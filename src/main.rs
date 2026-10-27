@@ -28,7 +28,12 @@ fn main() -> Result<()> {
     }
     // A launch from the macOS app bundle or the Linux AppImage works in the
     // app's data folder. Enter it before the logger opens logs/ there.
-    let app_bundle = vera20k::app::app_bundle::enter_data_folder();
+    // The external community host supplies a dedicated cwd/config even when
+    // the engine is packaged as a macOS bundle or Linux AppImage.
+    let community_host = std::env::args_os()
+        .skip(1)
+        .eq([std::ffi::OsString::from("--community-launch")]);
+    let app_bundle = !community_host && vera20k::app::app_bundle::enter_data_folder();
     let log_path = match vera20k::util::logging::init_file_logger("ra2") {
         Ok(path) => {
             eprintln!("Logging to {}", path.display());
@@ -75,8 +80,14 @@ fn main() -> Result<()> {
 }
 
 fn run(app_bundle: bool) -> Result<()> {
-    let launch_mode =
-        vera20k::app::frontend::launch::parse_launch_args(std::env::args_os().skip(1))?;
+    let community_launch = std::env::args_os()
+        .skip(1)
+        .eq([std::ffi::OsString::from("--community-launch")]);
+    let launch_mode = if community_launch {
+        vera20k::app::frontend::launch::parse_launch_args([std::ffi::OsString::from("-SPAWN")])?
+    } else {
+        vera20k::app::frontend::launch::parse_launch_args(std::env::args_os().skip(1))?
+    };
 
     // A help switch terminates before anything else is created, matching the
     // native switch parser returning a failure that makes WinMain bail.
@@ -142,7 +153,11 @@ fn run(app_bundle: bool) -> Result<()> {
             app
         }
         vera20k::app::frontend::launch::AppLaunchMode::Spawn(options) => {
-            vera20k::app::App::new_spawn(options)?
+            if community_launch {
+                vera20k::app::App::new_community(options, std::io::stdin().lock())?
+            } else {
+                vera20k::app::App::new_spawn(options)?
+            }
         }
         vera20k::app::frontend::launch::AppLaunchMode::Replay(request) => {
             vera20k::app::App::new_replay(request)

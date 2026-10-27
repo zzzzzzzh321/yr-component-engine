@@ -12,6 +12,10 @@ autotests = false
 autoexamples = false
 autobenches = false
 
+[[test]]
+name = "community-memory"
+path = "../tests/community_memory.rs"
+
 [lib]
 path = "core_lib.rs"
 

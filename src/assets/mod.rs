@@ -20,6 +20,7 @@
 //! - Other modules (rules/, map/, render/, audio/) depend on assets/, never the reverse.
 
 pub mod asset_manager;
+pub mod community;
 pub mod aud_file;
 pub mod audio_bag;
 pub mod bink_audio;

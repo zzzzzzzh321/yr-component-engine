@@ -43,6 +43,7 @@ pub(crate) mod campaign_defeat;
 pub(crate) mod campaign_victory;
 pub(crate) mod chrono_screen;
 mod cncnet;
+pub mod community;
 mod cooperative_round;
 #[cfg(feature = "debug-tools")]
 pub(crate) mod debug_tools;

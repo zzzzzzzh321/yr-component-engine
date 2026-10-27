@@ -715,6 +715,9 @@ impl AssetManager {
 
     /// Look up a file by name across all loaded archives.
     pub fn get(&self, name: &str) -> Option<Vec<u8>> {
+        if let Some(bytes) = super::community::get(name) {
+            return Some(bytes.to_vec());
+        }
         if let Some((loose, bytes)) = self.loose_bytes(name) {
             log::trace!("Found loose '{}' at {}", name, loose.path.display());
             return Some(bytes.to_vec());
@@ -726,6 +729,9 @@ impl AssetManager {
 
     /// Look up a file by name without copying the asset bytes.
     pub fn get_ref(&self, name: &str) -> Option<&[u8]> {
+        if let Some(bytes) = super::community::get(name) {
+            return Some(bytes.as_ref());
+        }
         if let Some((loose, bytes)) = self.loose_bytes(name) {
             log::trace!("Found loose '{}' at {}", name, loose.path.display());
             return Some(bytes);
@@ -738,6 +744,9 @@ impl AssetManager {
     /// [`Self::get_ref`]'s file as a share of its storage, for a reader that
     /// outlives the borrow (a theme song the audio device streams).
     pub fn get_shared(&self, name: &str) -> Option<SharedBytes> {
+        if let Some(bytes) = super::community::get(name) {
+            return Some(bytes.clone().into());
+        }
         if let Some(bytes) = self
             .loose_asset(name)
             .and_then(|loose| loose.snapshot().clone())
@@ -752,12 +761,20 @@ impl AssetManager {
     /// read current disk bytes themselves; cached startup loose snapshots must
     /// not resurrect a file they just deleted (e.g. Keyboard Reset All5FBA05).
     pub fn get_archive_ref(&self, name: &str) -> Option<&[u8]> {
+        if let Some(bytes) = super::community::get(name) {
+            return Some(bytes.as_ref());
+        }
         let (named, entry_id) = self.lookup_asset_entry(name)?;
         named.archive.get_by_id(entry_id)
     }
 
     /// Look up a file by name and return both the bytes and source archive name.
     pub fn get_with_source(&self, name: &str) -> Option<(Vec<u8>, String)> {
+        if let Some(snapshot) = super::community::snapshot() {
+            if let Some(bytes) = snapshot.get(name) {
+                return Some((bytes.to_vec(), snapshot.source().to_owned()));
+            }
+        }
         if let Some((loose, bytes)) = self.loose_bytes(name) {
             return Some((bytes.to_vec(), loose.source_name.clone()));
         }
@@ -796,6 +813,18 @@ impl AssetManager {
         name: &str,
         maximum: Option<usize>,
     ) -> Result<Option<AssetResolutionRef<'_>>, AssetError> {
+        if let Some(snapshot) = super::community::snapshot() {
+            if let Some(bytes) = snapshot.get(name) {
+                if let Some(maximum) = maximum {
+                    check_asset_read_limit(bytes.len() as u64, maximum)?;
+                }
+                return Ok(Some(AssetResolutionRef {
+                    bytes,
+                    source_archive: snapshot.source(),
+                    entry_id: mix_hash(name),
+                }));
+            }
+        }
         if let Some(loose) = self.loose_asset(name) {
             let bytes = match maximum {
                 Some(maximum) => loose.bytes_bounded(maximum)?,
@@ -843,7 +872,16 @@ impl AssetManager {
             return Some(cached);
         }
 
-        let candidate = if let Some((loose, bytes)) = self.loose_bytes(name) {
+        let candidate = if let Some(snapshot) =
+            super::community::snapshot().filter(|s| s.get(name).is_some())
+        {
+            MixFileLoad {
+                bytes: snapshot.get(name)?.clone(),
+                source_archive: Arc::from(snapshot.source()),
+                #[cfg(test)]
+                entry_id: cache_key,
+            }
+        } else if let Some((loose, bytes)) = self.loose_bytes(name) {
             MixFileLoad {
                 bytes: Arc::from(bytes),
                 source_archive: Arc::from(loose.source_name.as_str()),
@@ -1195,6 +1233,9 @@ impl AssetManager {
     /// to ASCII case. Read from disk at each call; not part of the startup
     /// loose catalog, which holds top-level files only.
     pub fn read_install_file(&self, relative: &str) -> Option<Vec<u8>> {
+        if let Some(bytes) = super::community::get(relative) {
+            return Some(bytes.to_vec());
+        }
         let mut path = self.ra2_dir.clone();
         for component in relative.split(['\\', '/']).filter(|part| !part.is_empty()) {
             let exact = path.join(component);

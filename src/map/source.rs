@@ -356,6 +356,29 @@ fn load_map_input_with_assets<T>(
     limit: Option<usize>,
     decode: impl Fn(MapInput<'_>) -> Result<T>,
 ) -> Result<T> {
+    // An admitted community snapshot is authoritative even if a stale loose
+    // map with the same name exists in the retail installation.
+    for candidate in asset_map_candidates(map_name) {
+        if crate::assets::community::get(&candidate).is_some() {
+            let resolved = assets
+                .resolve_ref(&candidate)
+                .expect("community snapshot winner");
+            anyhow::ensure!(
+                limit.is_none_or(|n| resolved.bytes.len() <= n),
+                "map exceeds transfer size limit"
+            );
+            return decode(MapInput {
+                bytes: Cow::Borrowed(resolved.bytes),
+                source: LoadedMapSource::Mix {
+                    logical_name: candidate,
+                    source_archive: resolved.source_archive.to_owned(),
+                    entry_id: resolved.entry_id,
+                    payload_len: resolved.bytes.len(),
+                    source_sha256: sha256_hex(resolved.bytes),
+                },
+            });
+        }
+    }
     let local = local_map_path(ra2_dir, map_name)
         .and_then(|path| read_loose_map_input_bounded(&path, limit))
         .and_then(&decode);
