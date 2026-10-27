@@ -12,6 +12,10 @@ autotests = false
 autoexamples = false
 autobenches = false
 
+[[bin]]
+name = "vera-map-library"
+path = "bin/community_maps.rs"
+
 [[test]]
 name = "community-memory"
 path = "../tests/community_memory.rs"
@@ -57,6 +61,7 @@ debug-tools = ["telemetry"]
 test-support = []
 
 [dependencies]
+base64 = "0.22"
 # Shared authenticated datagram codec used by the standalone relay.
 vera20k-relay-protocol = { path = "../services/relay-protocol" }
 glam = { workspace = true }
