@@ -30,19 +30,6 @@ pub(crate) const HIGH_BRIDGE_BODY_DRAW: CellBodyDraw = CellBodyDraw {
     render_z: RenderZPolicy::ReadWrite,
 };
 
-/// Latin-square jitter for healthy bridge body frames at base state byte 0
-/// (NS) or 9 (EW). Verified raw memory read at gamemd's `g_LatinSquare`
-/// (RE doc §5; ledger #1).
-const BRIDGE_BODY_LATIN_SQUARE: [u8; 16] = [0, 1, 2, 3, 3, 2, 1, 0, 2, 3, 0, 1, 1, 0, 3, 2];
-
-/// Body Y offset for bridge state bytes 0..=8.
-/// Verified in `CellClass__Get_Draw_Offset @ 0x00480110`: HasBridge applies
-/// `-0x10`, and only state bytes 9..=17 receive the extra `-0x0f`.
-const BRIDGE_BODY_Y_OFFSET_STATE_0_TO_8: f32 = -16.0;
-/// Body Y offset for bridge state bytes 9..=17.
-/// This follows the state byte, not the flipped SHP frame range.
-const BRIDGE_BODY_Y_OFFSET_STATE_9_TO_17: f32 = -31.0;
-
 /// Shadow X displacement on EW states 9..17.
 ///
 /// Settled at -15: the native overlay-shadow draw subtracts 0xF from the draw
@@ -53,26 +40,14 @@ pub const BRIDGE_SHADOW_EW_DX: i32 = -15;
 /// Full caller execution is pinned in tools/spatial_oracle/bridge_shadow_render.json.
 pub const BRIDGE_SHADOW_EW_DY: i32 = 7;
 
-/// CellClass::DrawOverlay_Body @ 0047F6A0 uses the raw +11E byte.
-/// Only states 0 and 9 add g_LatinSquare; native caller controls exercise
-/// every table entry in tools/spatial_oracle/bridge_body_render.json.
-fn compute_bridge_body_shp_frame(state: u8, rx: u16, ry: u16) -> u8 {
-    if state == 0 || state == 9 {
-        state + BRIDGE_BODY_LATIN_SQUARE[usize::from((ry & 3) * 4 + (rx & 3))]
-    } else {
-        state
-    }
-}
+use crate::map::draw_geometry::{bridge_body_y_offset, compute_bridge_body_shp_frame};
 
 /// State-dependent Y term in CellClass::Get_Draw_Offset480110.
 /// Projection owns signed level/camera; the atlas owns OverlayType Y bias.
 /// The unraised EF identity has its own -15 term, independently of IsRubble.
 pub(super) fn cell_overlay_y_offset(overlay: u8, flags: u32, state: u8) -> f32 {
     if flags & crate::map::bridge_facts::BRIDGE_FLAG_ANCHOR_SELF != 0 {
-        match state {
-            9..=17 => BRIDGE_BODY_Y_OFFSET_STATE_9_TO_17,
-            _ => BRIDGE_BODY_Y_OFFSET_STATE_0_TO_8,
-        }
+        bridge_body_y_offset(state)
     } else if overlay == crate::sim::overlay_grid::RUBBLE_OVERLAY_INDEX {
         -15.0 // original480144..48014D
     } else {

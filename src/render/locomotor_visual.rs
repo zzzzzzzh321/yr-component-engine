@@ -175,39 +175,7 @@ pub fn screen_lift_px(entity: &GameEntity) -> i32 {
     }
 }
 
-/// How far up a building's art sits from the entity anchor, in screen pixels.
-///
-/// gamemd gives buildings their own answer to "where do I draw": of every
-/// class, only `BuildingClass` overrides that virtual, and its override takes
-/// half a cell off **both** coordinate axes — a pure `-128, -128` lepton step,
-/// applied before the projection. Equal steps on the two axes cancel
-/// horizontally and come to exactly half a tile up, moving the anchor from the
-/// centre of the north-west footprint cell to that cell's tile row. There is no
-/// X term and there must never be one.
-///
-/// This is the *whole* difference between a building's draw point and every
-/// other class's, and it is only correct on top of an entity anchor that sits
-/// on the cell's diamond centre — which is what
-/// [`crate::util::lepton::lepton_to_screen`] returns. Applying this shift while
-/// the entity anchor was still on the tile row double-counted it and left every
-/// building floating half a tile above its foundation; that was tried and
-/// reverted before the anchor was moved. The two belong together.
-///
-/// It applies to the building's **art** only — body, bib, overlay anims, voxel
-/// turret, and the depth those sort on. It does not apply to selection
-/// brackets, health pips, occupant pips or sensor rings: gamemd builds those
-/// from the foundation-centre coordinate (the `GetCoords` virtual), reached on
-/// a path that never consults the render-coordinate override, so they belong on
-/// the plain entity anchor.
-pub const BUILDING_ART_LIFT_PX: f32 = crate::map::terrain::TILE_HEIGHT / 2.0;
-
-/// A building's art anchor, given its plain entity anchor.
-///
-/// One owner for [`BUILDING_ART_LIFT_PX`] so every draw of a building's art
-/// lands on the same point.
-pub fn building_art_anchor(sx: f32, sy: f32) -> (f32, f32) {
-    (sx, sy - BUILDING_ART_LIFT_PX)
-}
+pub use crate::map::draw_geometry::{BUILDING_ART_LIFT_PX, building_art_anchor};
 
 /// The isometric projection alone, with no height lift applied.
 ///

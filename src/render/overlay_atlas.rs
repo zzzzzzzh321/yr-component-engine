@@ -946,18 +946,7 @@ fn render_decoded_overlay_frame(
 /// adds the stored frame X/Y before passing its width/height to the walker.
 /// Keep that cropped rectangle: padding a 43-row GAWALL frame to its 70-row
 /// canvas changes the upright Z seed even though its color pixels stay put.
-pub(crate) fn stored_frame_offset(
-    canvas_width: u16,
-    canvas_height: u16,
-    frame_x: u16,
-    frame_y: u16,
-    y_offset: f32,
-) -> (f32, f32) {
-    (
-        f32::from(frame_x) - f32::from(canvas_width / 2),
-        f32::from(frame_y) - f32::from(canvas_height / 2) + y_offset,
-    )
-}
+pub(crate) use crate::map::draw_geometry::stored_frame_offset;
 
 /// Build the candidate SHP filename list for a SmudgeType.
 ///

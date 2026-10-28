@@ -29,6 +29,67 @@ mod tests {
         assert!(inspect_map_bytes(b"[Map]\nSize=0,0,-1,4", "bad.map", None, "local").is_err());
     }
     #[test]
+    fn high_bridge_draw_geometry_matches_original_controls() {
+        use vera20k_core::map::draw_geometry::{
+            bridge_body_y_offset, compute_bridge_body_shp_frame,
+        };
+        let packet: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/spatial_oracle/bridge_body_render.json"
+        ))
+        .unwrap();
+        for row in packet["controls"].as_array().unwrap() {
+            let input = &row["input"];
+            if input["flags"].as_u64().unwrap() & 0x80 == 0 {
+                continue;
+            }
+            let state = input["state"].as_u64().unwrap() as u8;
+            let rx = input["coords"][0].as_u64().unwrap() as u16;
+            let ry = input["coords"][1].as_u64().unwrap() as u16;
+            let draw = &row["draws"][0];
+            assert_eq!(
+                u64::from(compute_bridge_body_shp_frame(state, rx, ry)),
+                draw["frame"].as_u64().unwrap(),
+                "{}",
+                row["name"]
+            );
+            let level = input["level"].as_i64().unwrap();
+            let original_offset =
+                draw["point"][1].as_i64().unwrap() - input["cell_point"][1].as_i64().unwrap() - 15
+                    + level * 15;
+            assert_eq!(
+                bridge_body_y_offset(state),
+                original_offset as f32,
+                "{}",
+                row["name"]
+            );
+        }
+    }
+    #[test]
+    fn building_art_anchor_matches_original_render_coordinate() {
+        use vera20k_core::{
+            map::draw_geometry::building_art_anchor, util::lepton::absolute_leptons_to_screen,
+        };
+        let packet: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/spatial_oracle/building_pixel_coordinates.json"
+        ))
+        .unwrap();
+        // Unchanged original Building receiver, no admitted per-art pixel offset:
+        // 0x004518E3 reaches its render-coordinate virtual at 0x00459EF0.
+        let row = &packet["constructor_rows"][0];
+        let project = |v: &serde_json::Value| {
+            absolute_leptons_to_screen(
+                v[0].as_i64().unwrap() as i32,
+                v[1].as_i64().unwrap() as i32,
+                v[2].as_i64().unwrap() as i32,
+            )
+        };
+        let location = project(&row["raw_building"]);
+        assert_eq!(
+            building_art_anchor(location.0, location.1),
+            project(&row["world"])
+        );
+    }
+    #[test]
     #[ignore = "requires a local, licensed YR install in RA2_DIR"]
     fn static_preview_decodes_real_assets_at_high_resolution() {
         use base64::Engine;

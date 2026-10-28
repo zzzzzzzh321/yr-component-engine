@@ -2,6 +2,10 @@
 //! This presentation-only overview does not run a match or claim tactical-frame
 //! parity. Mobile/voxel objects, animated attachments and live effects are omitted.
 use super::{
+    draw_geometry::{
+        bridge_body_y_offset, building_art_anchor, compute_bridge_body_shp_frame,
+        is_high_bridge_body_identity, stored_frame_offset,
+    },
     map_file::MapFile,
     terrain::iso_to_screen,
     theater::{self, TileImage, TileKey},
@@ -95,7 +99,6 @@ fn draw_shp(
     row: f32,
     tint: [f32; 3],
 ) {
-    let frame = frame.min(image.frames.len().saturating_sub(1));
     let Some(bounds) = image.frames.get(frame) else {
         return;
     };
@@ -110,10 +113,17 @@ fn draw_shp(
         offset_x: 0,
         offset_y: 0,
     };
+    let (offset_x, offset_y) = stored_frame_offset(
+        image.width,
+        image.height,
+        bounds.frame_x,
+        bounds.frame_y,
+        0.,
+    );
     canvas.draw(
         &tile,
-        center[0] - image.width as f32 / 2. + bounds.frame_x as f32,
-        center[1] - image.height as f32 / 2. + bounds.frame_y as f32,
+        center[0] + offset_x,
+        center[1] + offset_y,
         row + 30.,
         tint,
     );
@@ -242,6 +252,19 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
         let flags = overlays.flags(overlay.overlay_id);
         let mut point = center(overlay.rx, overlay.ry);
         point[1] += flags.map_or(0., |f| f.y_draw_offset());
+        let high_bridge = is_high_bridge_body_identity(overlay.overlay_id, name);
+        let frame = if high_bridge {
+            let raw_flags = resolved
+                .cell(overlay.rx, overlay.ry)
+                .map_or(0, |c| c.bridge_facts.raw_flags);
+            if raw_flags & super::bridge_facts::BRIDGE_FLAG_ANCHOR_SELF == 0 {
+                continue;
+            }
+            point[1] += bridge_body_y_offset(overlay.frame);
+            compute_bridge_body_shp_frame(overlay.frame, overlay.rx, overlay.ry)
+        } else {
+            overlay.frame
+        };
         let pal = if flags.is_some_and(|f| f.tiberium) {
             &td.tiberium_palette
         } else {
@@ -250,7 +273,7 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
         draw_shp(
             &mut canvas,
             image,
-            overlay.frame as usize,
+            frame as usize,
             pal,
             point,
             (overlay.rx as f32 + overlay.ry as f32) * 15.,
@@ -279,10 +302,6 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
             lights.terrain_tile_tint_at((object.rx, object.ry)),
         );
     }
-    let foundations: HashMap<_, _> = processed
-        .building_foundation_geometries()
-        .map(|(name, f)| (name, f.dimensions()))
-        .collect();
     let references: HashMap<_, _> = processed
         .techno_reference_states()
         .filter(|(category, _, _, _)| {
@@ -309,13 +328,9 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
         let Some((image, _)) = shp(&mut cache, assets, &names) else {
             continue;
         };
-        let (fw, fh) = foundations
-            .get(object.type_id.as_str())
-            .copied()
-            .unwrap_or((1, 1));
         let mut point = center(object.cell_x, object.cell_y);
-        point[0] += (fw as f32 - fh as f32) * 15.;
-        point[1] += (fw as f32 + fh as f32 - 2.) * 7.5;
+        let (x, y) = building_art_anchor(point[0], point[1]);
+        point = [x, y];
         if let Some(entry) = art.get(&image_id) {
             point[0] += entry.x_draw_offset as f32;
             point[1] += entry.y_draw_offset as f32

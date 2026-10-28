@@ -8,7 +8,7 @@ use crate::assets::shp_file::ShpFile;
 use crate::render::batch::{BatchRenderer, BatchTexture};
 use crate::render::overlay_atlas::{OverlaySpriteEntry, stored_frame_offset};
 use crate::rules::effect_asset_catalog::load_overlay_shape;
-use crate::rules::overlay_types::{OverlayTypeFlags, OverlayTypeRegistry, is_high_bridge_index};
+use crate::rules::overlay_types::{OverlayTypeFlags, OverlayTypeRegistry};
 
 const SPRITE_PADDING: u32 = 1;
 
@@ -69,21 +69,7 @@ struct RenderedBridge {
     offset_y: f32,
 }
 
-pub fn is_high_bridge_body_name(name: &str) -> bool {
-    ["BRIDGE1", "BRIDGEB1", "BRIDGE2", "BRIDGEB2"]
-        .iter()
-        .any(|candidate| name.eq_ignore_ascii_case(candidate))
-}
-
-/// Route a live high-bridge body by the CellClass numeric identity first.
-///
-/// Native `OverlayClass::Mark @ 0x005FC570` dispatches the four high-anchor
-/// setters by numeric OverlayType index, so a layered rules file may retain
-/// high-bridge semantics under a noncanonical art name. Canonical names remain
-/// accepted for the established destroy-band cells written by bridge runtime.
-pub fn is_high_bridge_body_identity(overlay_id: u8, name: &str) -> bool {
-    is_high_bridge_index(overlay_id) || is_high_bridge_body_name(name)
-}
+pub use crate::map::draw_geometry::{is_high_bridge_body_identity, is_high_bridge_body_name};
 
 /// Body frames for each type that routes as a high bridge. Shadow material
 /// for every overlay type is bound separately below. Repair writes 0x18/0x19/
