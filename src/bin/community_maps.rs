@@ -28,4 +28,39 @@ mod tests {
         assert_eq!(m["sourceSha256"], sha256_hex(bytes));
         assert!(inspect_map_bytes(b"[Map]\nSize=0,0,-1,4", "bad.map", None, "local").is_err());
     }
+    #[test]
+    #[ignore = "requires a local, licensed YR install in RA2_DIR"]
+    fn static_preview_decodes_real_assets_at_high_resolution() {
+        use base64::Engine;
+        let root = std::env::var("RA2_DIR").expect("RA2_DIR");
+        let scan = vera20k_core::map::community_library::run(
+            serde_json::from_value(serde_json::json!({"operation":"scan","retailDir":root}))
+                .unwrap(),
+        )
+        .unwrap();
+        let record = scan["maps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["info"]["fileName"] == "XMP02T2.MAP")
+            .expect("Isle of War");
+        let result=vera20k_core::map::community_library::run(serde_json::from_value(serde_json::json!({"operation":"render","retailDir":root,"locator":record["locator"],"expectedHash":record["info"]["sourceSha256"]})).unwrap()).unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(
+                result["preview"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("data:image/png;base64,")
+                    .unwrap(),
+            )
+            .unwrap();
+        let decoded = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(decoded.width(), 1536);
+        assert_eq!(result["previewGeometry"]["height"], decoded.height());
+        let distinct: std::collections::HashSet<_> = decoded.pixels().map(|p| p.0).collect();
+        assert!(
+            distinct.len() > 512,
+            "A rendered overview must retain artwork detail"
+        );
+    }
 }

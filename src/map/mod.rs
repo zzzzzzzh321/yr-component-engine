@@ -27,6 +27,7 @@ pub mod scenario_sources;
 pub mod skirmish_scenarios;
 pub mod source;
 pub mod community_library;
+mod community_preview;
 pub mod entities;
 pub mod events;
 pub mod houses;

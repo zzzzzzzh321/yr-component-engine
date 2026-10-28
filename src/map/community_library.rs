@@ -265,7 +265,7 @@ pub fn run(request: Request) -> Result<Value> {
         &mut assets,
         csf.as_ref(),
     )?;
-    if request.operation == "read" {
+    if request.operation == "read" || request.operation == "render" {
         let locator = request.locator.context("missing map source")?;
         let bytes = read_source(&locator, &roots, &assets)?;
         ensure!(
@@ -273,8 +273,11 @@ pub fn run(request: Request) -> Result<Value> {
             "map changed since library scan; refresh and select it again"
         );
         // A real selection must pass the gameplay terrain parser, not just its header.
-        crate::map::map_file::load_from_bytes(bytes.clone())?;
+        let map = crate::map::map_file::load_from_bytes(bytes.clone())?;
         let ini = IniFile::from_bytes(&bytes)?;
+        if request.operation == "render" {
+            return super::community_preview::render(&mut assets, &map);
+        }
         return Ok(
             json!({"data":STANDARD.encode(&bytes),"sourceSha256":sha256_hex(&bytes),"preview":preview_bmp(&ini)}),
         );

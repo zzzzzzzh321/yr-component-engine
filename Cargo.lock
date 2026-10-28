@@ -2722,6 +2722,7 @@ dependencies = [
  "glam",
  "half",
  "hashbrown 0.16.1",
+ "image",
  "js-sys",
  "libc",
  "log",

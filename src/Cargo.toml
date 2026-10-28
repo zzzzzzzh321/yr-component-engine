@@ -62,6 +62,7 @@ test-support = []
 
 [dependencies]
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Shared authenticated datagram codec used by the standalone relay.
 vera20k-relay-protocol = { path = "../services/relay-protocol" }
 glam = { workspace = true }
