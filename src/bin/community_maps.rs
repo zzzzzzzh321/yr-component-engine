@@ -124,4 +124,50 @@ mod tests {
             "A rendered overview must retain artwork detail"
         );
     }
+
+    #[test]
+    #[ignore = "requires the stock Bay of Pigs map in a licensed RA2_DIR"]
+    fn bay_of_pigs_preview_includes_oil_pump_attachments() {
+        use base64::Engine;
+        let root = std::env::var("RA2_DIR").expect("RA2_DIR");
+        let result = vera20k_core::map::community_library::run(
+            serde_json::from_value(serde_json::json!({
+                "operation":"render", "retailDir":root,
+                "locator":{"kind":"archive","name":"XBayOPigs.MAP"},
+                "expectedHash":"15b761afdc3403cac20f32ad65b60cc158b385900a73f46f78cadf021160dd15"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(
+                result["preview"]
+                    .as_str()
+                    .unwrap()
+                    .split_once(',')
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+        let image = image::load_from_memory(&png).unwrap().to_rgb8();
+        // Two separate oil pumps beside the northern warehouse, sampled in
+        // the final 1536px overview. The stock body-only preview contains just
+        // 24/20 dark neutral pixels here; the missing CAOILD_A pump frames
+        // contribute the tall dark machinery. A broad coverage threshold
+        // avoids tying this regression to PNG encoding or exact RGB values.
+        for (left, top, right, bottom) in [(906, 263, 922, 285), (887, 274, 903, 294)] {
+            let dark_machinery = (top..bottom)
+                .flat_map(|y| (left..right).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let p = image.get_pixel(x, y).0;
+                    let spread = p.iter().max().unwrap() - p.iter().min().unwrap();
+                    spread < 30 && p.into_iter().map(u16::from).sum::<u16>() < 270
+                })
+                .count();
+            assert!(
+                dark_machinery >= 55,
+                "Oil-pump attachment missing at {left},{top}: {dark_machinery}"
+            );
+        }
+    }
 }

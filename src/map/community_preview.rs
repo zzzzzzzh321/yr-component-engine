@@ -1,6 +1,7 @@
 //! Local static map photographs, composed from the engine's TMP/SHP/INI owners.
 //! This presentation-only overview does not run a match or claim tactical-frame
-//! parity. Mobile/voxel objects, animated attachments and live effects are omitted.
+//! parity. Building attachments are frozen at their initial normal frame;
+//! mobile/voxel objects and live effects are omitted.
 use super::{
     draw_geometry::{
         bridge_body_y_offset, building_art_anchor, compute_bridge_body_shp_frame,
@@ -13,7 +14,10 @@ use super::{
 use crate::{
     assets::{asset_manager::AssetManager, pal_file::Palette, shp_file::ShpFile},
     rules::{
-        art_data::{ArtRegistry, building_body_shp_candidates},
+        art_data::{
+            AnimDrawPalette, ArtRegistry, EffectImageKind, anim_draw_palette,
+            building_body_shp_candidates, effect_shp_candidates, object_shp_candidates,
+        },
         ini_parser::IniFile,
         native_processing::{
             NativeRulesRegistryState, RulesLayerKind, RulesLayerStack, RulesProcessContext,
@@ -21,6 +25,7 @@ use crate::{
         object_image::ImageTheater,
         overlay_types::OverlayTypeRegistry,
     },
+    util::{lepton::absolute_leptons_to_screen, pixel_conversion::PixelConversionBounds},
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -127,6 +132,126 @@ fn draw_shp(
         row + 30.,
         tint,
     );
+}
+
+struct BuildingPiece {
+    names: Vec<String>,
+    frame: usize,
+    center: [f32; 2],
+    z_adjust: i32,
+    palette: PreviewPalette,
+    tint: [f32; 3],
+}
+enum PreviewPalette {
+    Unit,
+    Iso,
+    Anim,
+}
+
+/// A static building is one assembly, not just frame zero of its body SHP.
+/// Slot allocation451890/451988 uses the unshifted render coordinate and
+/// slot X/Y converted by Tactical6D2360. DrawIt422CA0 adds AnimType.Start and
+/// YDrawOffset. See sim/building_art.rs and presentation/instances/shp.rs.
+/// This overview freezes normal Active/Idle slots; it does not create combat,
+/// production, superweapon or upgrade state to make every declared slot live.
+fn building_pieces(
+    art: &ArtRegistry,
+    type_id: &str,
+    rules_image: &str,
+    extension: &str,
+    theater: &str,
+    cell: (u16, u16, u8),
+    anchor: [f32; 2],
+    tint: [f32; 3],
+) -> Vec<BuildingPiece> {
+    let image_id = art.resolve_effective_image_id(type_id, rules_image);
+    let metadata = art.resolve_metadata_entry(type_id, rules_image);
+    let mut body_center = anchor;
+    if let Some(entry) = metadata {
+        body_center[0] += entry.x_draw_offset as f32;
+        body_center[1] += entry.y_draw_offset as f32;
+    }
+    let mut pieces = vec![BuildingPiece {
+        names: building_body_shp_candidates(Some(art), rules_image, &image_id, extension, theater),
+        frame: 0,
+        center: body_center,
+        z_adjust: 0,
+        palette: if metadata.is_some_and(|entry| entry.terrain_palette) {
+            PreviewPalette::Iso
+        } else {
+            PreviewPalette::Unit
+        },
+        tint,
+    }];
+    let Some(entry) = metadata else { return pieces };
+    if let Some(bib) = &entry.bib_shape {
+        let bib_image = art.resolve_effective_image_id(bib, bib);
+        let (x, y) = art.draw_offsets(bib);
+        // Building DrawBody43D9C9 draws the bib in the same building group.
+        pieces.insert(
+            0,
+            BuildingPiece {
+                names: object_shp_candidates(Some(art), &bib_image, extension, theater),
+                frame: 0,
+                center: [anchor[0] + x as f32, anchor[1] + y as f32],
+                z_adjust: 0,
+                palette: if entry.terrain_palette {
+                    PreviewPalette::Iso
+                } else {
+                    PreviewPalette::Unit
+                },
+                tint,
+            },
+        );
+    }
+    for slot in &entry.building_anims {
+        if !matches!(slot.native_slot, 3..=6 | 18) || slot.anim_type.is_empty() {
+            continue;
+        }
+        let Some(config) = art.anim_runtime_config(&slot.anim_type) else {
+            continue;
+        };
+        let Ok(frame) = usize::try_from(config.start) else {
+            continue;
+        };
+        let (dx, dy) = PixelConversionBounds::default().offset_to_leptons(slot.x, slot.y);
+        let (sx, sy) = absolute_leptons_to_screen(
+            i32::from(cell.0) * 256 + dx,
+            i32::from(cell.1) * 256 + dy,
+            i32::from(cell.2 as i8) * crate::util::lepton::GROUND_LEVEL_HEIGHT_LEPTONS,
+        );
+        let anim_image = art.resolve_anim_image_id(&slot.anim_type);
+        pieces.push(BuildingPiece {
+            names: effect_shp_candidates(
+                EffectImageKind::Animation,
+                Some(art),
+                &slot.anim_type,
+                &anim_image,
+                extension,
+                theater,
+            ),
+            frame,
+            center: [sx, sy + config.y_draw_offset as f32],
+            z_adjust: slot.z_adjust,
+            palette: if config.should_use_cell_drawer
+                || anim_draw_palette(config) == AnimDrawPalette::Unit
+            {
+                PreviewPalette::Unit
+            } else {
+                PreviewPalette::Anim
+            },
+            tint: if config.use_normal_light {
+                [1.; 3]
+            } else {
+                tint
+            },
+        });
+    }
+    // Static painter order within the group. Positive ZAdjust is behind the
+    // body (e.g. CAAIRP_A=5); negative values put flags in front. Keep all
+    // pieces at the host's foot depth, without a flag shifting other buildings.
+    pieces.sort_by(|a, b| b.z_adjust.cmp(&a.z_adjust));
+    pieces
 }
 
 pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> {
@@ -240,6 +365,9 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
         .map_err(|failure| anyhow::anyhow!("preview rules: {}", failure.into_parts().0))?;
     let overlays = OverlayTypeRegistry::from_processed_rules(&processed);
     let art = ArtRegistry::from_ini(&art_ini);
+    let anim_palette = assets
+        .get_ref("anim.pal")
+        .and_then(|bytes| Palette::from_bytes(bytes).ok());
     let mut cache = HashMap::new();
     for overlay in &map.overlays {
         let Some(name) = overlays.name(overlay.overlay_id) else {
@@ -317,33 +445,43 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
             continue;
         };
         let rules_image = image_state.image();
-        let image_id = art.resolve_effective_image_id(&object.type_id, rules_image);
-        let names = building_body_shp_candidates(
-            Some(&art),
+        let point = center(object.cell_x, object.cell_y);
+        let (x, y) = building_art_anchor(point[0], point[1]);
+        for piece in building_pieces(
+            &art,
+            &object.type_id,
             rules_image,
-            &image_id,
             td.extension,
             &h.theater,
-        );
-        let Some((image, _)) = shp(&mut cache, assets, &names) else {
-            continue;
-        };
-        let mut point = center(object.cell_x, object.cell_y);
-        let (x, y) = building_art_anchor(point[0], point[1]);
-        point = [x, y];
-        if let Some(entry) = art.get(&image_id) {
-            point[0] += entry.x_draw_offset as f32;
-            point[1] += entry.y_draw_offset as f32
-        }
-        draw_shp(
-            &mut canvas,
-            image,
-            0,
-            &td.unit_palette,
-            point,
-            (object.cell_x as f32 + object.cell_y as f32) * 15.,
+            (
+                object.cell_x,
+                object.cell_y,
+                *levels.get(&(object.cell_x, object.cell_y)).unwrap_or(&0),
+            ),
+            [x, y],
             lights.tint_or_default((object.cell_x, object.cell_y)),
-        );
+        ) {
+            let Some((image, _)) = shp(&mut cache, assets, &piece.names) else {
+                continue;
+            };
+            let palette = match piece.palette {
+                PreviewPalette::Unit => &td.unit_palette,
+                PreviewPalette::Iso => &td.iso_palette,
+                PreviewPalette::Anim => match &anim_palette {
+                    Some(palette) => palette,
+                    None => continue,
+                },
+            };
+            draw_shp(
+                &mut canvas,
+                image,
+                piece.frame,
+                palette,
+                piece.center,
+                (object.cell_x as f32 + object.cell_y as f32) * 15.,
+                piece.tint,
+            );
+        }
     }
     let ratio = (LONG_EDGE as f32 / width.max(height) as f32).min(1.);
     let output = image::imageops::resize(
