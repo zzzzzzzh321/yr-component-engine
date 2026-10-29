@@ -764,6 +764,31 @@ impl AssetManager {
         let (named, entry_id) = self.lookup_asset_entry(name)?;
         named.archive.get_shared_by_id(entry_id)
     }
+    /// Seekable owner for music/header readers. Published files and nested MIX
+    /// entries never require a whole-file snapshot on this path.
+    pub fn open_resource(&self, name: &str) -> Option<super::mix_archive::ResourceReader> {
+        if let Some(snapshot) = super::community::snapshot() {
+            if let Some(view) = snapshot
+                .file_view(name)
+                .expect("invalid published resource view")
+            {
+                return Some(Box::new(view.reader()));
+            }
+            if let Some(bytes) = snapshot.get(name) {
+                return Some(Box::new(std::io::Cursor::new(SharedBytes::from(
+                    bytes.clone(),
+                ))));
+            }
+        }
+        if let Some(bytes) = self
+            .loose_asset(name)
+            .and_then(|loose| loose.snapshot().clone())
+        {
+            return Some(Box::new(std::io::Cursor::new(SharedBytes::from(bytes))));
+        }
+        let (named, id) = self.lookup_asset_entry(name)?;
+        named.archive.open_by_id(id)
+    }
 
     /// Registered archive fallback for mutable loose-file owners. These callers
     /// read current disk bytes themselves; cached startup loose snapshots must
@@ -855,6 +880,9 @@ impl AssetManager {
         let Some((named, entry_id)) = self.lookup_asset_entry(name) else {
             return Ok(None);
         };
+        if let (Some(maximum), Some(size)) = (maximum, named.archive.entry_size(entry_id)) {
+            check_asset_read_limit(size, maximum)?;
+        }
         let Some(bytes) = named.archive.get_by_id(entry_id) else {
             return Ok(None);
         };
@@ -1187,6 +1215,13 @@ impl AssetManager {
             || self.lookup_location_for_name(name).is_some()
             || self.loose_asset(name).is_some()
     }
+    pub fn package_resident_bytes(&self) -> usize {
+        self.archives
+            .iter()
+            .chain(&self.archive_catalog)
+            .map(|a| a.archive.package_resident_bytes())
+            .sum()
+    }
 
     /// Look up a loaded archive by its display/debug name.
     pub fn archive(&self, name: &str) -> Option<&MixArchive> {
@@ -1422,7 +1457,17 @@ impl AssetManager {
                 }
                 let first = !result.matched;
                 result.matched = true;
-                let archive = MixArchive::from_bytes(snapshot.get(name).unwrap().to_vec())?;
+                let archive = if let Some(view) =
+                    snapshot
+                        .file_view(name)
+                        .map_err(|e| AssetError::ParseError {
+                            format: "VERAMOD MIX".into(),
+                            detail: e.to_string(),
+                        })? {
+                    MixArchive::from_package(view)?
+                } else {
+                    MixArchive::from_bytes(snapshot.get(name).unwrap().to_vec())?
+                };
                 self.append_registered_archive(NamedArchive {
                     name: format!("{} -> {name}", snapshot.source()),
                     archive,
@@ -1546,6 +1591,24 @@ impl AssetManager {
 
         // Community CCFile overrides retain the ordinary named-constructor
         // order above (retail Init_Base_Mix_Files/Init_Mix_Files @ 0x00530460).
+        if let Some(view) = super::community::snapshot()
+            .map(|s| s.file_view(name))
+            .transpose()
+            .map_err(|e| AssetError::ParseError {
+                format: "VERAMOD MIX".into(),
+                detail: e.to_string(),
+            })?
+            .flatten()
+        {
+            self.append_registered_archive(NamedArchive {
+                name: format!(
+                    "{} -> {name}",
+                    super::community::snapshot().unwrap().source()
+                ),
+                archive: MixArchive::from_package(view)?,
+            });
+            return Ok(true);
+        }
         if let Some(bytes) = super::community::get(name) {
             let archive = MixArchive::from_bytes(bytes.to_vec())?;
             self.append_registered_archive(NamedArchive {

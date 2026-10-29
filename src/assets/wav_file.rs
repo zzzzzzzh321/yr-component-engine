@@ -5,7 +5,10 @@
 //! Theme catalog scan `7207F0` stores the resulting whole seconds. Its IMA rate
 //! is deliberately different from both the WAV average rate and playback length.
 
-use std::ops::Range;
+use std::{
+    io::{Cursor, Read, Seek, SeekFrom},
+    ops::Range,
+};
 
 use crate::assets::ima_adpcm::ImaBlockDecoder;
 
@@ -26,50 +29,12 @@ impl<'a> WavFile<'a> {
     /// Preserve the playback parser's first data-after-fmt choice, bounded data
     /// slice and word-aligned chunk walk. Malformed short fmt chunks fail safely.
     pub fn parse(bytes: &'a [u8]) -> Option<Self> {
-        if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-            return None;
-        }
-        let mut offset = 12_usize;
-        let mut format = None;
-        while offset.checked_add(8)? <= bytes.len() {
-            let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?);
-            let start = offset + 8;
-            let end = start.checked_add(size as usize)?;
-            match &bytes[offset..offset + 4] {
-                b"fmt " if end <= bytes.len() => {
-                    let fmt = bytes.get(start..end)?;
-                    let word = |i: usize| -> Option<u16> {
-                        Some(u16::from_le_bytes(fmt.get(i..i + 2)?.try_into().ok()?))
-                    };
-                    format = Some((
-                        word(0)?,
-                        word(2)?,
-                        u32::from_le_bytes(fmt.get(4..8)?.try_into().ok()?),
-                        word(12)?,
-                        word(14)?,
-                    ));
-                }
-                b"data" => {
-                    if let Some((format_tag, channels, sample_rate, block_align, bits_per_sample)) =
-                        format
-                    {
-                        return Some(Self {
-                            format_tag,
-                            channels,
-                            sample_rate,
-                            block_align,
-                            bits_per_sample,
-                            declared_data_len: size,
-                            data: &bytes[start..end.min(bytes.len())],
-                            data_start: start,
-                        });
-                    }
-                }
-                _ => {}
-            }
-            offset = end.checked_add((size & 1) as usize)?;
-        }
-        None
+        let header = WavStreamHeader::read(&mut Cursor::new(bytes))?;
+        Some(Self {
+            data_start: header.payload.start,
+            data: bytes.get(header.payload)?,
+            ..header.format
+        })
     }
 
     /// Original `408751..4087C3` recomputes the descriptor rate, overwriting
@@ -102,6 +67,135 @@ impl<'a> WavFile<'a> {
     }
 }
 
+/// Header-only read through the same RIFF owner as borrowed playback. `format`
+/// contains no payload; `payload` identifies the bounded file range to stream.
+pub struct WavStreamHeader {
+    pub format: WavFile<'static>,
+    pub payload: Range<usize>,
+}
+impl WavStreamHeader {
+    pub fn read<R: Read + Seek + ?Sized>(reader: &mut R) -> Option<Self> {
+        let length = usize::try_from(reader.seek(SeekFrom::End(0)).ok()?).ok()?;
+        if length < 44 {
+            return None;
+        }
+        reader.seek(SeekFrom::Start(0)).ok()?;
+        let mut head = [0; 12];
+        reader.read_exact(&mut head).ok()?;
+        if &head[..4] != b"RIFF" || &head[8..] != b"WAVE" {
+            return None;
+        }
+        let mut offset = 12usize;
+        let mut format = None;
+        while offset.checked_add(8)? <= length {
+            reader.seek(SeekFrom::Start(offset as u64)).ok()?;
+            let mut chunk = [0; 8];
+            reader.read_exact(&mut chunk).ok()?;
+            let size = u32::from_le_bytes(chunk[4..].try_into().ok()?);
+            let start = offset + 8;
+            let end = start.checked_add(size as usize)?;
+            match &chunk[..4] {
+                b"fmt " if end <= length => {
+                    if size < 16 {
+                        return None;
+                    }
+                    let mut fmt = [0; 16];
+                    reader.read_exact(&mut fmt).ok()?;
+                    let word = |i| u16::from_le_bytes([fmt[i], fmt[i + 1]]);
+                    format = Some((
+                        word(0),
+                        word(2),
+                        u32::from_le_bytes(fmt[4..8].try_into().ok()?),
+                        word(12),
+                        word(14),
+                    ));
+                }
+                b"data" => {
+                    if let Some((format_tag, channels, sample_rate, block_align, bits_per_sample)) =
+                        format
+                    {
+                        return Some(Self {
+                            format: WavFile {
+                                format_tag,
+                                channels,
+                                sample_rate,
+                                block_align,
+                                bits_per_sample,
+                                declared_data_len: size,
+                                data: &[],
+                                data_start: 0,
+                            },
+                            payload: start..end.min(length),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            offset = end.checked_add((size & 1) as usize)?;
+        }
+        None
+    }
+}
+
+/// A bounded source window: one PCM run or one IMA block plus the previous
+/// block. The retained prefix preserves the native short-tail stale padding.
+pub struct WavReadCursor {
+    pub header: WavStreamHeader,
+    decoder: WavPcmCursor,
+    position: usize,
+    stride: usize,
+    previous: Vec<u8>,
+    input: Vec<u8>,
+}
+impl WavReadCursor {
+    pub fn new(header: WavStreamHeader) -> Option<Self> {
+        let decoder = WavPcmCursor::new(&header.format)?;
+        let stride = if header.format.format_tag == 0x11 {
+            header.format.block_align as usize
+        } else {
+            PCM_RUN_BYTES
+        };
+        if stride == 0 {
+            return None;
+        }
+        Some(Self {
+            header,
+            decoder,
+            position: 0,
+            stride,
+            previous: Vec::new(),
+            input: Vec::new(),
+        })
+    }
+    pub fn read_next<R: Read + Seek + ?Sized>(
+        &mut self,
+        reader: &mut R,
+        out: &mut Vec<i16>,
+    ) -> std::io::Result<bool> {
+        let take = self
+            .stride
+            .min(self.header.payload.len().saturating_sub(self.position));
+        if take == 0 {
+            return Ok(false);
+        }
+        reader.seek(SeekFrom::Start(
+            (self.header.payload.start + self.position) as u64,
+        ))?;
+        self.input.clear();
+        self.input.extend_from_slice(&self.previous);
+        let prefix = self.input.len();
+        self.input.resize(prefix + take, 0);
+        reader.read_exact(&mut self.input[prefix..])?;
+        let decoded = self.decoder.decode_at(&self.input, prefix, out);
+        if self.header.format.format_tag == 0x11 {
+            self.previous.clear();
+            self.previous.extend_from_slice(&self.input[prefix..]);
+        }
+        self.position += take;
+        Ok(decoded)
+    }
+}
+
 /// PCM bytes one [`WavPcmCursor::decode_next`] call converts: a VERA streaming
 /// granularity, near one retail IMA block's 1017 frames.
 const PCM_RUN_BYTES: usize = 4096;
@@ -129,6 +223,13 @@ enum PayloadFormat {
 }
 
 impl WavPcmCursor {
+    fn decode_at(&mut self, data: &[u8], position: usize, out: &mut Vec<i16>) -> bool {
+        if let PayloadFormat::Ima(decoder) = &mut self.format {
+            return decoder.decode_at(data, position, out);
+        }
+        self.pos = position;
+        self.decode_next(data, out)
+    }
     /// `None` for a payload playback does not decode: a format tag other than
     /// PCM or IMA ADPCM, or PCM other than 8 or 16 bits.
     pub fn new(wav: &WavFile<'_>) -> Option<Self> {

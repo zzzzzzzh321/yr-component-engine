@@ -42,7 +42,7 @@
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::assets::error::AssetError;
 use crate::assets::mix_crypto;
@@ -81,8 +81,8 @@ pub struct MixEntry {
 
 /// A parsed MIX archive, ready for file extraction.
 ///
-/// Holds the entire MIX file data in memory and provides
-/// methods to look up and extract files by name or hash ID.
+/// Disk archives share mapped/owned bytes. Encrypted package archives retain
+/// their index and a bounded view, and read entries on demand.
 #[derive(Clone)]
 pub struct MixArchive {
     /// The file index entries, sorted by id for binary search lookup.
@@ -94,7 +94,17 @@ pub struct MixArchive {
     /// The raw archive bytes. Top-level archives can stay memory-mapped;
     /// nested archives can share a sub-view into parent archive storage.
     data: MixData,
+    package: Option<PackageMix>,
 }
+
+#[derive(Clone)]
+struct PackageMix {
+    source: vera_package::ResourceView,
+    entries: Vec<OnceLock<SharedBytes>>,
+}
+pub trait ResourceRead: std::io::Read + std::io::Seek + Send {}
+impl<T: std::io::Read + std::io::Seek + Send> ResourceRead for T {}
+pub type ResourceReader = Box<dyn ResourceRead>;
 
 #[derive(Clone)]
 enum MixBytes {
@@ -205,6 +215,11 @@ impl std::ops::Deref for SharedBytes {
         self.0.as_slice()
     }
 }
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
 
 impl MixArchive {
     /// Parse a MIX archive from raw bytes.
@@ -214,6 +229,26 @@ impl MixArchive {
     /// - Non-zero → old-header layout: that value IS the file_count
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, AssetError> {
         Self::from_data(MixData::from_owned(data))
+    }
+
+    /// Distribution backing only. Reuse the normal MIX index parser, reading
+    /// at most the largest possible u16-count index; payloads remain encrypted.
+    pub fn from_package(source: vera_package::ResourceView) -> Result<Self, AssetError> {
+        let prefix = source
+            .read_range(0, source.len().min(1024 * 1024) as usize)
+            .map_err(|e| AssetError::ParseError {
+                format: "VERAMOD MIX".into(),
+                detail: e.to_string(),
+            })?;
+        let mut archive = Self::from_bytes(prefix)?;
+        archive.data = MixData::from_owned(archive.data.as_slice()[..archive.body_offset].to_vec());
+        archive.package = Some(PackageMix {
+            source,
+            entries: (0..archive.entries.len())
+                .map(|_| OnceLock::new())
+                .collect(),
+        });
+        Ok(archive)
     }
 
     /// Cheap format sniff used before cloning candidate nested MIX payloads.
@@ -298,6 +333,7 @@ impl MixArchive {
             body_size,
             flags,
             data,
+            package: None,
         })
     }
 
@@ -335,6 +371,20 @@ impl MixArchive {
     pub fn get_by_id(&self, id: i32) -> Option<&[u8]> {
         let index: usize = self.entries.binary_search_by_key(&id, |e| e.id).ok()?;
         let entry: &MixEntry = &self.entries[index];
+        if let Some(package) = &self.package {
+            let view = self.package_entry(entry)?;
+            assert!(
+                view.len() <= 256 * 1024 * 1024,
+                "published MIX entry exceeds whole-file read budget; use a resource reader"
+            );
+            if package.entries[index].get().is_none() {
+                let bytes = view
+                    .read_range(0, view.len() as usize)
+                    .expect("authenticated MIX entry unreadable; refusing retail fallback");
+                let _ = package.entries[index].set(SharedBytes::from(Arc::<[u8]>::from(bytes)));
+            }
+            return package.entries[index].get().map(|b| b.as_ref());
+        }
         let data = self.data.as_slice();
 
         let start = self.body_offset.checked_add(entry.offset as usize)?;
@@ -351,7 +401,33 @@ impl MixArchive {
     /// [`Self::get_by_id`] as a share of the archive storage.
     pub fn get_shared_by_id(&self, id: i32) -> Option<SharedBytes> {
         let index: usize = self.entries.binary_search_by_key(&id, |e| e.id).ok()?;
+        if self.package.is_some() {
+            let view = self.package_entry(&self.entries[index])?;
+            assert!(
+                view.len() <= 256 * 1024 * 1024,
+                "published MIX entry exceeds shared read budget; use a resource reader"
+            );
+            let bytes = view
+                .read_range(0, view.len() as usize)
+                .expect("authenticated MIX entry unreadable");
+            return Some(Arc::<[u8]>::from(bytes).into());
+        }
         self.entry_view(&self.entries[index]).map(SharedBytes)
+    }
+    pub fn open_by_id(&self, id: i32) -> Option<ResourceReader> {
+        let index = self.entries.binary_search_by_key(&id, |e| e.id).ok()?;
+        if self.package.is_some() {
+            return Some(Box::new(self.package_entry(&self.entries[index])?.reader()));
+        }
+        Some(Box::new(std::io::Cursor::new(self.get_shared_by_id(id)?)))
+    }
+    fn package_entry(&self, entry: &MixEntry) -> Option<vera_package::ResourceView> {
+        let start = (self.body_offset as u64).checked_add(entry.offset as u64)?;
+        self.package
+            .as_ref()?
+            .source
+            .subrange(start, entry.size as u64)
+            .ok()
     }
 
     /// Parse a child MIX archive directly from an entry without copying its bytes.
@@ -360,6 +436,12 @@ impl MixArchive {
             Ok(index) => index,
             Err(_) => return Ok(None),
         };
+        if self.package.is_some() {
+            return self
+                .package_entry(&self.entries[index])
+                .map(Self::from_package)
+                .transpose();
+        }
         let Some(data) = self.entry_view(&self.entries[index]) else {
             return Ok(None);
         };
@@ -378,7 +460,27 @@ impl MixArchive {
 
     /// Size of the raw archive in bytes.
     pub fn byte_len(&self) -> usize {
-        self.data.len()
+        self.package
+            .as_ref()
+            .map_or_else(|| self.data.len(), |p| p.source.len() as usize)
+    }
+    pub fn entry_size(&self, id: i32) -> Option<u64> {
+        let index = self.entries.binary_search_by_key(&id, |e| e.id).ok()?;
+        let entry = &self.entries[index];
+        let end = (self.body_offset as u64)
+            .checked_add(entry.offset as u64)?
+            .checked_add(entry.size as u64)?;
+        (end <= self.byte_len() as u64).then_some(entry.size as u64)
+    }
+    pub fn package_resident_bytes(&self) -> usize {
+        self.package.as_ref().map_or(0, |p| {
+            self.data.len()
+                + p.entries
+                    .iter()
+                    .filter_map(OnceLock::get)
+                    .map(|b| b.len())
+                    .sum::<usize>()
+        })
     }
 
     /// Validate a completely accounted-for container for an untrusted consumer.
@@ -392,6 +494,9 @@ impl MixArchive {
         let invalid = |reason: &str| AssetError::InvalidMixHeader {
             reason: reason.to_owned(),
         };
+        if self.package.is_some() {
+            return Err(invalid("stream-backed MIX is not a transferred map"));
+        }
         if self.flags & !(FLAG_CHECKSUM | FLAG_ENCRYPTED) != 0 {
             return Err(invalid("Unsupported transfer MIX flags"));
         }

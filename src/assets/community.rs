@@ -7,7 +7,9 @@ use std::{
 };
 
 static SNAPSHOT: OnceLock<Snapshot> = OnceLock::new();
-pub fn valid_package_name(name:&str)->bool{vera_package::normalize(name).is_ok()}
+pub fn valid_package_name(name: &str) -> bool {
+    vera_package::normalize(name).is_ok()
+}
 pub fn open_package(
     path: &std::path::Path,
     public_key: &[u8; 32],
@@ -138,6 +140,12 @@ impl Snapshot {
             return Ok(None);
         };
         Ok(Some(package.reader(name)?))
+    }
+    pub fn file_view(&self, name: &str) -> Result<Option<vera_package::ResourceView>> {
+        let Some(package) = self.package.as_ref().filter(|p| p.contains(name)) else {
+            return Ok(None);
+        };
+        Ok(Some(package.view(name)?))
     }
     pub fn source(&self) -> &str {
         &self.source

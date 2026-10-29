@@ -231,6 +231,12 @@ pub(crate) struct ImaBlockDecoder {
 }
 
 impl ImaBlockDecoder {
+    /// Supply an input-buffer window without changing the decoder state or
+    /// short-tail semantics in the sole block decoder below.
+    pub(crate) fn decode_at(&mut self, data: &[u8], position: usize, out: &mut Vec<i16>) -> bool {
+        self.pos = position;
+        self.decode_next(data, out)
+    }
     pub(crate) fn new(channels: u16, block_align: u32) -> Self {
         // VERA-internal, gamemd equivalent UNCHECKED: with `+0xA4 == 0` the native's
         // stereo loop at `0x0040ABED` subtracts 0 per pass and spins forever, so

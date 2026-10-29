@@ -22,12 +22,10 @@
 //! User-requested YR parity exception: preserve this expanded gameplay playlist
 //! during future parity work unless the user explicitly asks to change it.
 
-use std::ops::Range;
-
 use crate::assets::asset_manager::AssetManager;
 use crate::assets::aud_file;
-use crate::assets::mix_archive::SharedBytes;
-use crate::assets::wav_file::{WavFile, WavPcmCursor};
+use crate::assets::mix_archive::{ResourceReader, SharedBytes};
+use crate::assets::wav_file::{WavFile, WavReadCursor, WavStreamHeader};
 use crate::audio::sfx::upmix_i16_to_f32_stereo;
 use crate::rules::ini_parser::{IniFile, IniSection};
 use crate::util::native_x87::X87Chop53;
@@ -172,10 +170,9 @@ pub(crate) struct PreparedTrack {
 /// A WAV song's payload, read from a share of its archive storage so neither
 /// thread copies it.
 struct WavStream {
-    file: SharedBytes,
-    payload: Range<usize>,
+    file: ResourceReader,
     channels: u16,
-    cursor: WavPcmCursor,
+    cursor: WavReadCursor,
     piece: Vec<i16>,
 }
 
@@ -194,20 +191,25 @@ impl PreparedTrack {
     /// A WAV song decoding as it is pulled; `None` wherever the whole-file
     /// `decode_wav` fails or yields no samples, or the rate is zero.
     pub(super) fn streamed(stem: &str, file: &SharedBytes) -> Option<Self> {
-        let wav = WavFile::parse(file)?;
-        let cursor = WavPcmCursor::new(&wav)?;
-        if wav.sample_rate == 0 {
+        file.read_ahead();
+        Self::streamed_reader(stem, Box::new(std::io::Cursor::new(file.clone())))
+    }
+    fn streamed_reader(stem: &str, mut file: ResourceReader) -> Option<Self> {
+        let header = WavStreamHeader::read(&mut *file)?;
+        let sample_rate = header.format.sample_rate;
+        let channels = header.format.channels;
+        let cursor = WavReadCursor::new(header)?;
+        if sample_rate == 0 {
             return None;
         }
         let mut track = Self {
             stem: stem.to_string(),
-            sample_rate: wav.sample_rate,
+            sample_rate,
             pcm: Vec::new(),
             pulled: 0,
             stream: Some(WavStream {
-                payload: wav.data_range(),
-                channels: wav.channels,
-                file: file.clone(),
+                channels,
+                file,
                 cursor,
                 piece: Vec::new(),
             }),
@@ -216,7 +218,6 @@ impl PreparedTrack {
         if track.exhausted() {
             return None;
         }
-        file.read_ahead();
         Some(track)
     }
 
@@ -234,8 +235,14 @@ impl PreparedTrack {
         self.pcm.clear();
         self.pulled = 0;
         stream.piece.clear();
-        let payload = &stream.file[stream.payload.clone()];
-        if stream.cursor.decode_next(payload, &mut stream.piece) {
+        let decoded = stream
+            .cursor
+            .read_next(&mut *stream.file, &mut stream.piece)
+            .unwrap_or_else(|error| {
+                log::error!("Music stream read failed: {error}");
+                false
+            });
+        if decoded {
             upmix_i16_to_f32_stereo(&mut self.pcm, &stream.piece, stream.channels);
         } else {
             self.stream = None;
@@ -993,13 +1000,16 @@ impl ThemeRuntime {
 /// its first piece here (see [`PreparedTrack`]).
 fn prepare_track(track_name: &str, assets: &AssetManager) -> Option<PreparedTrack> {
     for filename in [format!("{track_name}.wav"), format!("{track_name}.aud")] {
+        if filename.ends_with(".wav") {
+            if let Some(reader) = assets.open_resource(&filename) {
+                if let Some(track) = PreparedTrack::streamed_reader(track_name, reader) {
+                    return Some(track);
+                }
+            }
+        }
         let Some(file) = assets.get_shared(&filename) else {
             continue;
         };
-
-        if let Some(track) = PreparedTrack::streamed(track_name, &file) {
-            return Some(track);
-        }
 
         let Some((header, samples)) = aud_file::decode_aud(&file) else {
             continue;
@@ -1034,12 +1044,12 @@ fn find_section<'a>(ini: &'a IniFile, name: &str) -> Option<&'a IniSection> {
 fn scan_catalog_availability(entries: &mut [ThemeEntry], assets: &AssetManager) {
     for entry in entries {
         let wav = (!entry.sound.is_empty())
-            .then(|| assets.get_ref(&format!("{}.wav", entry.sound)))
+            .then(|| assets.open_resource(&format!("{}.wav", entry.sound)))
             .flatten();
         entry.available = wav.is_some();
         entry.duration_seconds = wav
-            .and_then(crate::assets::wav_file::WavFile::parse)
-            .and_then(|wav| wav.native_duration_seconds())
+            .and_then(|mut reader| WavStreamHeader::read(&mut *reader))
+            .and_then(|header| header.format.native_duration_seconds())
             .unwrap_or(0);
     }
 }
