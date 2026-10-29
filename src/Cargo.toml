@@ -16,6 +16,10 @@ autobenches = false
 name = "vera-map-library"
 path = "bin/community_maps.rs"
 
+[[bin]]
+name = "vera-package-probe"
+path = "bin/community_package_probe.rs"
+
 [[test]]
 name = "community-memory"
 path = "../tests/community_memory.rs"
@@ -62,6 +66,7 @@ test-support = []
 
 [dependencies]
 base64 = "0.22"
+vera-package = { path = "../../format" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Shared authenticated datagram codec used by the standalone relay.
 vera20k-relay-protocol = { path = "../services/relay-protocol" }

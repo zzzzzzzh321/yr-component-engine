@@ -600,10 +600,15 @@ impl AssetManager {
             Some(SelectedAudioFile {
                 source_archive: source.source_archive.to_owned(),
                 entry_id: source.entry_id,
-                loose_name: self
-                    .loose_asset(name)
-                    .filter(|loose| loose.source_name == source.source_archive)
-                    .map(|_| name.to_owned()),
+                loose_name: if super::community::snapshot()
+                    .is_some_and(|s| s.source() == source.source_archive)
+                {
+                    Some(name.to_owned())
+                } else {
+                    self.loose_asset(name)
+                        .filter(|loose| loose.source_name == source.source_archive)
+                        .map(|_| name.to_owned())
+                },
             })
         };
         #[cfg(not(feature = "ares"))]
@@ -630,7 +635,10 @@ impl AssetManager {
         selected: &'a SelectedAudioFile,
     ) -> Option<AssetResolutionRef<'a>> {
         let bytes = if let Some(name) = selected.loose_name.as_deref() {
-            self.loose_asset(name)?.bytes()?
+            match super::community::get(name) {
+                Some(bytes) => bytes,
+                None => self.loose_asset(name)?.bytes()?,
+            }
         } else {
             self.archives
                 .iter()
@@ -814,7 +822,13 @@ impl AssetManager {
         maximum: Option<usize>,
     ) -> Result<Option<AssetResolutionRef<'_>>, AssetError> {
         if let Some(snapshot) = super::community::snapshot() {
-            if let Some(bytes) = snapshot.get(name) {
+            if let Some(bytes) = snapshot
+                .get_bounded(name, maximum.unwrap_or(256 * 1024 * 1024))
+                .map_err(|error| AssetError::ParseError {
+                    format: "community package".into(),
+                    detail: error.to_string(),
+                })?
+            {
                 if let Some(maximum) = maximum {
                     check_asset_read_limit(bytes.len() as u64, maximum)?;
                 }
@@ -1169,7 +1183,9 @@ impl AssetManager {
     /// payloads. Catalog presence does not guarantee a subsequent disk read.
     /// Retail provenance: MIX-then-raw availability — `CCFileClass__IsAvailable_MixThenRaw` @ `0x00473C50`.
     pub fn contains(&self, name: &str) -> bool {
-        self.lookup_location_for_name(name).is_some() || self.loose_asset(name).is_some()
+        super::community::snapshot().is_some_and(|s| s.contains(name))
+            || self.lookup_location_for_name(name).is_some()
+            || self.loose_asset(name).is_some()
     }
 
     /// Look up a loaded archive by its display/debug name.
@@ -1392,18 +1408,41 @@ impl AssetManager {
         relative_directory: Option<&str>,
         family_prefix: &str,
     ) -> Result<WildcardMount, AssetError> {
+        let mut result = WildcardMount::default();
+        if let Some(snapshot) = super::community::snapshot() {
+            let prefix = relative_directory
+                .map(|d| format!("{}/", d.replace('\\', "/").to_ascii_lowercase()))
+                .unwrap_or_default();
+            for name in snapshot.names() {
+                let Some(leaf) = name.strip_prefix(&prefix).filter(|n| !n.contains('/')) else {
+                    continue;
+                };
+                if !mix_wildcard_family_matches(leaf, family_prefix) {
+                    continue;
+                }
+                let first = !result.matched;
+                result.matched = true;
+                let archive = MixArchive::from_bytes(snapshot.get(name).unwrap().to_vec())?;
+                self.append_registered_archive(NamedArchive {
+                    name: format!("{} -> {name}", snapshot.source()),
+                    archive,
+                });
+                if first {
+                    result.first_registered = true;
+                }
+            }
+        }
         let directory = relative_directory
             .map(|relative| self.ra2_dir.join(relative))
             .unwrap_or_else(|| self.ra2_dir.clone());
         let entries = match crate::util::file_system::read_dir(&directory) {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(WildcardMount::default());
+                return Ok(result);
             }
             Err(err) => return Err(err.into()),
         };
 
-        let mut result = WildcardMount::default();
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -1452,7 +1491,8 @@ impl AssetManager {
     }
 
     fn raw_relative_file_available(&self, relative: &str) -> bool {
-        retail_enumerated_file(&self.ra2_dir.join(relative))
+        super::community::snapshot().is_some_and(|s| s.contains(relative))
+            || retail_enumerated_file(&self.ra2_dir.join(relative))
     }
 
     fn record_archive_issue(
@@ -1504,6 +1544,19 @@ impl AssetManager {
             return Ok(true);
         }
 
+        // Community CCFile overrides retain the ordinary named-constructor
+        // order above (retail Init_Base_Mix_Files/Init_Mix_Files @ 0x00530460).
+        if let Some(bytes) = super::community::get(name) {
+            let archive = MixArchive::from_bytes(bytes.to_vec())?;
+            self.append_registered_archive(NamedArchive {
+                name: format!(
+                    "{} -> {name}",
+                    super::community::snapshot().unwrap().source()
+                ),
+                archive,
+            });
+            return Ok(true);
+        }
         if let Some(disk_path) = self.loose_path(name).map(Path::to_path_buf) {
             let archive = MixArchive::load(&disk_path)?;
             if let Some(position) = self

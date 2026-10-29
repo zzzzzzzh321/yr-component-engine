@@ -68,6 +68,7 @@ vera20k-core = { path = "src" }
 
 # Background HTTPS lobby I/O; verified TLS is independent of simulation.
 base64 = "0.22"
+zeroize = "1"
 
 # OS multiplayer session nonces and RFC6455 handshake; no simulation RNG or command intake.
 getrandom = { version = "=0.3.4" }

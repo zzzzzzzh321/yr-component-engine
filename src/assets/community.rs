@@ -7,12 +7,23 @@ use std::{
 };
 
 static SNAPSHOT: OnceLock<Snapshot> = OnceLock::new();
+pub fn valid_package_name(name:&str)->bool{vera_package::normalize(name).is_ok()}
+pub fn open_package(
+    path: &std::path::Path,
+    public_key: &[u8; 32],
+    key: [u8; 32],
+    sha256: &str,
+) -> Result<Arc<vera_package::Archive>> {
+    vera_package::Archive::open(path, public_key, key, sha256)
+}
 pub const MAX_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
 pub struct Snapshot {
     files: BTreeMap<String, Arc<[u8]>>,
     source: String,
+    package: Option<Arc<vera_package::Archive>>,
+    package_files: BTreeMap<String, OnceLock<Arc<[u8]>>>,
 }
 impl Snapshot {
     pub fn new(source: String, files: Vec<(String, Vec<u8>)>) -> Result<Self> {
@@ -46,10 +57,87 @@ impl Snapshot {
         Ok(Self {
             files: result,
             source: format!("community:{source}"),
+            package: None,
+            package_files: BTreeMap::new(),
         })
     }
+    /// Package content stays encrypted on disk. Legacy whole-file consumers
+    /// retain only files they request; seekable consumers can use `open`.
+    pub fn from_package(
+        source: String,
+        package: Arc<vera_package::Archive>,
+        overlays: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self> {
+        ensure!(
+            format!(
+                "{}@{}",
+                package.metadata().id,
+                package.metadata().release_id
+            ) == source,
+            "package release mismatch"
+        );
+        let mut snapshot = if overlays.is_empty() {
+            Self {
+                files: BTreeMap::new(),
+                source: format!("community:{source}"),
+                package: None,
+                package_files: BTreeMap::new(),
+            }
+        } else {
+            Self::new(source, overlays)?
+        };
+        for entry in package.entries() {
+            let name = vera_package::normalize(&entry.name)?;
+            ensure!(
+                !snapshot.files.contains_key(&name),
+                "package overlay name conflict"
+            );
+            snapshot.package_files.insert(name, OnceLock::new());
+        }
+        snapshot.package = Some(package);
+        Ok(snapshot)
+    }
+    pub fn contains(&self, name: &str) -> bool {
+        vera_package::normalize(name)
+            .is_ok_and(|n| self.files.contains_key(&n) || self.package_files.contains_key(&n))
+    }
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.files
+            .keys()
+            .chain(self.package_files.keys())
+            .map(String::as_str)
+    }
     pub fn get(&self, name: &str) -> Option<&Arc<[u8]>> {
-        self.files.get(&name.to_ascii_lowercase())
+        self.get_bounded(name, 256 * 1024 * 1024)
+            .expect("published resource is unreadable; refusing retail fallback")
+    }
+    pub fn get_bounded(&self, name: &str, maximum: usize) -> Result<Option<&Arc<[u8]>>> {
+        let Ok(normalized) = vera_package::normalize(name) else {
+            return Ok(None);
+        };
+        if let Some(bytes) = self.files.get(&normalized) {
+            ensure!(bytes.len() <= maximum, "resource exceeds read budget");
+            return Ok(Some(bytes));
+        }
+        let Some(slot) = self.package_files.get(&normalized) else {
+            return Ok(None);
+        };
+        let package = self.package.as_ref().unwrap();
+        ensure!(
+            package.entry(&normalized).unwrap().bytes <= maximum as u64,
+            "resource exceeds read budget"
+        );
+        if slot.get().is_none() {
+            let data = package.read_file(&normalized, maximum)?;
+            let _ = slot.set(Arc::from(data));
+        }
+        Ok(slot.get())
+    }
+    pub fn open(&self, name: &str) -> Result<Option<vera_package::ArchiveReader>> {
+        let Some(package) = self.package.as_ref().filter(|p| p.contains(name)) else {
+            return Ok(None);
+        };
+        Ok(Some(package.reader(name)?))
     }
     pub fn source(&self) -> &str {
         &self.source

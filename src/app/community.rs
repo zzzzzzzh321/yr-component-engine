@@ -12,6 +12,7 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use std::io::Read;
+use zeroize::Zeroize;
 
 const MAX_FRAME: usize = 48 * 1024 * 1024;
 #[derive(Deserialize)]
@@ -21,6 +22,16 @@ struct Launch {
     release: String,
     spawn: String,
     resources: Vec<Resource>,
+    #[serde(default)]
+    package: Option<PackageLaunch>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PackageLaunch {
+    path: std::path::PathBuf,
+    sha256: String,
+    public_key: String,
+    key: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,10 +54,10 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
     reader
         .read_exact(&mut bytes)
         .context("incomplete community launch frame")?;
-    let launch: Launch =
+    let mut launch: Launch =
         serde_json::from_slice(&bytes).context("invalid community launch frame")?;
     ensure!(
-        launch.protocol == 1,
+        launch.protocol == 1 || launch.protocol == 2,
         "unsupported community launch protocol"
     );
     ensure!(
@@ -54,25 +65,50 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
         "community launch settings too large"
     );
     let request = SpawnRequest::parse(&launch.spawn)?;
-    let snapshot = Snapshot::new(
-        launch.release,
-        launch
-            .resources
-            .into_iter()
-            .map(|r| {
-                ensure!(
-                    r.data.len() <= 24 * 1024 * 1024,
-                    "encoded resource too large"
-                );
-                Ok((
-                    r.name,
-                    STANDARD
-                        .decode(r.data)
-                        .context("invalid resource encoding")?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?,
-    )?;
+    let resources = launch
+        .resources
+        .into_iter()
+        .map(|r| {
+            ensure!(
+                r.data.len() <= 24 * 1024 * 1024,
+                "encoded resource too large"
+            );
+            Ok((
+                r.name,
+                STANDARD
+                    .decode(r.data)
+                    .context("invalid resource encoding")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let snapshot = if launch.protocol == 2 {
+        let mut package = launch
+            .package
+            .take()
+            .context("community protocol v2 requires package")?;
+        let key: [u8; 32] = STANDARD
+            .decode(&package.key)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid package key"))?;
+        package.key.zeroize();
+        let public_key: [u8; 32] = STANDARD
+            .decode(&package.public_key)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid package public key"))?;
+        let archive = vera20k_core::assets::community::open_package(
+            &package.path,
+            &public_key,
+            key,
+            &package.sha256,
+        )?;
+        Snapshot::from_package(launch.release, archive, resources)?
+    } else {
+        ensure!(
+            launch.package.is_none(),
+            "legacy protocol cannot include package"
+        );
+        Snapshot::new(launch.release, resources)?
+    };
     match &request.game {
         SpawnGame::Skirmish(s) => {
             let name = s
@@ -80,7 +116,7 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
                 .as_deref()
                 .context("missing community map")?;
             ensure!(
-                community::valid_name(name) && snapshot.get(name).is_some(),
+                (if launch.protocol==2{vera20k_core::assets::community::valid_package_name(name)}else{community::valid_name(name)}) && snapshot.contains(name),
                 "community map absent from snapshot"
             );
         }
