@@ -24,6 +24,10 @@ struct Launch {
     resources: Vec<Resource>,
     #[serde(default)]
     package: Option<PackageLaunch>,
+    #[serde(default)]
+    packages: Vec<PackageLaunch>,
+    #[serde(default, rename = "musicEnabled")]
+    music_enabled: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -81,7 +85,8 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let snapshot = if launch.protocol == 2 {
+    ensure!(launch.packages.len() <= 3, "too many optional packages");
+    let mut snapshot = if launch.protocol == 2 {
         let mut package = launch
             .package
             .take()
@@ -101,14 +106,22 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
             key,
             &package.sha256,
         )?;
-        Snapshot::from_package(launch.release, archive, resources)?
+        let mut archives = vec![archive];
+        for mut extra in launch.packages {
+            let key: [u8;32] = STANDARD.decode(&extra.key)?.try_into().map_err(|_| anyhow::anyhow!("invalid package key"))?;
+            extra.key.zeroize();
+            ensure!(extra.public_key == package.public_key, "optional package signer mismatch");
+            archives.push(community::open_package(&extra.path, &public_key, key, &extra.sha256)?);
+        }
+        Snapshot::from_packages(launch.release, archives, resources)?
     } else {
         ensure!(
-            launch.package.is_none(),
+            launch.package.is_none() && launch.packages.is_empty() && launch.music_enabled.is_none(),
             "legacy protocol cannot include package"
         );
         Snapshot::new(launch.release, resources)?
     };
+    snapshot.set_music_enabled(launch.music_enabled.unwrap_or(true));
     match &request.game {
         SpawnGame::Skirmish(s) => {
             let name = s

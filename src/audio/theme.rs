@@ -366,6 +366,13 @@ impl ThemeRuntime {
         if self.catalog_loaded {
             return;
         }
+        // Community optional music is a presentation policy for this session.
+        // Do not fall through to retail music or persist a changed user volume.
+        if crate::assets::community::snapshot().is_some_and(|s| !s.music_enabled()) {
+            self.catalog_loaded = true;
+            log::info!("Community optional music disabled for this session");
+            return;
+        }
         if let Ok(selected) = crate::rules::retail_sources::select_ini(assets, THEME_INI_NAME) {
             self.entries = catalog_from_ini(&selected.ini);
         }

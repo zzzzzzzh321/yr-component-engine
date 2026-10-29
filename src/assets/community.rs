@@ -24,8 +24,9 @@ pub const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 pub struct Snapshot {
     files: BTreeMap<String, Arc<[u8]>>,
     source: String,
-    package: Option<Arc<vera_package::Archive>>,
-    package_files: BTreeMap<String, OnceLock<Arc<[u8]>>>,
+    packages: Vec<Arc<vera_package::Archive>>,
+    package_files: BTreeMap<String, (usize, OnceLock<Arc<[u8]>>)>,
+    music_enabled: bool,
 }
 impl Snapshot {
     pub fn new(source: String, files: Vec<(String, Vec<u8>)>) -> Result<Self> {
@@ -59,8 +60,9 @@ impl Snapshot {
         Ok(Self {
             files: result,
             source: format!("community:{source}"),
-            package: None,
+            packages: Vec::new(),
             package_files: BTreeMap::new(),
+            music_enabled: true,
         })
     }
     /// Package content stays encrypted on disk. Legacy whole-file consumers
@@ -70,6 +72,17 @@ impl Snapshot {
         package: Arc<vera_package::Archive>,
         overlays: Vec<(String, Vec<u8>)>,
     ) -> Result<Self> {
+        Self::from_packages(source, vec![package], overlays)
+    }
+    /// Independently verified optional archives may add resources, but cannot
+    /// replace a resource from the main package or a launch overlay.
+    pub fn from_packages(
+        source: String,
+        packages: Vec<Arc<vera_package::Archive>>,
+        overlays: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self> {
+        ensure!(!packages.is_empty() && packages.len() <= 4, "invalid package count");
+        let package = &packages[0];
         ensure!(
             format!(
                 "{}@{}",
@@ -82,23 +95,29 @@ impl Snapshot {
             Self {
                 files: BTreeMap::new(),
                 source: format!("community:{source}"),
-                package: None,
+                packages: Vec::new(),
                 package_files: BTreeMap::new(),
+                music_enabled: true,
             }
         } else {
             Self::new(source, overlays)?
         };
+        for (owner, package) in packages.iter().enumerate() {
         for entry in package.entries() {
             let name = vera_package::normalize(&entry.name)?;
             ensure!(
-                !snapshot.files.contains_key(&name),
+                !snapshot.files.contains_key(&name) && !snapshot.package_files.contains_key(&name),
                 "package overlay name conflict"
             );
-            snapshot.package_files.insert(name, OnceLock::new());
+            snapshot.package_files.insert(name, (owner, OnceLock::new()));
+            ensure!(snapshot.package_files.len() <= 65_536, "too many package resources");
         }
-        snapshot.package = Some(package);
+        }
+        snapshot.packages = packages;
         Ok(snapshot)
     }
+    pub fn set_music_enabled(&mut self, enabled: bool) { self.music_enabled = enabled; }
+    pub fn music_enabled(&self) -> bool { self.music_enabled }
     pub fn contains(&self, name: &str) -> bool {
         vera_package::normalize(name)
             .is_ok_and(|n| self.files.contains_key(&n) || self.package_files.contains_key(&n))
@@ -121,10 +140,10 @@ impl Snapshot {
             ensure!(bytes.len() <= maximum, "resource exceeds read budget");
             return Ok(Some(bytes));
         }
-        let Some(slot) = self.package_files.get(&normalized) else {
+        let Some((owner, slot)) = self.package_files.get(&normalized) else {
             return Ok(None);
         };
-        let package = self.package.as_ref().unwrap();
+        let package = &self.packages[*owner];
         ensure!(
             package.entry(&normalized).unwrap().bytes <= maximum as u64,
             "resource exceeds read budget"
@@ -136,15 +155,17 @@ impl Snapshot {
         Ok(slot.get())
     }
     pub fn open(&self, name: &str) -> Result<Option<vera_package::ArchiveReader>> {
-        let Some(package) = self.package.as_ref().filter(|p| p.contains(name)) else {
+        let Some((owner, _)) = self.package_files.get(&vera_package::normalize(name)?) else {
             return Ok(None);
         };
+        let package = &self.packages[*owner];
         Ok(Some(package.reader(name)?))
     }
     pub fn file_view(&self, name: &str) -> Result<Option<vera_package::ResourceView>> {
-        let Some(package) = self.package.as_ref().filter(|p| p.contains(name)) else {
+        let Some((owner, _)) = self.package_files.get(&vera_package::normalize(name)?) else {
             return Ok(None);
         };
+        let package = &self.packages[*owner];
         Ok(Some(package.view(name)?))
     }
     pub fn source(&self) -> &str {
