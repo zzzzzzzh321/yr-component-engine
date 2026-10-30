@@ -102,7 +102,7 @@ pub(crate) mod telemetry_server;
 pub(crate) mod types;
 mod window_icon;
 
-/// Main window title. The single-instance gate finds a running copy's window by
+/// Main window title. The interactive single-instance gate finds a running copy's window by
 /// this exact title, so `main` hands the same constant to
 /// `util::single_instance::acquire`.
 pub const WINDOW_TITLE: &str = match (
@@ -141,6 +141,7 @@ pub struct App {
     /// use the command-line screen fields as its current-value defaults.
     startup_options: crate::app::frontend::startup_options::RetailStartupOptions,
     spawn_request: Option<crate::app::frontend::cncnet_spawn::SpawnRequest>,
+    community_network: Option<crate::app::shell_wol::ExternalNetworkLaunch>,
     replay_request: Option<crate::app::frontend::launch::ReplayLaunchRequest>,
     startup_failure: Option<String>,
     /// Make sure config.toml names a game folder before the window opens
@@ -197,6 +198,7 @@ impl App {
             capture_render_not_before: None,
             startup_options,
             spawn_request: None,
+            community_network: None,
             replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
@@ -217,6 +219,7 @@ impl App {
             capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             spawn_request: None,
+            community_network: None,
             replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
@@ -239,6 +242,7 @@ impl App {
             capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             spawn_request: None,
+            community_network: None,
             replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,

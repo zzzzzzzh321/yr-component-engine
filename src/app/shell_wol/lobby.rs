@@ -923,6 +923,17 @@ fn new_runner(
     })
 }
 
+/// Adopt only a room whose authenticated membership the external service has
+/// already admitted. Its records stay in the ordinary lobby owner throughout
+/// map verification, relay admission, loading and gameplay cleanup.
+pub(super) fn external_room(channel: WolChannel, members: Vec<WolMember>) -> Box<WolLobby> {
+    let mut lobby = new_runner(Runner::Lobby, false, false, Instant::now(), true);
+    lobby.current = Some(channel);
+    lobby.members = members;
+    lobby.step = Step::Ready;
+    lobby
+}
+
 /// The Buddy List runner's entry (`0x0079F140`, steps 1-2): a runner with
 /// no `0x113` and the chat-lobby list behind `TXT_REQ_CHANLIST`
 /// (`0x0077EF90(0, 0)`, the 30 s wait `0x0077F120`).

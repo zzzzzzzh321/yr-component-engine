@@ -105,6 +105,15 @@ fn run(app_bundle: bool) -> Result<()> {
     // are deliberately left ungated so parallel captures still run —
     // VERA-internal exemption, native has no capture mode.
     let _instance_guard = match &launch_mode {
+        vera20k::app::frontend::launch::AppLaunchMode::Spawn(_) if community_launch => {
+            let config = vera20k::util::config::GameConfig::load()?;
+            match vera20k::util::single_instance::acquire_profile(config.paths.settings_dir())? {
+                vera20k::util::single_instance::SingleInstance::Acquired(guard) => Some(guard),
+                vera20k::util::single_instance::SingleInstance::AlreadyRunning => {
+                    anyhow::bail!("this community game profile is already running");
+                }
+            }
+        }
         vera20k::app::frontend::launch::AppLaunchMode::Interactive(_)
         | vera20k::app::frontend::launch::AppLaunchMode::Spawn(_)
         | vera20k::app::frontend::launch::AppLaunchMode::Replay(_) => {

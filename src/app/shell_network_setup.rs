@@ -17,7 +17,7 @@ pub(crate) use service::{
 };
 pub(crate) mod view;
 mod wol;
-pub(crate) use actions::{apply_action, commit_map_selection, commit_start, open_choose_map};
+pub(crate) use actions::{apply_action, commit_map_selection, commit_start, open_choose_map, request_external_start};
 pub(crate) use view::view;
 pub(crate) use wol::{
     WolStartUser, guest_users_listed, kicked_key, local_left, map_status, play_player_left,
@@ -682,7 +682,7 @@ fn initialize_host_seed(
     u32::from(crt.draw15())
 }
 
-fn install_setup(
+pub(crate) fn install_setup(
     state: &mut AppState,
     launch: SkirmishLaunchSession,
     dialog: SetupDialog,

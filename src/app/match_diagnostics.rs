@@ -127,6 +127,19 @@ pub(crate) struct ReplayLogFlush {
 }
 
 impl MatchDiagnosticsState {
+    /// Local opt-in observation of the existing network owners. It never
+    /// computes a checksum, injects input, or consumes simulation RNG.
+    pub(crate) fn external_network_audit_enabled() -> bool {
+        static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var("VERA_EXTERNAL_NETWORK_DIAGNOSTIC").as_deref() == Ok("1")
+        });
+        *ENABLED
+    }
+
+    pub(crate) fn external_network_audit(value: serde_json::Value) {
+        eprintln!("VERA_NETWORK_AUDIT {value}");
+    }
+
     pub(crate) fn is_replay_playback(&self) -> bool {
         self.replay_playback.is_some()
     }

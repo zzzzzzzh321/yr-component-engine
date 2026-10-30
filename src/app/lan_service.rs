@@ -3136,6 +3136,17 @@ pub(crate) fn install_gameplay(state: &mut AppState) -> anyhow::Result<()> {
         live.configure_precalculated_timing(timing.precalc_max_ahead, timing.precalc_frame_rate);
     }
     state.match_state.live_network = Some(live);
+    if state.frontend.external_launch
+        && super::match_diagnostics::MatchDiagnosticsState::external_network_audit_enabled()
+    {
+        let launch = state.match_state.session.network_setup().expect("installed network roster");
+        let startup = super::diagnostics::shell_capture::network_startup_receipt(
+            state, launch, state.match_state.sim_runtime.as_ref().map(|rt| &rt.simulation),
+        )?;
+        super::match_diagnostics::MatchDiagnosticsState::external_network_audit(
+            serde_json::json!({"event":"started","mode":"wol","startup":startup}),
+        );
+    }
     Ok(())
 }
 

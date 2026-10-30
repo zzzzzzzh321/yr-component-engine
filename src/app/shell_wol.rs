@@ -27,6 +27,7 @@ mod test_service;
 pub(crate) mod translation;
 
 pub(crate) use live_service::OnlineCleanup;
+pub(crate) use live_service::{ExternalNetworkLaunch, start_external_network};
 pub(crate) use live_service::{
     local_choices_agreed, online_cleanup_pending, online_exit_ready, online_match_id,
 };

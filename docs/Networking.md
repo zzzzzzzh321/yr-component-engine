@@ -212,3 +212,35 @@ Campaign; seed its settings folder with a `coopsave.ini` section for the pair
 `CurrentMap` is the campaign's last stage: at native frame 150 both processes flag every
 human House to win, BC6 offers only Quit, both press it and the campaign-end dialog
 `0xBC7` opens. The host stays on it; the guest presses Continue back to the lobby.
+
+## External community startup
+
+`--community-launch` can adopt an external room through the existing bounded,
+length-prefixed stdin launch frame. Its optional `network` object carries a
+work-scoped service URL, native v4 session, event cursor, channel, admitted members,
+seed, exact map SHA-256 and packed human rows. The service must create the native
+room and admit every member first; the handed cursor follows those membership
+events. Bearers and relay credentials stay in the inherited pipe and HTTP worker
+memory, never arguments, profile files or logs. Remote services require HTTPS;
+local development allows only literal `127.0.0.1` HTTP work mounts.
+
+The adapter substitutes real human nodes into the ordinary one-human spawn
+template, retaining AI rows and alliances. It then uses the existing MatchSession,
+map/effective-rules proofs, host assignment and Start transaction, guest readiness,
+relay probe/latency negotiation, loading handoff, command stream and lease/finish
+owners. It does not invent a second simulation or transport. Native setup controls
+are read-only while this automatic startup runs. This external adapter currently
+admits at most eight total playing participants with unique stock palette colors.
+Its frozen local Country selects Ares loading SHP/PAL fields, including added
+countries; ordinary native network startup keeps its existing art policy.
+
+Community processes hold a lock on their actual writable settings directory.
+Separate client profiles can run concurrently; duplicate launches of one profile
+fail before game initialization. Interactive, legacy `-SPAWN` and replay entry
+retain the ordinary global Windows gate. Omitting `network` preserves offline
+community startup. A local acceptance run may set
+`VERA_EXTERNAL_NETWORK_DIAGNOSTIC=1` to project actual installed startup identities
+and sampled existing frame checksums/command opcodes to stderr. This observation
+never computes an extra checksum or injects gameplay input.
+The same opt-in stream includes `loading_art` and `sidebar_art` records for the
+actual resolved loading palette/background and installed side-atlas identities.

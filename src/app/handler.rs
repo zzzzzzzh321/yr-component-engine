@@ -356,7 +356,10 @@ impl App {
                     crate::app::loading::pump::begin_loading(&mut state, loading);
                 }
                 if let Some(request) = self.spawn_request.take()
-                    && let Err(error) = Self::start_spawn_session(&mut state, request)
+                    && let Err(error) = match self.community_network.take() {
+                        Some(network) => super::shell_wol::start_external_network(&mut state, request, network),
+                        None => Self::start_spawn_session(&mut state, request),
+                    }
                 {
                     let error = format!("CnCNet startup failed: {error:#}");
                     log::error!("{error}");

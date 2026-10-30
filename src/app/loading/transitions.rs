@@ -201,6 +201,33 @@ pub(crate) fn install_world_presentation(
     state.match_state.match_presentation.bridge_atlas = assets.bridge_atlas;
     state.match_state.match_presentation.sidebar_cameo_atlas = assets.sidebar_cameo_atlas;
     state.match_state.match_presentation.sidebar_chrome = assets.sidebar_chrome;
+    if state.frontend.external_launch
+        && crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit_enabled()
+        && let Some(runtime) = state.match_state.sim_runtime.as_ref()
+        && let Some(chrome) = state
+            .match_state
+            .match_presentation
+            .sidebar_chrome
+            .as_ref()
+            .and_then(|set| set.resolve_side(runtime.simulation.session().scenario_side()))
+    {
+        let identity = chrome.atlas.source_identity();
+        crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit(
+            serde_json::json!({
+                "event":"sidebar_art",
+                "side":runtime.simulation.session().scenario_side(),
+                "identity":{
+                    "atlas_theme":format!("{:?}", identity.atlas_theme),
+                    "parent_archive":identity.parent_archive,
+                    "radar":identity.radar,
+                    "theme_palette":identity.theme_palette,
+                    "generic_palette":identity.generic_palette,
+                    "background_palette":identity.background_palette,
+                    "backgrounds":identity.backgrounds
+                }
+            }),
+        );
+    }
     #[cfg(feature = "phobos")]
     {
         state.match_state.match_presentation.sw_sidebar_art = assets.sw_sidebar_art;

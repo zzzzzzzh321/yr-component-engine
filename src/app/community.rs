@@ -28,6 +28,8 @@ struct Launch {
     packages: Vec<PackageLaunch>,
     #[serde(default, rename = "musicEnabled")]
     music_enabled: Option<bool>,
+    #[serde(default)]
+    network: Option<super::shell_wol::ExternalNetworkLaunch>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,7 +46,13 @@ struct Resource {
     data: String,
 }
 
-fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
+fn decode(
+    mut reader: impl Read,
+) -> Result<(
+    SpawnRequest,
+    Snapshot,
+    Option<super::shell_wol::ExternalNetworkLaunch>,
+)> {
     let mut header = [0; 4];
     reader
         .read_exact(&mut header)
@@ -69,6 +77,13 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
         "community launch settings too large"
     );
     let request = SpawnRequest::parse(&launch.spawn)?;
+    if let Some(network) = launch.network.as_ref() {
+        network.validate()?;
+        ensure!(
+            matches!(request.game, SpawnGame::Skirmish(_)),
+            "network launch requires skirmish settings"
+        );
+    }
     let resources = launch
         .resources
         .into_iter()
@@ -108,15 +123,28 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
         )?;
         let mut archives = vec![archive];
         for mut extra in launch.packages {
-            let key: [u8;32] = STANDARD.decode(&extra.key)?.try_into().map_err(|_| anyhow::anyhow!("invalid package key"))?;
+            let key: [u8; 32] = STANDARD
+                .decode(&extra.key)?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid package key"))?;
             extra.key.zeroize();
-            ensure!(extra.public_key == package.public_key, "optional package signer mismatch");
-            archives.push(community::open_package(&extra.path, &public_key, key, &extra.sha256)?);
+            ensure!(
+                extra.public_key == package.public_key,
+                "optional package signer mismatch"
+            );
+            archives.push(community::open_package(
+                &extra.path,
+                &public_key,
+                key,
+                &extra.sha256,
+            )?);
         }
         Snapshot::from_packages(launch.release, archives, resources)?
     } else {
         ensure!(
-            launch.package.is_none() && launch.packages.is_empty() && launch.music_enabled.is_none(),
+            launch.package.is_none()
+                && launch.packages.is_empty()
+                && launch.music_enabled.is_none(),
             "legacy protocol cannot include package"
         );
         Snapshot::new(launch.release, resources)?
@@ -129,7 +157,11 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
                 .as_deref()
                 .context("missing community map")?;
             ensure!(
-                (if launch.protocol==2{vera20k_core::assets::community::valid_package_name(name)}else{community::valid_name(name)}) && snapshot.contains(name),
+                (if launch.protocol == 2 {
+                    vera20k_core::assets::community::valid_package_name(name)
+                } else {
+                    community::valid_name(name)
+                }) && snapshot.contains(name),
                 "community map absent from snapshot"
             );
         }
@@ -137,7 +169,7 @@ fn decode(mut reader: impl Read) -> Result<(SpawnRequest, Snapshot)> {
             anyhow::bail!("community protocol v1 supports offline skirmish only")
         }
     }
-    Ok((request, snapshot))
+    Ok((request, snapshot, launch.network))
 }
 impl App {
     pub fn new_community(options: RetailStartupOptions, reader: impl Read) -> Result<Self> {
@@ -145,11 +177,12 @@ impl App {
             std::env::var_os("RA2_QUICKPLAY").is_none(),
             "community launch conflicts with RA2_QUICKPLAY"
         );
-        let (request, snapshot) = decode(reader)?;
+        let (request, snapshot, network) = decode(reader)?;
         community::install(snapshot)?;
-        log::info!("Community snapshot installed from inherited pipe; entering external skirmish");
+        log::info!("Community snapshot installed from inherited pipe; entering external game");
         let mut app = Self::new(options);
         app.spawn_request = Some(request);
+        app.community_network = network;
         Ok(app)
     }
 }

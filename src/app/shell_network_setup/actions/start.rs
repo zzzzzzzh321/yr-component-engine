@@ -9,7 +9,7 @@ use crate::skirmish_modes::ModeStartEffect;
 
 use super::super::chat_notice as message;
 
-pub(super) fn request_start(state: &mut AppState) -> anyhow::Result<()> {
+pub(crate) fn request_start(state: &mut AppState) -> anyhow::Result<()> {
     let wol = super::super::dialog(state).wol();
     anyhow::ensure!(
         state.match_state.session.host(),

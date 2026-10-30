@@ -23,6 +23,11 @@ use serde_json::Value;
 use serde_json::json;
 
 pub(super) enum Request {
+    /// One-use external launcher handoff; this worker remains the sole bearer owner.
+    AdoptSession {
+        session: Session,
+        cursor: u64,
+    },
     ReadMapUpload {
         transfer: u64,
         source: crate::map::source::TransferMapSource,
@@ -494,7 +499,7 @@ pub(super) fn run(
     stopping: Arc<AtomicBool>,
 ) {
     let config = ureq::Agent::config_builder()
-        .https_only(true)
+        .https_only(base.starts_with("https://"))
         .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(12)))
@@ -523,6 +528,13 @@ pub(super) fn run(
             break;
         }
         match request {
+            Some(Request::AdoptSession { session, cursor }) => {
+                if client.token.is_none() {
+                    client.cursor = cursor;
+                    client.token = Some(session.token);
+                    failed_polls = 0;
+                }
+            }
             Some(Request::ReadMapUpload {
                 transfer,
                 source,

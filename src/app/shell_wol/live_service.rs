@@ -2,10 +2,13 @@
 //! MatchSession remains the sole authority for accepted participants and options.
 //! The custom protocol is documented in services/lobby/protocol.md.
 
+mod external;
 mod http;
 mod maps;
 mod wire;
+pub(crate) use external::{ExternalNetworkLaunch, start_external_network};
 
+use crate::util::time::{Duration, Instant};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -13,11 +16,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use crate::util::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, ensure};
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use anyhow::Context;
+use anyhow::{Result, anyhow, ensure};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -248,6 +250,7 @@ pub(super) struct LiveService {
     next_renewal_attempt: Option<Instant>,
     maps: maps::Transfers,
     translations: Translations,
+    external_start_deadline: Option<Instant>,
 }
 
 impl Drop for LiveService {
@@ -429,6 +432,11 @@ impl LiveService {
                 && !base[8..].chars().any(|ch| matches!(ch, '@' | '?' | '#')),
             "the online lobby needs its configured HTTPS service"
         );
+        Self::with_base(base)
+    }
+
+    #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+    fn with_base(base: String) -> Result<Self> {
         let (requests, input) = mpsc::channel();
         let (output, responses) = mpsc::channel();
         let stopping = Arc::new(AtomicBool::new(false));
@@ -466,6 +474,7 @@ impl LiveService {
             next_renewal_attempt: None,
             maps: Default::default(),
             translations: Translations::default(),
+            external_start_deadline: None,
         })
     }
 
@@ -826,6 +835,11 @@ pub(super) fn poll(state: &mut AppState) -> Option<Instant> {
         if service.pending.is_none() && service.match_id.is_none() {
             maps::poll(state, &mut service);
         }
+        if let Err(error) = external::poll_start(state, &mut service) {
+            log::warn!("External multiplayer startup failed: {error:#}");
+            service.external_start_deadline = None;
+            fail_start(state, "The multiplayer startup could not be completed.");
+        }
         poll_renewal(state, &mut service);
         poll_stats(state, &mut service);
     }
@@ -859,6 +873,11 @@ fn notice(state: &mut AppState, text: &str) {
 }
 
 fn fail_start(state: &mut AppState, text: &str) {
+    if state.frontend.external_launch {
+        state.frontend.external_launch_error = Some(text.to_owned());
+        crate::app::App::start_quit_cascade(state);
+        return;
+    }
     if crate::app::loading::pump::cancel_network_loading(state, text) {
         return;
     }
@@ -1118,6 +1137,21 @@ fn local_agreement(state: &mut AppState, revision: u64) -> Result<Value> {
     Ok(
         json!({"revision":revision,"version":agreement.version,"rules_digest":agreement.rules_digest,"map_digest":map_digest,"effective_map_digest":effective_map_digest,"staging_digest":staging_digest}),
     )
+}
+
+fn publish_map_and_host_ready(
+    service: &mut LiveService,
+    mut agreement: Value,
+    status: u8,
+    host: bool,
+) {
+    let mut map = agreement.clone();
+    map["status"] = json!(status);
+    service.command("map_status", map);
+    if host {
+        agreement["ready"] = json!(true);
+        service.command("ready", agreement);
+    }
 }
 
 fn local_map_status(state: &AppState, service: &LiveService) -> u8 {
@@ -1913,13 +1947,10 @@ fn apply_event(
             maps::received_options(state, service, generated)?;
             // The owner is ready without a guest Accept button, but still proves its
             // own local map and rules to the same server admission gate.
-            let mut agreement = local_agreement(state, service.revision)?;
-            agreement["status"] = json!(local_map_status(state, service));
-            service.command("map_status", agreement.clone());
-            if state.match_state.session.host() {
-                agreement["ready"] = json!(true);
-                service.command("ready", agreement);
-            }
+            let agreement = local_agreement(state, service.revision)?;
+            let status = local_map_status(state, service);
+            let host = state.match_state.session.host();
+            publish_map_and_host_ready(service, agreement, status, host);
         }
         "choices" => {
             #[derive(Deserialize)]
@@ -2136,6 +2167,7 @@ fn apply_event(
         "error" => notice(state, "The online service rejected the request."),
         _ => {}
     }
+    external::observe_event(state, service, kind);
     Ok(())
 }
 
@@ -2416,8 +2448,36 @@ mod completion_tests {
             next_renewal_attempt: None,
             maps: Default::default(),
             translations: Translations::default(),
+            external_start_deadline: None,
         };
         (service, input, output)
+    }
+
+    #[test]
+    fn host_readiness_does_not_reuse_map_status_wire_fields() {
+        let (mut service, input, _) = control_service(None);
+        let agreement = json!({"revision":7,"version":"build","rules_digest":"a".repeat(64),"map_digest":"b".repeat(64),"effective_map_digest":"c".repeat(64),"staging_digest":""});
+        publish_map_and_host_ready(&mut service, agreement.clone(), 1, true);
+        let http::Request::Command {
+            operation, payload, ..
+        } = input.try_recv().unwrap()
+        else {
+            panic!("missing map status command");
+        };
+        let mut expected_map = agreement.clone();
+        expected_map["status"] = json!(1);
+        assert_eq!(operation, "map_status");
+        assert_eq!(payload, expected_map);
+        let http::Request::Command {
+            operation, payload, ..
+        } = input.try_recv().unwrap()
+        else {
+            panic!("missing host ready command");
+        };
+        let mut expected_ready = agreement;
+        expected_ready["ready"] = json!(true);
+        assert_eq!(operation, "ready");
+        assert_eq!(payload, expected_ready);
     }
 
     #[test]

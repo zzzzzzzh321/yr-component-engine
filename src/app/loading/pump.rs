@@ -775,6 +775,8 @@ struct EarlyCountryLoading {
     country: crate::rules::ruleset::CountryIdx,
     palette_name: String,
     palette: Option<crate::assets::pal_file::Palette>,
+    /// Opt-in provenance of the palette bytes frozen by this attempt.
+    palette_source: Option<String>,
     /// `None` keeps the stock AlliedLoad/SovietLoad text color.
     text_rgb: Option<[f32; 3]>,
 }
@@ -1020,13 +1022,15 @@ impl LoadingJob {
 }
 
 #[cfg(feature = "ares")]
-fn ordinary_country_loading_index(
+fn country_loading_index(
     startup: &LoadingStartup,
+    external_launch: bool,
 ) -> Option<crate::rules::ruleset::CountryIdx> {
     if matches!(
         startup,
-        LoadingStartup::Network(_) | LoadingStartup::Campaign(_) | LoadingStartup::Generic { .. }
-    ) || crate::map::rmg::is_seed_selection(startup.selected_map_file())
+        LoadingStartup::Campaign(_) | LoadingStartup::Generic { .. }
+    ) || (matches!(startup, LoadingStartup::Network(_)) && !external_launch)
+        || crate::map::rmg::is_seed_selection(startup.selected_map_file())
     {
         return None;
     }
@@ -1041,10 +1045,15 @@ fn ordinary_country_loading_index(
 fn bind_early_country_loading(
     native: &mut NativeLoadingScreenState,
     startup: &LoadingStartup,
+    external_launch: bool,
     owner: &crate::rules::process_owner::NativeRulesProcessOwner,
     assets: &AssetManager,
 ) -> anyhow::Result<()> {
-    let Some(index) = ordinary_country_loading_index(startup) else {
+    // Community rooms freeze the actual Country index before native admission.
+    // Reuse its retained Ares presentation, including added countries, rather
+    // than interpreting its ordinal as one of the ten stock loading variants.
+    // The ordinary native network route keeps its existing presentation policy.
+    let Some(index) = country_loading_index(startup, external_launch) else {
         return Ok(());
     };
     let (country, side) = owner.country_loading(index).ok_or_else(|| {
@@ -1062,6 +1071,14 @@ fn bind_early_country_loading(
         // that absent observation too; a later mount must not reread the PAL.
         crate::render::loading_screen_chrome::load_named_ui_palette(assets, &palette_name)
     };
+    let palette_source =
+        crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit_enabled()
+            .then(|| {
+                assets
+                    .resolve_ref(&palette_name)
+                    .map(|source| source.source_archive.to_owned())
+            })
+            .flatten();
     let text_rgb = owner
         .country_loading_text_hsv(index)
         .map(|hsv| normalize_rgb(hsv_to_rgb(hsv)));
@@ -1073,6 +1090,7 @@ fn bind_early_country_loading(
         country: index,
         palette_name,
         palette,
+        palette_source,
         text_rgb,
     });
     Ok(())
@@ -1655,6 +1673,7 @@ fn pump_loading_after_present(
                     .map(|runtime| &mut runtime.simulation),
                 session,
                 false,
+                state.frontend.external_launch,
                 state
                     .platform
                     .game_config
@@ -2320,6 +2339,7 @@ fn prepare_loading_session(
     mut resident: Option<&mut crate::sim::world::Simulation>,
     mut session: LoadingSession,
     before_first_frame: bool,
+    _external_launch: bool,
     configured_ra2_dir: Option<PathBuf>,
     network: Option<crate::app::lan_service::LoadingNetworkService<'_>>,
 ) -> anyhow::Result<LoadingSession> {
@@ -2366,7 +2386,13 @@ fn prepare_loading_session(
                         anyhow::anyhow!("loading requires the process-resident Rules owner")
                     })
                     .and_then(|owner| {
-                        bind_early_country_loading(native, request.startup(), owner, assets)
+                        bind_early_country_loading(
+                            native,
+                            request.startup(),
+                            _external_launch,
+                            owner,
+                            assets,
+                        )
                     });
                 if let Err(err) = early {
                     job.retire(process_assets);
@@ -2483,6 +2509,7 @@ fn prepare_scenario_initial_before_first_frame(state: &mut AppState) -> anyhow::
             .map(|runtime| &mut runtime.simulation),
         session,
         true,
+        state.frontend.external_launch,
         state
             .platform
             .game_config
@@ -2941,6 +2968,29 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
         composition_input,
         &participant_art,
     );
+    #[cfg(feature = "ares")]
+    if state.frontend.external_launch
+        && crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit_enabled()
+        && let Some(background) = art.background
+        && let Some(early) = state
+            .frontend
+            .loading_session
+            .as_ref()
+            .and_then(|session| session.native.as_ref())
+            .and_then(|native| native.early_country_loading.as_ref())
+    {
+        crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit(
+            serde_json::json!({
+                "event":"loading_art",
+                "country":early.country.0,
+                "background":background.name,
+                "palette":background.palette_name,
+                "backgroundSource":assets.load_file_from_mix(background.name).map(|source|source.source_archive.to_string()),
+                "paletteSource":early.palette_source,
+                "atlasReady":atlas.is_some()
+            }),
+        );
+    }
     if let Some(native) = state
         .frontend
         .loading_session

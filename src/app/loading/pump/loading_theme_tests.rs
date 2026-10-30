@@ -141,6 +141,7 @@ fn ares_campaign_theme_plays_once_after_map_parse_through_the_asset_lease() {
         None,
         slot.take().unwrap(),
         true,
+        false,
         Some(directory.path().to_owned()),
         None,
     )
@@ -162,6 +163,7 @@ fn ares_campaign_theme_plays_once_after_map_parse_through_the_asset_lease() {
         &mut Default::default(),
         None,
         session,
+        false,
         false,
         Some(directory.path().to_owned()),
         None,

@@ -9,11 +9,19 @@ use crate::map::source::test_support::TestDirectory;
 const ROOT: &[u8] = b"[Countries]\n0=PARENT\n1=CHILD\n[Colors]\nFirst=17,128,240\n[PARENT]\nFile.LoadScreen=parent.shp\nFile.LoadScreenPAL=parent.pal\nLoadScreenText.Name=Name:Parent\nLoadScreenText.Color=First\n[CHILD]\nParentCountry=PARENT\nFile.LoadScreen=child.shp\nFile.LoadScreenPAL=child.pal\nLoadScreenText.Name=Name:Child\nLoadScreenText.Color=First\n";
 
 fn fixture() -> (TestDirectory, ProcessAssets, LoadingSession) {
+    fixture_with_country(ROOT, 1)
+}
+
+fn fixture_with_country(
+    root: &[u8],
+    country: u16,
+) -> (TestDirectory, ProcessAssets, LoadingSession) {
     let dir = TestDirectory::new("ares-country-loading-boundaries");
-    dir.write("rulesmd.ini", ROOT);
+    dir.write("rulesmd.ini", root);
     dir.write("artmd.ini", b"[Movies]\n");
     dir.write("parent.pal", &[12; 768]);
     dir.write("child.pal", &[20; 768]);
+    dir.write("mplsb.pal", &[24; 768]);
     let manager = AssetManager::from_loose_root_for_test(dir.path());
     let mut assets = ProcessAssets::new(
         crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
@@ -22,7 +30,7 @@ fn fixture() -> (TestDirectory, ProcessAssets, LoadingSession) {
     assets.initialize_sources_if_needed(&manager).unwrap();
     assets.return_from_loading(manager);
     let request = crate::app::frontend::cncnet_spawn::SpawnRequest::parse(
-        "[Settings]\nScenario=fixture.map\nSide=1\nColor=0\nSpecialHouseIsAlly=No\nAIPlayers=1\nSeed=77\n[HouseHandicaps]\nMulti2=1\n[HouseCountries]\nMulti2=0\n[HouseColors]\nMulti2=1\n[SpawnLocations]\nMulti1=0\nMulti2=1\n",
+        &format!("[Settings]\nScenario=fixture.map\nSide={country}\nColor=0\nSpecialHouseIsAlly=No\nAIPlayers=1\nSeed=77\n[HouseHandicaps]\nMulti2=1\n[HouseCountries]\nMulti2=0\n[HouseColors]\nMulti2=1\n[SpawnLocations]\nMulti1=0\nMulti2=1\n"),
     ).unwrap();
     let crate::app::frontend::cncnet_spawn::SpawnGame::Skirmish(launch) = request.game else {
         panic!("Battle");
@@ -79,9 +87,92 @@ fn bind(session: &mut LoadingSession, assets: &ProcessAssets) -> anyhow::Result<
     bind_early_country_loading(
         session.native.as_mut().unwrap(),
         startup,
+        false,
         assets.native_rules().unwrap(),
         session.job.asset_manager.as_ref().unwrap(),
     )
+}
+
+#[test]
+fn community_network_loading_binds_added_local_country_shape_and_palette() {
+    use crate::app::match_runtime::session::{MatchSession, NetworkReturnContext};
+    let mut root = String::from("[Countries]\n");
+    for index in 0..11 {
+        root += &format!("{index}=C{index}\n");
+    }
+    // MO's actual Last Bastion keys; the fixture supplies its own palette bytes.
+    root += "11=Guild3\n[Sides]\nGDI=C0\nNod=C1\nThirdSide=C2\nFourthSide=Guild3\n[C0]\nSide=GDI\n[C1]\nSide=Nod\n[C2]\nSide=ThirdSide\n[Guild3]\nSide=FourthSide\nFile.LoadScreen=ls800lastb.shp\nFile.LoadScreenPAL=mplsb.pal\n";
+    let (_dir, mut assets, mut session) = fixture_with_country(root.as_bytes(), 11);
+    let mut launch = session.stage.startup().launch_session().unwrap().clone();
+    let mut guest = launch.humans[0].clone();
+    guest.name = "Guest".into();
+    guest.raw_slot_index = Some(1);
+    guest.slot.color_index = 1;
+    guest.slot.start_position = crate::skirmish_launch::LaunchStartPosition::Position(1);
+    launch.humans[0].name = "Host".into();
+    launch.humans[0].slot.country = LaunchCountry::America;
+    launch.humans.push(guest);
+    launch.local_player_index = 1;
+    launch.opponents.clear();
+    launch.ai_player_count = 0;
+    launch.rebuild_house_roster();
+    let mut network = MatchSession::default();
+    network.enter_network(NetworkReturnContext::LanLobby);
+    network
+        .accept_network_setup(launch, false, Some(7))
+        .unwrap();
+    network.prepare_network_timing(2, || 0).unwrap();
+    let request = LoadingRequest::network(network.freeze_network_start(77).unwrap());
+    let job = session.job;
+    session = LoadingSession::from_request(request);
+    session.job = job;
+    assert!(session.native.as_ref().unwrap().variant == NativeLoadingArt::StockOffline(None));
+    // A native room retains its existing route even with the same added Country.
+    bind(&mut session, &assets).unwrap();
+    assert!(
+        session
+            .native
+            .as_ref()
+            .unwrap()
+            .early_country_loading
+            .is_none()
+    );
+    bind_early_country_loading(
+        session.native.as_mut().unwrap(),
+        session.stage.startup(),
+        true,
+        assets.native_rules().unwrap(),
+        session.job.asset_manager.as_ref().unwrap(),
+    )
+    .unwrap();
+    prepare_map(&mut session);
+    let LoadingStage::Prepared(prepared) = &mut session.stage else {
+        panic!("prepared")
+    };
+    prepare_country_loading_prefix(
+        &mut assets,
+        None,
+        prepared,
+        session.native.as_mut().unwrap(),
+    )
+    .unwrap();
+    let native = session.native.as_ref().unwrap();
+    let early = native.early_country_loading.as_ref().unwrap();
+    assert_eq!(early.country.0, 11);
+    assert_eq!(early.palette_name, "mplsb.pal");
+    assert_eq!(
+        early.palette.as_ref().unwrap().color(1),
+        Color::rgb(96, 96, 96)
+    );
+    assert_eq!(native.local_side_index, 3);
+    let late = native.late_country_loading.as_ref().unwrap();
+    assert_eq!(late.files(), ("ls800lastb.shp", "mplsb.pal"));
+    assert_eq!(
+        late.background_file(false).as_deref(),
+        Some("ls800lastb.shp")
+    );
+    session.retire(&mut assets);
+    assert!(assets.is_available() && !assets.is_leased());
 }
 
 #[test]
@@ -260,14 +351,14 @@ fn ares_country_loading_attempt_keeps_observer_random_map_and_campaign_on_existi
         panic!("legacy");
     };
     launch.humans[0].role = crate::skirmish_launch::LaunchHumanRole::from_observer(true);
-    assert!(ordinary_country_loading_index(request.startup()).is_none());
+    assert!(country_loading_index(request.startup(), false).is_none());
     let mut launch = tests::test_launch_session(LaunchCountry::from_country_index(1));
     launch.selected_map_file = Some("RandMap.Sed".into());
     let random = LoadingRequest::unverified_legacy_skirmish(launch, tests::unverified_seed(77));
-    assert!(ordinary_country_loading_index(random.startup()).is_none());
+    assert!(country_loading_index(random.startup(), false).is_none());
     let generic = LoadingRequest::generic_map_load("fixture.map");
-    assert!(ordinary_country_loading_index(generic.startup()).is_none());
+    assert!(country_loading_index(generic.startup(), false).is_none());
     let campaign = LoadingRequest::campaign(tests::prepared_campaign());
-    assert!(ordinary_country_loading_index(campaign.startup()).is_none());
+    assert!(country_loading_index(campaign.startup(), false).is_none());
     session.retire(&mut assets);
 }

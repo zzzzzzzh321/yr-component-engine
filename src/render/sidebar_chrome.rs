@@ -86,7 +86,7 @@ const GENERIC_SIDEBAR_SHP_NAMES: &[&str] = &[
 pub use crate::ui::sidebar::SidebarTheme;
 
 /// One logical sidebar input and the archive selected by the existing resolver.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SidebarChromeAssetIdentity {
     pub logical_name: String,
     pub source_archive: Option<String>,

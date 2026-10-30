@@ -2,6 +2,7 @@
 //! admits them.
 
 mod start;
+pub(crate) use start::request_start as request_external_start;
 use super::*;
 use crate::app::match_runtime::session::NetworkRowKind;
 use crate::skirmish_launch::{AiDifficulty, LaunchCountry, LaunchStartPosition, LaunchTeam};

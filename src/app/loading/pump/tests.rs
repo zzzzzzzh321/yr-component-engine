@@ -381,6 +381,7 @@ fn campaign_preparation_failure_retires_the_lease_with_shell_retry_policy() {
                 None,
                 slot.take().unwrap(),
                 true,
+                false,
                 None,
                 None,
             )
@@ -677,6 +678,7 @@ fn loading_replacement_and_terminal_retirement_preserve_cache_and_admission_orde
                 None,
                 slot.take().unwrap(),
                 true,
+                false,
                 None,
                 None,
             )
@@ -811,6 +813,7 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
         None,
         session,
         true,
+        false,
         Some(ra2_dir.clone()),
         None,
     )
@@ -846,6 +849,7 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
             &mut retention,
             None,
             session,
+            false,
             false,
             Some(ra2_dir.clone()),
             None,

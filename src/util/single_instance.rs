@@ -46,6 +46,7 @@ pub enum SingleInstance {
 pub struct InstanceGuard {
     #[cfg(windows)]
     handle: *mut core::ffi::c_void,
+    _profile_lock: Option<std::fs::File>,
 }
 
 impl Drop for InstanceGuard {
@@ -111,7 +112,10 @@ pub fn acquire(window_title: &str) -> SingleInstance {
         (handle, GetLastError())
     };
     if !another_copy_owns_gate(last_error) {
-        return SingleInstance::Acquired(InstanceGuard { handle });
+        return SingleInstance::Acquired(InstanceGuard {
+            handle,
+            _profile_lock: None,
+        });
     }
 
     // Native raises and restores the first copy's window before bailing, so a
@@ -138,12 +142,67 @@ pub fn acquire(window_title: &str) -> SingleInstance {
 /// deliberately ungated.
 #[cfg(not(windows))]
 pub fn acquire(_window_title: &str) -> SingleInstance {
-    SingleInstance::Acquired(InstanceGuard {})
+    SingleInstance::Acquired(InstanceGuard {
+        _profile_lock: None,
+    })
+}
+
+/// Community clients own independent writable profiles. Keep their gate on
+/// the actual profile file, so aliases of one directory still conflict while
+/// distinct clients can connect to the same multiplayer match. The native
+/// interactive/replay gate above keeps its process-wide policy.
+pub fn acquire_profile(directory: &std::path::Path) -> std::io::Result<SingleInstance> {
+    std::fs::create_dir_all(directory)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join(".vera20k-instance.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(SingleInstance::Acquired(InstanceGuard {
+            #[cfg(windows)]
+            handle: std::ptr::null_mut(),
+            _profile_lock: Some(file),
+        })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(SingleInstance::AlreadyRunning),
+        Err(error) => Err(std::io::Error::other(error)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn community_profiles_exclude_duplicates_without_blocking_other_profiles() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("vera-profile-gate-{}-{unique}", std::process::id()));
+        let first = root.join("first");
+        let second = root.join("second");
+        let one = acquire_profile(&first).unwrap();
+        assert!(matches!(one, SingleInstance::Acquired(_)));
+        assert!(matches!(
+            acquire_profile(&first).unwrap(),
+            SingleInstance::AlreadyRunning
+        ));
+        let two = acquire_profile(&second).unwrap();
+        assert!(matches!(two, SingleInstance::Acquired(_)));
+        drop(one);
+        drop(two);
+        assert!(matches!(
+            acquire_profile(&first).unwrap(),
+            SingleInstance::Acquired(_)
+        ));
+        for directory in [&first, &second] {
+            std::fs::remove_file(directory.join(".vera20k-instance.lock")).unwrap();
+            std::fs::remove_dir(directory).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn only_error_already_exists_reports_a_running_copy() {

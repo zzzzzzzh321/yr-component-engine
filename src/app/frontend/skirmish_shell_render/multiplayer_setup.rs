@@ -33,6 +33,68 @@ pub(crate) fn render_multiplayer_setup(
     encoder: &mut wgpu::CommandEncoder,
     destination: &wgpu::Texture,
 ) -> anyhow::Result<()> {
+    if state.frontend.external_launch {
+        // The external client already owns the room UI. Keep native setup and
+        // verification owners running, but project only a connection screen.
+        let (width, height) = (state.render_width(), state.render_height());
+        let scale = crate::app::input::multiplayer_setup::layout(state)
+            .page
+            .scale;
+        let atlas = state
+            .frontend
+            .skirmish_shell_chrome
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("external connection art unavailable"))?;
+        let art =
+            super::launcher_options::launcher_background_instances(atlas, width, height, scale);
+        let mut caption = state
+            .process_assets
+            .csf
+            .as_ref()
+            .and_then(|csf| csf.get("VERA:ConnectingToMatch"))
+            .unwrap_or("Connecting to match...")
+            .to_owned();
+        if let Some((completed, total)) = state
+            .frontend
+            .network_setup_protocol
+            .as_ref()
+            .and_then(|protocol| protocol.transfer_progress())
+        {
+            caption.push_str(&format!(
+                "  {}%",
+                completed.saturating_mul(100) / total.max(1)
+            ));
+        }
+        let text = shell_text::draw_in_rect_scaled(
+            &state.renderer.bit_font,
+            &caption,
+            rect_to_text_rect(RectPx::new(
+                20,
+                height as i32 / 2 - 24,
+                width as i32 - 40,
+                48,
+            )),
+            SHELL_LABEL_TEXT_RGB,
+            ShellAlign::H_CENTER | ShellAlign::V_CENTER,
+            [0.0; 2],
+            SHELL_CONTROL_TEXT_DEPTH,
+            scale.factor(),
+        );
+        return in_game_shell::render_shell_frame(
+            state,
+            encoder,
+            destination,
+            InGameShellFrame {
+                art,
+                controls: Vec::new(),
+                texts: vec![text],
+                label: "External match connection",
+            },
+            ShellFrameArt::Launcher,
+            ShellFrameOverlay::default(),
+            ShellFrameCursor::Hidden,
+        );
+    }
     if let Some((completed, total)) = state
         .frontend
         .network_setup_protocol

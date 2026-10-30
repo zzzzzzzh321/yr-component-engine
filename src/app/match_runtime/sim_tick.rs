@@ -1456,7 +1456,19 @@ fn advance_one_simulation_frame(
             // Queue_AI already published this checksum to the process session
             // before in-frame FRAMEINFO comparisons. Keep the output for other
             // consumers without recording it a second time here.
-            let _ = multiplayer_checksum;
+            if state.frontend.external_launch
+                && crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit_enabled()
+                && tick_result.frame_committed
+                && let Some(checksum) = multiplayer_checksum
+                && (checksum.frame % 30 == 0 || !admitted_commands.is_empty())
+            {
+                crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit(
+                    serde_json::json!({"event":"frame","frame":checksum.frame,
+                        "source":state.match_state.session.network_setup().map(|launch|launch.local_player_index),
+                        "tick":tick_result.tick,"checksum":checksum.checksum.ok().map(|value|value.value),
+                        "opcodes":admitted_commands.iter().filter_map(|command|match &command.payload { crate::sim::command::Command::SynchronizedRecord { record } => Some(record.opcode()), _ => None }).collect::<Vec<_>>() }),
+                );
+            }
             camera_logic_frame = frame_lifecycle_outputs
                 .iter()
                 .any(|output| matches!(output, LifecycleOutput::LogicVisit))

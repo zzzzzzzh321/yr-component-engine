@@ -410,7 +410,7 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
         dialog,
         ping_icons,
         host,
-        locked: protocol.locked,
+        locked: protocol.locked || state.frontend.external_launch,
         // C2's lockout (0x78F85E..0x78F907, 0x79132A..0x7913D1): Short Game
         // checked and disabled in a tournament or clan room.
         short_game_locked: host && profile_is_wol(state) && room.tournament_or_clan(),
