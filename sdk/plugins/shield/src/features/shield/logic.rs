@@ -2,8 +2,8 @@
 use super::{
     Configuration,
     config::{ShieldType, ShieldWarheadRules},
-    host::Host,
 };
+use crate::support::Host;
 use vera_mod_api::timer::{CdTimer, PAUSED_START_FRAME};
 use vera_mod_api::{
     Context, DamageContext, DamageKernelInput, EntityContext, Meter, Plan, Projection, Request,
@@ -175,7 +175,7 @@ fn clamp_native(value: i32, min: i32, max: i32) -> i32 {
     }
 }
 
-pub(super) fn evaluate<H: Host>(
+pub(crate) fn evaluate<H: Host>(
     request: &Request,
     config: &Configuration,
     host: &H,

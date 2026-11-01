@@ -4,7 +4,7 @@
 //! CanFire_Ammo100479B0, TechnoClass_Fire_Ammo100441F0,
 //! InfantryClass_Fire_Ammo10047910 and UnitClass_Fire_Ammo10047B30.
 
-use crate::host::{ConfigView, Host};
+use crate::support::{ConfigView, Host};
 use std::collections::BTreeMap;
 use vera_mod_api::{
     WEAPON_USER_BUILDING, WEAPON_USER_INFANTRY, WEAPON_USER_UNIT, WeaponResourcePolicy,
@@ -13,7 +13,7 @@ use vera_mod_api::{
 /// The native merged-section reader replays retained physical values. Failed
 /// or empty later reads keep the prior successful cost; no parser is copied.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-pub(super) struct Ammunition {
+pub(crate) struct Ammunition {
     costs: BTreeMap<String, i32>,
 }
 

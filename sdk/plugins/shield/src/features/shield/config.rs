@@ -21,7 +21,7 @@
 //! and the warhead-side `Shield.AttachTypes`/`RemoveTypes`/`Break`/`HitAnim`
 //! keys. Those are separate presentation, transfer and warhead-effect chains.
 
-use crate::host::{ConfigView as IniFile, Host, Section as IniSection};
+use crate::support::{ConfigView as IniFile, Host, Section as IniSection};
 use vera_mod_api::{native_string::truncate_native_bytes, relationship::AffectedHouse};
 
 /// `Enumerable` stores `Name[32]` with `_TRUNCATE`.
@@ -34,9 +34,9 @@ pub struct ShieldType {
     name: String,
     strength: i32,
     initial_strength: Option<i32>,
-    #[serde(with = "super::optional_float_bits")]
+    #[serde(with = "crate::support::codec::optional_float_bits")]
     condition_yellow: Option<f64>,
-    #[serde(with = "super::optional_float_bits")]
+    #[serde(with = "crate::support::codec::optional_float_bits")]
     condition_red: Option<f64>,
     armor: String,
     inherit_armor_from_techno: bool,
@@ -44,14 +44,14 @@ pub struct ShieldType {
     inherit_armor_disallowed: Vec<String>,
     apply_armor_mult: Option<bool>,
     powered: bool,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     respawn: f64,
     respawn_rate: i32,
     respawn_restart_in_combat: bool,
     respawn_restart_in_combat_delay: i32,
     respawn_anim: Vec<String>,
     respawn_weapon: Option<String>,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     self_healing: f64,
     self_healing_rate: i32,
     self_healing_restart_in_combat: bool,
@@ -69,9 +69,9 @@ pub struct ShieldType {
     hit_flash_blue: bool,
     hit_flash_black: bool,
     break_weapon: Option<String>,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     absorb_percent: f64,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     pass_percent: f64,
     received_damage_minimum: i32,
     received_damage_maximum: i32,
@@ -81,7 +81,7 @@ pub struct ShieldType {
     pips_building_empty: Option<i32>,
     pips_hide_if_no_strength: bool,
     tint_color: Option<(u8, u8, u8)>,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     tint_intensity: f64,
     tint_visible_to_houses: AffectedHouse,
 }
@@ -474,15 +474,15 @@ pub struct ShieldWarheadRules {
     /// `Shield.Penetrate.Types`: when non-empty, a shield type outside it is
     /// never penetrated.
     pub(crate) penetrate_types: Vec<String>,
-    #[serde(with = "super::optional_float_bits")]
+    #[serde(with = "crate::support::codec::optional_float_bits")]
     pub(crate) absorb_percent: Option<f64>,
-    #[serde(with = "super::optional_float_bits")]
+    #[serde(with = "crate::support::codec::optional_float_bits")]
     pub(crate) pass_percent: Option<f64>,
     pub(crate) received_minimum: Option<i32>,
     pub(crate) received_maximum: Option<i32>,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     pub(crate) received_min_multiplier: f64,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     pub(crate) received_max_multiplier: f64,
 }
 
@@ -594,9 +594,9 @@ fn read_pip_triplet(section: &IniSection<'_, impl Host>, key: &str, default: [i3
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShieldGlobals {
     pub(crate) apply_armor_mult: bool,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     pub(crate) condition_yellow: f64,
-    #[serde(with = "super::float_bits")]
+    #[serde(with = "crate::support::codec::float_bits")]
     pub(crate) condition_red: f64,
     pub(crate) pips: [i32; 3],
     pub(crate) pips_building: [i32; 3],

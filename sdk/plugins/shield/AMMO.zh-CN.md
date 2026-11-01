@@ -31,7 +31,7 @@ Ammo=2
 
 ## 代码与接口
 
-[src/ammo.rs](src/ammo.rs) 解释配置、选择成本、开火后的装填请求及适用类别。实际弹药状态、扣减和计时继续由引擎已有所有者负责。
+[src/features/ammo.rs](src/features/ammo.rs) 解释配置、选择成本、开火后的装填请求及适用类别。实际弹药状态、扣减和计时继续由引擎已有所有者负责。
 
 可选回调 `weapon_resource` 接收武器名称，返回 `WeaponResourcePolicy`：`cost` 为成本，`reload_after_use` 为射击后装填请求，`users` 为适用类别位掩码。
 

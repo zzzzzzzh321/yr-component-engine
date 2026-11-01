@@ -37,13 +37,21 @@
 | [wit/gameplay.wit](wit/gameplay.wit) | `vera:mod-sdk@0.1.0` 组件接口 |
 | [runtime](runtime/README.md) | Wasmtime 运行时、组件缓存、执行限制与宿主服务 |
 | [package/src/main.rs](package/src/main.rs) | 离线打包工具 `vera-mod-pack` |
-| [plugins/shield/src/lib.rs](plugins/shield/src/lib.rs) | 示例插件的声明、配置组装与回调入口 |
-| [plugins/shield/src/config.rs](plugins/shield/src/config.rs) | 护盾配置读取 |
-| [plugins/shield/src/logic.rs](plugins/shield/src/logic.rs) | 护盾状态、伤害、恢复和过载逻辑 |
-| [../src/mod_sdk.rs](../src/mod_sdk.rs) | 引擎侧资源接纳、对象绑定、伤害与帧更新适配 |
+| [plugins/shield/src/lib.rs](plugins/shield/src/lib.rs) | WIT 导出、消息解码和回调名称核对 |
+| [plugins/shield/src/component.rs](plugins/shield/src/component.rs) | 组件声明、配置封装、固定顺序的功能分派 |
+| [plugins/shield/src/features/shield](plugins/shield/src/features/shield/mod.rs) | 护盾配置绑定、状态、伤害、恢复和过载逻辑 |
+| [plugins/shield/src/features/ammo.rs](plugins/shield/src/features/ammo.rs) | 外置 Ares 武器弹药策略 |
+| [plugins/shield/src/support](plugins/shield/src/support/mod.rs) | 通用宿主访问与浮点位编码 |
+| [../src/mod_sdk.rs](../src/mod_sdk.rs) | 保持现有调用路径的引擎入口，不承载功能算法 |
+| [../src/mod_sdk/program.rs](../src/mod_sdk/program.rs) | 组件身份、冻结配置、执行缓存和存档校验 |
+| [../src/mod_sdk/assets.rs](../src/mod_sdk/assets.rs) | 作品声明接纳与读档绑定 |
+| [../src/mod_sdk/host.rs](../src/mod_sdk/host.rs) | 原有 INI 读取器、类型目录与伤害计算服务 |
+| [../src/mod_sdk/simulation.rs](../src/mod_sdk/simulation.rs) | 构造、伤害、更新阶段的数据转换和计划提交 |
 | [../src/mod_sdk/acceptance.rs](../src/mod_sdk/acceptance.rs) | 使用正式引擎路径的命令行验收入口 |
 
 引擎负责对象生命周期、真实生命值、原有伤害流程，以及校验并提交插件返回的计划。插件负责自己的配置、护盾值、计时器和算法，通过通用进度条与染色数据表达显示效果。
+
+更详细的边界、数据所有权和添加功能步骤见 [架构与扩展指南](ARCHITECTURE.zh-CN.md)。
 
 当前按“一个作品、一个功能组件”设计。一个组件内部可以包含多个功能；本版没有多插件依赖解析、加载顺序和冲突合并系统。
 

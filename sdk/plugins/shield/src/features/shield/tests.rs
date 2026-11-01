@@ -1,6 +1,11 @@
 //! Focused behavior checks; the engine integration tests supply production INI
 //! readers and the real warhead kernel to the built WASM component.
-use super::*;
+use super::config;
+use crate::{
+    component::{Configuration, evaluate, freeze_shield},
+    support::Host,
+};
+use vera_mod_api::{API_VERSION, Context, Plan, Request};
 use vera_mod_api::{
     ArmorVerses, AttachContext, DamageContext, DamageKernelInput, EntityContext, TickContext,
 };
@@ -83,7 +88,7 @@ fn attached(local: [i32; 3], global: [i32; 3]) -> Request {
             frame: 0,
             entity: entity(),
         }),
-        config: serde_json::to_vec(&config).unwrap(),
+        config: freeze_shield(config),
         state: vec![],
     };
     request.state = evaluate(&request, &HostFixture).unwrap().state;
@@ -243,7 +248,7 @@ fn chronosphere_skips_absorption_and_recovery_without_temporal_timer_pause() {
 #[test]
 fn guest_house_policy_preserves_neutral_owner_and_null_source_order() {
     let mut request = attached([-1; 3], [-1; 3]);
-    let mut config = decode_config(&request.config).unwrap();
+    let mut config: super::Configuration = serde_json::from_slice(&request.config).unwrap();
     config.warheads.insert(
         "WH".into(),
         config::ShieldWarheadRules {
@@ -253,7 +258,7 @@ fn guest_house_policy_preserves_neutral_owner_and_null_source_order() {
             ..Default::default()
         },
     );
-    request.config = serde_json::to_vec(&config).unwrap();
+    request.config = freeze_shield(config);
     damage(&mut request, 0, 20);
     if let Context::Damage(context) = &mut request.context {
         context.source_owner = Some("Multi1".into());
@@ -337,7 +342,7 @@ fn overload_commits_second_hit_and_keeps_recovery_paused_until_it_ends() {
 fn overload_pauses_combat_delays_for_both_healing_and_respawn() {
     for (hit, before_recovery, recovered) in [(60, 40, 65), (100, 0, 50)] {
         let mut request = attached([-1; 3], [-1; 3]);
-        request.config = serde_json::to_vec(&config::fixture_with_combat_delay(12)).unwrap();
+        request.config = freeze_shield(config::fixture_with_combat_delay(12));
         damage(&mut request, 10, hit);
         request.state = evaluate(&request, &HostFixture).unwrap().state;
         damage(&mut request, 11, 10);

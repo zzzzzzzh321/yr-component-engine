@@ -1,4 +1,8 @@
-use super::*;
+use super::{Program, host::NativeHost};
+use crate::rules::ini_parser::IniFile;
+use std::sync::Arc;
+use vera_mod_api::{self as api, Context};
+use vera_mod_runtime::HostServices;
 
 fn entity() -> api::EntityContext {
     api::EntityContext {
@@ -25,12 +29,10 @@ fn entity() -> api::EntityContext {
 
 #[test]
 fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
-    let host = NativeHost {
-        weapons: Vec::new(),
-        ini: Some(Arc::new(IniFile::from_str(
-            "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nRate=0.125\nName=none\n",
-        ))),
-    };
+    let host = NativeHost::configuration(
+        IniFile::from_str("[S]\nNumber=$12\nBad=garbage\nClear=<default>\nRate=0.125\nName=none\n"),
+        Vec::new(),
+    );
     let read = |key, reader, current| {
         serde_json::from_slice::<serde_json::Value>(
             &host.config_read("S", key, reader, current).unwrap(),
@@ -173,31 +175,7 @@ fn sdk_component_layers_and_preview_use_production_host_without_mutation() {
         .unwrap();
     let meter = &attached.projection.as_ref().unwrap().meters[0];
     assert_eq!((meter.current, meter.maximum), (12, 40));
-    let context = Context::Damage(api::DamageContext {
-        frame: 1,
-        entity: entity(),
-        attacker: None,
-        source_owner: None,
-        source_is_ally: false,
-        source_is_owner: false,
-        target_is_neutral: false,
-        attacker_same_type_owner: false,
-        warhead_name: "WH".into(),
-        warhead_temporal: false,
-        warhead_psychedelic: false,
-        incoming: 4,
-        distance_leptons: 0,
-        ignore_defenses: false,
-        no_damage: false,
-        max_damage: 999,
-        armor_multiplier_bits: 1_f64.to_bits(),
-        verses: vec![api::ArmorVerses {
-            armor: "none".into(),
-            multiplier_bits: 1_f64.to_bits(),
-        }],
-        cell_spread_bits: 0_f64.to_bits(),
-        percent_at_max_bits: 1_f64.to_bits(),
-    });
+    let context = shield_damage_context(1, 4);
     let preview = program.evaluate(context.clone(), &attached.state).unwrap();
     let committed = program.evaluate(context, &attached.state).unwrap();
     assert_eq!(preview, committed);
@@ -214,8 +192,10 @@ fn sdk_component_layers_and_preview_use_production_host_without_mutation() {
     let restored: Program = crate::util::save_codec::deserialize(&saved).unwrap();
     restored.validate_restore().unwrap();
     assert_eq!(restored.sha256(), program.sha256());
-    let mut poisoned: Program = crate::util::save_codec::deserialize(&saved).unwrap();
-    poisoned.bytes[0] ^= 1;
+    let mut poisoned = serde_json::to_value(&restored).unwrap();
+    let byte = poisoned["bytes"][0].as_u64().unwrap();
+    poisoned["bytes"][0] = serde_json::json!(byte ^ 1);
+    let poisoned: Program = serde_json::from_value(poisoned).unwrap();
     assert!(poisoned.validate_restore().is_err());
 }
 
@@ -292,4 +272,95 @@ fn sdk_invalid_component_state_stops_real_receiver_and_frame_without_fallback() 
         sim.restore_after_snapshot_load(),
         Err(crate::sim::snapshot::SnapshotRestoreError::InvalidExternalMod(_))
     ));
+}
+
+fn shield_damage_context(frame: i32, incoming: i32) -> Context {
+    Context::Damage(api::DamageContext {
+        frame,
+        entity: entity(),
+        attacker: None,
+        source_owner: None,
+        source_is_ally: false,
+        source_is_owner: false,
+        target_is_neutral: false,
+        attacker_same_type_owner: false,
+        warhead_name: "WH".into(),
+        warhead_temporal: false,
+        warhead_psychedelic: false,
+        incoming,
+        distance_leptons: 0,
+        ignore_defenses: false,
+        no_damage: false,
+        max_damage: 999,
+        armor_multiplier_bits: 1_f64.to_bits(),
+        verses: vec![api::ArmorVerses {
+            armor: "none".into(),
+            multiplier_bits: 1_f64.to_bits(),
+        }],
+        cell_spread_bits: 0_f64.to_bits(),
+        percent_at_max_bits: 1_f64.to_bits(),
+    })
+}
+
+/// Compatibility is byte-exact, not merely equivalent JSON. Run this against
+/// retained release artifacts; the old guest supplies the expected output.
+#[test]
+#[ignore = "requires VERA_SDK_BASELINE_WASM and VERA_SDK_CANDIDATE_WASM"]
+fn sdk_refactor_preserves_frozen_configuration_and_entity_state_bytes() {
+    let ini = IniFile::from_str(
+        "[ShieldTypes]\n0=TEST\n[TEST]\nStrength=100\nSelfHealing=0.25\nSelfHealing.Rate=0.1\n\
+         Respawn=0.5\nRespawn.Rate=0.1\n[TANK]\nShieldType=TEST\n[PAIR]\nAmmo=2\n\
+         [VeraOverload]\nHeatLimit=30\nDuration=75\nCooling=1\n",
+    );
+    let load = |key| {
+        let bytes = std::fs::read(std::env::var_os(key).expect(key)).unwrap();
+        let digest = crate::util::sha256::sha256_hex(&bytes);
+        Program::load_with_types(
+            bytes,
+            &digest,
+            &[ini.clone(), ini.clone()],
+            &["TANK".into()],
+            &["WH".into()],
+            &["PAIR".into()],
+        )
+        .unwrap()
+    };
+    let baseline = load("VERA_SDK_BASELINE_WASM");
+    let candidate = load("VERA_SDK_CANDIDATE_WASM");
+    assert_eq!(baseline.manifest(), candidate.manifest());
+    let old_saved = serde_json::to_value(&baseline).unwrap();
+    let new_saved = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(
+        old_saved["config"], new_saved["config"],
+        "frozen config bytes enter the checksum"
+    );
+    assert_eq!(
+        baseline.weapon_resource_policy("PAIR").unwrap(),
+        candidate.weapon_resource_policy("PAIR").unwrap()
+    );
+    let mut state = Vec::new();
+    for context in [
+        Context::Attach(api::AttachContext {
+            frame: 0,
+            entity: entity(),
+        }),
+        shield_damage_context(1, 35),
+        Context::Tick(api::TickContext {
+            frame: 30,
+            entity: entity(),
+        }),
+        shield_damage_context(31, 70),
+        Context::Tick(api::TickContext {
+            frame: 200,
+            entity: entity(),
+        }),
+    ] {
+        let expected = baseline.evaluate(context.clone(), &state).unwrap();
+        let actual = candidate.evaluate(context, &state).unwrap();
+        assert_eq!(
+            expected, actual,
+            "candidate must accept retained opaque state unchanged"
+        );
+        state = expected.state;
+    }
 }
