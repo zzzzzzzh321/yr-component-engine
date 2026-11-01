@@ -256,7 +256,7 @@ fn finite_infantry_reloads_and_resumes_fire_only_with_ares() {
 }
 
 #[test]
-#[ignore = "requires the built ares-ammo component in VERA_SDK_AMMO_WASM"]
+#[ignore = "requires the reference component with INI-selected ammo in VERA_SDK_AMMO_WASM"]
 fn sdk_ammo_controls_infantry_admission_debit_and_reload() {
     let wasm =
         std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
@@ -265,7 +265,7 @@ fn sdk_ammo_controls_infantry_admission_debit_and_reload() {
         "[AmmoProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=";
     let Some(mut free) = Scene::with_component(
         &format!(
-            "[E1]\nAmmo=0\nInitialAmmo=0\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}0\n"
+            "[VeraFeatures]\nAresAmmo=yes\n[E1]\nAmmo=0\nInitialAmmo=0\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}0\n"
         ),
         Some(&wasm),
     ) else {
@@ -290,7 +290,7 @@ fn sdk_ammo_controls_infantry_admission_debit_and_reload() {
 
     let Some(mut pair) = Scene::with_component(
         &format!(
-            "[E1]\nAmmo=3\nInitialAmmo=3\nReload=12\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}2\n"
+            "[VeraFeatures]\nAresAmmo=yes\n[E1]\nAmmo=3\nInitialAmmo=3\nReload=12\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}2\n"
         ),
         Some(&wasm),
     ) else {
@@ -318,14 +318,14 @@ fn sdk_ammo_controls_infantry_admission_debit_and_reload() {
 }
 
 #[test]
-#[ignore = "requires the built ares-ammo component in VERA_SDK_AMMO_WASM"]
+#[ignore = "requires the reference component with INI-selected ammo in VERA_SDK_AMMO_WASM"]
 fn sdk_ammo_vehicle_and_building_keep_partial_magazines_until_reload() {
     let wasm =
         std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
             .unwrap();
     for kind in ["LTNK", "GAPILL"] {
         let patch = format!(
-            "[{kind}]\nAmmo=3\nInitialAmmo=3\nReload=1000\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n\
+            "[VeraFeatures]\nAresAmmo=yes\n[{kind}]\nAmmo=3\nInitialAmmo=3\nReload=1000\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n\
              [AmmoProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=2\n"
         );
         let Some(mut scene) = Scene::with_component(&patch, Some(&wasm)) else {

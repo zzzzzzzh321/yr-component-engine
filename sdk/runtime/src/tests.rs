@@ -198,7 +198,9 @@ fn runtime_admits_the_built_reference_component_without_wasi_services() {
             .unwrap();
     let runtime = ComponentRuntime::new(Default::default()).unwrap();
     let module = load(&runtime, &bytes).unwrap();
-    assert_eq!(module.manifest().id, "vera.compat-shield");
+    assert!(
+        ["vera.compat-shield", "vera.reference-gameplay"].contains(&module.manifest().id.as_str())
+    );
     let plan = runtime
         .evaluate(&module, &request(), Arc::new(ManifestHost))
         .unwrap();

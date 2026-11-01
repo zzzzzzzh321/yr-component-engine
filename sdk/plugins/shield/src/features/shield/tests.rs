@@ -30,10 +30,10 @@ impl Host for HostFixture {
     }
 }
 
-#[cfg(feature = "ares-ammo")]
 #[test]
 fn ammunition_uses_frozen_configuration_and_excludes_aircraft() {
     let mut config = serde_json::to_value(Configuration::default()).unwrap();
+    config["features"]["ares_ammo"] = serde_json::json!(true);
     config["ammunition"] = serde_json::json!({"costs":{"PAIR":2,"FREE":0,"NEGATIVE":-2}});
     let frozen = serde_json::to_vec(&config).unwrap();
     for (name, cost) in [("PAIR", 2), ("FREE", 0), ("NEGATIVE", -2), ("ordinary", 1)] {
@@ -80,7 +80,7 @@ fn entity() -> EntityContext {
     }
 }
 
-fn attached(local: [i32; 3], global: [i32; 3]) -> Request {
+fn attached(local: [i32; 3], global: [i32; 3], overload: bool) -> Request {
     let config = config::fixture_configuration(local, global);
     let mut request = Request {
         api_version: API_VERSION,
@@ -88,7 +88,7 @@ fn attached(local: [i32; 3], global: [i32; 3]) -> Request {
             frame: 0,
             entity: entity(),
         }),
-        config: freeze_shield(config),
+        config: freeze_shield(config, overload),
         state: vec![],
     };
     request.state = evaluate(&request, &HostFixture).unwrap().state;
@@ -130,7 +130,7 @@ fn tick_plan(request: &mut Request, frame: i32, entity: EntityContext) -> Plan {
 
 #[test]
 fn damage_is_a_repeatable_plan_and_recovery_survives_state_serialization() {
-    let mut request = attached([-1; 3], [-1; 3]);
+    let mut request = attached([-1; 3], [-1; 3], false);
     damage(&mut request, 10, 20);
     let snapshot = request.state.clone();
     let first = evaluate(&request, &HostFixture).unwrap();
@@ -163,7 +163,7 @@ fn damage_is_a_repeatable_plan_and_recovery_survives_state_serialization() {
 
 #[test]
 fn pips_choose_local_then_global_then_native_fallback() {
-    let local = attached([20, 21, 22], [10, 11, 12]);
+    let local = attached([20, 21, 22], [10, 11, 12], false);
     let meter = evaluate(&local, &HostFixture)
         .unwrap()
         .projection
@@ -171,7 +171,7 @@ fn pips_choose_local_then_global_then_native_fallback() {
         .meters
         .remove(0);
     assert_eq!((meter.pip_frame, meter.building_pip_frame), (20, 30));
-    let global = attached([-1; 3], [10, 11, 12]);
+    let global = attached([-1; 3], [10, 11, 12], false);
     let meter = evaluate(&global, &HostFixture)
         .unwrap()
         .projection
@@ -179,7 +179,7 @@ fn pips_choose_local_then_global_then_native_fallback() {
         .meters
         .remove(0);
     assert_eq!((meter.pip_frame, meter.building_pip_frame), (10, 40));
-    let bare = attached([-1; 3], [-1; 3]);
+    let bare = attached([-1; 3], [-1; 3], false);
     let meter = evaluate(&bare, &HostFixture)
         .unwrap()
         .projection
@@ -191,7 +191,7 @@ fn pips_choose_local_then_global_then_native_fallback() {
 
 #[test]
 fn chronosphere_skips_absorption_and_recovery_without_temporal_timer_pause() {
-    let mut request = attached([-1; 3], [-1; 3]);
+    let mut request = attached([-1; 3], [-1; 3], false);
     damage(&mut request, 0, 20);
     if let Context::Damage(context) = &mut request.context {
         context.entity.being_warped_out = true;
@@ -247,7 +247,7 @@ fn chronosphere_skips_absorption_and_recovery_without_temporal_timer_pause() {
 
 #[test]
 fn guest_house_policy_preserves_neutral_owner_and_null_source_order() {
-    let mut request = attached([-1; 3], [-1; 3]);
+    let mut request = attached([-1; 3], [-1; 3], false);
     let mut config: super::Configuration = serde_json::from_slice(&request.config).unwrap();
     config.warheads.insert(
         "WH".into(),
@@ -258,7 +258,7 @@ fn guest_house_policy_preserves_neutral_owner_and_null_source_order() {
             ..Default::default()
         },
     );
-    request.config = freeze_shield(config);
+    request.config = freeze_shield(config, false);
     damage(&mut request, 0, 20);
     if let Context::Damage(context) = &mut request.context {
         context.source_owner = Some("Multi1".into());
@@ -305,7 +305,6 @@ fn guest_house_policy_preserves_neutral_owner_and_null_source_order() {
     );
 }
 
-#[cfg(feature = "overload")]
 fn tick_and_commit_points(request: &mut Request, frame: i32) -> i32 {
     let plan = tick_plan(request, frame, entity());
     let points = plan.projection.as_ref().unwrap().meters[0].current;
@@ -313,10 +312,9 @@ fn tick_and_commit_points(request: &mut Request, frame: i32) -> i32 {
     points
 }
 
-#[cfg(feature = "overload")]
 #[test]
 fn overload_commits_second_hit_and_keeps_recovery_paused_until_it_ends() {
-    let mut request = attached([-1; 3], [-1; 3]);
+    let mut request = attached([-1; 3], [-1; 3], true);
     damage(&mut request, 10, 60);
     let first = evaluate(&request, &HostFixture).unwrap();
     assert_eq!(first.damage, Some(0));
@@ -337,12 +335,11 @@ fn overload_commits_second_hit_and_keeps_recovery_paused_until_it_ends() {
     assert_eq!(tick_and_commit_points(&mut request, 175), 65);
 }
 
-#[cfg(feature = "overload")]
 #[test]
 fn overload_pauses_combat_delays_for_both_healing_and_respawn() {
     for (hit, before_recovery, recovered) in [(60, 40, 65), (100, 0, 50)] {
-        let mut request = attached([-1; 3], [-1; 3]);
-        request.config = freeze_shield(config::fixture_with_combat_delay(12));
+        let mut request = attached([-1; 3], [-1; 3], true);
+        request.config = freeze_shield(config::fixture_with_combat_delay(12), true);
         damage(&mut request, 10, hit);
         request.state = evaluate(&request, &HostFixture).unwrap().state;
         damage(&mut request, 11, 10);
@@ -358,4 +355,36 @@ fn overload_pauses_combat_delays_for_both_healing_and_respawn() {
         assert_eq!(tick_and_commit_points(&mut request, 186), before_recovery);
         assert_eq!(tick_and_commit_points(&mut request, 187), recovered);
     }
+}
+
+#[test]
+fn disabled_features_do_not_create_shields_or_weapon_policies() {
+    let frozen = freeze_shield(config::fixture_configuration([-1; 3], [-1; 3]), false);
+    let mut config = serde_json::from_slice::<serde_json::Value>(&frozen).unwrap();
+    config["features"] = serde_json::json!({"shield":false,"overload":false,"ares_ammo":false});
+    config["ammunition"] = serde_json::json!({"costs":{"PAIR":2}});
+    let mut request = Request {
+        api_version: API_VERSION,
+        context: Context::Attach(AttachContext {
+            frame: 0,
+            entity: entity(),
+        }),
+        config: serde_json::to_vec(&config).unwrap(),
+        state: Vec::new(),
+    };
+    let plan = evaluate(&request, &HostFixture).unwrap();
+    assert!(
+        plan.state.is_empty(),
+        "disabled shield must not subscribe an object"
+    );
+    assert!(plan.projection.unwrap().meters.is_empty());
+    request.context = Context::WeaponResource(vera_mod_api::WeaponResourceContext {
+        weapon_name: "PAIR".into(),
+    });
+    assert!(
+        evaluate(&request, &HostFixture)
+            .unwrap()
+            .weapon_resource
+            .is_none()
+    );
 }

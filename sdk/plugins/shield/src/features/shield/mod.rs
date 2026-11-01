@@ -42,6 +42,7 @@ impl Configuration {
         &mut self,
         context: &ConfigureContext,
         view: &ConfigView<'_, H>,
+        overload_enabled: bool,
     ) {
         if context.final_pass {
             self.globals = ShieldGlobals::from_ini(view);
@@ -62,7 +63,7 @@ impl Configuration {
                     self.warheads.insert(name.to_ascii_uppercase(), rules);
                 }
             }
-            if cfg!(feature = "overload") {
+            if overload_enabled {
                 let section = view.section_or_empty("VeraOverload");
                 self.overload.limit = section.read_int("HeatLimit", self.overload.limit).max(1);
                 self.overload.duration =

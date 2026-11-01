@@ -56,7 +56,7 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
 }
 
 #[test]
-#[ignore = "requires the built ares-ammo component in VERA_SDK_AMMO_WASM"]
+#[ignore = "requires the reference component with INI-selected ammo in VERA_SDK_AMMO_WASM"]
 fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
     use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
     use crate::rules::ruleset::RuleSet;
@@ -64,7 +64,7 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
         std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
             .unwrap();
     let mut layers = RulesLayerStack::new(IniFile::from_str(
-        "[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\n\
+        "[VeraFeatures]\nAresAmmo=yes\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\n\
          [PAIR]\nAmmo=$12\n[FREE]\nAmmo=0\n[pair]\nAmmo=99\n",
     ));
     layers.push(
@@ -151,7 +151,7 @@ fn sdk_component_layers_and_preview_use_production_host_without_mutation() {
             .unwrap();
     let digest = crate::util::sha256::sha256_hex(&bytes);
     let root = IniFile::from_str(
-        "[ShieldTypes]\n0=TEST\n[TEST]\nStrength=80\nPassPercent=0.5\nInitialStrength=$12\n",
+        "[VeraFeatures]\nShield=yes\n[ShieldTypes]\n0=TEST\n[TEST]\nStrength=80\nPassPercent=0.5\nInitialStrength=$12\n",
     );
     let map = IniFile::from_str("[TEST]\nStrength=40\nInitialStrength=bad\n");
     let final_ini = IniFile::from_str("[TANK]\nShieldType=TEST\n");
@@ -203,7 +203,7 @@ fn sdk_component_layers_and_preview_use_production_host_without_mutation() {
 #[ignore = "requires the built reference component in VERA_SDK_COMPAT_WASM"]
 fn sdk_invalid_component_state_stops_real_receiver_and_frame_without_fallback() {
     let ini = crate::sim::arena_fixture::clear_ground_ini(
-        "[Countries]\n0=Americans\n1=Russians\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nArmor=heavy\nSpeed=0\nShieldType=TEST\n[ShieldTypes]\n0=TEST\n[TEST]\nStrength=100\n[Warheads]\n0=WH\n[WH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
+        "[VeraFeatures]\nShield=yes\n[Countries]\n0=Americans\n1=Russians\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nArmor=heavy\nSpeed=0\nShieldType=TEST\n[ShieldTypes]\n0=TEST\n[TEST]\nStrength=100\n[Warheads]\n0=WH\n[WH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
     );
     let bytes =
         std::fs::read(std::env::var_os("VERA_SDK_COMPAT_WASM").expect("set VERA_SDK_COMPAT_WASM"))
@@ -363,4 +363,104 @@ fn sdk_refactor_preserves_frozen_configuration_and_entity_state_bytes() {
         );
         state = expected.state;
     }
+}
+
+/// The same portable component selects all behavior from the real Rules INI
+/// reader. Saved selection overrides the current work's changed INI on restore.
+#[test]
+#[ignore = "requires VERA_SDK_REFERENCE_WASM"]
+fn sdk_ini_selection_is_layered_frozen_and_restored_with_the_program() {
+    use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+    use crate::rules::ruleset::RuleSet;
+    let bytes = std::fs::read(
+        std::env::var_os("VERA_SDK_REFERENCE_WASM").expect("set VERA_SDK_REFERENCE_WASM"),
+    )
+    .unwrap();
+    let digest = crate::util::sha256::sha256_hex(&bytes);
+    let load = |patch: &str| {
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[VeraFeatures]\nOverload=yes\nAresAmmo=yes\n\
+             [VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nShieldType=TEST\n\
+             [PAIR]\nAmmo=2\n[ShieldTypes]\n0=TEST\n[TEST]\nStrength=100\n",
+        ));
+        layers.push(RulesLayerKind::Scenario, IniFile::from_str(patch));
+        let processed = layers.process().unwrap();
+        let rules = RuleSet::from_processed_rules(&processed).unwrap();
+        Program::load_with_types(
+            bytes.clone(),
+            &digest,
+            processed.sdk_passes(),
+            &["TANK".into()],
+            &[],
+            &rules.weapon_names(),
+        )
+        .map(|program| (program, rules))
+    };
+    // Do not reject the early layer: its missing dependency is enabled later.
+    let (enabled, _) = load("[VeraFeatures]\nShield=yes\nAresAmmo=invalid\n").unwrap();
+    let saved = crate::util::save_codec::serialize(&enabled).unwrap();
+    let (disabled, mut current_rules) =
+        load("[VeraFeatures]\nShield=no\nOverload=no\nAresAmmo=no\n").unwrap();
+    assert_eq!(
+        enabled.sha256(),
+        disabled.sha256(),
+        "one component serves both works"
+    );
+    let attach = Context::Attach(api::AttachContext {
+        frame: 0,
+        entity: entity(),
+    });
+    assert!(
+        disabled
+            .evaluate(attach.clone(), &[])
+            .unwrap()
+            .state
+            .is_empty()
+    );
+    assert_eq!(disabled.weapon_resource_policy("PAIR").unwrap(), None);
+    assert!(
+        load("")
+            .unwrap_err()
+            .contains("Overload=yes requires Shield=yes")
+    );
+
+    let restored: Program = crate::util::save_codec::deserialize(&saved).unwrap();
+    restored.validate_restore().unwrap();
+    current_rules.external_mod = Some(Arc::new(restored));
+    current_rules.bind_weapon_resource_policies().unwrap();
+    assert_eq!(
+        current_rules
+            .weapon("PAIR")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_UNIT)
+            .unwrap()
+            .cost,
+        2
+    );
+    let restored = current_rules.external_mod.as_ref().unwrap();
+    let attached = restored.evaluate(attach, &[]).unwrap();
+    assert_eq!(attached.projection.unwrap().meters[0].current, 100);
+    let first = restored
+        .evaluate(shield_damage_context(10, 60), &attached.state)
+        .unwrap();
+    assert_eq!(first.damage, Some(0));
+    assert!(!first.projection.unwrap().meters[0].active);
+    assert_eq!(
+        restored
+            .evaluate(shield_damage_context(11, 10), &first.state)
+            .unwrap()
+            .damage,
+        Some(10)
+    );
+    use std::hash::Hasher;
+    let checksum = |program: &Program| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        program.fold(&mut hasher);
+        hasher.finish()
+    };
+    assert_ne!(
+        checksum(restored),
+        checksum(&disabled),
+        "frozen selection enters the program checksum"
+    );
 }

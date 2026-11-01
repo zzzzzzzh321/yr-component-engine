@@ -1,8 +1,11 @@
 # 外置 Ares 武器弹药消耗
 
-使用 `ares-ammo` 编译特性，在同一护盾组件中增加 Ares 武器 `Ammo=`。引擎不再直接解释武器节里的这个扩展键；无组件或没有新增回调时保持原版的一发需求。
+在作品 INI 中设置 `[VeraFeatures] AresAmmo=yes`，同一参考组件即可解释 Ares 武器 `Ammo=`，无须构建参数。引擎不再直接解释武器节里的这个扩展键；无组件或没有新增回调时保持原版的一发需求。
 
 ```ini
+[VeraFeatures]
+AresAmmo=yes
+
 [MTNK]
 Ammo=5
 InitialAmmo=5
@@ -44,12 +47,12 @@ Rules 接纳时一次查询各武器并绑定只读派生策略，热路径不�
 从引擎仓库根目录执行：
 
 ```powershell
-python -m tools.cargo_run -- build --locked -p vera-reference-shield --target wasm32-unknown-unknown --release --features ares-ammo
+python -m tools.cargo_run -- build --locked -p vera-reference-shield --target wasm32-unknown-unknown --release
 ```
 
 按 [中文 SDK README](../../README.zh-CN.md) 将构建工具报告的 target 目录下 `wasm32-unknown-unknown/release/vera_reference_shield.wasm` 打包到新目录。格式仍是 `gameplay.wasm` 加 `vera-mod.json`。
 
-需要同时启用过载时使用 `--features overload,ares-ammo`。兼容版标识 `vera.compat-shield-ammo`，过载版标识 `vera.overload-shield-ammo`。
+需要护盾或过载时，在同一个 `[VeraFeatures]` 节增加 `Shield=yes`、`Overload=yes`。所有组合使用同一 `vera.reference-gameplay` 组件，版本 0.3.0，config_version=3。开关默认关闭，过载依赖护盾，选择随存档冻结。
 
 新引擎验收模式 `ammo` 使用兼容护盾加弹药组件，报告文件必须为新文件，父目录已存在：
 
@@ -57,10 +60,10 @@ python -m tools.cargo_run -- build --locked -p vera-reference-shield --target wa
 vera20k.exe --mod-sdk-probe --retail-dir "原版游戏目录" --map XMP03T4.MAP --mode ammo --module "组件目录/gameplay.wasm" --output "报告目录/ammo.json"
 ```
 
-该模式检查护盾伤害链、原版地图加载、实际命令与开火产生的 5→3→1 弹药变化、余量不足停止开火及存档后策略绑定。
+`ammo` 模式通过 INI 同时开启护盾和弹药；`ammo-only` 只开启弹药。两者使用同一个组件。该模式检查护盾伤害链、原版地图加载、实际命令与开火产生的 5→3→1 弹药变化、余量不足停止开火及存档后策略绑定。
 
 ```powershell
-python -m tools.cargo_run -- test --locked -p vera-reference-shield --lib --features ares-ammo
+python -m tools.cargo_run -- test --locked -p vera-reference-shield --lib
 ```
 
 设置 `VERA_SDK_AMMO_WASM` 为已打包组件路径，并按仓库要求配置原版 INI 与 `RA2_DIR` 后，运行实际 Wasm 集成测试：

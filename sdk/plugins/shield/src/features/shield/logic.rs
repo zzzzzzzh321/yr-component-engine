@@ -179,6 +179,7 @@ pub(crate) fn evaluate<H: Host>(
     request: &Request,
     config: &Configuration,
     host: &H,
+    overload_enabled: bool,
 ) -> Result<Plan, String> {
     let mut plan = Plan::unchanged(request);
     let state: Option<ShieldState> = if request.state.is_empty() {
@@ -200,7 +201,9 @@ pub(crate) fn evaluate<H: Host>(
         }
         Context::Damage(context) => {
             let next = if let Some(state) = state {
-                if let Some((next, remaining)) = damage_stage(state, config, context, host)? {
+                if let Some((next, remaining)) =
+                    damage_stage(state, config, context, host, overload_enabled)?
+                {
                     plan.damage = Some(remaining);
                     Some(next)
                 } else {
@@ -212,7 +215,15 @@ pub(crate) fn evaluate<H: Host>(
             (next, &context.entity, context.frame)
         }
         Context::Tick(context) => {
-            let next = state.and_then(|state| tick(state, config, &context.entity, context.frame));
+            let next = state.and_then(|state| {
+                tick(
+                    state,
+                    config,
+                    &context.entity,
+                    context.frame,
+                    overload_enabled,
+                )
+            });
             (next, &context.entity, context.frame)
         }
         Context::Configure(_) => return Err("configuration must use the configuration hook".into()),
@@ -298,6 +309,7 @@ fn damage_stage<H: Host>(
     config: &Configuration,
     context: &DamageContext,
     host: &H,
+    overload_enabled: bool,
 ) -> Result<Option<(ShieldState, i32)>, String> {
     if context.ignore_defenses {
         return Ok(None);
@@ -452,9 +464,9 @@ fn damage_stage<H: Host>(
     if restart {
         restart_recovery_in_combat(&mut state, ty, frame);
     }
-    // This authored extension is enabled solely by the separate guest build.
+    // This authored extension is enabled by the frozen INI selection.
     // It measures actually consumed shield points, not the unabsorbed packet.
-    if cfg!(feature = "overload") {
+    if overload_enabled {
         state.heat = state
             .heat
             .saturating_add(before_hp.saturating_sub(state.hp).max(0));
@@ -510,6 +522,7 @@ fn tick(
     config: &Configuration,
     entity: &EntityContext,
     frame: i32,
+    overload_enabled: bool,
 ) -> Option<ShieldState> {
     let Some(ty) = config.catalog.entry(state.type_name()) else {
         return Some(state);
@@ -532,7 +545,7 @@ fn tick(
     if entity.chrono_warp_latch || entity.ai_frozen {
         return Some(state);
     }
-    if cfg!(feature = "overload") {
+    if overload_enabled {
         state.heat = state.heat.saturating_sub(config.overload.cooling).max(0);
         if state.overload.in_progress(frame) {
             return Some(state);

@@ -1,8 +1,9 @@
 # External shield reference component
 
 This component implements the currently ported VERA20K shield chain outside
-the game engine. The compatibility build and the authored overload build use
-the same `vera:mod-sdk@0.1.0` interface and run under the same engine binary.
+the game engine. One reference component uses the
+`vera:mod-sdk@0.1.0` interface; INI selects compatible shields, authored overload
+and Ares weapon ammo under the same engine binary.
 
 The code was moved from VERA20K's Rust implementation, retaining its source
 references. It does not include Ares/Phobos C++ code or Mental Omega resources.
@@ -30,26 +31,39 @@ the `SelfHealing.EnabledBy` consumer were not completed in the old owner and
 are not newly claimed here. The retained original PIPS/PIPBRD presentation is
 used; configurable alternative Pips.Background resources are not newly added.
 
-## Compatibility and overload builds
+## One build, INI-selected features
 
-From the engine checkout, after installing the `wasm32-unknown-unknown` Rust
-target (`rustup target add wasm32-unknown-unknown`):
-
-```sh
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- build -p vera-reference-shield --target wasm32-unknown-unknown --release
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- run -p vera-mod-pack -- "<reported-target>/wasm32-unknown-unknown/release/vera_reference_shield.wasm" "<existing-output-parent>/compatible-new"
-```
-
-The runner prints the checkout-owned target directory; substitute that path for
-`<reported-target>` rather than assuming `target/`. The packager's output
-directory must be new and its parent must already exist. Its `gameplay.wasm`
-and `vera-mod.json` form the compatible publication artifact. Preserve this
-directory before building and packaging the second variant:
+Install `wasm32-unknown-unknown`, then build from the engine checkout:
 
 ```sh
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- build -p vera-reference-shield --target wasm32-unknown-unknown --release --features overload
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- run -p vera-mod-pack -- "<reported-target>/wasm32-unknown-unknown/release/vera_reference_shield.wasm" "<existing-output-parent>/overload-new"
+python -m tools.cargo_run -- build --locked -p vera-reference-shield --target wasm32-unknown-unknown --release
+python -m tools.cargo_run -- build --locked -p vera-mod-pack --profile fast
+python -m tools.cargo_run --resolve vera-mod-pack --profile fast
 ```
+
+Invoke the executable reported by `--resolve` directly:
+
+```sh
+"<reported-packager>" "<reported-target>/wasm32-unknown-unknown/release/vera_reference_shield.wasm" "<existing-output-parent>/reference-new"
+```
+
+The output directory must be new and its parent must exist. Reuse the same
+`gameplay.wasm` and `vera-mod.json` for each work; Cargo feature flags are no
+longer used for gameplay selection. Put this in a loaded Rules/map INI:
+
+```ini
+[VeraFeatures]
+Shield=yes
+Overload=no
+AresAmmo=yes
+```
+
+All switches default to no. Overload requires Shield. Existing `ShieldTypes`,
+`ShieldType` and weapon `Ammo` settings retain their syntax. Layered selection
+is frozen with the configuration and saved/checksummed; it cannot change during
+a match. `examples/features.ini` shows the combined selection. The component
+identity is `vera.reference-gameplay` 0.3.0, config_version=3, state_version=1.
+Retained older component files keep their original behavior and identity.
 
 The packager uses the embedded WIT metadata to encode and validate a standalone
 component; it never executes the guest or adds WASI adapters. A direct
@@ -61,12 +75,11 @@ WASM artifacts and production INI/damage owners.
 
 ```sh
 python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- test -p vera-reference-shield --lib
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- test -p vera-reference-shield --lib --features overload
 ```
 
 ## Authored overload behavior
 
-Only the `overload` guest build adds this behavior. It increases heat by the
+`[VeraFeatures] Overload=yes` enables this behavior in the same component. It increases heat by the
 shield points actually consumed by a hit. Reaching HeatLimit suspends shield
 absorption and recovery for Duration simulation frames. Cooling points are
 removed on each eligible object AI visit. Temporal, chrono and limbo admission
@@ -86,5 +99,5 @@ Duration=75
 Cooling=1
 ```
 
-The compatible build ignores that section. `examples/shield.ini` uses only
+With Overload=no, the component ignores that parameter section. `examples/shield.ini` uses only
 original-game unit names and fictional shield data; it contains no artwork.

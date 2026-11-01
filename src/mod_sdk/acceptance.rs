@@ -31,7 +31,7 @@ const AMMO_PROBE_INI: &str = "\r\n[SDKAmmoGun]\r\nDamage=1\r\nROF=15\r\nRange=6\
 const PROBE_MAP: &str = "sdk-probe.map";
 // An authored demonstration layer, never a host implementation of shield rules.
 // A 100% receiver for every retail armor isolates the component from unrelated
-// weapon/armor tuning. The same bytes are admitted in all three modes.
+// weapon/armor tuning. Only the authored feature selection differs by mode.
 const PROBE_INI: &str = "\r\n[ShieldTypes]\r\nSDKProbe=SDKShield\r\n[SDKShield]\r\nStrength=100\r\nArmor=none\r\nSelfHealing=0.25\r\nSelfHealing.Rate=0.1\r\nRespawn=0.5\r\nRespawn.Rate=0.1\r\nPips=16,16,16\r\n[MTNK]\r\nShieldType=SDKShield\r\n[Warheads]\r\nSDKProbe=SDKProbeWH\r\n[SDKProbeWH]\r\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\r\nCellSpread=0\r\nPercentAtMax=1\r\n[VeraOverload]\r\nHeatLimit=60\r\nDuration=75\r\nCooling=1\r\n";
 
 /// Early main dispatch. Named probe arguments are deliberately separate from
@@ -99,12 +99,21 @@ where
         let output = PathBuf::from(take("--output")?);
         let module = fields.remove("--module").map(PathBuf::from);
         ensure!(
-            ["none", "compat", "overload", "ammo"].contains(&mode.as_str()),
-            "mode must be none, compat, overload or ammo"
+            [
+                "none",
+                "disabled",
+                "compat",
+                "overload",
+                "ammo",
+                "ammo-only",
+                "all"
+            ]
+            .contains(&mode.as_str()),
+            "mode must be none, disabled, compat, overload, ammo, ammo-only or all"
         );
         ensure!(
             (mode == "none") == module.is_none(),
-            "none takes no component; compat/overload require --module"
+            "none takes no component; all other modes require --module"
         );
         validate_output(&retail, &output)?;
         write_result(
@@ -228,6 +237,10 @@ fn run_probe(
     module_path: Option<&Path>,
     output: &Path,
 ) -> Result<Value> {
+    let has_shield = matches!(mode, "compat" | "overload" | "ammo" | "all");
+    let has_overload = matches!(mode, "overload" | "all");
+    let has_ammo = matches!(mode, "ammo" | "ammo-only" | "all");
+    let tests_ammo = has_ammo || mode == "disabled";
     let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
     ensure!(
         !assets.contains("vera-mod.json"),
@@ -262,7 +275,7 @@ fn run_probe(
     let original_source = selected.source;
     drop(selected.map);
     // Keep one physical MTNK section: duplicate INI headers do not merge.
-    let probe_ini = if mode == "ammo" {
+    let probe_ini = if tests_ammo {
         PROBE_INI.replacen(
             "ShieldType=SDKShield\r\n",
             &format!("ShieldType=SDKShield\r\n{}", AMMO_UNIT_INI),
@@ -272,9 +285,18 @@ fn run_probe(
         PROBE_INI.to_owned()
     };
     bytes.extend_from_slice(probe_ini.as_bytes());
-    if mode == "ammo" {
+    if tests_ammo {
         bytes.extend_from_slice(AMMO_PROBE_INI.as_bytes());
     }
+    bytes.extend_from_slice(
+        format!(
+            "\r\n[VeraFeatures]\r\nShield={}\r\nOverload={}\r\nAresAmmo={}\r\n",
+            if has_shield { "yes" } else { "no" },
+            if has_overload { "yes" } else { "no" },
+            if has_ammo { "yes" } else { "no" },
+        )
+        .as_bytes(),
+    );
     let mut files = vec![(PROBE_MAP.to_string(), bytes)];
     if let Some(module_path) = module_path {
         ensure!(
@@ -320,19 +342,17 @@ fn run_probe(
     match mode {
         "none" => ensure!(identity.is_none(), "no-module mode admitted a module"),
         _ => {
-            let expected = if mode == "ammo" {
-                "vera.compat-shield-ammo"
-            } else if mode == "compat" {
-                "vera.compat-shield"
-            } else {
-                "vera.overload-shield"
+            let legacy_id = match mode {
+                "ammo" => Some("vera.compat-shield-ammo"),
+                "compat" => Some("vera.compat-shield"),
+                "overload" => Some("vera.overload-shield"),
+                _ => None,
             };
             ensure!(
-                scenario
-                    .sim()
-                    .external_mod
-                    .as_ref()
-                    .is_some_and(|p| p.manifest().id == expected),
+                scenario.sim().external_mod.as_ref().is_some_and(|p| {
+                    p.manifest().id == "vera.reference-gameplay"
+                        || legacy_id == Some(p.manifest().id.as_str())
+                }),
                 "component identity does not match requested mode"
             );
         }
@@ -383,10 +403,12 @@ fn run_probe(
             .entities()
             .get(target)
             .context("probe target died")?;
-        let expected_loss = match mode {
-            "none" => [60, 120, 180],
-            "compat" | "ammo" => [0, 20, 80],
-            _ => [0, 60, 120],
+        let expected_loss = if !has_shield {
+            [60, 120, 180]
+        } else if has_overload {
+            [0, 60, 120]
+        } else {
+            [0, 20, 80]
         }[shot];
         ensure!(
             entity.health.current() == initial - expected_loss,
@@ -395,10 +417,10 @@ fn run_probe(
             entity.health.current(),
             initial - expected_loss
         );
-        if mode == "none" {
+        if !has_shield {
             ensure!(
                 entity.mod_presentation().meters.is_empty() && entity.mod_component().is_empty(),
-                "no-module entity contains component state"
+                "shield-disabled entity contains shield state"
             );
         } else {
             let meter = entity
@@ -406,11 +428,7 @@ fn run_probe(
                 .meters
                 .first()
                 .context("component omitted its meter")?;
-            let expected = if (mode == "compat" || mode == "ammo") && shot > 0 {
-                0
-            } else {
-                40
-            };
+            let expected = if !has_overload && shot > 0 { 0 } else { 40 };
             ensure!(
                 meter.current == expected && meter.maximum == 100,
                 "unexpected component meter after damage {}",
@@ -419,8 +437,8 @@ fn run_probe(
         }
         advance(&mut scenario)?;
     }
-    let ammunition = if mode == "ammo" {
-        Some(probe_ammunition(&mut scenario)?)
+    let ammunition = if tests_ammo {
+        Some(probe_ammunition(&mut scenario, has_ammo)?)
     } else {
         None
     };
@@ -434,7 +452,7 @@ fn run_probe(
     )
 }
 
-fn probe_ammunition(scenario: &mut HeadlessScenario) -> Result<Value> {
+fn probe_ammunition(scenario: &mut HeadlessScenario, enabled: bool) -> Result<Value> {
     use crate::sim::command::Command;
     let actor = spawn_target(scenario)?;
     let entity = scenario
@@ -471,6 +489,7 @@ fn probe_ammunition(scenario: &mut HeadlessScenario) -> Result<Value> {
         ),
         "force-fire command rejected"
     );
+    let expected: &[i32] = if enabled { &[3, 1] } else { &[4, 3, 2, 1, 0] };
     let mut shots = Vec::new();
     let mut last_shot = None;
     for visit in 0..300 {
@@ -495,20 +514,20 @@ fn probe_ammunition(scenario: &mut HeadlessScenario) -> Result<Value> {
             shots.push(count);
             last_shot = Some(visit);
             ensure!(
-                shots.len() <= 2,
-                "one remaining round incorrectly funded another shot"
+                shots.len() <= expected.len(),
+                "insufficient ammunition incorrectly funded another shot"
             );
         }
-        if shots.len() == 2 && last_shot.is_some_and(|last| visit > last + 90) {
+        if shots.len() == expected.len() && last_shot.is_some_and(|last| visit > last + 90) {
             break;
         }
     }
     ensure!(
-        shots == [3, 1],
-        "expected two real shots with counts 3/1, got {shots:?}"
+        shots == expected,
+        "expected real shot counts {expected:?}, got {shots:?}"
     );
     Ok(
-        json!({"actor":actor,"initial":5,"afterShots":shots,"blockedBelowCost":true,"source":"production command/CanFire/FireAt/Logic"}),
+        json!({"actor":actor,"initial":5,"afterShots":shots,"aresAmmoEnabled":enabled,"blockedBelowCost":true,"source":"production command/CanFire/FireAt/Logic"}),
     )
 }
 
@@ -666,10 +685,11 @@ fn snapshot_roundtrip(
         .entities()
         .get(new_target)
         .context("post-load constructor absent")?;
-    let module_enabled = scenario.sim().external_mod.is_some();
+    // Loading a module does not imply this object subscribes: disabled and
+    // ammo-only works legitimately keep no per-object component state.
     ensure!(
-        module_enabled == !new_entity.mod_component().is_empty(),
-        "post-load constructor lost its module binding"
+        new_entity.mod_component().is_empty() == before.is_empty(),
+        "post-load constructor changed its component subscription"
     );
     Ok(
         json!({"resourceAdmission":true,"opaqueStatePreserved":true,"simulationResume":true,"postLoadAttach":true,"weaponResourcesRebound":true,"file":save_path,"bytes":bytes.len(),"sha256":crate::util::sha256::sha256_hex(&bytes),"guiStateRestored":false,"residentAssetRebindExercised":false}),

@@ -699,7 +699,7 @@ pub(crate) fn fixture_configuration(local: [i32; 3], global: [i32; 3]) -> super:
     result
 }
 
-#[cfg(all(test, feature = "overload"))]
+#[cfg(test)]
 pub(crate) fn fixture_with_combat_delay(delay: i32) -> super::Configuration {
     let mut result = fixture_configuration([-1; 3], [-1; 3]);
     let ty = &mut result.catalog.types[0];

@@ -3,15 +3,10 @@ name = "vera-reference-shield"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-description = "External reference gameplay component for compatible and overload shields"
+description = "INI-selected shield, overload and Ares ammo reference gameplay component"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-
-[features]
-default = []
-overload = []
-ares-ammo = []
 
 [dependencies]
 vera-mod-api = { path = "../../api" }

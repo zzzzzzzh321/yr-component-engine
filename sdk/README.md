@@ -1,8 +1,8 @@
 # VERA Mod SDK — first shield prototype
 
 One work loads one optional portable gameplay component. The same engine runs
-retail YR without a declaration, the compatible shield component, or an authored
-overload component. This prototype migrates the existing supported shield chain;
+retail YR without a declaration or one reference component whose shields, authored
+overload and Ares weapon ammo are selected through INI. This prototype migrates the existing supported shield chain;
 it does not migrate every Ares/Phobos feature or claim full upstream parity.
 
 ## Boundaries
@@ -14,8 +14,9 @@ it does not migrate every Ares/Phobos feature or claim full upstream parity.
   No filesystem, clock, random, network or WASI services are linked.
 - `package`: offline `vera-mod-pack` tool; wraps a core Wasm module and emits
   the component plus its content-hashed declaration, without executing it.
-- `plugins/shield`: author-editable Rust reference. Compatible and overload
-  artifacts differ only in guest code. They need no different engine build.
+- `plugins/shield`: author-editable Rust reference. One artifact contains the
+  features; `[VeraFeatures] Shield/Overload/AresAmmo` selects them through INI.
+  All default to no; Overload requires Shield. Selection is frozen per match.
 - `src/mod_sdk.rs`: production asset admission, entity/combat/tick adapter,
   bounded change-plan validation and frozen saved-program admission.
 
@@ -47,7 +48,10 @@ emitted by `wit-bindgen`. Then wrap the core module using the workspace tool:
 
 ```sh
 python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- build -p vera-reference-shield --target wasm32-unknown-unknown --release
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- run -p vera-mod-pack -- "<reported-target>/wasm32-unknown-unknown/release/vera_reference_shield.wasm" "<existing-output-parent>/compatible-new"
+python -m tools.cargo_run -- build --locked -p vera-mod-pack --profile fast
+python -m tools.cargo_run --resolve vera-mod-pack --profile fast
+# Invoke the executable path reported above:
+"<reported-packager>" "<reported-target>/wasm32-unknown-unknown/release/vera_reference_shield.wasm" "<existing-output-parent>/reference-new"
 ```
 
 `<reported-target>` is the checkout-owned target directory printed by the build
