@@ -43,5 +43,7 @@ lang: zh-CN
 
 ## 扩展与原作者
 
+- [Ares 功能中文开发参考](ares-feature-guide.md)：功能、INI入口、修复与SDK开发方向。
+
 - [Ares、Phobos、NPatch、VeraX 与原作者](credits.md)
 

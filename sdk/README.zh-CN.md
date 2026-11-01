@@ -10,6 +10,8 @@
 
 [Ares 武器弹药消耗示例](plugins/shield/AMMO.zh-CN.md) 通过 INI 的 `[VeraFeatures] AresAmmo=yes` 开启，可与护盾组合。可选的 `weapon_resource` 回调提供通用弹药策略，复用引擎已有开火检查、扣弹和装填；原有四个回调仍是基础要求。
 
+Ares 完整公开功能目录、INI 键索引与后续开发拆分见 [Ares 功能中文开发参考](../docs/zh-CN/ares-feature-guide.md)。其中的 SDK 接入描述为开发建议，当前已外置范围仍以上文为准。
+
 ## 同一个引擎，三种运行方式
 
 | 方式 | 作品提供的内容 | 行为 |

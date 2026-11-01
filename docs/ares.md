@@ -105,3 +105,5 @@ owners. The official [Ares credits](https://ares-developers.github.io/Ares-docs/
 list the remaining testers and community members.
 
 简体中文：[扩展支持与原作者](zh-CN/credits.md)。
+
+中文功能与开发目录：[Ares 功能中文开发参考](zh-CN/ares-feature-guide.md)（公开功能概述与后续 SDK 设计建议，独立于本页的已实现范围）。

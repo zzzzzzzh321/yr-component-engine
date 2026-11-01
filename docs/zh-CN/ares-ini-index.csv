@@ -1,0 +1,960 @@
+﻿条目编号,分类,所属节,INI键或模板,条目形态,原文类型提示,官方来源
+AR316,超级武器,General,*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR193,单位与通用玩法,Weapon,Abductor,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR193,单位与通用玩法,Weapon,Abductor.AbductBelowPercent,字面键名,float - percentage,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR193,单位与通用玩法,Weapon,Abductor.Anim,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR193,单位与通用玩法,Weapon,Abductor.ChangeOwner,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR193,单位与通用玩法,Weapon,Abductor.MaxHealth,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR193,单位与通用玩法,Weapon,Abductor.Temporal,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR162,建筑与基地,BuildingType,Academy.AircraftVeterancy,字面键名,double - veterancy levels,https://ares-developers.github.io/Ares-docs/new/buildings/academy.html
+AR162,建筑与基地,BuildingType,Academy.BuildingVeterancy,字面键名,double - veterancy levels,https://ares-developers.github.io/Ares-docs/new/buildings/academy.html
+AR162,建筑与基地,BuildingType,Academy.Ignore,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/buildings/academy.html
+AR162,建筑与基地,BuildingType,Academy.InfantryVeterancy,字面键名,double - veterancy levels,https://ares-developers.github.io/Ares-docs/new/buildings/academy.html
+AR162,建筑与基地,BuildingType,Academy.Types,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/buildings/academy.html
+AR162,建筑与基地,BuildingType,Academy.VehicleVeterancy,字面键名,double - veterancy levels,https://ares-developers.github.io/Ares-docs/new/buildings/academy.html
+AR346,弹头与伤害,Warhead,AffectsEnemies,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/general.html
+AR346,弹头与伤害,Warhead,AffectsOwner,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/general.html
+AR280,阵营与国家,Side,AI.BaseDefenseCounts,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR280,阵营与国家,Side,AI.BaseDefenses,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR279,阵营与国家,Country,AI.PowerPlants,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultcountry.html
+AR164,建筑与基地,BuildingType,AIBaseNormal,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/basebuilding.html
+AR165,建筑与基地,BuildingType,AIBuildCounts,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/buildings/buildcount.html
+AR165,建筑与基地,BuildingType,AIExtraCounts,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/buildings/buildcount.html
+AR276,单位与通用玩法,General,AIFriendlyDistance,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/scripts.html
+AR164,建筑与基地,BuildingType,AIInnerBase,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/basebuilding.html
+AR284,阵营与国家,Country,AIRandomSelectionWeight,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR268,抛射体,Projectile,AirburstSpread,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/projectiles/splits.html
+AR156,单位与通用玩法,TechnoType,AirRate,字面键名,integer - number of frames,https://ares-developers.github.io/Ares-docs/new/airrate.html
+AR183,建筑与基地,CombatDamage,AlliedSolidTransparency,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/solidbuildings.html
+AR104,模组逻辑修复,GlobalControls,AllowBypassBuildLimit,字面键名,list of boolean,https://ares-developers.github.io/Ares-docs/bugfixes/type2/multipleaifactoriescloneunits.html
+AR380,恢复的泰伯利亚之日机制,UISettings,AllowMultiEngineer,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/multiengineercheckbox.html
+AR104,模组逻辑修复,GlobalControls,AllowParallelAIQueues,字面键名,boolean,https://ares-developers.github.io/Ares-docs/bugfixes/type2/multipleaifactoriescloneunits.html
+AR346,弹头与伤害,Warhead,AllowZeroDamage,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/general.html
+AR103,模组逻辑修复,ObjectType,AlphaImage,字面键名,见原文,https://ares-developers.github.io/Ares-docs/bugfixes/type2/movingalphalights.html
+AR260,单位与通用玩法,Image,AltCameoPCX,字面键名,"filename, *including* the .pcx extension",https://ares-developers.github.io/Ares-docs/new/pcxcameos.html
+AR158,单位与通用玩法,TechnoType,AlternateTheaterArt,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/alternatetheaterart.html
+AR370,武器,Weapon,AmbientDamage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR359,武器,Weapon,Ammo,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/weapons/ammo.html
+AR263,抛射体,Projectile,AnimLength,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/projectiles/animations.html
+AR362,武器,Weapon,ApplyDamage,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/damage.html
+AR268,抛射体,Projectile,AroundTarget,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/projectiles/splits.html
+AR163,建筑与基地,TechnoType,Assaulter.Level,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/assaulter.html
+AR264,抛射体,Projectile,AttachedSystem,字面键名,ParticleSystemType,https://ares-developers.github.io/Ares-docs/new/projectiles/attachedsystem.html
+AR160,单位与通用玩法,Section,AttachEffect.Animation,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Warhead,AttachEffect.AnimResetOnReapply,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.ArmorMultiplier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.Cloakable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Warhead,AttachEffect.Cumulative,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,TechnoType,AttachEffect.Delay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.DiscardOnEntry,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.FirepowerMultiplier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.ForceDecloak,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,TechnoType,AttachEffect.InitialDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.PenetratesIronCurtain,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.ROFMultiplier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.SpeedMultiplier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR160,单位与通用玩法,Section,AttachEffect.TemporalHidesAnim,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/attacheffect.html
+AR195,单位与通用玩法,CombatDamage,AutoRepel,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/civilianenemies.html
+AR265,抛射体,Projectile,BallisticScatter.Max,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/projectiles/ballisticscatter.html
+AR265,抛射体,Projectile,BallisticScatter.Min,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/projectiles/ballisticscatter.html
+AR238,单位与通用玩法,General,BaseUnit,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/keepalive.html
+AR305,超级武器,SuperWeapon,Battery.KeepOnline,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/types/battery.html
+AR305,超级武器,SuperWeapon,Battery.Overpower,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/types/battery.html
+AR305,超级武器,SuperWeapon,Battery.Power,字面键名,integer - power,https://ares-developers.github.io/Ares-docs/new/superweapons/types/battery.html
+AR368,武器,Weapon,Beam.Amplitude,字面键名,float,https://ares-developers.github.io/Ares-docs/new/weapons/radiation.html
+AR368,武器,Weapon,Beam.Color,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/new/weapons/radiation.html
+AR368,武器,Weapon,Beam.Duration,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/weapons/radiation.html
+AR368,武器,Weapon,Beam.IsHouseColor,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/radiation.html
+AR258,单位与通用玩法,ParticleSystem,BehavesLike,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/particles.html
+AR338,弹头与伤害,TechnoType,Berserk.ROFMultiplier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/warheads/berserk.html
+AR338,弹头与伤害,CombatDamage,BerserkROFMultiplier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/warheads/berserk.html
+AR363,武器,Weapon,Bolt.Color1,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/weapons/electricbolts.html
+AR363,武器,Weapon,Bolt.Color2,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/weapons/electricbolts.html
+AR363,武器,Weapon,Bolt.Color3,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/new/weapons/electricbolts.html
+AR363,武器,Weapon,Bolt.ParticleSystem,字面键名,ParticleSystem,https://ares-developers.github.io/Ares-docs/new/weapons/electricbolts.html
+AR161,单位与通用玩法,TechnoType,Bounty,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR161,单位与通用玩法,TechnoType,Bounty.Display,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR161,单位与通用玩法,TechnoType,Bounty.EliteValue,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR161,单位与通用玩法,TechnoType,Bounty.RookieValue,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR161,单位与通用玩法,TechnoType,Bounty.Value,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR161,单位与通用玩法,TechnoType,Bounty.VeteranValue,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR161,单位与通用玩法,AudioVisual,BountyDisplay,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR161,单位与通用玩法,General,BountyEnablers,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR349,弹头与伤害,Warhead,BridgeAbsoluteDestroyer,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR190,单位与通用玩法,TechnoType,BuildTime.Cost,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/buildtime.html
+AR190,单位与通用玩法,TechnoType,BuildTime.LowPowerPenalty,字面键名,double - multiplier,https://ares-developers.github.io/Ares-docs/new/buildtime.html
+AR190,单位与通用玩法,TechnoType,BuildTime.MaxLowPower,字面键名,double,https://ares-developers.github.io/Ares-docs/new/buildtime.html
+AR190,单位与通用玩法,TechnoType,BuildTime.MinLowPower,字面键名,double,https://ares-developers.github.io/Ares-docs/new/buildtime.html
+AR190,单位与通用玩法,TechnoType,BuildTime.MultipleFactory,字面键名,double - multiplier,https://ares-developers.github.io/Ares-docs/new/buildtime.html
+AR190,单位与通用玩法,TechnoType,BuildTime.Speed,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/buildtime.html
+AR167,建筑与基地,BuildingType,BuildupTime,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/buildings/builduptime.html
+AR170,建筑与基地,DOG,BuiltAt,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR170,建筑与基地,InfantryOrVehicle,BuiltAt,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR189,建筑与基地,BuildingType,Bunker.Raidable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR208,单位与通用玩法,UnitArt,CameoPalette,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/customcameopalettes.html
+AR260,单位与通用玩法,Image,CameoPCX,字面键名,"filename, *including* the .pcx extension",https://ares-developers.github.io/Ares-docs/new/pcxcameos.html
+AR388,界面与诊断,UISettings,Campaign3.Image,字面键名,见原文,https://ares-developers.github.io/Ares-docs/ui-features/customizablecampaignbuttons.html
+AR397,界面与诊断,UISettings,CampaignButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR385,界面与诊断,UISettings,CampaignList,字面键名,boolean,https://ares-developers.github.io/Ares-docs/ui-features/campaignlist.html
+AR385,界面与诊断,UISettings,CampaignListSize,字面键名,integer,https://ares-developers.github.io/Ares-docs/ui-features/campaignlist.html
+AR282,阵营与国家,Side,CampaignScore.Animation,字面键名,"filename, *including* the .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,CampaignScore.Background,字面键名,"filename, *including* the .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,CampaignScore.OverParTheme,字面键名,theme id,https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,CampaignScore.Palette,字面键名,"filename, *including* the .pal extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,CampaignScore.Transition,字面键名,"filename, *including* the .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,CampaignScore.UnderParTheme,字面键名,theme id,https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR388,界面与诊断,UISettings,CampaignX,模板或通配,battle,https://ares-developers.github.io/Ares-docs/ui-features/customizablecampaignbuttons.html
+AR388,界面与诊断,UISettings,CampaignX.Image,模板或通配,"filename, *including* the .shp extension",https://ares-developers.github.io/Ares-docs/ui-features/customizablecampaignbuttons.html
+AR388,界面与诊断,UISettings,CampaignX.Palette,模板或通配,"filename, *including* the .pal extension",https://ares-developers.github.io/Ares-docs/ui-features/customizablecampaignbuttons.html
+AR388,界面与诊断,UISettings,CampaignX.Subline,模板或通配,CSF label,https://ares-developers.github.io/Ares-docs/ui-features/customizablecampaignbuttons.html
+AR388,界面与诊断,UISettings,CampaignX.Tooltip,模板或通配,CSF label,https://ares-developers.github.io/Ares-docs/ui-features/customizablecampaignbuttons.html
+AR239,单位与通用玩法,Country,CanBeDriven,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR239,单位与通用玩法,TechnoType,CanBeDriven,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR189,建筑与基地,BuildingType,CanBeOccupiedBy,字面键名,list of InfantryTypes,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR273,单位与通用玩法,InfantryOrVehicle,CanBeReversed,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/reverseengineerlogic.html
+AR239,单位与通用玩法,TechnoType,CanDrive,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR191,单位与通用玩法,TechnoType,CanPassiveAquire.Cloak,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/canpassiveaquire.html
+AR191,单位与通用玩法,TechnoType,CanPassiveAquire.Guard,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/canpassiveaquire.html
+AR192,单位与通用玩法,UnitType,Carryall.Allowed,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/carryalls.html
+AR192,单位与通用玩法,AircraftType,Carryall.SizeLimit,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/carryalls.html
+AR339,弹头与伤害,Warhead,CellSpread.MaxAffect,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/warheads/cellspread.html
+AR194,单位与通用玩法,General,ChronoInfantryCrush,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoshift.html
+AR194,单位与通用玩法,TechnoType,Chronoshift.Allow,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoshift.html
+AR194,单位与通用玩法,TechnoType,Chronoshift.Crushable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoshift.html
+AR194,单位与通用玩法,BuildingType,Chronoshift.IsVehicle,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoshift.html
+AR306,超级武器,SuperWeapon,Chronosphere.AffectsIronCurtain,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.AffectsUndeployable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.AffectsUnwarpable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.BlastDest,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.BlastSrc,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.BlowUnplaceable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.KillCargo,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.KillOrganic,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.KillTeleporters,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR306,超级武器,SuperWeapon,Chronosphere.ReconsiderBuildings,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR195,单位与通用玩法,TechnoType,CivilianEnemy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/civilianenemies.html
+AR199,隐形与探测,TechnoType,Cloakable.Allowed,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/cloak/cloakstates.html
+AR199,隐形与探测,InfantryType,Cloakable.Deployed,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/cloak/cloakstates.html
+AR199,隐形与探测,BuildingType,Cloakable.Powered,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/cloak/cloakstates.html
+AR198,隐形与探测,TechnoType,Cloakable.Stages,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/cloak/cloakstages.html
+AR196,隐形与探测,General,CloakHeight,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/cloak/cloakheight.html
+AR197,隐形与探测,TechnoType,CloakSound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/cloak/cloaksound.html
+AR170,建筑与基地,InfantryOrVehicle,Cloneable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR170,建筑与基地,InfantryOrVehicle,ClonedAs,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR170,建筑与基地,InfantryOrVehicle,ClonedAt,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR170,建筑与基地,BuildingType,CloningFacility,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR080,模组逻辑修复,CombatDamage,CollapseChance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/bugfixes/type2/destroyablecliffs.html
+AR404,界面与诊断,UISettings,Color.Border1,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR404,界面与诊断,UISettings,Color.Border2,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR404,界面与诊断,UISettings,Color.Disabled,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR404,界面与诊断,UISettings,Color.Selection,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR404,界面与诊断,UISettings,Color.Text,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR404,界面与诊断,UISettings,Color.X.Disabled,模板或通配,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR404,界面与诊断,UISettings,Color.X.Selection,模板或通配,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR404,界面与诊断,UISettings,Color.X.Text,模板或通配,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/userinterfacecolors.html
+AR335,单位与通用玩法,TechnoType,Convert.Deploy,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR335,单位与通用玩法,TechnoType,Convert.Land,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR335,单位与通用玩法,TechnoType,Convert.Script,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR335,单位与通用玩法,TechnoType,Convert.Water,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR389,界面与诊断,Colors,Count,字面键名,integer,https://ares-developers.github.io/Ares-docs/ui-features/customizabledropdowncolors.html
+AR203,单位与通用玩法,AircraftType,Crashable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/crashableaircraft.html
+AR203,单位与通用玩法,AircraftType,CrashSpin,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/crashableaircraft.html
+AR280,阵营与国家,Side,Crew,字面键名,InfantryType,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR323,单位与通用玩法,BuildingType,Crew.EngineerChance,字面键名,integer - percent between 0 and 100,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,TechnoType,Crew.TechnicianChance,字面键名,integer - percent between 0 and 100,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR205,单位与通用玩法,TechnoType,CrushDamage,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/crushdamage.html
+AR205,单位与通用玩法,TechnoType,CrushDamage.Elite,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/crushdamage.html
+AR205,单位与通用玩法,TechnoType,CrushDamage.Rookie,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/crushdamage.html
+AR205,单位与通用玩法,TechnoType,CrushDamage.Veteran,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/crushdamage.html
+AR205,单位与通用玩法,TechnoType,CrushDamage.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/crushdamage.html
+AR340,弹头与伤害,Warhead,Culling.Chance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/culling.html
+AR340,弹头与伤害,Warhead,Culling.EliteBelowHealth,字面键名,integer - percentage,https://ares-developers.github.io/Ares-docs/new/warheads/culling.html
+AR340,弹头与伤害,Warhead,Culling.EliteChance,字面键名,integer - percentage,https://ares-developers.github.io/Ares-docs/new/warheads/culling.html
+AR340,弹头与伤害,Warhead,Culling.RookieBelowHealth,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/culling.html
+AR340,弹头与伤害,Warhead,Culling.RookieChance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/culling.html
+AR340,弹头与伤害,Warhead,Culling.VeteranBelowHealth,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/culling.html
+AR340,弹头与伤害,Warhead,Culling.VeteranChance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/culling.html
+AR296,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/cursors.html
+AR306,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR307,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR308,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR311,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR314,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR315,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR316,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR317,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR318,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR319,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicreveal.html
+AR321,超级武器,SuperWeapon,Cursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/spyplane.html
+AR361,武器,Weapon,Cursor.Attack,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/weapons/cursors.html
+AR361,武器,Weapon,Cursor.AttackOutOfRange,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/weapons/cursors.html
+AR206,单位与通用玩法,TechnoType,Cursor.Deploy,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/cursors.html
+AR206,单位与通用玩法,TechnoType,Cursor.Enter,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/cursors.html
+AR206,单位与通用玩法,TechnoType,Cursor.Move,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/cursors.html
+AR206,单位与通用玩法,TechnoType,Cursor.NoDeploy,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/cursors.html
+AR206,单位与通用玩法,TechnoType,Cursor.NoEnter,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/cursors.html
+AR206,单位与通用玩法,TechnoType,Cursor.NoMove,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/cursors.html
+AR206,单位与通用玩法,BuildingType,Cursor.Spy,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/cursors.html
+AR207,单位与通用玩法,Animation,CustomPalette,字面键名,filename with .pal extension,https://ares-developers.github.io/Ares-docs/new/customanimationandprojectilepalettes.html
+AR326,矿物与资源,Tiberium,Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/tiberium/damage.html
+AR159,单位与通用玩法,Animation,Damage.Delay,字面键名,integer - animation frames,https://ares-developers.github.io/Ares-docs/new/animations.html
+AR348,弹头与伤害,Warhead,Damage.Deployed,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/warheads/infantry.html
+AR341,弹头与伤害,General,DamageAirConsiderBridges,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/damageair.html
+AR341,弹头与伤害,Warhead,DamageAirThreshold,字面键名,integer - leptons,https://ares-developers.github.io/Ares-docs/new/warheads/damageair.html
+AR258,单位与通用玩法,ParticleType,DamageRange,字面键名,double - cells,https://ares-developers.github.io/Ares-docs/new/particles.html
+AR213,单位与通用玩法,TechnoType,DamageSmokeParticleSystems,字面键名,list of ParticleSystems,https://ares-developers.github.io/Ares-docs/new/damageparticlesystems.html
+AR213,单位与通用玩法,TechnoType,DamageSparks,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/damageparticlesystems.html
+AR213,单位与通用玩法,TechnoType,DamageSparksParticleSystems,字面键名,list of ParticleSystems,https://ares-developers.github.io/Ares-docs/new/damageparticlesystems.html
+AR376,恢复的泰伯利亚之日机制,General,DamageToFirestormDamageCoefficient,字面键名,double - multiplier,https://ares-developers.github.io/Ares-docs/restored/firestormwall.html
+AR216,单位与通用玩法,AudioVisual,DeactivateDimEMP,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/dimming.html
+AR216,单位与通用玩法,AudioVisual,DeactivateDimOperator,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/dimming.html
+AR216,单位与通用玩法,AudioVisual,DeactivateDimPowered,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/dimming.html
+AR342,弹头与伤害,Warhead,DeathWeapon.Suppress,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/warheads/deathweapon.html
+AR342,弹头与伤害,Warhead,DeathWeapon.SuppressInfantry,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/deathweapon.html
+AR342,弹头与伤害,Warhead,DeathWeapon.SuppressVehicles,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/deathweapon.html
+AR325,矿物与资源,Tiberium,Debris.Chance,字面键名,integer - percent,https://ares-developers.github.io/Ares-docs/new/tiberium/chainreactions.html
+AR394,界面与诊断,GlobalControls,DebugKeysEnabled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/ui-features/keyboardcommandshotkeys.html
+AR197,隐形与探测,AudioVisual,DecloakSound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/cloak/cloaksound.html
+AR197,隐形与探测,TechnoType,DecloakSound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/cloak/cloaksound.html
+AR280,阵营与国家,Side,DefaultDisguise,字面键名,InfantryType,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR187,建筑与基地,BuildingType,Degrade.Amount,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR187,建筑与基地,General,Degrade.AmountConsumer,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR187,建筑与基地,General,Degrade.AmountNormal,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR187,建筑与基地,General,Degrade.Enabled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR187,建筑与基地,BuildingType,Degrade.Percentage,字面键名,double - percentage,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR187,建筑与基地,General,Degrade.Percentage,字面键名,double - percentage,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR187,建筑与基地,Country,Degrades,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR187,建筑与基地,House,Degrades,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/trivialstructuredamage.html
+AR322,超级武器,SuperWeapon,Deliver.BaseNormal,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/unitdelivery.html
+AR322,超级武器,SuperWeapon,Deliver.Owner,字面键名,enumeration invoker|neutral|special|civilian,https://ares-developers.github.io/Ares-docs/new/superweapons/types/unitdelivery.html
+AR322,超级武器,SuperWeapon,Deliver.Types,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/types/unitdelivery.html
+AR214,单位与通用玩法,TechnoType,DeployDir,字面键名,integer - facing,https://ares-developers.github.io/Ares-docs/new/deploydir.html
+AR253,单位与通用玩法,MovieFilename,Description,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/movies.html
+AR303,超级武器,TechnoType,DesignatorRange,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR285,阵营与国家,Side,DialogBackground.Image,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR285,阵营与国家,Side,DialogBackground.Palette,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR343,弹头与伤害,Warhead,DieSound.Override,字面键名,soundmd entry,https://ares-developers.github.io/Ares-docs/new/warheads/diesound.html
+AR215,单位与通用玩法,TechnoType,DigIn,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/dig.html
+AR215,单位与通用玩法,TechnoType,DigInSound,字面键名,sound entry,https://ares-developers.github.io/Ares-docs/new/dig.html
+AR215,单位与通用玩法,TechnoType,DigOut,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/dig.html
+AR215,单位与通用玩法,TechnoType,DigOutSound,字面键名,sound entry,https://ares-developers.github.io/Ares-docs/new/dig.html
+AR391,界面与诊断,Graphics.Advanced,DirectX.Force,字面键名,hardware / emulation,https://ares-developers.github.io/Ares-docs/ui-features/graphicssurfacedrawing.html
+AR344,弹头与伤害,Warhead,DisableWeapons.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/warheads/disableweapons.html
+AR217,单位与通用玩法,AudioVisual,DiskLaserAnimEnabled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/disklaser.html
+AR179,建筑与基地,AudioVisual,DisplayCreditsDelay,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/buildings/producecash.html
+AR180,建筑与基地,BuildingImage,DockUnloadCell,字面键名,2 integers - cell offset,https://ares-developers.github.io/Ares-docs/new/buildings/refineries.html
+AR180,建筑与基地,BuildingImage,DockUnloadFacing,字面键名,integer - facing32,https://ares-developers.github.io/Ares-docs/new/buildings/refineries.html
+AR218,单位与通用玩法,InfantryType,Doggie,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/doggie.html
+AR318,超级武器,SuperWeapon,Dominator.Capture,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.CaptureImmuneToPsionics,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.CaptureMindControlled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.CapturePermaMindControlled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.ControlAnim,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.FireAtPercentage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.FirstAnim,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.FirstAnimHeight,字面键名,integer - leptons,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.PermanentCapture,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.Ripple,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.SecondAnim,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR318,超级武器,SuperWeapon,Dominator.SecondAnimHeight,字面键名,integer - leptons,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR219,单位与通用玩法,TechnoType,Drain.Amount,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/drain.html
+AR219,单位与通用玩法,TechnoType,Drain.Local,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/drain.html
+AR307,超级武器,SuperWeapon,DropPod.Maximum,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR307,超级武器,SuperWeapon,DropPod.Minimum,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR307,超级武器,SuperWeapon,DropPod.Types,字面键名,list of InfantryTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR307,超级武器,SuperWeapon,DropPod.Veterancy,字面键名,float,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR220,单位与通用玩法,General,DropPodMaximum,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/droppod.html
+AR220,单位与通用玩法,General,DropPodMinimum,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/droppod.html
+AR220,单位与通用玩法,General,DropPodTrailer,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/new/droppod.html
+AR220,单位与通用玩法,General,DropPodTypes,字面键名,list of InfantryTypes,https://ares-developers.github.io/Ares-docs/new/droppod.html
+AR346,弹头与伤害,Warhead,EffectsRequireDamage,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/general.html
+AR346,弹头与伤害,Warhead,EffectsRequireVerses,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/general.html
+AR375,恢复的泰伯利亚之日机制,Warhead,EMP.Cap,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR375,恢复的泰伯利亚之日机制,Warhead,EMP.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR375,恢复的泰伯利亚之日机制,TechnoType,EMP.Modifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR375,恢复的泰伯利亚之日机制,TechnoType,EMP.Sparkles,字面键名,animation,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR375,恢复的泰伯利亚之日机制,Warhead,EMP.Sparkles,字面键名,animation,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR375,恢复的泰伯利亚之日机制,TechnoType,EMP.Threshold,字面键名,enumeration - one of yes|no|inair *or* integer - frames,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR375,恢复的泰伯利亚之日机制,CombatDamage,EMPAIRecoverMission,字面键名,mission,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR272,单位与通用玩法,TechnoType,EmptyReloadAmount,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/reload.html
+AR308,超级武器,SuperWeapon,EMPulse.Cannons,字面键名,list of BuildingType,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR308,超级武器,SuperWeapon,EMPulse.Linked,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR308,超级武器,SuperWeapon,EMPulse.PulseBall,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR308,超级武器,SuperWeapon,EMPulse.PulseDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR308,超级武器,SuperWeapon,EMPulse.TargetSelf,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR209,单位与通用玩法,General,EnemyInsignia,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR222,单位与通用玩法,BuildingType,EnemyUIName,字面键名,csf string,https://ares-developers.github.io/Ares-docs/new/enemyuiname.html
+AR169,建筑与基地,General,EnemyWrench,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/enemywrench.html
+AR085,模组逻辑修复,InfantryType,Engineer,字面键名,见原文,https://ares-developers.github.io/Ares-docs/bugfixes/type2/engineertechniciancrew.html
+AR280,阵营与国家,Nod,Engineer,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR280,阵营与国家,Side,Engineer,字面键名,InfantryType,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR280,阵营与国家,ThirdSide,Engineer,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR379,恢复的泰伯利亚之日机制,General,EngineerAlwaysCaptureTech,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/multiengineer.html
+AR379,恢复的泰伯利亚之日机制,General,EngineerCaptureLevel,字面键名,float - percent,https://ares-developers.github.io/Ares-docs/restored/multiengineer.html
+AR379,恢复的泰伯利亚之日机制,General,EngineerDamage,字面键名,float - percent,https://ares-developers.github.io/Ares-docs/restored/multiengineer.html
+AR181,建筑与基地,BuildingType,EngineerRepairable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/repair.html
+AR297,超级武器,SuperWeapon,EVA.Activated,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/evaevents.html
+AR307,超级武器,SuperWeapon,EVA.Activated,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR312,超级武器,SuperWeapon,EVA.Activated,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR297,超级武器,SuperWeapon,EVA.Detected,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/evaevents.html
+AR307,超级武器,SuperWeapon,EVA.Detected,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR312,超级武器,SuperWeapon,EVA.Detected,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR269,单位与通用玩法,TechnoType,EVA.ElitePromoted,字面键名,EVA message,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR297,超级武器,SuperWeapon,EVA.Impatient,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/evaevents.html
+AR297,超级武器,SuperWeapon,EVA.InsufficientFunds,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/evaevents.html
+AR240,单位与通用玩法,TechnoType,EVA.Lost,字面键名,evamd entry,https://ares-developers.github.io/Ares-docs/new/losteva.html
+AR297,超级武器,SuperWeapon,EVA.Ready,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/evaevents.html
+AR307,超级武器,SuperWeapon,EVA.Ready,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR312,超级武器,SuperWeapon,EVA.Ready,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR297,超级武器,SuperWeapon,EVA.SelectTarget,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/superweapons/evaevents.html
+AR285,阵营与国家,Side,EVA.Tag,字面键名,EVA Type,https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR269,单位与通用玩法,TechnoType,EVA.VeteranPromoted,字面键名,EVA message,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR211,单位与通用玩法,TechnoType,Experience.AirstrikeModifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.FromAirstrike,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.FromPassengers,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.MindControlSelfModifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.MindControlVictimModifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.PassengerModifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.PromotePassengers,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.SpawnModifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR211,单位与通用玩法,TechnoType,Experience.SpawnOwnerModifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/customizableveterancy.html
+AR325,矿物与资源,Tiberium,ExplosionDamage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/tiberium/chainreactions.html
+AR325,矿物与资源,Tiberium,ExplosionWarhead,字面键名,warhead,https://ares-developers.github.io/Ares-docs/new/tiberium/chainreactions.html
+AR224,单位与通用玩法,VehicleType,Facings,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/facings.html
+AR170,建筑与基地,KENN,Factory,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR170,建筑与基地,BuildingType,Factory.ExplicitOnly,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR170,建筑与基地,KENN,Factory.ExplicitOnly,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/buildings/factoriesandcloning.html
+AR262,单位与通用玩法,TechnoType,FactoryOwners,字面键名,list of houses,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,TechnoType,FactoryOwners.Forbidden,字面键名,list of houses,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,BuildingType,FactoryOwners.HasAllPlans,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,BuildingType,FactoryOwners.Permanent,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR225,单位与通用玩法,TechnoType,FactoryPlant.Multiplier,字面键名,double - multiplier,https://ares-developers.github.io/Ares-docs/new/factoryplant.html
+AR171,建筑与基地,BuildingType,Fake,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/fakes.html
+AR226,单位与通用玩法,TechnoType,FakeOf,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/fakeof.html
+AR227,单位与通用玩法,TechnoType,FallRate.NoParachute,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/fallrate.html
+AR227,单位与通用玩法,TechnoType,FallRate.NoParachuteMax,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/fallrate.html
+AR227,单位与通用玩法,TechnoType,FallRate.Parachute,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/fallrate.html
+AR227,单位与通用玩法,TechnoType,FallRate.ParachuteMax,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/fallrate.html
+AR284,阵营与国家,Country,File.Flag,字面键名,"filename, *including* the .pcx extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,File.LoadScreen,字面键名,"filename, *including* the .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,File.LoadScreenPAL,字面键名,"filename, *including* the .pal extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,File.ObserverBackground,字面键名,"filename, *including* the .pcx or .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,File.ObserverFlag,字面键名,"filename, *including* the .pcx or .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,File.ObserverFlagAltPalette,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,File.Taunt,字面键名,"filename, *including* the Taunts directory and .wav extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR376,恢复的泰伯利亚之日机制,BuildingType,Firestorm.Wall,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/firestormwall.html
+AR376,恢复的泰伯利亚之日机制,AudioVisual,FirestormActiveAnim,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/restored/firestormwall.html
+AR376,恢复的泰伯利亚之日机制,AudioVisual,FirestormAirAnim,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/restored/firestormwall.html
+AR376,恢复的泰伯利亚之日机制,AudioVisual,FirestormGroundAnim,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/restored/firestormwall.html
+AR376,恢复的泰伯利亚之日机制,AudioVisual,FirestormIdleAnim,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/restored/firestormwall.html
+AR376,恢复的泰伯利亚之日机制,CombatDamage,FirestormWarhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/restored/firestormwall.html
+AR275,单位与通用玩法,Animation,Flamer,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/scorchflamer.html
+AR345,弹头与伤害,Warhead,Flash.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/warheads/flash.html
+AR172,建筑与基地,BuildingType,ForceShield.Modifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/buildings/forceshield.html
+AR173,建筑与基地,BuildingType,GateDownSound,字面键名,sound name,https://ares-developers.github.io/Ares-docs/new/buildings/gates.html
+AR173,建筑与基地,BuildingType,GateUpSound,字面键名,sound name,https://ares-developers.github.io/Ares-docs/new/buildings/gates.html
+AR229,单位与通用玩法,TechnoType,Gattling.Cycle,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/gattlingcycle.html
+AR161,单位与通用玩法,Country,GivesBounty,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/bounty.html
+AR282,阵营与国家,Side,GraphicalText.Image,字面键名,"filename, *including* the .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,GraphicalText.Palette,字面键名,"filename, *including* the .pal extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR336,单位与通用玩法,TechnoType,GroupAs,字面键名,string,https://ares-developers.github.io/Ares-docs/new/typeselect.html
+AR232,单位与通用玩法,VehicleType,Harvester.KickDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/harvesters.html
+AR232,单位与通用玩法,TechnoType,Harvester.LongScan,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/harvesters.html
+AR232,单位与通用玩法,BuildingType,Harvester.ScanCorrection,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/harvesters.html
+AR232,单位与通用玩法,TechnoType,Harvester.ShortScan,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/harvesters.html
+AR232,单位与通用玩法,VehicleType,Harvester.TooFarDistance,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/harvesters.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,HasSpotlight,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR328,矿物与资源,Tiberium,Heal.Delay,字面键名,float - minutes,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR328,矿物与资源,Tiberium,Heal.IStep,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR328,矿物与资源,Tiberium,Heal.Step,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR328,矿物与资源,Tiberium,Heal.UStep,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR258,单位与通用玩法,ParticleSystemType,HoldsWhat,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/particles.html
+AR385,界面与诊断,Battle,HoverSound,字面键名,sound,https://ares-developers.github.io/Ares-docs/ui-features/campaignlist.html
+AR234,单位与通用玩法,SpecialWeapons,HSBuilding,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR280,阵营与国家,Side,HunterSeeker,字面键名,VehicleType,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR234,单位与通用玩法,VehicleType,HunterSeeker.AscentSpeed,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR312,超级武器,SuperWeapon,HunterSeeker.Buildings,字面键名,list of BuildingType,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR234,单位与通用玩法,VehicleType,HunterSeeker.DescendProximity,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,VehicleType,HunterSeeker.DescentSpeed,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,VehicleType,HunterSeeker.DetonateProximity,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,VehicleType,HunterSeeker.EmergeSpeed,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,TechnoType,HunterSeeker.Ignore,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR312,超级武器,SuperWeapon,HunterSeeker.RandomOnly,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR312,超级武器,SuperWeapon,HunterSeeker.Type,字面键名,VehicleType,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR234,单位与通用玩法,General,HunterSeekerAscentSpeed,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,General,HunterSeekerDescendProximity,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,General,HunterSeekerDescentSpeed,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,General,HunterSeekerDetonateProximity,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR234,单位与通用玩法,General,HunterSeekerEmergeSpeed,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hunterseeker.html
+AR374,恢复的泰伯利亚之日机制,WaterImage,Image,字面键名,见原文,https://ares-developers.github.io/Ares-docs/restored/amphibiousimagechanges.html
+AR193,单位与通用玩法,TechnoType,ImmuneToAbduction,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR338,弹头与伤害,TechnoType,ImmuneToBerserk,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/berserk.html
+AR375,恢复的泰伯利亚之日机制,TechnoType,ImmuneToEMP,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR274,单位与通用玩法,BuildingType,ImmuneToSaboteurs,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/saboteur.html
+AR401,界面与诊断,Urban,Infantry,字面键名,list of InfantryTypes,https://ares-developers.github.io/Ares-docs/ui-features/randommapgenerator.html
+AR236,单位与通用玩法,AudioVisual,InfantryElectrocuted,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/infantryelectrocuted.html
+AR348,弹头与伤害,Warhead,InfDeathAnim,字面键名,"string, animation ID",https://ares-developers.github.io/Ares-docs/new/warheads/infantry.html
+AR303,超级武器,TechnoType,InhibitorRange,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR237,单位与通用玩法,TechnoType,InitialPayload.Nums,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/initialpayload.html
+AR237,单位与通用玩法,TechnoType,InitialPayload.Types,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/initialpayload.html
+AR209,单位与通用玩法,TechnoType,Insignia.Elite,字面键名,"filename, excluding the .shp extension",https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR209,单位与通用玩法,TechnoType,Insignia.Rookie,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR209,单位与通用玩法,TechnoType,Insignia.ShowEnemy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR209,单位与通用玩法,TechnoType,Insignia.Veteran,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR209,单位与通用玩法,TechnoType,InsigniaFrame.Elite,字面键名,integer - frame,https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR209,单位与通用玩法,TechnoType,InsigniaFrame.Rookie,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR209,单位与通用玩法,TechnoType,InsigniaFrame.Veteran,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/customizableinsignia.html
+AR349,弹头与伤害,Warhead,IonCannon,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR349,弹头与伤害,Warhead,IonCannon.Beam,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR349,弹头与伤害,Warhead,IonCannon.Blast,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR349,弹头与伤害,Warhead,IonCannon.Damage,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR349,弹头与伤害,Warhead,IonCannon.Ripple,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR349,弹头与伤害,Warhead,IonCannon.Rock,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR349,弹头与伤害,Warhead,IonCannon.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/warheads/ioncannon.html
+AR350,弹头与伤害,Warhead,IronCurtain.Cap,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/warheads/ironcurtain.html
+AR350,弹头与伤害,Warhead,IronCurtain.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/warheads/ironcurtain.html
+AR350,弹头与伤害,Warhead,IronCurtain.Flash,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/ironcurtain.html
+AR350,弹头与伤害,TechnoType,IronCurtain.Modifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/warheads/ironcurtain.html
+AR350,弹头与伤害,AudioVisual,IronCurtainFlash,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/ironcurtain.html
+AR231,单位与通用玩法,InfantryType,IsCow,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/hardcodedunitproperties.html
+AR231,单位与通用玩法,InfantryType,IsDesolator,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/hardcodedunitproperties.html
+AR369,武器,Weapon,IsDetachedRailgun,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/railgun.html
+AR178,建筑与基地,PrismForwarding.SupportWeapon,IsElectricBolt,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,PrismForwarding.SupportWeapon,IsLaser,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR177,建筑与基地,BuildingType,IsPassable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/passablestructures.html
+AR375,恢复的泰伯利亚之日机制,SuperWeapon,IsPowered,字面键名,见原文,https://ares-developers.github.io/Ares-docs/restored/emp.html
+AR178,建筑与基地,PrismForwarding.SupportWeapon,IsRadBeam,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR189,建筑与基地,BuildingType,IsTrench,字面键名,string - trench type ID,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR365,武器,Weapon,IvanBomb.AttachSound,字面键名,sound name,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.CanDetonateDeathBomb,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.CanDetonateTimeBomb,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.DeathBomb,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.DeathBombOnAllies,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.Delay,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.DestroysBridges,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.Detachable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.DetonateOnSell,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.FlickerRate,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.Image,字面键名,"filename, *excluding*the .shp extension",https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.TickingSound,字面键名,sound name,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR365,武器,Weapon,IvanBomb.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/weapons/ivanbombs.html
+AR238,单位与通用玩法,TechnoType,KeepAlive,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/keepalive.html
+AR239,单位与通用玩法,Warhead,KillDriver,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR239,单位与通用玩法,Warhead,KillDriver.Chance,字面键名,float - percentage,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR239,单位与通用玩法,Warhead,KillDriver.KillBelowPercent,字面键名,float,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR239,单位与通用玩法,Warhead,KillDriver.Owner,字面键名,"enumeration - civilian,special,neutral",https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR239,单位与通用玩法,Warhead,KillDriver.RemoveVeterancy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR366,武器,Weapon,LaserThickness,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/weapons/laser.html
+AR314,超级武器,SuperWeapon,Light.*,模板或通配,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR315,超级武器,SuperWeapon,Light.*,模板或通配,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR318,超级武器,SuperWeapon,Light.*,模板或通配,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR301,超级武器,SuperWeapon,Light.Ambient,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/lighting.html
+AR301,超级武器,SuperWeapon,Light.Blue,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/lighting.html
+AR301,超级武器,SuperWeapon,Light.Enabled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/lighting.html
+AR301,超级武器,SuperWeapon,Light.Green,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/lighting.html
+AR301,超级武器,SuperWeapon,Light.Red,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/lighting.html
+AR314,超级武器,SuperWeapon,Lightning.BoltExplosion,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.Bolts,字面键名,list of Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.CloudHeight,字面键名,integer - leptons,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.Clouds,字面键名,list of Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.Debris,字面键名,list of Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.DebrisMax,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.DebrisMin,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.HitDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.IgnoreLightningRod,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.PrintText,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.RadarOutage,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.RadarOutageAffects,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.ScatterCount,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.ScatterDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.Separation,字面键名,integer - distance,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR314,超级武器,SuperWeapon,Lightning.Sounds,字面键名,list of Sounds,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR175,建筑与基地,BuildingType,LightningRod,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/lightningrods.html
+AR175,建筑与基地,BuildingType,LightningRod.Modifier,字面键名,float - modifier,https://ares-developers.github.io/Ares-docs/new/buildings/lightningrods.html
+AR284,阵营与国家,Country,ListIndex,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR386,界面与诊断,Basic,LoadingTheme,字面键名,theme id,https://ares-developers.github.io/Ares-docs/ui-features/campaignloadscreen.html
+AR284,阵营与国家,Country,LoadingTheme,字面键名,theme id,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR285,阵营与国家,Side,LoadingTheme,字面键名,theme id,https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR284,阵营与国家,Country,LoadScreenText.Brief,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,LoadScreenText.Color,字面键名,Color scheme,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR386,界面与诊断,Mission,LoadScreenText.Color,字面键名,Color scheme,https://ares-developers.github.io/Ares-docs/ui-features/campaignloadscreen.html
+AR284,阵营与国家,Country,LoadScreenText.Name,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR284,阵营与国家,Country,LoadScreenText.SpecialName,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR185,建筑与基地,BuildingType,LostEvaEvent,字面键名,EVA event,https://ares-developers.github.io/Ares-docs/new/buildings/techstructures.html
+AR241,单位与通用玩法,Animation,MakeInfantryOwner,字面键名,enumeration invoker|killer|victim|civilian|special|neutral|random,https://ares-developers.github.io/Ares-docs/new/makeinfantryowner.html
+AR346,弹头与伤害,Warhead,Malicious,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/general.html
+AR176,建筑与基地,BuildingType,MassSelectable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/massselect.html
+AR188,建筑与基地,TunnelType,MaxSize,字面键名,double,https://ares-developers.github.io/Ares-docs/new/buildings/tunnels.html
+AR243,资源与配置加载,General,Medians,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/misc/avoidableinternalerrors.html
+AR284,阵营与国家,Country,MenuText.Status,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR302,超级武器,SuperWeapon,Message.Abort,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR302,超级武器,SuperWeapon,Message.Activate,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR302,超级武器,SuperWeapon,Message.CannotFire,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR185,建筑与基地,BuildingType,Message.Capture,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/buildings/techstructures.html
+AR302,超级武器,SuperWeapon,Message.Color,字面键名,Color scheme,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR302,超级武器,SuperWeapon,Message.Detected,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR302,超级武器,SuperWeapon,Message.FirerColor,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR302,超级武器,SuperWeapon,Message.InsufficientFunds,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR302,超级武器,SuperWeapon,Message.Launch,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR185,建筑与基地,BuildingType,Message.Lost,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/buildings/techstructures.html
+AR302,超级武器,SuperWeapon,Message.Ready,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/messages.html
+AR331,矿物与资源,General,Message.SilosNeeded,字面键名,csf label,https://ares-developers.github.io/Ares-docs/new/tiberium/storage.html
+AR285,阵营与国家,Side,MessageTextColor,字面键名,Color scheme,https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR352,弹头与伤害,Warhead,MindControl.Permanent,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/mindcontrol.html
+AR178,建筑与基地,PrismForwarding.SupportWeapon,MinimumRange,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR212,单位与通用玩法,AircraftType,Missile.Acceleration,字面键名,float,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.Altitude,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.BodyLength,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.Custom,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.EliteDamage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.EliteWarhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.EliteWeapon,字面键名,Weapon,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.LazyCurve,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.PauseFrames,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.PitchFinal,字面键名,float,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.PitchInitial,字面键名,float,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.RaiseRate,字面键名,float,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.TakeOffAnim,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.TiltFrames,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.TrailerAnim,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.TrailerSeparation,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.TurnRate,字面键名,float,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR212,单位与通用玩法,AircraftType,Missile.Weapon,字面键名,Weapon,https://ares-developers.github.io/Ares-docs/new/custommissiles.html
+AR295,超级武器,SuperWeapon,Money.Amount,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/superweapons/cost.html
+AR295,超级武器,SuperWeapon,Money.DrainAmount,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/superweapons/cost.html
+AR295,超级武器,SuperWeapon,Money.DrainDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/cost.html
+AR397,界面与诊断,UISettings,MoviesAndCreditsButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR282,阵营与国家,Side,MultiplayerScore.Background,字面键名,"filename, *including* the .shp extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,MultiplayerScore.Bars,字面键名,"filename, *including* the .pcx extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,MultiplayerScore.LoseTheme,字面键名,theme id,https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,MultiplayerScore.Palette,字面键名,"filename, *including* the .pal extension",https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR282,阵营与国家,Side,MultiplayerScore.WinTheme,字面键名,theme id,https://ares-developers.github.io/Ares-docs/new/sidescountries/scorescreens.html
+AR311,超级武器,SuperWeapon,Mutate.Explosion,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR311,超级武器,SuperWeapon,Mutate.IgnoreCyborg,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR311,超级武器,SuperWeapon,Mutate.IgnoreNotHuman,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR311,超级武器,SuperWeapon,Mutate.KillNatural,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR252,单位与通用玩法,MouseCursors,Name,字面键名,cursor definition,https://ares-developers.github.io/Ares-docs/new/mousecursors.html
+AR398,界面与诊断,VersionInfo,Name,字面键名,string,https://ares-developers.github.io/Ares-docs/ui-features/modinfo.html
+AR397,界面与诊断,UISettings,NetworkButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR255,单位与通用玩法,TechnoType,NoAmmoAmount,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/noammoweapon.html
+AR255,单位与通用玩法,TechnoType,NoAmmoWeapon,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/noammoweapon.html
+AR296,超级武器,SuperWeapon,NoCursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/cursors.html
+AR308,超级武器,SuperWeapon,NoCursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR317,超级武器,SuperWeapon,NoCursor,字面键名,mouse cursor,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR242,单位与通用玩法,TechnoType,NoManualEnter,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/manual.html
+AR242,单位与通用玩法,TechnoType,NoManualFire,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/manual.html
+AR242,单位与通用玩法,TechnoType,NoManualUnload,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/manual.html
+AR242,单位与通用玩法,InfantryType,NoSelfGuardArea,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/manual.html
+AR315,超级武器,SuperWeapon,Nuke.Payload,字面键名,Weapon,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR315,超级武器,SuperWeapon,Nuke.PsiWarning,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR315,超级武器,SuperWeapon,Nuke.SiloLaunch,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR315,超级武器,SuperWeapon,Nuke.TakeOff,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR353,弹头与伤害,Warhead,NukeFlash.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/warheads/nukeflash.html
+AR256,单位与通用玩法,TechnoType,OmniCrusher.Aggressive,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/omnicrusher.html
+AR257,单位与通用玩法,TechnoType,Operator,字面键名,list of TechnoTypes or “_ANY_”,https://ares-developers.github.io/Ares-docs/new/operator.html
+AR325,矿物与资源,General,OverlayExplodeThreshold,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/tiberium/chainreactions.html
+AR178,建筑与基地,BuildingType,Overpowerable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR258,单位与通用玩法,ParticleType,Palette,字面键名,filename with .pal extension,https://ares-developers.github.io/Ares-docs/new/particles.html
+AR279,阵营与国家,Country,Parachute.Anim,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultcountry.html
+AR280,阵营与国家,Side,Parachute.Anim,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR210,单位与通用玩法,TechnoType,Parachute.Anim,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/customizableparachuteanimations.html
+AR316,超级武器,Country,ParaDrop.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Side,ParaDrop.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR279,阵营与国家,Country,ParaDrop.Aircraft,字面键名,AircraftType,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultcountry.html
+AR280,阵营与国家,Side,ParaDrop.Aircraft,字面键名,AircraftType,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR316,超级武器,SuperWeapon,ParaDrop.Aircraft,字面键名,AircraftType,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Aircraft,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,SuperWeapon,ParaDrop.Count,字面键名,integer - number of planes,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Count,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Country.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Country.PlaneX.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.ID.PlaneX.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Nod.Aircraft,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR279,阵营与国家,Country,ParaDrop.Num,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultcountry.html
+AR280,阵营与国家,Side,ParaDrop.Num,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR316,超级武器,SuperWeapon,ParaDrop.Num,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Num,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.PlaneX.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Russia.Plane3.Types,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Side.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Side.PlaneX.*,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR279,阵营与国家,Country,ParaDrop.Types,字面键名,list of InfantryTypes and/or VehicleTypes,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultcountry.html
+AR280,阵营与国家,Side,ParaDrop.Types,字面键名,list of InfantryTypes and/or VehicleTypes,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR316,超级武器,SuperWeapon,ParaDrop.Types,字面键名,list of InfantryTypes and/or VehicleTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR316,超级武器,Superweapon,ParaDrop.Types,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR188,建筑与基地,TunnelType,Passengers,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/tunnels.html
+AR259,单位与通用玩法,TechnoType,Passengers.Allowed,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/passengers.html
+AR259,单位与通用玩法,UnitType,Passengers.BySize,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/passengers.html
+AR259,单位与通用玩法,TechnoType,Passengers.Disallowed,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/passengers.html
+AR193,单位与通用玩法,TechnoType,PassengerTurret,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/chronoprisons.html
+AR261,单位与通用玩法,TechnoType,Pip,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/pips.html
+AR195,单位与通用玩法,CombatDamage,PlayerAutoRepel,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/civilianenemies.html
+AR397,界面与诊断,UISettings,PlayMoviesButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR262,单位与通用玩法,GenericPrerequisites,POWER,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR254,单位与通用玩法,UnitType,PoweredBy,字面键名,list of BuildingType,https://ares-developers.github.io/Ares-docs/new/newpoweredunitlogic.html
+AR354,弹头与伤害,Warhead,PreImpactAnim,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/warheads/preimpactanim.html
+AR354,弹头与伤害,Warhead,PreImpactAnim.Moves,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/preimpactanim.html
+AR262,单位与通用玩法,TechnoType,Prerequisite.List#,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,TechnoType,Prerequisite.Lists,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,TechnoType,Prerequisite.Negative,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,TechnoType,Prerequisite.RequiredTheaters,字面键名,list of theater names,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR184,建筑与基地,TechnoType,Prerequisite.StolenTechs,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR262,单位与通用玩法,TechnoType,Prerequisite.StolenTechs,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,General,PrerequisitePower,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,General,PrerequisiteProcAlternate,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,General,PrerequisiteX,模板或通配,见原文,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR262,单位与通用玩法,General,PrerequisiteXAlternate,模板或通配,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR346,弹头与伤害,Warhead,PreventScatter,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/general.html
+AR178,建筑与基地,BuildingType,PrismForwarding,字面键名,enumeration - yes|no|forward|attack,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.BreakSupport,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.ChargeDelay,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.DamageAdd,字面键名,integer - damage bonus,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.EliteSupportWeapon,字面键名,weapon,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.Intensity,字面键名,integer - laser thickness,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,ATESLA,PrismForwarding.MaxChainLength,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.MaxChainLength,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.MaxFeeds,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.MaxNetworkSize,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR036,原版缺陷修复,ATESLA,PrismForwarding.SupportModifier,字面键名,见原文,https://ares-developers.github.io/Ares-docs/bugfixes/type1/prismsupportbugs.html
+AR178,建筑与基地,BuildingType,PrismForwarding.SupportModifier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.SupportWeapon,字面键名,weapon,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.Targets,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR178,建筑与基地,BuildingType,PrismForwarding.ToAllies,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR262,单位与通用玩法,GenericPrerequisites,PROC,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/prerequisites.html
+AR179,建筑与基地,BuildingType,ProduceCashDisplay,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/producecash.html
+AR367,武器,Weapon,ProjectileRange,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/weapons/projectilerange.html
+AR335,单位与通用玩法,TechnoType,Promote.EliteExperience,字面键名,double,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR269,单位与通用玩法,TechnoType,Promote.EliteFlash,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR269,单位与通用玩法,TechnoType,Promote.EliteSound,字面键名,sound,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR335,单位与通用玩法,TechnoType,Promote.EliteType,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR269,单位与通用玩法,TechnoType,Promote.IncludePassengers,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR335,单位与通用玩法,TechnoType,Promote.VeteranExperience,字面键名,double,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR269,单位与通用玩法,TechnoType,Promote.VeteranFlash,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR269,单位与通用玩法,TechnoType,Promote.VeteranSound,字面键名,sound,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR335,单位与通用玩法,TechnoType,Promote.VeteranType,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/typeconversion.html
+AR317,超级武器,SuperWeapon,Protect.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR317,超级武器,SuperWeapon,Protect.PlayFadeSoundTime,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR317,超级武器,SuperWeapon,Protect.PowerOutage,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR239,单位与通用玩法,TechnoType,ProtectedDriver,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR239,单位与通用玩法,TechnoType,ProtectedDriver.MinHealth,字面键名,double - percentage,https://ares-developers.github.io/Ares-docs/new/killingdrivers.html
+AR390,界面与诊断,UISettings,QuickExit,字面键名,boolean,https://ares-developers.github.io/Ares-docs/ui-features/exit.html
+AR270,单位与通用玩法,TechnoType,RadarJamRadius,字面键名,integer - radius in cells,https://ares-developers.github.io/Ares-docs/new/radarjammers.html
+AR271,单位与通用玩法,TechnoType,RadialIndicatorRadius,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/radialindicators.html
+AR204,单位与通用玩法,CrateRules,RandomCrateMoney,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/crates.html
+AR284,阵营与国家,Country,RandomSelectionWeight,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/sidescountries/uicountry.html
+AR178,建筑与基地,PrismForwarding.SupportWeapon,Range,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR267,抛射体,Projectile,Ranged,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/projectiles/ranged.html
+AR331,矿物与资源,BuildingType,Refinery.UseStorage,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/storage.html
+AR355,弹头与伤害,Warhead,RelativeDamage,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/relativedamage.html
+AR355,弹头与伤害,Warhead,RelativeDamage.Aircraft,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/relativedamage.html
+AR355,弹头与伤害,Warhead,RelativeDamage.Buildings,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/relativedamage.html
+AR355,弹头与伤害,Warhead,RelativeDamage.Infantry,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/relativedamage.html
+AR355,弹头与伤害,Warhead,RelativeDamage.Terrain,字面键名,integer - percent,https://ares-developers.github.io/Ares-docs/new/warheads/relativedamage.html
+AR355,弹头与伤害,Warhead,RelativeDamage.Vehicles,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/warheads/relativedamage.html
+AR272,单位与通用玩法,TechnoType,ReloadAmount,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/reload.html
+AR154,单位与通用玩法,AircraftType,ReloadRate,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/aircraftreload.html
+AR181,建筑与基地,General,RepairStopOnInsufficientFunds,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/repair.html
+AR178,建筑与基地,PrismForwarding.SupportWeapon,Report,字面键名,sound,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR268,抛射体,Projectile,RetargetAccuracy,字面键名,float - percentage,https://ares-developers.github.io/Ares-docs/new/projectiles/splits.html
+AR268,抛射体,Projectile,RetargetSelf,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/projectiles/splits.html
+AR185,建筑与基地,BuildingType,Returnable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/techstructures.html
+AR185,建筑与基地,General,ReturnStructures,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/techstructures.html
+AR273,单位与通用玩法,InfantryOrVehicle,ReversedAs,字面键名,TechnoType,https://ares-developers.github.io/Ares-docs/new/reverseengineerlogic.html
+AR273,单位与通用玩法,BuildingType,ReverseEngineersVictims,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/reverseengineerlogic.html
+AR178,建筑与基地,PrismForwarding.SupportWeapon,ROF,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/buildings/prismforwarding.html
+AR189,建筑与基地,BuildingType,Rubble.Destroyed,字面键名,BuildingType,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Destroyed.Anim,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Destroyed.Owner,字面键名,enumeration default|civilian|special|neutral,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Destroyed.Remove,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Destroyed.Strength,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Intact,字面键名,BuildingType,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Intact.Anim,字面键名,AnimationType,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Intact.Owner,字面键名,enumeration default|civilian|special|neutral,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Intact.Remove,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,Rubble.Intact.Strength,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR274,单位与通用玩法,InfantryType,Saboteur,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/saboteur.html
+AR275,单位与通用玩法,Animation,Scorch,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/scorchflamer.html
+AR182,建筑与基地,Boon,SecretLab.ForbiddenHouses,字面键名,list of countries,https://ares-developers.github.io/Ares-docs/new/buildings/secretlabs.html
+AR182,建筑与基地,Building,SecretLab.GenerateOnCapture,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/secretlabs.html
+AR182,建筑与基地,Building,SecretLab.PossibleBoons,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/buildings/secretlabs.html
+AR182,建筑与基地,Boon,SecretLab.RequiredHouses,字面键名,list of countries,https://ares-developers.github.io/Ares-docs/new/buildings/secretlabs.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.Amount,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.CombatDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.EliteAmount,字面键名,integer - hitpoints,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.EliteMax,字面键名,double - percentage,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.Max,字面键名,double - percentage,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.Rate,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.RookieAmount,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.RookieMax,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.VeteranAmount,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR277,单位与通用玩法,TechnoType,SelfHealing.VeteranMax,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/selfheal.html
+AR167,建筑与基地,BuildingType,SellTime,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/buildings/builduptime.html
+AR202,隐形与探测,TechnoType,SensorArray.Warn,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/cloak/sensorarray.html
+AR385,界面与诊断,UISettings,ShowDebugCampaigns,字面键名,boolean,https://ares-developers.github.io/Ares-docs/ui-features/campaignlist.html
+AR385,界面与诊断,UISettings,ShowSummary,字面键名,boolean,https://ares-developers.github.io/Ares-docs/ui-features/campaignlist.html
+AR285,阵营与国家,Side,Sidebar.MixFileIndex,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR285,阵营与国家,Side,Sidebar.YuriFileNames,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR208,单位与通用玩法,SuperWeapon,SidebarPalette,字面键名,"filename, *including* the .pal extension",https://ares-developers.github.io/Ares-docs/new/customcameopalettes.html
+AR260,单位与通用玩法,SuperWeapon,SidebarPCX,字面键名,"filename, *including* the .pcx extension",https://ares-developers.github.io/Ares-docs/new/pcxcameos.html
+AR397,界面与诊断,UISettings,SinglePlayerButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR394,界面与诊断,Preview,Size,字面键名,见原文,https://ares-developers.github.io/Ares-docs/ui-features/keyboardcommandshotkeys.html
+AR397,界面与诊断,UISettings,SkirmishButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR166,建筑与基地,TechnoType,SlamSound,字面键名,sound entry,https://ares-developers.github.io/Ares-docs/new/buildings/buildingslam.html
+AR389,界面与诊断,Colors,SlotX.ColorScheme,模板或通配,Color scheme,https://ares-developers.github.io/Ares-docs/ui-features/customizabledropdowncolors.html
+AR389,界面与诊断,Colors,SlotX.DisplayColor,模板或通配,"R,G,B",https://ares-developers.github.io/Ares-docs/ui-features/customizabledropdowncolors.html
+AR389,界面与诊断,Colors,SlotX.Tooltip,模板或通配,CSF label,https://ares-developers.github.io/Ares-docs/ui-features/customizabledropdowncolors.html
+AR155,单位与通用玩法,AircraftType,Smoke.Anim,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/aircraftsmoke.html
+AR155,单位与通用玩法,AircraftType,Smoke.ChanceDead,字面键名,integer - percent,https://ares-developers.github.io/Ares-docs/new/aircraftsmoke.html
+AR155,单位与通用玩法,AircraftType,Smoke.ChanceRed,字面键名,integer - percent,https://ares-developers.github.io/Ares-docs/new/aircraftsmoke.html
+AR397,界面与诊断,UISettings,SneakPeeksButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR183,建筑与基地,BuildingType,SolidHeight,字面键名,integer - cells,https://ares-developers.github.io/Ares-docs/new/buildings/solidbuildings.html
+AR183,建筑与基地,BuildingType,SolidLevel,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/solidbuildings.html
+AR183,建筑与基地,Projectile,SolidLevel,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/solidbuildings.html
+AR356,弹头与伤害,Warhead,Sonar.Duration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/warheads/sonar.html
+AR320,超级武器,SuperWeapon,SonarPulse.Delay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/sonarpulse.html
+AR288,单位与通用玩法,AnimType,SpawnsParticle.RangeMaximum,字面键名,double - cells,https://ares-developers.github.io/Ares-docs/new/spawnsparticle.html
+AR288,单位与通用玩法,AnimType,SpawnsParticle.RangeMinimum,字面键名,double - cells,https://ares-developers.github.io/Ares-docs/new/spawnsparticle.html
+AR268,抛射体,Projectile,Splits,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/projectiles/splits.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,Spotlight.AttachedTo,字面键名,enumeration - one of body|turret,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,Spotlight.DisableBlue,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,Spotlight.DisableColor,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,Spotlight.DisableGreen,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,Spotlight.DisableRed,字面键名,boolean,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,Spotlight.Distance,字面键名,integer - leptons,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR381,恢复的泰伯利亚之日机制,TechnoType,Spotlight.StartHeight,字面键名,integer - leptons,https://ares-developers.github.io/Ares-docs/restored/spotlights.html
+AR184,建筑与基地,BuildingType,SpyEffect.AircraftVeterancy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.BuildingVeterancy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.Custom,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.InfantryVeterancy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.KeepRadar,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.NavalVeterancy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.PowerOutageDuration,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.ResetRadar,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.ResetSuperweapons,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.RevealProduction,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.RevealRadar,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.SabotageDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.StolenMoneyAmount,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.StolenMoneyPercentage,字面键名,float - percentage,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.StolenTechIndex,字面键名,list of integers,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.SuperWeapon,字面键名,SuperWeaponType,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.SuperWeaponPermanent,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.UndoReverseEngineer,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR184,建筑与基地,BuildingType,SpyEffect.VehicleVeterancy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/spyeffects.html
+AR321,超级武器,SuperWeapon,SpyPlane.Count,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/spyplane.html
+AR321,超级武器,SuperWeapon,SpyPlane.Mission,字面键名,mission,https://ares-developers.github.io/Ares-docs/new/superweapons/types/spyplane.html
+AR321,超级武器,SuperWeapon,SpyPlane.Type,字面键名,AircraftType,https://ares-developers.github.io/Ares-docs/new/superweapons/types/spyplane.html
+AR283,阵营与国家,Country,StartInMultiplayer.Types,字面键名,list of InfantryTypes and/or VehicleTypes,https://ares-developers.github.io/Ares-docs/new/sidescountries/startinmultiplayer.html
+AR283,阵营与国家,Country,StartInMultiplayer.WithConst,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/sidescountries/startinmultiplayer.html
+AR283,阵营与国家,General,StartInMultiplayerUnitCost,字面键名,integer - credits,https://ares-developers.github.io/Ares-docs/new/sidescountries/startinmultiplayer.html
+AR289,单位与通用玩法,AudioVisual,StealthSpeakDelay,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/speakdelays.html
+AR245,资源与配置加载,E1,Strength,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/misc/include.html
+AR401,界面与诊断,Urban,Structures,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/ui-features/randommapgenerator.html
+AR183,建筑与基地,Projectile,SubjectToBuildings,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/solidbuildings.html
+AR189,建筑与基地,Projectile,SubjectToTrenches,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR289,单位与通用玩法,AudioVisual,SubterraneanSpeakDelay,字面键名,double - minutes,https://ares-developers.github.io/Ares-docs/new/speakdelays.html
+AR385,界面与诊断,Battle,Summary,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/ui-features/campaignlist.html
+AR292,超级武器,BuildingType,SuperWeapons,字面键名,list of SuperWeaponTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/buildings.html
+AR323,单位与通用玩法,Unit,Survivor.ElitePassengerChance,字面键名,integer between 0 and 100,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,Unit,Survivor.ElitePilotChance,字面键名,integer between 0 and 100,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,Unit,Survivor.Pilots,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,Unit,Survivor.RookiePassengerChance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,Unit,Survivor.RookiePilotChance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,TechnoType,Survivor.Side#,模板或通配,"where # is the zero-based index of the side – e.g. 0 for Allied, 1 for Soviet, 2 for Yuri",https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,Unit,Survivor.VeteranPassengerChance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR323,单位与通用玩法,Unit,Survivor.VeteranPilotChance,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/survivors.html
+AR280,阵营与国家,Side,SurvivorDivisor,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR290,超级武器,SuperWeapon,SW.ActivationSound,字面键名,sound,https://ares-developers.github.io/Ares-docs/new/superweapons/animsound.html
+AR314,超级武器,SuperWeapon,SW.ActivationSound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR315,超级武器,SuperWeapon,SW.ActivationSound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR318,超级武器,SuperWeapon,SW.ActivationSound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR322,超级武器,SuperWeapon,SW.ActivationSound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/superweapons/types/unitdelivery.html
+AR298,超级武器,SuperWeapon,SW.AffectsHouse,字面键名,enumeration none|owner|allies|team|enemies|all,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR306,超级武器,SuperWeapon,SW.AffectsHouse,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR311,超级武器,SuperWeapon,SW.AffectsHouse,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR312,超级武器,SuperWeapon,SW.AffectsHouse,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR317,超级武器,SuperWeapon,SW.AffectsHouse,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR318,超级武器,SuperWeapon,SW.AffectsHouse,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR320,超级武器,SuperWeapon,SW.AffectsHouse,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/sonarpulse.html
+AR298,超级武器,SuperWeapon,SW.AffectsTarget,字面键名,enumeration none|land|water|empty|infantry|units|buildings,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR306,超级武器,SuperWeapon,SW.AffectsTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR311,超级武器,SuperWeapon,SW.AffectsTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR312,超级武器,SuperWeapon,SW.AffectsTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR317,超级武器,SuperWeapon,SW.AffectsTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR318,超级武器,SuperWeapon,SW.AffectsTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR320,超级武器,SuperWeapon,SW.AffectsTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/sonarpulse.html
+AR304,超级武器,SuperWeapon,SW.AIRequiresHouse,字面键名,enumeration owner|allies|team|enemies|others|all,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR304,超级武器,SuperWeapon,SW.AIRequiresTarget,字面键名,enumeration none|land|water|empty|infantry|units|buildings|all,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR320,超级武器,SuperWeapon,SW.AIRequiresTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/sonarpulse.html
+AR304,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration SW Targeting Type,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR305,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/battery.html
+AR306,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR307,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/droppod.html
+AR308,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR310,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/genericwarhead.html
+AR311,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR312,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR314,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR315,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR316,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/paradrop.html
+AR317,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR318,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR319,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicreveal.html
+AR320,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/sonarpulse.html
+AR321,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/spyplane.html
+AR322,超级武器,SuperWeapon,SW.AITargeting,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/unitdelivery.html
+AR304,超级武器,SuperWeapon,SW.AITargeting.Constraints,字面键名,enumeration SW Targeting Constraints,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR304,超级武器,SuperWeapon,SW.AITargeting.Preference,字面键名,enumeration SW Targeting Preference,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR291,超级武器,SuperWeapon,SW.AllowAI,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR291,超级武器,SuperWeapon,SW.AllowPlayer,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR291,超级武器,SuperWeapon,SW.AlwaysGranted,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR290,超级武器,SuperWeapon,SW.Animation,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/superweapons/animsound.html
+AR306,超级武器,SuperWeapon,SW.Animation,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR311,超级武器,SuperWeapon,SW.Animation,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR317,超级武器,SuperWeapon,SW.Animation,字面键名,Animation,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR290,超级武器,SuperWeapon,SW.AnimationHeight,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/animsound.html
+AR306,超级武器,SuperWeapon,SW.AnimationHeight,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR311,超级武器,SuperWeapon,SW.AnimationHeight,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR317,超级武器,SuperWeapon,SW.AnimationHeight,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR290,超级武器,SuperWeapon,SW.AnimationVisibility,字面键名,enumeration none|owner|allies|team|enemies|all,https://ares-developers.github.io/Ares-docs/new/superweapons/animsound.html
+AR303,超级武器,SuperWeapon,SW.AnyDesignator,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR303,超级武器,SuperWeapon,SW.AnyInhibitor,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR304,超级武器,SuperWeapon,SW.AutoFire,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR291,超级武器,SuperWeapon,SW.AuxBuildings,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR294,超级武器,SuperWeapon,SW.ChargeToDrainRatio,字面键名,float multiplier,https://ares-developers.github.io/Ares-docs/new/superweapons/chargedrain.html
+AR298,超级武器,SuperWeapon,SW.CreateRadarEvent,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR310,超级武器,SuperWeapon,SW.Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/genericwarhead.html
+AR311,超级武器,SuperWeapon,SW.Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR314,超级武器,SuperWeapon,SW.Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR315,超级武器,SuperWeapon,SW.Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR318,超级武器,SuperWeapon,SW.Damage,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR298,超级武器,SuperWeapon,SW.Deferment,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR314,超级武器,SuperWeapon,SW.Deferment,字面键名,integer frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR318,超级武器,SuperWeapon,SW.Deferment,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR322,超级武器,SuperWeapon,SW.Deferment,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/superweapons/types/unitdelivery.html
+AR303,超级武器,SuperWeapon,SW.Designators,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR304,超级武器,SuperWeapon,SW.FireIntoShroud,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR291,超级武器,SuperWeapon,SW.ForbiddenHouses,字面键名,list of HouseTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR298,超级武器,SuperWeapon,SW.Group,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR303,超级武器,SuperWeapon,SW.Inhibitors,字面键名,list of TechnoTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR298,超级武器,SuperWeapon,SW.InitialReady,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR304,超级武器,SuperWeapon,SW.ManualFire,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR308,超级武器,SuperWeapon,SW.MaxCount,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR312,超级武器,SuperWeapon,SW.MaxCount,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR291,超级武器,SuperWeapon,SW.NegBuildings,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR299,超级武器,ChronoSphereSpecial,SW.PostDependent,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/hardcoded.html
+AR299,超级武器,SuperWeapon,SW.PostDependent,字面键名,SuperWeapon,https://ares-developers.github.io/Ares-docs/new/superweapons/hardcoded.html
+AR306,超级武器,SuperWeapon,SW.PostDependent,字面键名,super weapon,https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR298,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR306,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/types/chronosphere.html
+AR311,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR314,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR317,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR318,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR319,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicreveal.html
+AR320,超级武器,SuperWeapon,SW.Range,字面键名,"float,integer",https://ares-developers.github.io/Ares-docs/new/superweapons/types/sonarpulse.html
+AR303,超级武器,SuperWeapon,SW.RangeMaximum,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR308,超级武器,SuperWeapon,SW.RangeMaximum,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR303,超级武器,SuperWeapon,SW.RangeMinimum,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/superweapons/range.html
+AR308,超级武器,SuperWeapon,SW.RangeMinimum,字面键名,float - cell range,https://ares-developers.github.io/Ares-docs/new/superweapons/types/empulse.html
+AR291,超级武器,SuperWeapon,SW.RequiredHouses,字面键名,list of HouseTypes,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR304,超级武器,SuperWeapon,SW.RequiresHouse,字面键名,enumeration none|owner|allies|team|enemies|all,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR317,超级武器,SuperWeapon,SW.RequiresHouse,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR304,超级武器,SuperWeapon,SW.RequiresTarget,字面键名,enumeration none|land|water|empty|infantry|units|buildings,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR317,超级武器,SuperWeapon,SW.RequiresTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/protect.html
+AR320,超级武器,SuperWeapon,SW.RequiresTarget,字面键名,enumeration,https://ares-developers.github.io/Ares-docs/new/superweapons/types/sonarpulse.html
+AR291,超级武器,SuperWeapon,SW.Shots,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/superweapons/availability.html
+AR298,超级武器,SuperWeapon,SW.ShowCameo,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR290,超级武器,SuperWeapon,SW.Sound,字面键名,sound,https://ares-developers.github.io/Ares-docs/new/superweapons/animsound.html
+AR311,超级武器,SuperWeapon,SW.Sound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR319,超级武器,SuperWeapon,SW.Sound,字面键名,Sound,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicreveal.html
+AR298,超级武器,SuperWeapon,SW.TimerVisibility,字面键名,enumeration none|owner|allies|team|enemies|all,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR294,超级武器,SuperWeapon,SW.Unstoppable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/chargedrain.html
+AR304,超级武器,SuperWeapon,SW.UseAITargeting,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/targeting.html
+AR298,超级武器,SuperWeapon,SW.VirtualCharge,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/superweapons/general.html
+AR310,超级武器,SuperWeapon,SW.Warhead,字面键名,warhead,https://ares-developers.github.io/Ares-docs/new/superweapons/types/genericwarhead.html
+AR311,超级武器,SuperWeapon,SW.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/superweapons/types/geneticconverter.html
+AR314,超级武器,SuperWeapon,SW.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/superweapons/types/lightningstorm.html
+AR315,超级武器,SuperWeapon,SW.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/superweapons/types/multimissile.html
+AR318,超级武器,SuperWeapon,SW.Warhead,字面键名,Warhead,https://ares-developers.github.io/Ares-docs/new/superweapons/types/psychicdominator.html
+AR324,单位与通用玩法,General,TeamRetaliate,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/teamretaliate.html
+AR280,阵营与国家,Side,Technician,字面键名,InfantryType,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultside.html
+AR357,弹头与伤害,Warhead,Temporal.HealthFactor,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/warheads/temporal.html
+AR357,弹头与伤害,Warhead,Temporal.WarpAway,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/warheads/temporal.html
+AR293,超级武器,SuperWeapon,Text.Active,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/cameooverlay.html
+AR293,超级武器,SuperWeapon,Text.Charging,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/cameooverlay.html
+AR293,超级武器,SuperWeapon,Text.Hold,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/cameooverlay.html
+AR293,超级武器,SuperWeapon,Text.Preparing,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/cameooverlay.html
+AR293,超级武器,SuperWeapon,Text.Ready,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/cameooverlay.html
+AR312,超级武器,SuperWeapon,Text.Ready,字面键名,CSF label,https://ares-developers.github.io/Ares-docs/new/superweapons/types/hunterseeker.html
+AR326,矿物与资源,General,TiberiumDamageEnabled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/damage.html
+AR326,矿物与资源,Basic,TiberiumDeathToVisceroid,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/tiberium/damage.html
+AR327,矿物与资源,CombatDamage,TiberiumExplosive,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/explosive.html
+AR327,矿物与资源,CombatDamage,TiberiumExplosiveAnim,字面键名,animation,https://ares-developers.github.io/Ares-docs/new/tiberium/explosive.html
+AR327,矿物与资源,CombatDamage,TiberiumExplosiveWarhead,字面键名,warhead,https://ares-developers.github.io/Ares-docs/new/tiberium/explosive.html
+AR328,矿物与资源,General,TiberiumHeal,字面键名,float - minutes,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR328,矿物与资源,TechnoType,TiberiumHeal,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR328,矿物与资源,General,TiberiumHealEnabled,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR326,矿物与资源,TechnoType,TiberiumProof,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/damage.html
+AR328,矿物与资源,TechnoType,TiberiumRemains,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/heal.html
+AR330,矿物与资源,TechnoType,TiberiumSpill,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/tiberium/spill.html
+AR326,矿物与资源,General,TiberiumTransmogrify,字面键名,integer - percent,https://ares-developers.github.io/Ares-docs/new/tiberium/damage.html
+AR326,矿物与资源,TechnoType,TiberiumTransmogrify,字面键名,integer - percent,https://ares-developers.github.io/Ares-docs/new/tiberium/damage.html
+AR186,建筑与基地,IQ,TogglePower,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/buildings/togglepower.html
+AR186,建筑与基地,General,TogglePowerAllowed,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/buildings/togglepower.html
+AR186,建筑与基地,General,TogglePowerDelay,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/buildings/togglepower.html
+AR285,阵营与国家,Side,ToolTipColor,字面键名,"R,G,B",https://ares-developers.github.io/Ares-docs/new/sidescountries/uiside.html
+AR188,建筑与基地,BuildingType,Tunnel,字面键名,TunnelType,https://ares-developers.github.io/Ares-docs/new/buildings/tunnels.html
+AR334,单位与通用玩法,TechnoType,TurretROT,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/turretrot.html
+AR336,单位与通用玩法,General,TypeSelectUseDeploy,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/typeselect.html
+AR189,建筑与基地,BuildingType,UC.DamageMultiplier,字面键名,float - multiplier,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,UC.FatalRate,字面键名,float - chance,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR189,建筑与基地,BuildingType,UC.PassThrough,字面键名,float - chance,https://ares-developers.github.io/Ares-docs/new/buildings/urbancombattrenches.html
+AR358,弹头与伤害,Warhead,UnitLost.Suppress,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/warheads/unitlost.html
+AR278,单位与通用玩法,BuildingType,UnitSell,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/sellunit.html
+AR278,单位与通用玩法,General,UnitsUnsellable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/sellunit.html
+AR253,单位与通用玩法,MovieFilename,Unlockable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/movies.html
+AR278,单位与通用玩法,TechnoType,Unsellable,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/sellunit.html
+AR309,超级武器,SuperWeapon,UseChargeDrain,字面键名,见原文,https://ares-developers.github.io/Ares-docs/new/superweapons/types/firestorm.html
+AR401,界面与诊断,Urban,Vehicles,字面键名,list of VehicleTypes,https://ares-developers.github.io/Ares-docs/ui-features/randommapgenerator.html
+AR233,单位与通用玩法,TechnoType,VehicleThief.Allowed,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/hijackers.html
+AR233,单位与通用玩法,InfantryType,VehicleThief.BreakMindControl,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/hijackers.html
+AR233,单位与通用玩法,InfantryType,VehicleThief.EnterSound,字面键名,Sound name,https://ares-developers.github.io/Ares-docs/new/hijackers.html
+AR233,单位与通用玩法,InfantryType,VehicleThief.KillPilots,字面键名,integer,https://ares-developers.github.io/Ares-docs/new/hijackers.html
+AR233,单位与通用玩法,InfantryType,VehicleThief.LeaveSound,字面键名,Sound name,https://ares-developers.github.io/Ares-docs/new/hijackers.html
+AR233,单位与通用玩法,InfantryType,VehicleThief.OneTime,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/hijackers.html
+AR398,界面与诊断,VersionInfo,Version,字面键名,string,https://ares-developers.github.io/Ares-docs/ui-features/modinfo.html
+AR153,单位与通用玩法,Warhead,Versus.clingfilm.PassiveAcquire,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/additionalarmortypesandverses.html
+AR153,单位与通用玩法,Warhead,Versus.magic,字面键名,float - modifier,https://ares-developers.github.io/Ares-docs/new/additionalarmortypesandverses.html
+AR153,单位与通用玩法,Warhead,Versus.magic.ForceFire,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/additionalarmortypesandverses.html
+AR153,单位与通用玩法,Warhead,Versus.steel.Retaliate,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/additionalarmortypesandverses.html
+AR279,阵营与国家,Country,VeteranBuildings,字面键名,list of BuildingTypes,https://ares-developers.github.io/Ares-docs/new/sidescountries/defaultcountry.html
+AR269,单位与通用玩法,AudioVisual,VeteranFlashTimer,字面键名,integer - frames,https://ares-developers.github.io/Ares-docs/new/promotion.html
+AR397,界面与诊断,UISettings,ViewCreditsButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
+AR157,单位与通用玩法,TechnoType,VoiceAirstrikeAbort,字面键名,soundmd entry,https://ares-developers.github.io/Ares-docs/new/airstrike.html
+AR157,单位与通用玩法,TechnoType,VoiceAirstrikeAttack,字面键名,soundmd entry,https://ares-developers.github.io/Ares-docs/new/airstrike.html
+AR343,弹头与伤害,Warhead,VoiceDie.Override,字面键名,soundmd entry,https://ares-developers.github.io/Ares-docs/new/warheads/diesound.html
+AR230,单位与通用玩法,VehicleType,VoiceIFVRepair,字面键名,soundmd entry,https://ares-developers.github.io/Ares-docs/new/gunner.html
+AR326,矿物与资源,Tiberium,Warhead,字面键名,warhead,https://ares-developers.github.io/Ares-docs/new/tiberium/damage.html
+AR370,武器,Weapon,Warhead,字面键名,WarheadType,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR374,恢复的泰伯利亚之日机制,VehicleType,WaterImage,字面键名,VehicleType,https://ares-developers.github.io/Ares-docs/restored/amphibiousimagechanges.html
+AR370,武器,Weapon,Wave.Color,字面键名,list of 3 integers,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.Intensity,字面键名,list of 3 integers,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.IsBigLaser,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.IsHouseColor,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.IsLaser,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.ReverseAgainstAircraft,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.ReverseAgainstBuildings,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.ReverseAgainstInfantry,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.ReverseAgainstOthers,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR370,武器,Weapon,Wave.ReverseAgainstVehicles,字面键名,boolean,https://ares-developers.github.io/Ares-docs/new/weapons/waves.html
+AR159,单位与通用玩法,Animation,Weapon,字面键名,weapon,https://ares-developers.github.io/Ares-docs/new/animations.html
+AR230,单位与通用玩法,TechnoType,WeaponTurretIndexX,模板或通配,integer - turret index,https://ares-developers.github.io/Ares-docs/new/gunner.html
+AR230,单位与通用玩法,TechnoType,WeaponUINameX,模板或通配,CSF label,https://ares-developers.github.io/Ares-docs/new/gunner.html
+AR397,界面与诊断,UISettings,WWOnlineButton,字面键名,action,https://ares-developers.github.io/Ares-docs/ui-features/menubuttoncustomization.html
