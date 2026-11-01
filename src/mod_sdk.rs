@@ -52,7 +52,7 @@ impl Clone for Program {
 
 impl Program {
     pub fn load(bytes: Vec<u8>, expected: &str, passes: &[IniFile]) -> Result<Self, String> {
-        Self::load_with_types(bytes, expected, passes, &[], &[])
+        Self::load_with_types(bytes, expected, passes, &[], &[], &[])
     }
 
     pub fn load_with_types(
@@ -61,6 +61,7 @@ impl Program {
         passes: &[IniFile],
         object_types: &[String],
         warheads: &[String],
+        weapons: &[String],
     ) -> Result<Self, String> {
         let runtime = ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
         let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
@@ -113,6 +114,11 @@ impl Program {
                     &request,
                     Arc::new(NativeHost {
                         ini: Some(Arc::new(ini.clone())),
+                        weapons: if final_pass {
+                            weapons.to_vec()
+                        } else {
+                            Vec::new()
+                        },
                     }),
                 )
                 .map_err(|e| e.to_string())?;
@@ -135,6 +141,22 @@ impl Program {
     }
     pub fn manifest(&self) -> &api::ModuleManifest {
         &self.manifest
+    }
+
+    pub(crate) fn weapon_resource_policy(
+        &self,
+        name: &str,
+    ) -> Result<Option<api::WeaponResourcePolicy>, String> {
+        if !self.manifest.hooks.contains(&api::HookKind::WeaponResource) {
+            return Ok(None);
+        }
+        let plan = self.evaluate(
+            Context::WeaponResource(api::WeaponResourceContext {
+                weapon_name: name.to_owned(),
+            }),
+            &[],
+        )?;
+        Ok(plan.weapon_resource)
     }
 
     fn executor(&self) -> Result<&Arc<Executor>, String> {
@@ -167,7 +189,10 @@ impl Program {
             .evaluate(
                 &executor.module,
                 &request,
-                Arc::new(NativeHost { ini: None }),
+                Arc::new(NativeHost {
+                    ini: None,
+                    weapons: Vec::new(),
+                }),
             )
             .map_err(|e| e.to_string())?;
         if plan.config.is_some() || !plan.operations.is_empty() {
@@ -235,11 +260,12 @@ pub(crate) fn load_from_assets(
     passes: &[IniFile],
     object_types: &[String],
     warheads: &[String],
+    weapons: &[String],
 ) -> Result<Option<Arc<Program>>, String> {
     let Some((digest, bytes)) = asset_program(assets)? else {
         return Ok(None);
     };
-    Program::load_with_types(bytes, &digest, passes, object_types, warheads)
+    Program::load_with_types(bytes, &digest, passes, object_types, warheads, weapons)
         .map(|p| Some(Arc::new(p)))
 }
 
@@ -254,19 +280,19 @@ pub fn adopt_saved_program(
     match (&sim.external_mod, asset_program(assets)?) {
         (None, None) => {
             rules.external_mod = None;
-            Ok(())
         }
         (Some(saved), Some((digest, _))) if saved.sha256() == digest => {
             saved.validate_restore()?;
             rules.external_mod = Some(Arc::new(saved.clone()));
-            Ok(())
         }
-        _ => Err("saved/current work disagree about external gameplay identity".into()),
+        _ => return Err("saved/current work disagree about external gameplay identity".into()),
     }
+    rules.bind_weapon_resource_policies()
 }
 
 struct NativeHost {
     ini: Option<Arc<IniFile>>,
+    weapons: Vec<String>,
 }
 
 impl HostServices for NativeHost {
@@ -300,6 +326,15 @@ impl HostServices for NativeHost {
                         .as_i64()
                         .and_then(|x| i32::try_from(x).ok())
                         .ok_or_else(bad)?
+                )
+            ),
+            "ares-int" => serde_json::json!(
+                section.read_ares_int(
+                    key,
+                    value
+                        .as_i64()
+                        .and_then(|x| i32::try_from(x).ok())
+                        .ok_or_else(bad)?,
                 )
             ),
             "bool" => serde_json::json!(section.read_bool(key, value.as_bool().ok_or_else(bad)?)),
@@ -376,6 +411,9 @@ impl HostServices for NativeHost {
     }
 
     fn registry(&self, name: &str) -> Vec<String> {
+        if name == "$weapons" {
+            return self.weapons.clone();
+        }
         self.ini
             .as_ref()
             .and_then(|ini| ini.section(name))
@@ -393,6 +431,16 @@ impl HostServices for NativeHost {
             input.no_damage,
             input.max_damage,
         ))
+    }
+}
+
+pub(crate) fn weapon_user(category: crate::map::entities::EntityCategory) -> u8 {
+    use crate::map::entities::EntityCategory;
+    match category {
+        EntityCategory::Unit => api::WEAPON_USER_UNIT,
+        EntityCategory::Infantry => api::WEAPON_USER_INFANTRY,
+        EntityCategory::Structure => api::WEAPON_USER_BUILDING,
+        EntityCategory::Aircraft => api::WEAPON_USER_AIRCRAFT,
     }
 }
 

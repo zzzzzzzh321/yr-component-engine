@@ -3,6 +3,8 @@
 //! Moved from VERA20K's Rust `sim/shield.rs` and `rules/phobos_shields.rs`.
 //! Native references remain beside their corresponding behavior. No Ares or
 //! Phobos C++ source or proprietary assets are incorporated.
+#[cfg(feature = "ares-ammo")]
+mod ammo;
 mod config;
 mod host;
 mod logic;
@@ -25,6 +27,8 @@ struct Configuration {
     objects: BTreeMap<String, String>,
     warheads: BTreeMap<String, ShieldWarheadRules>,
     overload: OverloadConfig,
+    #[cfg(feature = "ares-ammo")]
+    ammunition: ammo::Ammunition,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,23 +49,36 @@ impl Default for OverloadConfig {
 }
 
 pub fn manifest() -> ModuleManifest {
+    let mut hooks = vec![
+        HookKind::Configure,
+        HookKind::Attach,
+        HookKind::Damage,
+        HookKind::Tick,
+    ];
+    if cfg!(feature = "ares-ammo") {
+        hooks.push(HookKind::WeaponResource);
+    }
     ModuleManifest {
         api_version: API_VERSION,
-        id: if cfg!(feature = "overload") {
+        id: if cfg!(all(feature = "overload", feature = "ares-ammo")) {
+            "vera.overload-shield-ammo"
+        } else if cfg!(feature = "ares-ammo") {
+            "vera.compat-shield-ammo"
+        } else if cfg!(feature = "overload") {
             "vera.overload-shield"
         } else {
             "vera.compat-shield"
         }
         .into(),
-        version: "0.1.0".into(),
+        version: if cfg!(feature = "ares-ammo") {
+            "0.2.0"
+        } else {
+            "0.1.0"
+        }
+        .into(),
         state_version: 1,
-        config_version: 1,
-        hooks: vec![
-            HookKind::Configure,
-            HookKind::Attach,
-            HookKind::Damage,
-            HookKind::Tick,
-        ],
+        config_version: if cfg!(feature = "ares-ammo") { 2 } else { 1 },
+        hooks,
     }
 }
 
@@ -79,6 +96,8 @@ fn evaluate<H: Host>(request: &Request, host: &H) -> Result<Plan, String> {
     if let Context::Configure(context) = &request.context {
         let view = ConfigView::new(host);
         if context.final_pass {
+            #[cfg(feature = "ares-ammo")]
+            config.ammunition.configure(host, &view);
             config.globals = ShieldGlobals::from_ini(&view);
             config.objects.clear();
             for name in &context.object_types {
@@ -112,6 +131,19 @@ fn evaluate<H: Host>(request: &Request, host: &H) -> Result<Plan, String> {
         view.finish()?;
         let mut plan = Plan::unchanged(request);
         plan.config = Some(serde_json::to_vec(&config).map_err(|e| e.to_string())?);
+        return Ok(plan);
+    }
+    if let Context::WeaponResource(context) = &request.context {
+        let mut plan = Plan::unchanged(request);
+        #[cfg(feature = "ares-ammo")]
+        {
+            plan.weapon_resource = Some(config.ammunition.policy(&context.weapon_name));
+        }
+        #[cfg(not(feature = "ares-ammo"))]
+        {
+            let _ = context;
+            let _ = &mut plan;
+        }
         return Ok(plan);
     }
     logic::evaluate(request, &config, host)

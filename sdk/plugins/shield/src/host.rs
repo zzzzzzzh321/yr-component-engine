@@ -78,6 +78,10 @@ impl<H: Host> Section<'_, H> {
     pub fn read_int(&self, key: &str, current: i32) -> i32 {
         self.read(key, "int", current)
     }
+    #[cfg(feature = "ares-ammo")]
+    pub fn read_ares_int(&self, key: &str, current: i32) -> i32 {
+        self.read(key, "ares-int", current)
+    }
     pub fn read_bool(&self, key: &str, current: bool) -> bool {
         self.read(key, "bool", current)
     }

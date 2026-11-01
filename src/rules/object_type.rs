@@ -1829,6 +1829,9 @@ pub struct ObjectType {
     /// addresses live); RuleSet publishes the retained array. Resolution
     /// (elite tier, index) lives in `sim::combat::combat_weapon::weapon_for_index`.
     pub weapon_list: Vec<Option<String>>,
+    /// Derived from applicable external policies on this type's weapon slots.
+    /// Rebuilt with Rules; not a second configuration or saved instance state.
+    resource_reload: bool,
 
     /// The native elite weapon array (`TechnoTypeClass+0xA94`, stride `0x1C`).
     /// Same shape and same storage relationship: slot 0 is
@@ -3000,6 +3003,14 @@ impl ObjectType {
         self.weapon_list.get(index).and_then(|slot| slot.as_deref())
     }
 
+    pub(crate) fn resource_reload_enabled(&self) -> bool {
+        self.resource_reload
+    }
+
+    pub(crate) fn project_resource_reload(&mut self, enabled: bool) {
+        self.resource_reload = enabled;
+    }
+
     /// `EliteWeapon[index]` (`TechnoTypeClass+0xA94 + index*0x1C`).
     pub fn elite_weapon_at(&self, index: usize) -> Option<&str> {
         self.elite_weapon_list
@@ -3975,6 +3986,7 @@ impl ObjectType {
             // Constructor values: the ordered Rules processor owns the
             // per-pass weapon block and RuleSet publishes its arrays.
             weapon_list: vec![None; WEAPON_SLOT_COUNT],
+            resource_reload: false,
             elite_weapon_list: vec![None; WEAPON_SLOT_COUNT],
             weapon_count: 0,
             naval_targeting: section.read_int("NavalTargeting", 0),

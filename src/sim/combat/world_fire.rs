@@ -1952,11 +1952,26 @@ pub(super) fn emit_admitted_fire(
     }
     // FireAt6FF65A: shared DecreaseAmmo70D670 (+390) debits only signed>0.
     // Aircraft's override is RET41B900; release/dock retain their own writes.
+    let resource_policy = weapon.resource_policy(crate::mod_sdk::weapon_user(snap.category));
     if let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
         && entity.category() != EntityCategory::Aircraft
         && let Some(ammo) = entity.ammo_mut()
     {
-        ammo.decrease_by(weapon.ammo_cost());
+        ammo.decrease_by(resource_policy.map_or(1, |policy| policy.cost));
+    }
+    // Ares BuildingClass_Fire_Ammo100479F0..10047A3A uses the same native
+    // StartReloading6FB080 owner. The external policy selects this behavior;
+    // no weapon-specific key is interpreted by the engine.
+    if snap.category == EntityCategory::Structure
+        && resource_policy.is_some_and(|policy| policy.reload_after_use)
+        && let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
+        && let Some(live_type) = world.interner.object_type(entity.type_ref(), rules)
+        && live_type.ammo > 0
+        && entity
+            .ammo()
+            .is_some_and(|ammo| ammo.current() < live_type.ammo)
+    {
+        entity.start_reloading_ammo(live_type, binary_frame as i32);
     }
     // `0x006FF66C`, after DecreaseAmmo (`0x006FF656`): RevealOnFire.
     reveal_on_fire(
@@ -1980,9 +1995,8 @@ pub(super) fn emit_admitted_fire(
     // Concrete class FireAt suffixes follow the base tail, including
     // LimboLaunch. Infantry's Ares reload hook and Unit's firing counter /
     // Scalable work stay here for ordinary and direct mission FireAt callers.
-    #[cfg(feature = "ares")]
     if snap.category == EntityCategory::Infantry
-        && weapon.ammo_cost() > 0
+        && resource_policy.map_or(cfg!(feature = "ares"), |policy| policy.reload_after_use)
         && let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
         && !entity.lifecycle.in_limbo()
         && let Some(live_type) = world.interner.object_type(entity.type_ref(), rules)
@@ -2002,10 +2016,12 @@ pub(super) fn emit_admitted_fire(
         // type after the common tail, before the firing counter/scalable.
         if let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
             && let Some(live_type) = world.interner.object_type(entity.type_ref(), rules)
-            && if cfg!(feature = "ares") {
+            && if let Some(policy) = resource_policy {
+                policy.reload_after_use
+            } else if cfg!(feature = "ares") {
                 // Ares UnitClass_Fire_Ammo10047B30 replaces7413D3:
                 // positive Weapon Ammo invokes StartReloading directly.
-                weapon.ammo_cost() > 0
+                true
             } else {
                 live_type.ammo > 0
                     && entity

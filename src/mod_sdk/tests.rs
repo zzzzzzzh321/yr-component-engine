@@ -26,6 +26,7 @@ fn entity() -> api::EntityContext {
 #[test]
 fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     let host = NativeHost {
+        weapons: Vec::new(),
         ini: Some(Arc::new(IniFile::from_str(
             "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nRate=0.125\nName=none\n",
         ))),
@@ -52,6 +53,92 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     );
 }
 
+#[test]
+#[ignore = "requires the built ares-ammo component in VERA_SDK_AMMO_WASM"]
+fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
+    use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+    use crate::rules::ruleset::RuleSet;
+    let wasm =
+        std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
+            .unwrap();
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\n\
+         [PAIR]\nAmmo=$12\n[FREE]\nAmmo=0\n[pair]\nAmmo=99\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[PAIR]\nAmmo=invalid\n"),
+    );
+    let processed = layers.process().unwrap();
+    let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
+    let digest = crate::util::sha256::sha256_hex(&wasm);
+    let program = Program::load_with_types(
+        wasm,
+        &digest,
+        processed.sdk_passes(),
+        &["TANK".into()],
+        &[],
+        &rules.weapon_names(),
+    )
+    .unwrap();
+    // Only the plugin interprets Ammo; the engine has not bound a policy yet.
+    assert!(
+        rules
+            .weapon("PAIR")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_UNIT)
+            .is_none()
+    );
+    let saved = crate::util::save_codec::serialize(&program).unwrap();
+    rules.external_mod = Some(Arc::new(program));
+    rules.bind_weapon_resource_policies().unwrap();
+    assert_eq!(
+        rules
+            .weapon("PAIR")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_UNIT)
+            .unwrap()
+            .cost,
+        12
+    );
+    assert_eq!(
+        rules
+            .weapon("FREE")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_INFANTRY)
+            .unwrap()
+            .cost,
+        0
+    );
+    assert!(
+        rules
+            .weapon("PAIR")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_AIRCRAFT)
+            .is_none()
+    );
+    // New Rules contain a different current INI, but load must rebuild the
+    // read-only projection from the exact saved component configuration.
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[PAIR]\nAmmo=99\n"),
+    );
+    let mut loaded_rules = RuleSet::from_rules_layers(&layers).unwrap();
+    loaded_rules.external_mod = Some(Arc::new(
+        crate::util::save_codec::deserialize(&saved).unwrap(),
+    ));
+    loaded_rules.bind_weapon_resource_policies().unwrap();
+    assert_eq!(
+        loaded_rules
+            .weapon("PAIR")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_UNIT)
+            .unwrap()
+            .cost,
+        12
+    );
+}
+
 /// The actual built component + production native readers, not a second config
 /// parser. Build the SDK artifact and set VERA_SDK_COMPAT_WASM before running.
 #[test]
@@ -72,6 +159,7 @@ fn sdk_component_layers_and_preview_use_production_host_without_mutation() {
         &[root, map, final_ini],
         &["TANK".into()],
         &["WH".into()],
+        &[],
     )
     .unwrap();
     let attached = program
@@ -147,6 +235,7 @@ fn sdk_invalid_component_state_stops_real_receiver_and_frame_without_fallback() 
         &[ini.clone(), ini.clone()],
         &["TANK".into()],
         &["WH".into()],
+        &[],
     )
     .unwrap();
     let mut rules = crate::rules::ruleset::RuleSet::from_ini(&ini).unwrap();

@@ -4573,12 +4573,97 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
-    pub(crate) fn bind_external_mod(&mut self, assets: &crate::assets::asset_manager::AssetManager) -> Result<(), String> {
-        let object_types = self.object_list.iter().map(|object| object.id.clone()).collect::<Vec<_>>();
-        let mut warheads = self.warheads.values().map(|warhead| warhead.id.clone()).collect::<Vec<_>>();
+    pub(crate) fn bind_external_mod(
+        &mut self,
+        assets: &crate::assets::asset_manager::AssetManager,
+    ) -> Result<(), String> {
+        let object_types = self
+            .object_list
+            .iter()
+            .map(|object| object.id.clone())
+            .collect::<Vec<_>>();
+        let mut warheads = self
+            .warheads
+            .values()
+            .map(|warhead| warhead.id.clone())
+            .collect::<Vec<_>>();
         warheads.sort();
-        self.external_mod = crate::mod_sdk::load_from_assets(assets, &self.sdk_passes, &object_types, &warheads)?;
+        self.external_mod = crate::mod_sdk::load_from_assets(
+            assets,
+            &self.sdk_passes,
+            &object_types,
+            &warheads,
+            &self.weapon_names(),
+        )?;
+        self.bind_weapon_resource_policies()
+    }
+
+    pub(crate) fn weapon_names(&self) -> Vec<String> {
+        let mut names = self.weapons.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    pub(crate) fn bind_weapon_resource_policies(&mut self) -> Result<(), String> {
+        let names = self.weapon_names();
+        let policies = names
+            .into_iter()
+            .map(|name| {
+                let policy = self
+                    .external_mod
+                    .as_ref()
+                    .map(|program| program.weapon_resource_policy(&name))
+                    .transpose()?
+                    .flatten();
+                Ok((name, policy))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for (name, policy) in policies {
+            self.weapons
+                .get_mut(&name)
+                .expect("retained weapon")
+                .bind_resource_policy(policy);
+        }
+        self.project_weapon_resource_reload();
         Ok(())
+    }
+
+    fn project_weapon_resource_reload(&mut self) {
+        // Complete class coverage also admits unarmed/script-driven objects.
+        // Partial policies only opt in types actually binding an affected gun.
+        let complete_users = [
+            vera_mod_api::WEAPON_USER_UNIT,
+            vera_mod_api::WEAPON_USER_INFANTRY,
+            vera_mod_api::WEAPON_USER_BUILDING,
+        ]
+        .into_iter()
+        .filter(|user| {
+            !self.weapons.is_empty()
+                && self
+                    .weapons
+                    .values()
+                    .all(|weapon| weapon.resource_policy(*user).is_some())
+        })
+        .fold(0u8, |mask, user| mask | user);
+        for object in &mut self.object_list {
+            let user = match object.category {
+                ObjectCategory::Vehicle => vera_mod_api::WEAPON_USER_UNIT,
+                ObjectCategory::Infantry => vera_mod_api::WEAPON_USER_INFANTRY,
+                ObjectCategory::Building => vera_mod_api::WEAPON_USER_BUILDING,
+                ObjectCategory::Aircraft => vera_mod_api::WEAPON_USER_AIRCRAFT,
+            };
+            let enabled = complete_users & user != 0
+                || object
+                    .weapon_list
+                    .iter()
+                    .chain(&object.elite_weapon_list)
+                    .filter_map(|slot| slot.as_deref())
+                    .chain(object.occupy_weapon.as_deref())
+                    .chain(object.elite_occupy_weapon.as_deref())
+                    .filter_map(|name| Self::lookup_ci(&self.weapons, name))
+                    .any(|weapon| weapon.resource_policy(user).is_some());
+            object.project_resource_reload(enabled);
+        }
     }
 
     /// RulesExt+14A indexed by native House difficulty0/1/2 (hardest first).
@@ -6740,12 +6825,6 @@ impl RuleSet {
             b"ares-side-defaults-v1".hash(&mut hasher);
             b"ares-super-availability-v1".hash(&mut hasher);
             self.ares_super_weapon_metadata.hash(&mut hasher);
-            b"ares-weapon-ammo-v1".hash(&mut hasher);
-            self.weapons
-                .iter()
-                .map(|(id, weapon)| (id.to_ascii_uppercase(), weapon.ammo_cost()))
-                .collect::<BTreeMap<_, _>>()
-                .hash(&mut hasher);
             self.object_list
                 .iter()
                 .filter(|object| !object.additional_super_weapons().is_empty())
@@ -14514,6 +14593,54 @@ Projectile=Invisible
 #[cfg(test)]
 #[path = "map_lighting_tests.rs"]
 mod map_lighting_tests;
+
+#[cfg(test)]
+mod sdk_resource_projection_tests {
+    use super::*;
+
+    #[test]
+    fn sdk_partial_resource_policy_does_not_change_unrelated_reload() {
+        let mut rules = RuleSet::from_ini(&IniFile::from_str(
+            "[BuildingTypes]\n0=CUSTOM\n1=STOCK\n2=UNARMED\n[UNARMED]\nStrength=100\n[CUSTOM]\nPrimary=PAIR\n\
+             [STOCK]\nPrimary=ORDINARY\n[PAIR]\nDamage=1\n[ORDINARY]\nDamage=1\n",
+        ))
+        .unwrap();
+        rules
+            .weapons
+            .get_mut("PAIR")
+            .unwrap()
+            .bind_resource_policy(Some(vera_mod_api::WeaponResourcePolicy {
+                cost: 2,
+                reload_after_use: true,
+                users: vera_mod_api::WEAPON_USER_BUILDING,
+            }));
+        rules.project_weapon_resource_reload();
+        assert!(rules.object("CUSTOM").unwrap().resource_reload_enabled());
+        assert!(!rules.object("STOCK").unwrap().resource_reload_enabled());
+        assert!(!rules.object("UNARMED").unwrap().resource_reload_enabled());
+        rules
+            .weapons
+            .get_mut("ORDINARY")
+            .unwrap()
+            .bind_resource_policy(Some(vera_mod_api::WeaponResourcePolicy {
+                cost: 1,
+                reload_after_use: true,
+                users: vera_mod_api::WEAPON_USER_BUILDING,
+            }));
+        rules.project_weapon_resource_reload();
+        assert!(
+            rules.object("UNARMED").unwrap().resource_reload_enabled(),
+            "complete class coverage includes script-driven objects"
+        );
+        rules
+            .weapons
+            .get_mut("PAIR")
+            .unwrap()
+            .bind_resource_policy(None);
+        rules.project_weapon_resource_reload();
+        assert!(!rules.object("CUSTOM").unwrap().resource_reload_enabled());
+    }
+}
 
 #[cfg(test)]
 #[path = "global_promotion_tests.rs"]

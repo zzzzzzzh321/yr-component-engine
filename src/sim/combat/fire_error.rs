@@ -526,11 +526,13 @@ pub(crate) trait FireQuery {
     /// GetWeapon (vt+0x3F8) of this index: its WeaponType, `None` for an
     /// empty slot.
     fn weapon(&mut self, index: i32) -> Option<WeaponFacts>;
-    /// Installed Ares CanFire_Ammo100479B0, gamemd6FCA0D. Ordinary
-    /// instruction fixtures retain the original one-round requirement.
-    #[cfg(feature = "ares")]
-    fn weapon_ammo_cost(&mut self, _index: i32) -> i32 {
-        1
+    /// Optional resource requirement; ordinary instruction fixtures keep the
+    /// native empty-magazine gate (GetFireError6FCA0D).
+    fn weapon_resource_policy(
+        &mut self,
+        _index: i32,
+    ) -> Option<vera_mod_api::WeaponResourcePolicy> {
+        None
     }
     /// vt+0x3A8 InRange (T61).
     fn in_range(&mut self) -> bool;
@@ -1064,10 +1066,10 @@ fn techno(facts: &FireFacts, query: &mut impl FireQuery, check_range: bool) -> F
         return Rearm;
     }
     // T47 `0x006FCA0D`: -1 is unlimited.
-    #[cfg(feature = "ares")]
-    let lacks_ammo = firer.ammo >= 0 && firer.ammo < query.weapon_ammo_cost(facts.weapon_index);
-    #[cfg(not(feature = "ares"))]
-    let lacks_ammo = firer.ammo == 0;
+    let lacks_ammo = match query.weapon_resource_policy(facts.weapon_index) {
+        Some(policy) => firer.ammo >= 0 && firer.ammo < policy.cost,
+        None => firer.ammo == 0,
+    };
     if lacks_ammo {
         return Ammo;
     }

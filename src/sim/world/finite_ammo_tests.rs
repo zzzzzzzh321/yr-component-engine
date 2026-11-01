@@ -15,10 +15,36 @@ struct Scene(SimRuntime);
 
 impl Scene {
     fn new(patch: &str) -> Option<Self> {
+        Self::with_component(patch, None)
+    }
+
+    fn with_component(patch: &str, component: Option<&[u8]>) -> Option<Self> {
         let mut retail = crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch(
             "Hills.mmx",
             &IniFile::from_str(patch),
         )?;
+        if let Some(bytes) = component {
+            let digest = crate::util::sha256::sha256_hex(bytes);
+            let names = retail
+                .rules
+                .all_objects()
+                .map(|object| object.id.clone())
+                .collect::<Vec<_>>();
+            let program = crate::mod_sdk::Program::load_with_types(
+                bytes.to_vec(),
+                &digest,
+                &[
+                    retail.processed_rules.as_ref().clone(),
+                    retail.processed_rules.as_ref().clone(),
+                ],
+                &names,
+                &[],
+                &retail.rules.weapon_names(),
+            )
+            .unwrap();
+            retail.rules.external_mod = Some(std::sync::Arc::new(program));
+            retail.rules.bind_weapon_resource_policies().unwrap();
+        }
         let (_, mut assets) = crate::rules::retail_ini_fixture::retail_assets()?;
         let theater = crate::map::theater::load_theater(&mut assets, "TEMPERATE").unwrap();
         let roots = crate::rules::effect_asset_catalog::tolerant_anim_class_roots(&retail.rules);
@@ -229,14 +255,20 @@ fn finite_infantry_reloads_and_resumes_fire_only_with_ares() {
     );
 }
 
-#[cfg(feature = "ares")]
 #[test]
-fn ares_weapon_ammo_cost_controls_admission_debit_and_reload() {
+#[ignore = "requires the built ares-ammo component in VERA_SDK_AMMO_WASM"]
+fn sdk_ammo_controls_infantry_admission_debit_and_reload() {
+    let wasm =
+        std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
+            .unwrap();
     let weapon =
         "[AmmoProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=";
-    let Some(mut free) = Scene::new(&format!(
-        "[E1]\nAmmo=0\nInitialAmmo=0\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}0\n"
-    )) else {
+    let Some(mut free) = Scene::with_component(
+        &format!(
+            "[E1]\nAmmo=0\nInitialAmmo=0\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}0\n"
+        ),
+        Some(&wasm),
+    ) else {
         return;
     };
     let target = free.spawn("GACNST", "Russians", (16, 16));
@@ -256,9 +288,12 @@ fn ares_weapon_ammo_cost_controls_admission_debit_and_reload() {
     );
     assert_eq!(free.reload(infantry).duration(), 0);
 
-    let Some(mut pair) = Scene::new(&format!(
-        "[E1]\nAmmo=3\nInitialAmmo=3\nReload=12\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}2\n"
-    )) else {
+    let Some(mut pair) = Scene::with_component(
+        &format!(
+            "[E1]\nAmmo=3\nInitialAmmo=3\nReload=12\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n{weapon}2\n"
+        ),
+        Some(&wasm),
+    ) else {
         return;
     };
     let target = pair.spawn("GACNST", "Russians", (16, 16));
@@ -280,6 +315,57 @@ fn ares_weapon_ammo_cost_controls_admission_debit_and_reload() {
         (first, 12)
     );
     pair.shot(infantry, target);
+}
+
+#[test]
+#[ignore = "requires the built ares-ammo component in VERA_SDK_AMMO_WASM"]
+fn sdk_ammo_vehicle_and_building_keep_partial_magazines_until_reload() {
+    let wasm =
+        std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
+            .unwrap();
+    for kind in ["LTNK", "GAPILL"] {
+        let patch = format!(
+            "[{kind}]\nAmmo=3\nInitialAmmo=3\nReload=1000\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n\
+             [AmmoProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=2\n"
+        );
+        let Some(mut scene) = Scene::with_component(&patch, Some(&wasm)) else {
+            return;
+        };
+        let target = scene.spawn("GACNST", "Russians", (16, 16));
+        let source = scene.spawn(kind, "Americans", (16, 20));
+        scene.command(
+            "Americans",
+            Command::Attack {
+                attacker_id: source,
+                target_id: target,
+            },
+        );
+        let shot = scene.shot(source, target);
+        assert_eq!(
+            scene.count(source),
+            1,
+            "{kind}: one shot consumes two rounds"
+        );
+        let reload = scene.reload(source);
+        assert!(reload.duration() > 0);
+        let bytes = GameSnapshot::save_validated(
+            &scene.0.simulation,
+            0,
+            scene.0.resources.rules.simulation_config_hash(),
+            "external resource reload",
+            0,
+        );
+        let restored = scene.restored(&bytes);
+        scene.0.replace_simulation(restored);
+        for _ in 0..100 {
+            assert!(
+                !fired(&scene.frame(), source),
+                "{kind}: one round cannot fund another shot"
+            );
+            assert_eq!(scene.count(source), 1);
+        }
+        assert_eq!(scene.reload(source).start_frame(), shot);
+    }
 }
 
 // This is the stock GetROF6FCFA9 magazine shortcut. Installed Ares hook

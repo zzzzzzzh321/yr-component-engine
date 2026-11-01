@@ -25,6 +25,9 @@ use crate::{
     },
 };
 
+const AMMO_UNIT_INI: &str = "Ammo=5\r\nInitialAmmo=5\r\nReload=1000\r\nPrimary=SDKAmmoGun\r\nElitePrimary=SDKAmmoGun\r\nCanPassiveAquire=no\r\n";
+const AMMO_PROBE_INI: &str = "\r\n[SDKAmmoGun]\r\nDamage=1\r\nROF=15\r\nRange=6\r\nSpeed=100\r\nProjectile=InvisibleLow\r\nWarhead=SDKProbeWH\r\nAmmo=2\r\n";
+
 const PROBE_MAP: &str = "sdk-probe.map";
 // An authored demonstration layer, never a host implementation of shield rules.
 // A 100% receiver for every retail armor isolates the component from unrelated
@@ -96,8 +99,8 @@ where
         let output = PathBuf::from(take("--output")?);
         let module = fields.remove("--module").map(PathBuf::from);
         ensure!(
-            ["none", "compat", "overload"].contains(&mode.as_str()),
-            "mode must be none, compat or overload"
+            ["none", "compat", "overload", "ammo"].contains(&mode.as_str()),
+            "mode must be none, compat, overload or ammo"
         );
         ensure!(
             (mode == "none") == module.is_none(),
@@ -258,7 +261,20 @@ fn run_probe(
     );
     let original_source = selected.source;
     drop(selected.map);
-    bytes.extend_from_slice(PROBE_INI.as_bytes());
+    // Keep one physical MTNK section: duplicate INI headers do not merge.
+    let probe_ini = if mode == "ammo" {
+        PROBE_INI.replacen(
+            "ShieldType=SDKShield\r\n",
+            &format!("ShieldType=SDKShield\r\n{}", AMMO_UNIT_INI),
+            1,
+        )
+    } else {
+        PROBE_INI.to_owned()
+    };
+    bytes.extend_from_slice(probe_ini.as_bytes());
+    if mode == "ammo" {
+        bytes.extend_from_slice(AMMO_PROBE_INI.as_bytes());
+    }
     let mut files = vec![(PROBE_MAP.to_string(), bytes)];
     if let Some(module_path) = module_path {
         ensure!(
@@ -304,7 +320,9 @@ fn run_probe(
     match mode {
         "none" => ensure!(identity.is_none(), "no-module mode admitted a module"),
         _ => {
-            let expected = if mode == "compat" {
+            let expected = if mode == "ammo" {
+                "vera.compat-shield-ammo"
+            } else if mode == "compat" {
                 "vera.compat-shield"
             } else {
                 "vera.overload-shield"
@@ -367,7 +385,7 @@ fn run_probe(
             .context("probe target died")?;
         let expected_loss = match mode {
             "none" => [60, 120, 180],
-            "compat" => [0, 20, 80],
+            "compat" | "ammo" => [0, 20, 80],
             _ => [0, 60, 120],
         }[shot];
         ensure!(
@@ -388,7 +406,11 @@ fn run_probe(
                 .meters
                 .first()
                 .context("component omitted its meter")?;
-            let expected = if mode == "compat" && shot > 0 { 0 } else { 40 };
+            let expected = if (mode == "compat" || mode == "ammo") && shot > 0 {
+                0
+            } else {
+                40
+            };
             ensure!(
                 meter.current == expected && meter.maximum == 100,
                 "unexpected component meter after damage {}",
@@ -397,13 +419,96 @@ fn run_probe(
         }
         advance(&mut scenario)?;
     }
+    let ammunition = if mode == "ammo" {
+        Some(probe_ammunition(&mut scenario)?)
+    } else {
+        None
+    };
     let crc = scenario
         .runtime
         .simulation
         .compute_retail_multiplayer_checksum()?;
     let snapshot = snapshot_roundtrip(&mut scenario, &owner, &assets, target, output)?;
     Ok(
-        json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
+        json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"ammunition":ammunition,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
+    )
+}
+
+fn probe_ammunition(scenario: &mut HeadlessScenario) -> Result<Value> {
+    use crate::sim::command::Command;
+    let actor = spawn_target(scenario)?;
+    let entity = scenario
+        .sim()
+        .entities()
+        .get(actor)
+        .context("ammo actor absent")?;
+    let owner = scenario.sim().interner().resolve(entity.owner()).to_owned();
+    let command = Command::ForceAttackCell {
+        attacker_id: actor,
+        target_rx: entity
+            .position
+            .rx()
+            .checked_add(1)
+            .context("ammo target coordinate")?,
+        target_ry: entity
+            .position
+            .ry()
+            .checked_add(1)
+            .context("ammo target coordinate")?,
+    };
+    ensure!(
+        entity.ammo().is_some_and(|ammo| ammo.current() == 5),
+        "ammo constructor did not start at five"
+    );
+    let runtime = &mut scenario.runtime;
+    ensure!(
+        runtime.simulation.apply_command_with_overlays(
+            &owner,
+            &command,
+            &runtime.resources.rules,
+            Some(&runtime.resources.overlay_registry),
+            FrameEffects::default()
+        ),
+        "force-fire command rejected"
+    );
+    let mut shots = Vec::new();
+    let mut last_shot = None;
+    for visit in 0..300 {
+        let output = scenario.runtime.advance_frame(
+            &[],
+            headless_scenario::SIM_TICK_MS,
+            crate::sim::world::TickLane::Ordinary,
+            FrameEffects::default(),
+        )?;
+        if output
+            .fire_events
+            .iter()
+            .any(|event| event.attacker_id == actor)
+        {
+            let count = scenario
+                .sim()
+                .entities()
+                .get(actor)
+                .and_then(|entity| entity.ammo())
+                .context("ammo actor disappeared")?
+                .current();
+            shots.push(count);
+            last_shot = Some(visit);
+            ensure!(
+                shots.len() <= 2,
+                "one remaining round incorrectly funded another shot"
+            );
+        }
+        if shots.len() == 2 && last_shot.is_some_and(|last| visit > last + 90) {
+            break;
+        }
+    }
+    ensure!(
+        shots == [3, 1],
+        "expected two real shots with counts 3/1, got {shots:?}"
+    );
+    Ok(
+        json!({"actor":actor,"initial":5,"afterShots":shots,"blockedBelowCost":true,"source":"production command/CanFire/FireAt/Logic"}),
     )
 }
 
@@ -428,6 +533,9 @@ fn snapshot_roundtrip(
         .mod_component()
         .to_vec();
     let module_before = sim.external_mod_digest();
+    let weapon_policy_before = rules
+        .weapon("SDKAmmoGun")
+        .and_then(|weapon| weapon.resource_policy(vera_mod_api::WEAPON_USER_UNIT));
     let live = sim.resolved_terrain().context("live terrain missing")?;
     let terrain = live.capture_saved_template()?;
     let map_hash = scenario.map.ini.content_hash();
@@ -502,8 +610,24 @@ fn snapshot_roundtrip(
     // Otherwise an implementation that only validates and forgets to rebind
     // would pass by retaining the outgoing world's constructor hook.
     scenario.runtime.resources.rules.external_mod = None;
+    scenario
+        .runtime
+        .resources
+        .rules
+        .bind_weapon_resource_policies()
+        .map_err(anyhow::Error::msg)?;
     super::adopt_saved_program(&mut scenario.runtime.resources.rules, &loaded.sim, assets)
         .map_err(anyhow::Error::msg)?;
+    ensure!(
+        scenario
+            .runtime
+            .resources
+            .rules
+            .weapon("SDKAmmoGun")
+            .and_then(|weapon| weapon.resource_policy(vera_mod_api::WEAPON_USER_UNIT))
+            == weapon_policy_before,
+        "saved weapon policy was not rebound"
+    );
     let resources = loaded
         .take_scenario_resources()
         .context("saved resource owner absent")?;
@@ -548,6 +672,6 @@ fn snapshot_roundtrip(
         "post-load constructor lost its module binding"
     );
     Ok(
-        json!({"resourceAdmission":true,"opaqueStatePreserved":true,"simulationResume":true,"postLoadAttach":true,"file":save_path,"bytes":bytes.len(),"sha256":crate::util::sha256::sha256_hex(&bytes),"guiStateRestored":false,"residentAssetRebindExercised":false}),
+        json!({"resourceAdmission":true,"opaqueStatePreserved":true,"simulationResume":true,"postLoadAttach":true,"weaponResourcesRebound":true,"file":save_path,"bytes":bytes.len(),"sha256":crate::util::sha256::sha256_hex(&bytes),"guiStateRestored":false,"residentAssetRebindExercised":false}),
     )
 }

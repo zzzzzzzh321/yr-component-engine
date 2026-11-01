@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 overload = []
+ares-ammo = []
 
 [dependencies]
 vera-mod-api = { path = "../../api" }

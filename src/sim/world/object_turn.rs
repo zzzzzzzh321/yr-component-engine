@@ -1102,11 +1102,11 @@ impl Simulation {
             // gamemd51BCB2: out of limbo, Reload(+424) before idle Scatter.
             // The shared Techno owner supplies count/clock semantics; the
             // Unit-only MobileFire pause is deliberately not used here.
-            #[cfg(feature = "ares")]
             if let Some(entity) = sim.substrate.entities.get_mut(stable_id)
                 && entity.is_object_alive()
                 && !entity.lifecycle.in_limbo()
                 && let Some(obj) = sim.interner.object_type(entity.type_ref(), rules)
+                && (cfg!(feature = "ares") || obj.resource_reload_enabled())
             {
                 entity.reload_techno_ammo(obj, sim.session.binary_frame() as i32);
             }

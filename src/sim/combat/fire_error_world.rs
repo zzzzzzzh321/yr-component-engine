@@ -554,11 +554,10 @@ impl FireQuery for WorldQuery<'_, '_> {
         self.target_center_cell = Some(cells.lookup_world(xy.0, xy.1));
     }
 
-    #[cfg(feature = "ares")]
-    fn weapon_ammo_cost(&mut self, index: i32) -> i32 {
-        self.subject
-            .weapon_at(index)
-            .map_or(1, WeaponType::ammo_cost)
+    fn weapon_resource_policy(&mut self, index: i32) -> Option<vera_mod_api::WeaponResourcePolicy> {
+        self.subject.weapon_at(index).and_then(|weapon| {
+            weapon.resource_policy(crate::mod_sdk::weapon_user(self.subject.firer.category()))
+        })
     }
 
     fn weapon(&mut self, index: i32) -> Option<WeaponFacts> {
