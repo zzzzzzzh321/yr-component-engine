@@ -3,6 +3,10 @@
 VERA20K can build in partial, Rust-native support for some Phobos extensions. It does not load the
 Phobos DLL and is not general mod support.
 
+For a Chinese catalogue of upstream features, fixes, INI keys and future SDK implementation
+boundaries, see the [Phobos development reference](zh-CN/phobos-feature-guide.md).
+That catalogue describes upstream capabilities; the implemented VERA subset is listed below.
+
 Default builds use the retail readers and dispatch; an INI or client setting cannot enable omitted
 extensions. Build the supported extensions explicitly:
 

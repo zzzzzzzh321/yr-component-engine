@@ -45,5 +45,7 @@ lang: zh-CN
 
 - [Ares 功能中文开发参考](ares-feature-guide.md)：功能、INI入口、修复与SDK开发方向。
 
+- [Phobos 功能中文开发参考](phobos-feature-guide.md)：功能、修复、INI索引、版本对照与SDK实现边界。
+
 - [Ares、Phobos、NPatch、VeraX 与原作者](credits.md)
 

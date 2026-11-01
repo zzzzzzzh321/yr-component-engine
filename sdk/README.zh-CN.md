@@ -12,6 +12,8 @@
 
 Ares 完整公开功能目录、INI 键索引与后续开发拆分见 [Ares 功能中文开发参考](../docs/zh-CN/ares-feature-guide.md)。其中的 SDK 接入描述为开发建议，当前已外置范围仍以上文为准。
 
+Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 SDK 实现建议见 [Phobos 功能中文开发参考](../docs/zh-CN/phobos-feature-guide.md)。目录还区分了原生 DLL 互操作接口与本 SDK，以及护盾示例的已完成范围和待补能力。
+
 ## 同一个引擎，三种运行方式
 
 | 方式 | 作品提供的内容 | 行为 |
