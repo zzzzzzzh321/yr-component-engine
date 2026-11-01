@@ -254,20 +254,18 @@ pub(crate) fn anim_palette_light(
 
 /// `Drawing::RGB_To_Int` (YRpp `Drawing::Color16bit`): the 16-bit RGB565 word
 /// `(B >> 3) | ((G >> 2) << 5) | ((R >> 3) << 11)`.
-#[cfg(feature = "phobos")]
 fn rgb565_word([red, green, blue]: [u8; 3]) -> u16 {
     (u16::from(blue) >> 3) | ((u16::from(green) >> 2) << 5) | ((u16::from(red) >> 3) << 11)
 }
 
 /// `TechnoExt::ApplyCustomTintValues`'s viewer bucket: the owner's own draw
 /// takes Owner, an ally's Allies and anyone else's Enemies.
-#[cfg(feature = "phobos")]
 fn tint_bucket(
     owner: crate::sim::intern::InternedId,
     viewer: Option<crate::sim::intern::InternedId>,
     allied: impl FnOnce() -> bool,
-) -> crate::rules::phobos_shields::AffectedHouse {
-    use crate::rules::phobos_shields::AffectedHouse;
+) -> crate::rules::affected_house::AffectedHouse {
+    use crate::rules::affected_house::AffectedHouse;
     match viewer {
         Some(viewer) if viewer == owner => AffectedHouse::OWNER,
         Some(_) if allied() => AffectedHouse::ALLIES,
@@ -275,55 +273,33 @@ fn tint_bucket(
     }
 }
 
-/// Phobos `TechnoExt::ApplyCustomTintValues`
-/// (`src/Ext/Techno/Body.Internal.cpp:211..231`) for the shield entry that
-/// `UpdateTintValues` adds last (`Body.Update.cpp:1278..1282`): the viewer is
-/// the CurrentPlayer, so the owner's shield takes the Owner bucket, an ally's
-/// the Allies bucket and anyone else's the Enemies bucket, gated by
-/// `Tint.VisibleToHouses`. Returns the OR word and the summed intensity.
-///
+/// Render the module's committed tint projection. Relationship filtering and
+/// RGB565 packing are generic presentation operations; the module decides
+/// when a tint exists and supplies its already-resolved intensity.
+/// Phobos's former tint hooks at 0x706389/0x706786 retain their draw ordering.
 /// Read only: no simulation state, timer, RNG or detach is written.
-pub(crate) fn shield_tint(
+pub(crate) fn mod_tint(
     entity: &crate::sim::game_entity::GameEntity,
     simulation: &Simulation,
-    rules: &RuleSet,
 ) -> (u16, i32) {
-    #[cfg(feature = "phobos")]
-    {
-        let Some(shield) = entity.shield().filter(|shield| shield.is_active()) else {
-            return (0, 0);
+    let Some(tint) = entity.mod_presentation().tint.as_ref() else {
+        return (0, 0);
+    };
+    let owner = entity.owner();
+    let bucket = tint_bucket(owner, simulation.session().current_house(), || {
+        let Some(viewer) = simulation.session().current_house() else {
+            return false;
         };
-        let Some(shield_type) = rules.shield_type(shield.type_name()) else {
-            return (0, 0);
-        };
-        if !shield_type.has_tint() {
-            return (0, 0);
-        }
-        let owner = entity.owner();
-        let bucket = tint_bucket(owner, simulation.session().current_house(), || {
-            let Some(viewer) = simulation.session().current_house() else {
-                return false;
-            };
-            crate::map::houses::is_allied_with(
-                simulation.house_alliances(),
-                simulation.interner().resolve(owner),
-                simulation.interner().resolve(viewer),
-            )
-        });
-        if !shield_type.tint_visible_to_houses().contains(bucket) {
-            return (0, 0);
-        }
-        let word = shield_type
-            .tint_color()
-            .map_or(0, |(red, green, blue)| rgb565_word([red, green, blue]));
-        let intensity = (shield_type.tint_intensity() * 1000.0) as i32;
-        (word, intensity)
+        crate::map::houses::is_allied_with(
+            simulation.house_alliances(),
+            simulation.interner().resolve(owner),
+            simulation.interner().resolve(viewer),
+        )
+    });
+    if tint.visible_to_houses & bucket.bits() == 0 {
+        return (0, 0);
     }
-    #[cfg(not(feature = "phobos"))]
-    {
-        let _ = (entity, simulation, rules);
-        (0, 0)
-    }
+    (rgb565_word(tint.color_rgb), tint.intensity)
 }
 
 /// Selects the native draw hook that orders custom tint and effect intensity.
@@ -363,7 +339,7 @@ pub(crate) fn techno_effect_light(
     rules: Option<&RuleSet>,
     draw: TechnoDraw,
 ) -> ([f32; 3], crate::render::palette_light::PaletteLight) {
-    let custom = rules.map_or(0, |rules| shield_tint(entity, sim, rules).1);
+    let custom = rules.map_or(0, |_| mod_tint(entity, sim).1);
     techno_effect_light_at(
         entity,
         tint,
@@ -392,7 +368,7 @@ pub(crate) fn building_anim_light(
     sim: &Simulation,
     rules: Option<&RuleSet>,
 ) -> ([f32; 3], crate::render::palette_light::PaletteLight) {
-    let custom = rules.map_or(0, |rules| shield_tint(building, sim, rules).1);
+    let custom = rules.map_or(0, |_| mod_tint(building, sim).1);
     let (tint, light) = if let Some(sample) = building.building_art.tint_sample() {
         effect_light(
             tint,
@@ -554,7 +530,7 @@ pub(crate) fn unit_voxel_effect_light(
             } else {
                 0
             };
-            class | shield_tint(entity, sim, rules).0
+            class | mod_tint(entity, sim).0
         });
         light = light.with_colour_word(light.colour_word() | word);
     }
@@ -611,7 +587,7 @@ pub(crate) fn shp_colour_word(
 ) -> u16 {
     // Shield tint is the custom tint those hooks OR in after their class word,
     // including for a shrouded draw (the hooks replace the native shroud clear).
-    let shield_word = shield_tint(entity, sim, rules).0;
+    let shield_word = mod_tint(entity, sim).0;
     match entity.category() {
         crate::map::entities::EntityCategory::Infantry => {
             let berserk = if entity.berserk.is_active() && !shrouded() {

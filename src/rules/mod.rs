@@ -124,7 +124,7 @@ pub mod phobos_placement_preview;
 #[cfg(feature = "phobos")]
 pub mod phobos_sw_sidebar;
 pub mod phobos_radiation;
-pub mod phobos_shields;
+pub mod affected_house;
 /// Whether this binary includes the supported Ares extensions. INIs cannot change it.
 pub const ARES_ENABLED: bool = cfg!(feature = "ares");
 /// Whether this binary includes the supported Phobos extensions. INIs cannot change it.

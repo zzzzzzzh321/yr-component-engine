@@ -76,7 +76,8 @@ fn country_and_spy_starting_veterancy_follow_original_class_gates() {
             Some(object),
             &rules,
             construction::ComponentOrigin::Runtime,
-        );
+        )
+        .expect("fixture component construction");
         assert_eq!(
             u64::from(actor.veterancy.raw().bits()),
             row["raw_after"].as_u64().unwrap(),
@@ -203,7 +204,8 @@ fn ares_country_building_rank_matches_native_init_manager_hook() {
             rules.object("MATCH"),
             &rules,
             construction::ComponentOrigin::Runtime,
-        );
+        )
+        .expect("fixture component construction");
         assert_eq!(
             u64::from(actor.veterancy.raw().bits()),
             row["veterancy_bits"].as_u64().unwrap(),

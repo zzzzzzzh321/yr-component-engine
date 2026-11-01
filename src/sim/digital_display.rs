@@ -11,15 +11,27 @@
 //! auto-death). A display whose value is absent draws nothing, matching
 //! Phobos's `value <= -1 || maxValue <= 0` skip.
 
+#[cfg(feature = "phobos")]
 use crate::rules::digital_display::DigitalInfoType;
+#[cfg(feature = "phobos")]
 use crate::rules::ruleset::RuleSet;
+#[cfg(feature = "phobos")]
 use crate::sim::combat::veterancy::VeterancyRank;
 use crate::sim::game_entity::GameEntity;
+#[cfg(feature = "phobos")]
 use crate::sim::intern::InternedId;
+#[cfg(feature = "phobos")]
 use crate::sim::world::Simulation;
+
+/// Auxiliary numeric display values are independent of the meter's pip visibility.
+pub fn auxiliary_meter_values(entity: &GameEntity) -> Option<(i32, i32)> {
+    let meter = entity.mod_presentation().meters.first()?;
+    Some((meter.current, meter.maximum))
+}
 
 /// Phobos `GetValuesForDisplay` for one display entry. `value < 0` or
 /// `maximum <= 0` means "do not draw".
+#[cfg(feature = "phobos")]
 pub fn values_for_display(
     sim: &Simulation,
     entity: &GameEntity,
@@ -58,14 +70,7 @@ pub fn values_for_display(
             }
             (value, maximum)
         }
-        DigitalInfoType::Shield => {
-            let shield = entity.shield()?;
-            let ty = rules.shield_type(shield.type_name())?;
-            if shield.broken_non_respawning(ty) {
-                return None;
-            }
-            (shield.hp(), ty.strength())
-        }
+        DigitalInfoType::Shield => auxiliary_meter_values(entity)?,
         DigitalInfoType::Ammo => (entity.ammo()?.current(), object.ammo),
         DigitalInfoType::MindControl => {
             let manager = entity.capture_manager.as_ref()?;
@@ -299,6 +304,28 @@ pub fn values_for_display(
 }
 
 #[cfg(test)]
+mod module_meter_tests {
+    use super::*;
+
+    #[test]
+    fn auxiliary_meter_values_do_not_depend_on_pip_visibility() {
+        let mut entity = GameEntity::test_default(1, "TEST", "Neutral", 10, 10);
+        entity.set_mod_presentation_for_test(crate::mod_sdk::Projection {
+            meters: vec![crate::mod_sdk::Meter {
+                current: 25,
+                maximum: 100,
+                visible: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert_eq!(auxiliary_meter_values(&entity), Some((25, 100)));
+        entity.set_mod_presentation_for_test(Default::default());
+        assert_eq!(auxiliary_meter_values(&entity), None);
+    }
+}
+
+#[cfg(all(test, feature = "phobos"))]
 mod tests {
     use super::*;
     use crate::rules::ini_parser::IniFile;

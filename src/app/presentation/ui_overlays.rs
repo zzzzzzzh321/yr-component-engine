@@ -171,7 +171,6 @@ impl BuildingBarGeometry {
 /// Phobos `TechnoExt::GetFootSelectBracketPosition`'s rectangle at screen
 /// point `(sx, sy)`: the 8-pip Infantry or 17-pip mobile bracket, as
 /// `[x, y, width, height]`.
-#[cfg(feature = "phobos")]
 pub(crate) fn foot_select_bracket(sx: f32, sy: f32, infantry: bool) -> [f32; 4] {
     let length = if infantry { 8.0 } else { 17.0 };
     let nudge = if infantry { 1.0 } else { 0.0 };
@@ -970,45 +969,23 @@ fn keep_health_strip_screen_size(strip: &mut TechnoExtras, anchor: (f32, f32), z
     );
 }
 
-/// Phobos `ShieldClass::DrawShieldBar_Pip`: the entry's own triplet when its
-/// X is set, otherwise the global `[AudioVisual] Pips.Shield*` triplet, then
-/// the native 5 (building) / 16 (mobile) fallback.
-#[cfg(feature = "phobos")]
-fn shield_pip_frame(
-    building: bool,
-    hp: i32,
-    ty: &crate::rules::phobos_shields::ShieldType,
-    globals: &crate::rules::phobos_shields::ShieldGlobals,
-) -> usize {
-    let local = ty.pips(building);
-    let pips = if local[0] != -1 {
-        local
-    } else {
-        globals.pips(building)
-    };
-    let strength = f64::from(ty.strength());
-    let yellow = ty.condition_yellow(globals.condition_yellow());
-    let red = ty.condition_red(globals.condition_red());
-    let pick = |fallback: i32| usize::try_from(fallback.max(0)).unwrap_or(0);
-    if f64::from(hp) > yellow * strength && pips[0] != -1 {
-        pick(pips[0])
-    } else if f64::from(hp) > red * strength && (pips[1] != -1 || pips[0] != -1) {
-        pick(if pips[1] == -1 { pips[0] } else { pips[1] })
-    } else if pips[2] != -1 || pips[0] != -1 {
-        pick(if pips[2] == -1 { pips[0] } else { pips[2] })
-    } else {
-        if building { 5 } else { 16 }
+/// Filled pips for a module-owned auxiliary meter. The module chooses its
+/// appearance and visibility; the renderer only scales a fraction to a row.
+fn meter_filled_count(meter: &crate::mod_sdk::Meter, length: i32) -> i32 {
+    if !meter.active || meter.maximum <= 0 || length <= 0 {
+        return 0;
     }
+    ((f64::from(meter.current) / f64::from(meter.maximum) * f64::from(length)).round() as i32)
+        .clamp(1, length)
 }
 
 /// Phobos `DrawShieldBar_Building`/`DrawShieldBar_Other` sprite commands.
 /// `bracket` is the native bracket anchor after the class fixed offsets;
 /// `bracket_delta` is the shield's own `BracketDelta` (foot only).
-#[cfg(feature = "phobos")]
 #[allow(clippy::too_many_arguments)]
-fn shield_bar_instances(
+fn mod_meter_instances(
     entity: &crate::sim::game_entity::GameEntity,
-    rules: &RuleSet,
+    meter: &crate::mod_sdk::Meter,
     shape: &crate::render::selection_overlay::CenteredShapeStrip,
     pip_board: Option<&crate::render::selection_overlay::CenteredShapeStrip>,
     building: bool,
@@ -1017,29 +994,15 @@ fn shield_bar_instances(
     bracket_delta: f32,
     strip: &mut TechnoExtras,
 ) {
-    let Some(shield) = entity.shield() else {
-        return;
-    };
-    let Some(ty) = rules.shield_type(shield.type_name()) else {
-        return;
-    };
-    // `0x6F65D1`/`0x6F683C` skip the whole shield bar, background included,
-    // while the shield is broken and nothing will respawn it.
-    if shield.broken_non_respawning(ty) {
+    if !meter.visible {
         return;
     }
-    let globals = rules.shield_globals();
-    if shield.hp() <= 0 && ty.pips_hide_if_no_strength() {
-        return;
-    }
-    let strength = ty.strength();
-    let total = if shield.is_active() && strength != 0 {
-        ((f64::from(shield.hp()) / f64::from(strength) * f64::from(length)).round() as i32)
-            .clamp(1, length.max(1))
+    let total = meter_filled_count(meter, length);
+    let frame = if building {
+        meter.building_pip_frame
     } else {
-        0
-    };
-    let frame = shield_pip_frame(building, shield.hp(), ty, globals);
+        meter.pip_frame
+    } as usize;
     let depth = if building { 0.0006 } else { 0.0005 };
     let instance = |frame: usize, point: (f32, f32)| {
         shape.instance(frame, point, depth).map(|mut instance| {
@@ -1057,11 +1020,7 @@ fn shield_bar_instances(
                 ),
             ));
         }
-        let empty_frame = ty
-            .pips_building_empty()
-            .or_else(|| globals.pips_building_empty())
-            .unwrap_or(0);
-        let empty_frame = usize::try_from(empty_frame.max(0)).unwrap_or(0);
+        let empty_frame = meter.building_empty_frame as usize;
         for index in total..length {
             strip.fills.extend(instance(
                 empty_frame,
@@ -1319,13 +1278,12 @@ pub(crate) fn techno_extras_for_parent(
         // Phobos `TechnoClass_DrawHealthBar_Buildings 0x6F65D1` ->
         // `DrawShieldBar_Building(length, bound)`, before the native health
         // fill. The building bracket is the Top anchor minus (6,3).
-        #[cfg(feature = "phobos")]
-        {
+        if let Some(meter) = entity.mod_presentation().meters.first() {
             let top = geometry.first_pip(sx, sy);
             let bracket = (top.0 - 6.0, top.1 - 3.0);
-            shield_bar_instances(
+            mod_meter_instances(
                 entity,
-                rules,
+                meter,
                 shape,
                 overlay.pipbrd(),
                 true,
@@ -1407,24 +1365,19 @@ pub(crate) fn techno_extras_for_parent(
     // `DrawShieldBar_Other`, before the native health fill. The foot bracket
     // is the (Left, Top) anchor minus (1,0); the shield's own `BracketDelta`
     // adds the object bracket delta and the type's offset -3.
-    #[cfg(feature = "phobos")]
-    {
+    if let Some(meter) = entity.mod_presentation().meters.first() {
         let length = if infantry { 8 } else { 17 };
         let [left, top, _, _] = foot_select_bracket(sx, sy, infantry);
         let bracket = (left - 1.0, top);
-        let type_delta = entity
-            .shield()
-            .and_then(|shield| rules.shield_type(shield.type_name()))
-            .map_or(0.0, |ty| ty.bracket_delta() as f32);
-        shield_bar_instances(
+        mod_meter_instances(
             entity,
-            rules,
+            meter,
             shape,
             overlay.pipbrd(),
             false,
-            length as i32,
+            length,
             bracket,
-            delta + type_delta - 3.0,
+            delta + meter.bracket_delta as f32 - 3.0,
             &mut strip,
         );
     }
@@ -1852,44 +1805,21 @@ mod mind_control_pip_tests;
 
 #[cfg(test)]
 mod tests {
-    /// Phobos `DrawShieldBar_Pip`: the shield type's own frames first, then the
-    /// global `[AudioVisual] Pips.Shield*` triplet, then the native 16/5.
-    #[cfg(feature = "phobos")]
     #[test]
-    fn shield_pip_frames_follow_local_then_global_then_fallback() {
-        use crate::rules::ini_parser::IniFile;
-        use crate::rules::ruleset::RuleSet;
-
-        let local = RuleSet::from_ini(&IniFile::from_str(
-            "[ShieldTypes]\n0=S\n[S]\nStrength=100\nPips=20,21,22\nPips.Building=30,31,32\n",
-        ))
-        .unwrap();
-        let ty = local.shield_type("S").unwrap();
-        let globals = local.shield_globals();
-        assert_eq!(shield_pip_frame(false, 90, ty, globals), 20);
-        assert_eq!(shield_pip_frame(false, 40, ty, globals), 21);
-        assert_eq!(shield_pip_frame(false, 10, ty, globals), 22);
-        assert_eq!(shield_pip_frame(true, 90, ty, globals), 30);
-        assert_eq!(shield_pip_frame(true, 10, ty, globals), 32);
-
-        let global = RuleSet::from_ini(&IniFile::from_str(
-            "[ShieldTypes]\n0=S\n[S]\nStrength=100\n\
-             [AudioVisual]\nPips.Shield=10,11,12\nPips.Shield.Building=40,41,42\n",
-        ))
-        .unwrap();
-        let ty = global.shield_type("S").unwrap();
-        let globals = global.shield_globals();
-        assert_eq!(shield_pip_frame(false, 90, ty, globals), 10);
-        assert_eq!(shield_pip_frame(false, 10, ty, globals), 12);
-        assert_eq!(shield_pip_frame(true, 10, ty, globals), 42);
-
-        let bare = RuleSet::from_ini(&IniFile::from_str(
-            "[ShieldTypes]\n0=S\n[S]\nStrength=100\n",
-        ))
-        .unwrap();
-        let ty = bare.shield_type("S").unwrap();
-        assert_eq!(shield_pip_frame(false, 90, ty, bare.shield_globals()), 16);
-        assert_eq!(shield_pip_frame(true, 90, ty, bare.shield_globals()), 5);
+    fn module_meter_scales_its_declared_fraction_and_respects_activity() {
+        let mut meter = crate::mod_sdk::Meter {
+            current: 50,
+            maximum: 100,
+            active: true,
+            ..Default::default()
+        };
+        assert_eq!(meter_filled_count(&meter, 8), 4);
+        meter.current = 1;
+        assert_eq!(meter_filled_count(&meter, 8), 1);
+        meter.current = 200;
+        assert_eq!(meter_filled_count(&meter, 8), 8);
+        meter.active = false;
+        assert_eq!(meter_filled_count(&meter, 8), 0);
     }
 
     /// `tools/spatial_oracle/building_repair.json` `wrench` rows: the frame

@@ -324,6 +324,8 @@ pub enum SnapshotError {
 /// Structural failures found before a deserialized simulation is admitted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotRestoreError {
+    #[error("invalid external gameplay state: {0}")]
+    InvalidExternalMod(String),
     #[cfg(feature = "ares")]
     #[error("object {object_id} has invalid attached stats: {reason}")]
     InvalidAttachedStatsState {
@@ -1725,6 +1727,27 @@ impl Simulation {
     /// weak/derived identities, and reconstructs skipped indexes in dependency
     /// order.
     pub fn restore_after_snapshot_load(&mut self) -> Result<(), SnapshotRestoreError> {
+        if let Some(error) = &self.external_mod_fault {
+            return Err(SnapshotRestoreError::InvalidExternalMod(format!(
+                "world halted on component failure: {error}"
+            )));
+        }
+
+        if let Some(program) = &self.external_mod {
+            program
+                .validate_restore()
+                .map_err(SnapshotRestoreError::InvalidExternalMod)?;
+        }
+        for (_, entity) in self.substrate.entities.iter_sorted() {
+            if entity.mod_component().len() > vera_mod_api::MAX_STATE_BYTES
+                || (self.external_mod.is_none() && !entity.mod_component().is_empty())
+            {
+                return Err(SnapshotRestoreError::InvalidExternalMod(
+                    "orphaned or oversized entity component".into(),
+                ));
+            }
+        }
+
         for (_, entity) in self.substrate.entities.iter_sorted() {
             if !entity.type_facts.foundation().valid() {
                 return Err(SnapshotRestoreError::InvalidFoundation {

@@ -142,6 +142,8 @@ impl PreparedSavedGame {
         let mut rules = view
             .rules_owner
             .project_saved_scenario_rules(saved.processed_rules())?;
+        crate::mod_sdk::adopt_saved_program(&mut rules, &snapshot.sim, assets)
+            .map_err(PreparedLoadError::Resources)?;
         let overlay_registry = rules.overlay_registry().clone();
         init_helpers::bind_rules_art_metadata(
             &mut rules,
@@ -179,6 +181,8 @@ impl PreparedSavedGame {
         let mut rules = view
             .rules_owner
             .project_saved_scenario_rules(saved.processed_rules())?;
+        crate::mod_sdk::adopt_saved_program(&mut rules, &snapshot.sim, assets)
+            .map_err(PreparedLoadError::Resources)?;
         // OverlayLoad5FEB45 and MouseLoad5BE668 can replace the restored
         // shape policy. Refresh this immutable projection from the same
         // incoming record, rather than retaining its pre-load registry.

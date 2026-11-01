@@ -576,6 +576,22 @@ impl Simulation {
         hasher.finish()
     }
 
+    /// SDK-only authority shared by replay/state hashing and the live network
+    /// checksum. No module means no extra bytes in either legacy stream.
+    /// Compiled code, presentation and process caches never participate.
+    pub(crate) fn external_mod_digest(&self) -> Option<u64> {
+        let program = self.external_mod.as_ref()?;
+        let mut hasher = StateHasher::new();
+        b"vera-mod-authority-v1".hash(&mut hasher);
+        program.fold(&mut hasher);
+        self.substrate.entities.len().hash(&mut hasher);
+        for entity in self.substrate.entities.values_sorted() {
+            entity.stable_id().hash(&mut hasher);
+            entity.mod_component.hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
+
     /// Fold everything `state_hash` covers into `hasher`, in a fixed order.
     ///
     /// The per-House fog digests, the per-entity digests and the scans for a
@@ -616,6 +632,10 @@ impl Simulation {
     /// The fold before the fog digests: clocks, RNG, identities, scripts,
     /// object order, occupation, Houses, production and power.
     fn fold_before_fog(&self, hasher: &mut impl Hasher) {
+        if let Some(digest) = self.external_mod_digest() {
+            b"vera-mod-authority-v1".hash(hasher);
+            digest.hash(hasher);
+        }
         self.session.tick().hash(hasher);
         self.session.binary_frame().hash(hasher);
         self.planning.hash_state(hasher);
@@ -1673,10 +1693,6 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     {
         b"phobos-techno-placement-v1".hash(hasher);
         entity.phobos_placement.hash(hasher);
-        if let Some(shield) = &entity.shield {
-            b"phobos-shield-v1".hash(hasher);
-            shield.hash(hasher);
-        }
     }
     if entity.tracking_facts.naval_combatant() {
         // Retained across reload: later Remove_Tracking must use the same

@@ -637,7 +637,7 @@ fn retail_authored_unit_high_matches_original_pose_scope_and_lists() {
                     &rules,
                     Some(&terrain),
                     Some(&registry),
-                );
+                ).expect("authored component construction");
                 assert!(
                     sim.object_placement_scope_active(),
                     "{name}: retain the outer scope"

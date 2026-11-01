@@ -564,7 +564,8 @@ fn building_contact_constructor_matches_original_slots_before_hello() {
             rules.object("BASE"),
             &rules,
             construction::ComponentOrigin::Runtime,
-        );
+        )
+        .expect("fixture component construction");
         check(&entity);
         let view = sim.scenario_rng.logical_view();
         assert_eq!(
@@ -1587,7 +1588,7 @@ fn techno_constructor_live_overlay_context_admits_ore_and_structural_bridge() {
             &rules,
             None,
             Some(&registry),
-        ),
+        ).expect("authored map objects"),
         2,
     );
     let authored = sim.substrate.entities.get(1).unwrap();

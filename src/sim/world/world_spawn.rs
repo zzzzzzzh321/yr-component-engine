@@ -54,6 +54,7 @@ pub struct GeneratedTechnoInitTable {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneratedTechnoInitError {
+    Gameplay(String),
     TraceOrdinalMismatch {
         expected: usize,
         found: usize,
@@ -78,6 +79,7 @@ pub enum GeneratedTechnoInitError {
 impl fmt::Display for GeneratedTechnoInitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Gameplay(error) => write!(f, "gameplay component: {error}"),
             Self::TraceOrdinalMismatch { expected, found } => write!(
                 f,
                 "generated construction trace expected ordinal {expected}, found {found}"
@@ -303,6 +305,7 @@ impl Simulation {
             resolved_terrain,
             None,
         )
+        .expect("fixture map construction")
     }
 
     pub(crate) fn spawn_from_map_with_resolved_and_overlay_registry(
@@ -311,7 +314,7 @@ impl Simulation {
         rules: &RuleSet,
         resolved_terrain: Option<&ResolvedTerrainGrid>,
         overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
-    ) -> u32 {
+    ) -> Result<u32, GeneratedTechnoInitError> {
         self.spawn_from_map_with_constructor_inits(
             entities,
             rules,
@@ -319,7 +322,6 @@ impl Simulation {
             overlay_registry,
             None,
         )
-        .expect("fresh fixed-map Techno constructor initialization cannot fail")
     }
 
     /// Project generated-map Technos using constructor words already consumed
@@ -548,7 +550,7 @@ impl Simulation {
                         sub_cell: map_ent.sub_cell,
                         bridge_deck: bridge_spawn,
                     },
-                );
+                )?;
                 // The line's AI Sellable and AI Repairable, written after the
                 // constructor and before the Unlimbo (`BuildingClass::ReadFromINI`
                 // `0x0044FB5B`, `0x0044FB70`).

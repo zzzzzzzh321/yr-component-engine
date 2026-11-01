@@ -1,0 +1,19 @@
+[package]
+name = "vera-reference-shield"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "External reference gameplay component for compatible and overload shields"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+overload = []
+
+[dependencies]
+vera-mod-api = { path = "../../api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+wit-bindgen = "=0.51.0"

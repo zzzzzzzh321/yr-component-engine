@@ -16,6 +16,9 @@ use anyhow::Result;
 use winit::event_loop::EventLoop;
 
 fn main() -> Result<()> {
+    if let Some(result) = vera20k::mod_sdk::acceptance::try_run(std::env::args_os().skip(1)) {
+        std::process::exit(result?);
+    }
     if let Some(result) =
         vera20k::app::frontend::launch::try_replay_verify(std::env::args_os().skip(1))
     {

@@ -1,4 +1,5 @@
-//! Phobos Shields, retained by the Rules registry.
+//! External Phobos-compatible configuration, moved from VERA20K rules/phobos_shields.rs.
+//! Original Rust implementation and source references are retained below.
 //!
 //! Native identity: Phobos `ShieldTypeClass`
 //! (`src/New/Type/ShieldTypeClass.{h,cpp}`), an `Enumerable<ShieldTypeClass>`
@@ -11,78 +12,20 @@
 //! The catalog is read by the ordered Rules Process owner, exactly as the
 //! `[RadiationTypes]` catalog is, so a later layer replaces or retains each
 //! field independently. `RuleSet` publishes an immutable projection and the
-//! simulation resolves shields through [`crate::rules::ruleset::RuleSet::shield_type`].
-//! Damage absorption itself lives in `sim::shield`, at the
+//! external component resolves shield definitions from its own immutable catalog.
+//! Damage absorption itself lives in the component's `logic` module, at the
 //! `TechnoClass::ReceiveDamage @ 0x00701900` entry
 //! (installed hook `0x701900+0x6`, `src/Ext/Techno/Hooks.ReceiveDamage.cpp`).
 //!
-//! Read but not consumed here: `Pips*`, `IdleAnim*`, `HitFlash*`, `AllowTransfer*`
+//! Read but not consumed here: `IdleAnim*`, `HitFlash*`, `AllowTransfer*`
 //! and the warhead-side `Shield.AttachTypes`/`RemoveTypes`/`Break`/`HitAnim`
 //! keys. Those are separate presentation, transfer and warhead-effect chains.
 
-#[cfg(feature = "phobos")]
-use crate::rules::ini_parser::IniFile;
-#[cfg(feature = "phobos")]
-use crate::rules::ini_value::truncate_native_bytes;
+use crate::host::{ConfigView as IniFile, Host, Section as IniSection};
+use vera_mod_api::{native_string::truncate_native_bytes, relationship::AffectedHouse};
 
 /// `Enumerable` stores `Name[32]` with `_TRUNCATE`.
-#[cfg(feature = "phobos")]
 const NAME_PAYLOAD_BYTES: usize = 0x1F;
-
-/// Phobos `AffectedHouse` flags (`Utilities/Enum.h:127..141`), the target of
-/// `Valueable<AffectedHouse>::Read` (`Utilities/TemplateDef.h:824..873`): the
-/// value starts at `None` and ORs one flag per comma-separated token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct AffectedHouse(u8);
-
-impl AffectedHouse {
-    pub const NONE: Self = Self(0x0);
-    pub const OWNER: Self = Self(0x1);
-    pub const ALLIES: Self = Self(0x2);
-    pub const ENEMIES: Self = Self(0x4);
-    pub const NEUTRAL: Self = Self(0x8);
-    pub const ALL: Self = Self(Self::OWNER.0 | Self::ALLIES.0 | Self::ENEMIES.0 | Self::NEUTRAL.0);
-
-    pub fn bits(self) -> u8 {
-        self.0
-    }
-
-    /// The `flags & AffectedHouse::X != AffectedHouse::None` test.
-    pub fn contains(self, other: Self) -> bool {
-        self.0 & other.0 != 0
-    }
-
-    /// `Read<AffectedHouse>`: every token must match a known spelling, or the
-    /// whole read fails and the caller retains its current value.
-    #[cfg(feature = "phobos")]
-    pub(crate) fn parse(raw: &str) -> Option<Self> {
-        let mut parsed = Self::NONE;
-        for part in raw.split(',') {
-            let token = part.trim_matches(|c| matches!(c, ' ' | '\t' | '\r'));
-            let flag = match token.to_ascii_lowercase().as_str() {
-                "owner" | "self" => Self::OWNER,
-                "allies" | "ally" => Self::ALLIES,
-                "enemies" | "enemy" => Self::ENEMIES,
-                "neutral" => Self::NEUTRAL,
-                // Team = Owner | Allies, Others = NotOwner.
-                "team" => Self(Self::OWNER.0 | Self::ALLIES.0),
-                "others" => Self(Self::ALLIES.0 | Self::ENEMIES.0),
-                "all" => Self::ALL,
-                "none" => Self::NONE,
-                _ => return None,
-            };
-            parsed = Self(parsed.0 | flag.0);
-        }
-        Some(parsed)
-    }
-}
-
-/// `ShieldTypeClass`'s constructor default (`Tint_VisibleToHouses { AffectedHouse::All }`).
-impl Default for AffectedHouse {
-    fn default() -> Self {
-        Self::ALL
-    }
-}
 
 /// `ShieldTypeClass`'s constructor values. Every field keeps the current value
 /// when its key is absent, so one `apply_pass` may replace or retain each value.
@@ -91,7 +34,9 @@ pub struct ShieldType {
     name: String,
     strength: i32,
     initial_strength: Option<i32>,
+    #[serde(with = "super::optional_float_bits")]
     condition_yellow: Option<f64>,
+    #[serde(with = "super::optional_float_bits")]
     condition_red: Option<f64>,
     armor: String,
     inherit_armor_from_techno: bool,
@@ -99,12 +44,14 @@ pub struct ShieldType {
     inherit_armor_disallowed: Vec<String>,
     apply_armor_mult: Option<bool>,
     powered: bool,
+    #[serde(with = "super::float_bits")]
     respawn: f64,
     respawn_rate: i32,
     respawn_restart_in_combat: bool,
     respawn_restart_in_combat_delay: i32,
     respawn_anim: Vec<String>,
     respawn_weapon: Option<String>,
+    #[serde(with = "super::float_bits")]
     self_healing: f64,
     self_healing_rate: i32,
     self_healing_restart_in_combat: bool,
@@ -122,7 +69,9 @@ pub struct ShieldType {
     hit_flash_blue: bool,
     hit_flash_black: bool,
     break_weapon: Option<String>,
+    #[serde(with = "super::float_bits")]
     absorb_percent: f64,
+    #[serde(with = "super::float_bits")]
     pass_percent: f64,
     received_damage_minimum: i32,
     received_damage_maximum: i32,
@@ -132,6 +81,7 @@ pub struct ShieldType {
     pips_building_empty: Option<i32>,
     pips_hide_if_no_strength: bool,
     tint_color: Option<(u8, u8, u8)>,
+    #[serde(with = "super::float_bits")]
     tint_intensity: f64,
     tint_visible_to_houses: AffectedHouse,
 }
@@ -157,6 +107,10 @@ impl ShieldType {
             pips_building: [-1, -1, -1],
             ..Self::default()
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// `InitialStrength.Get(Strength)`: the constructor's nullable default.
@@ -220,10 +174,6 @@ impl ShieldType {
         self.respawn_restart_in_combat_delay
     }
 
-    pub(crate) fn respawn_weapon(&self) -> Option<&str> {
-        self.respawn_weapon.as_deref()
-    }
-
     pub(crate) fn self_healing(&self) -> f64 {
         self.self_healing
     }
@@ -273,10 +223,6 @@ impl ShieldType {
         } else {
             self.pips
         }
-    }
-
-    pub fn pips_background(&self) -> Option<&str> {
-        self.pips_background.as_deref()
     }
 
     pub fn pips_building_empty(&self) -> Option<i32> {
@@ -365,12 +311,6 @@ pub struct ShieldTypeCatalog {
 }
 
 impl ShieldTypeCatalog {
-    #[cfg(feature = "phobos")]
-    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
-        self.types.iter().map(|entry| entry.name.as_str())
-    }
-
-    #[cfg(feature = "phobos")]
     pub fn entry(&self, name: &str) -> Option<&ShieldType> {
         self.types
             .iter()
@@ -379,20 +319,19 @@ impl ShieldTypeCatalog {
 
     /// Read one reached Rules pass: the pass's `[ShieldTypes]` list appends
     /// entries, then every retained entry re-reads its own section.
-    #[cfg(feature = "phobos")]
-    pub(crate) fn apply_pass(&mut self, pass: &IniFile) {
+    pub(crate) fn apply_pass(&mut self, pass: &IniFile<'_, impl Host>) {
         if let Some(list) = pass.section("ShieldTypes") {
             // Phobos Enumerable::LoadFromINIList reads each physical key
             // through ReadString with Phobos::readBuffer[2048] before lookup.
             // Source: Phobos b90ab4bc, src/Utilities/Enumerable.h:49-60,
             // src/Phobos.h:23-24; CCINIClass::ReadString @0x00528A10.
             for key in list.physical_keys() {
-                let Some(name) = list.read_name(key, 2048) else {
+                let Some(name) = list.read_name(&key, 2048) else {
                     continue;
                 };
-                if self.entry(name).is_none() {
-                    self.types.push(ShieldType::named(&truncate_native_bytes(
-                        name,
+                if self.entry(&name).is_none() {
+                    self.types.push(ShieldType::named(truncate_native_bytes(
+                        &name,
                         NAME_PAYLOAD_BYTES,
                     )));
                 }
@@ -415,10 +354,12 @@ impl ShieldTypeCatalog {
             entry.inherit_armor_from_techno =
                 section.read_bool("InheritArmorFromTechno", entry.inherit_armor_from_techno);
             if let Some(tokens) = section.read_list("InheritArmor.Allowed", 0x80) {
-                entry.inherit_armor_allowed = tokens.into_iter().map(str::to_owned).collect();
+                entry.inherit_armor_allowed =
+                    tokens.into_iter().map(|value| value.to_owned()).collect();
             }
             if let Some(tokens) = section.read_list("InheritArmor.Disallowed", 0x80) {
-                entry.inherit_armor_disallowed = tokens.into_iter().map(str::to_owned).collect();
+                entry.inherit_armor_disallowed =
+                    tokens.into_iter().map(|value| value.to_owned()).collect();
             }
             entry.apply_armor_mult =
                 section.read_phobos_nullable_bool("ApplyArmorMult", entry.apply_armor_mult);
@@ -436,13 +377,13 @@ impl ShieldTypeCatalog {
                 entry.respawn_restart_in_combat_delay,
             );
             if let Some(tokens) = section.read_list("Respawn.Anim", 0x80) {
-                entry.respawn_anim = tokens.into_iter().map(str::to_owned).collect();
+                entry.respawn_anim = tokens.into_iter().map(|value| value.to_owned()).collect();
             }
             if section.is_present("Respawn.Weapon") {
                 entry.respawn_weapon = section
                     .read_name("Respawn.Weapon", 0x80)
                     .filter(|name| !is_none_name(name))
-                    .map(str::to_owned);
+                    .map(|value| value.to_owned());
             }
             entry.self_healing = section.read_double("SelfHealing", entry.self_healing);
             if let Some(minutes) = section.read_phobos_nullable_double("SelfHealing.Rate", None) {
@@ -457,7 +398,8 @@ impl ShieldTypeCatalog {
                 entry.self_healing_restart_in_combat_delay,
             );
             if let Some(tokens) = section.read_list("SelfHealing.EnabledBy", 0x80) {
-                entry.self_healing_enabled_by = tokens.into_iter().map(str::to_owned).collect();
+                entry.self_healing_enabled_by =
+                    tokens.into_iter().map(|value| value.to_owned()).collect();
             }
             entry.absorb_over_damage =
                 section.read_bool("AbsorbOverDamage", entry.absorb_over_damage);
@@ -465,11 +407,11 @@ impl ShieldTypeCatalog {
             entry.bracket_delta = section.read_int("BracketDelta", entry.bracket_delta);
             entry.break_anim = section
                 .read_list("BreakAnim", 0x80)
-                .map(|tokens| tokens.into_iter().map(str::to_owned).collect())
+                .map(|tokens| tokens.into_iter().map(|value| value.to_owned()).collect())
                 .unwrap_or_else(|| entry.break_anim.clone());
             entry.hit_anim = section
                 .read_list("HitAnim", 0x80)
-                .map(|tokens| tokens.into_iter().map(str::to_owned).collect())
+                .map(|tokens| tokens.into_iter().map(|value| value.to_owned()).collect())
                 .unwrap_or_else(|| entry.hit_anim.clone());
             entry.hit_flash = section.read_bool("HitFlash", entry.hit_flash);
             entry.hit_flash_fixed_size =
@@ -482,7 +424,7 @@ impl ShieldTypeCatalog {
                 entry.break_weapon = section
                     .read_name("BreakWeapon", 0x80)
                     .filter(|name| !is_none_name(name))
-                    .map(str::to_owned);
+                    .map(|value| value.to_owned());
             }
             entry.absorb_percent = section.read_double("AbsorbPercent", entry.absorb_percent);
             entry.pass_percent = section.read_double("PassPercent", entry.pass_percent);
@@ -490,8 +432,8 @@ impl ShieldTypeCatalog {
                 section.read_int("ReceivedDamage.Minimum", entry.received_damage_minimum);
             entry.received_damage_maximum =
                 section.read_int("ReceivedDamage.Maximum", entry.received_damage_maximum);
-            entry.pips = read_pip_triplet(section, "Pips", entry.pips);
-            entry.pips_building = read_pip_triplet(section, "Pips.Building", entry.pips_building);
+            entry.pips = read_pip_triplet(&section, "Pips", entry.pips);
+            entry.pips_building = read_pip_triplet(&section, "Pips.Building", entry.pips_building);
             entry.pips_background = section.read_phobos_nullable_with(
                 "Pips.Background",
                 entry.pips_background.take(),
@@ -520,25 +462,37 @@ impl ShieldTypeCatalog {
 /// `src/Ext/WarheadType/Body.cpp:246..260`). Read on the merged warhead section;
 /// `None` floats/ints retain the shield type's value at use, exactly as
 /// `Nullable.Get(typeValue)` resolves them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShieldWarheadRules {
+    pub(crate) affects_allies: bool,
+    pub(crate) affects_owner: Option<bool>,
+    pub(crate) affects_enemies: bool,
+    pub(crate) affects_neutral: bool,
     pub(crate) penetrate: bool,
     /// `Shield.AffectTypes`: empty means every shield type.
     pub(crate) affect_types: Vec<String>,
     /// `Shield.Penetrate.Types`: when non-empty, a shield type outside it is
     /// never penetrated.
     pub(crate) penetrate_types: Vec<String>,
+    #[serde(with = "super::optional_float_bits")]
     pub(crate) absorb_percent: Option<f64>,
+    #[serde(with = "super::optional_float_bits")]
     pub(crate) pass_percent: Option<f64>,
     pub(crate) received_minimum: Option<i32>,
     pub(crate) received_maximum: Option<i32>,
+    #[serde(with = "super::float_bits")]
     pub(crate) received_min_multiplier: f64,
+    #[serde(with = "super::float_bits")]
     pub(crate) received_max_multiplier: f64,
 }
 
 impl Default for ShieldWarheadRules {
     fn default() -> Self {
         Self {
+            affects_allies: true,
+            affects_owner: None,
+            affects_enemies: true,
+            affects_neutral: true,
             penetrate: false,
             affect_types: Vec::new(),
             penetrate_types: Vec::new(),
@@ -554,16 +508,24 @@ impl Default for ShieldWarheadRules {
 
 impl ShieldWarheadRules {
     /// `WarheadTypeClass::ReadINI`'s shield block, in native order.
-    pub(crate) fn from_section(section: &crate::rules::ini_parser::IniSection) -> Self {
+    pub(crate) fn from_section(section: &IniSection<'_, impl Host>) -> Self {
         let mut rules = Self::default();
+        // Original WarheadTypeClass::ReadINI AffectsAllies @ 0x0075D9F2;
+        // the retained Phobos house gates are guest-owned configuration.
+        rules.affects_allies = section.read_bool("AffectsAllies", true);
+        rules.affects_owner = section
+            .is_present("AffectsOwner")
+            .then(|| section.read_bool("AffectsOwner", false));
+        rules.affects_enemies = section.read_bool("AffectsEnemies", true);
+        rules.affects_neutral = section.read_bool("AffectsNeutral", true);
         rules.penetrate = section.read_bool("Shield.Penetrate", rules.penetrate);
         rules.affect_types = section
             .read_list("Shield.AffectTypes", 0x80)
-            .map(|tokens| tokens.into_iter().map(str::to_owned).collect())
+            .map(|tokens| tokens.into_iter().map(|value| value.to_owned()).collect())
             .unwrap_or_default();
         rules.penetrate_types = section
             .read_list("Shield.Penetrate.Types", 0x80)
-            .map(|tokens| tokens.into_iter().map(str::to_owned).collect())
+            .map(|tokens| tokens.into_iter().map(|value| value.to_owned()).collect())
             .unwrap_or_default();
         rules.absorb_percent =
             section.read_phobos_nullable_double("Shield.AbsorbPercent", rules.absorb_percent);
@@ -615,11 +577,7 @@ fn is_none_name(name: &str) -> bool {
 
 /// `Vector3D<int>` read: the first three tokens replace the defaults; an
 /// absent key or short list keeps them.
-fn read_pip_triplet(
-    section: &crate::rules::ini_parser::IniSection,
-    key: &str,
-    default: [i32; 3],
-) -> [i32; 3] {
+fn read_pip_triplet(section: &IniSection<'_, impl Host>, key: &str, default: [i32; 3]) -> [i32; 3] {
     let Some(values) = section.read_int_list(key) else {
         return default;
     };
@@ -636,7 +594,9 @@ fn read_pip_triplet(
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShieldGlobals {
     pub(crate) apply_armor_mult: bool,
+    #[serde(with = "super::float_bits")]
     pub(crate) condition_yellow: f64,
+    #[serde(with = "super::float_bits")]
     pub(crate) condition_red: f64,
     pub(crate) pips: [i32; 3],
     pub(crate) pips_building: [i32; 3],
@@ -659,7 +619,7 @@ impl Default for ShieldGlobals {
 }
 
 impl ShieldGlobals {
-    pub(crate) fn from_ini(ini: &crate::rules::ini_parser::IniFile) -> Self {
+    pub(crate) fn from_ini(ini: &IniFile<'_, impl Host>) -> Self {
         let defaults = Self::default();
         let combat = ini.section_or_empty("CombatDamage");
         let audio = ini.section_or_empty("AudioVisual");
@@ -708,15 +668,42 @@ impl ShieldGlobals {
         }
     }
 
-    pub fn pips_background(&self) -> Option<&str> {
-        self.pips_background.as_deref()
-    }
-
     pub fn pips_building_empty(&self) -> Option<i32> {
         self.pips_building_empty
     }
 }
 
-#[cfg(all(test, feature = "phobos"))]
-#[path = "phobos_shields_tests.rs"]
-mod tests;
+#[cfg(test)]
+pub(crate) fn fixture_configuration(local: [i32; 3], global: [i32; 3]) -> super::Configuration {
+    let mut ty = ShieldType::named("TestShield");
+    ty.strength = 100;
+    ty.self_healing = 0.25;
+    ty.self_healing_rate = 90;
+    ty.respawn = 0.5;
+    ty.respawn_rate = 90;
+    ty.pips = local;
+    ty.pips_building = if local[0] == -1 {
+        [-1; 3]
+    } else {
+        [30, 31, 32]
+    };
+    let mut result = super::Configuration::default();
+    result.catalog.types.push(ty);
+    result.globals.pips = global;
+    result.globals.pips_building = if global[0] == -1 {
+        [-1; 3]
+    } else {
+        [40, 41, 42]
+    };
+    result.objects.insert("TANK".into(), "TestShield".into());
+    result
+}
+
+#[cfg(all(test, feature = "overload"))]
+pub(crate) fn fixture_with_combat_delay(delay: i32) -> super::Configuration {
+    let mut result = fixture_configuration([-1; 3], [-1; 3]);
+    let ty = &mut result.catalog.types[0];
+    ty.self_healing_restart_in_combat_delay = delay;
+    ty.respawn_restart_in_combat_delay = delay;
+    result
+}

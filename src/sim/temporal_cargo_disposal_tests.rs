@@ -74,7 +74,8 @@ impl Scene {
                     &rules,
                     Some(&terrain),
                     Some(&registry)
-                ),
+                )
+                .expect("authored map objects"),
                 map.entities.len() as u32
             );
             sim.classify_map_triggers(&rules);

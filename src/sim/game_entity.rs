@@ -128,10 +128,12 @@ pub struct GameEntity {
     #[cfg(feature = "ares")]
     #[serde(default)]
     attach_effects: attach_effect::AttachEffects,
-    /// Phobos ShieldClass state: shield points and their recovery timers.
-    #[cfg(feature = "phobos")]
+    /// The current gameplay component owns these bounded persistent bytes.
     #[serde(default)]
-    pub(super) shield: Option<crate::sim::shield::ShieldState>,
+    pub(crate) mod_component: Vec<u8>,
+    /// Derived presentation, outside the authoritative state hash.
+    #[serde(default)]
+    pub(crate) mod_presentation: vera_mod_api::Projection,
     /// Low word of the one raw Scenario RNG draw performed by the active-retail
     /// `TechnoClass` constructor (`0x006F3254`, stored at native `+0x3C8`).
     /// Later report-selection consumers read this persistent value; placement
@@ -899,11 +901,18 @@ fn default_build_rejects_saved_delivery_base_override_and_keeps_base_space() {
 }
 
 impl GameEntity {
-    /// Read-only Phobos shield state for presentation. Construction and the
-    /// shield owner retain simulation-side mutation authority.
-    #[cfg(feature = "phobos")]
-    pub fn shield(&self) -> Option<&crate::sim::shield::ShieldState> {
-        self.shield.as_ref()
+    /// Test fixture for the generic, component-owned presentation view.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_mod_presentation_for_test(&mut self, projection: vera_mod_api::Projection) {
+        self.mod_presentation = projection;
+    }
+
+    pub fn mod_component(&self) -> &[u8] {
+        &self.mod_component
+    }
+
+    pub fn mod_presentation(&self) -> &vera_mod_api::Projection {
+        &self.mod_presentation
     }
 
     /// Infantry+6D9: building survivor identity, not Type.Nominal.
@@ -1964,8 +1973,8 @@ impl GameEntity {
             produce_cash: crate::sim::credit_income::ProduceCash::new(construction_frame),
             drain: Default::default(),
             parasite: crate::sim::combat::parasite::FootParasite::new(construction_frame),
-            #[cfg(feature = "phobos")]
-            shield: None,
+            mod_component: Vec::new(),
+            mod_presentation: Default::default(),
         }
     }
 

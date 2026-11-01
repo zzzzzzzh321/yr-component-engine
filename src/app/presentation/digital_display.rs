@@ -175,14 +175,8 @@ pub(crate) fn digital_display_instances(
             maximum = (maximum / divisor).max(1);
         }
 
-        let has_shield = entity
-            .shield()
-            .zip(
-                entity
-                    .shield()
-                    .and_then(|s| rules.shield_type(s.type_name())),
-            )
-            .is_some_and(|(shield, ty)| !shield.broken_non_respawning(ty));
+        let meter = entity.mod_presentation().meters.first();
+        let has_shield = meter.is_some();
         let mut position = if is_building {
             building_bracket(sim, entity, object, rules, display.anchor_building)
         } else {
@@ -190,11 +184,9 @@ pub(crate) fn digital_display_instances(
         };
         position.1 += object.pixel_selection_bracket_delta as f32;
         if display.info_type == DigitalInfoType::Shield
-            && let Some(delta) = entity
-                .shield()
-                .and_then(|shield| rules.shield_type(shield.type_name()))
+            && let Some(meter) = meter
         {
-            position.1 += delta.bracket_delta() as f32;
+            position.1 += meter.bracket_delta as f32;
         }
         position.0 += display.offset[0] as f32;
         position.1 += display.offset[1] as f32;
@@ -259,12 +251,12 @@ pub(crate) fn digital_display_instances(
 /// Phobos `EnumFunctions::CanTargetHouse(flags, pThis->Owner, CurrentPlayer)`:
 /// All short-circuits, then owner, neutral, ally and enemy in that order.
 fn can_target_house(
-    flags: crate::rules::phobos_shields::AffectedHouse,
+    flags: crate::rules::affected_house::AffectedHouse,
     same_house: bool,
     viewer_neutral: bool,
     allied: bool,
 ) -> bool {
-    use crate::rules::phobos_shields::AffectedHouse;
+    use crate::rules::affected_house::AffectedHouse;
     if flags == AffectedHouse::ALL {
         return true;
     }
@@ -597,7 +589,7 @@ mod tests {
             shape_percentage_frame: false,
             percentage: false,
             hide_max_value: None,
-            visible_to_houses: crate::rules::phobos_shields::AffectedHouse::ALL,
+            visible_to_houses: crate::rules::affected_house::AffectedHouse::ALL,
             visible_to_houses_observer: true,
             visible_in_special_state: true,
             info_type: DigitalInfoType::Health,
@@ -632,7 +624,7 @@ mod tests {
 
     #[test]
     fn house_visibility_follows_phobos_can_target_house_order() {
-        use crate::rules::phobos_shields::AffectedHouse;
+        use crate::rules::affected_house::AffectedHouse;
         assert!(can_target_house(AffectedHouse::ALL, false, false, false));
         assert!(can_target_house(AffectedHouse::OWNER, true, false, false));
         assert!(!can_target_house(AffectedHouse::OWNER, false, false, true));

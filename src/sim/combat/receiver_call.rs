@@ -350,7 +350,7 @@ pub(super) fn resolve_receive_damage(
     )
 }
 
-/// [`resolve_receive_damage`] with the Phobos shield stage's surviving damage
+/// [`resolve_receive_damage`] with an external pre-stage's surviving damage
 /// substituted for the caller-owned receiver input. `skip_low_damage_check`
 /// mirrors `0x7019D8` when the shield wrote a zero packet.
 pub(super) fn resolve_receive_damage_with_input(
@@ -566,19 +566,20 @@ pub(crate) fn wave_post_object_damage(
     scenario_no_damage: bool,
     current_tick: u64,
     terrain: Option<&crate::map::resolved_terrain::ResolvedTerrainGrid>,
-    #[cfg(feature = "phobos")] simulation: Option<&crate::sim::world::Simulation>,
-) -> Option<i32> {
+    simulation: Option<&crate::sim::world::Simulation>,
+) -> Result<Option<i32>, String> {
     let event = prepare_infantry_receiver(event, entities, rules, interner, terrain);
-    // The shield hook writes its surviving value into the caller pointer
-    // before Techno's body; preview the stage without committing it, because
-    // the receiver commit that follows applies the absorption exactly once.
-    #[cfg(feature = "phobos")]
-    let shield_remaining = simulation.and_then(|simulation| {
-        crate::sim::shield::preview_receive_damage(simulation, rules, &event, event.damage)
-    });
-    #[cfg(not(feature = "phobos"))]
-    let shield_remaining: Option<i32> = None;
-    let resolved = match shield_remaining {
+    // The module's pre-stage writes its surviving value into the caller pointer
+    // before Techno's body; preview without committing state, because the
+    // receiver commit that follows applies the stage exactly once. Evaluation
+    // failure must stop the walk rather than falling back to an unmodified hit.
+    let module_remaining = match simulation {
+        Some(simulation) => {
+            crate::mod_sdk::preview_receive_damage(simulation, rules, &event, event.damage)?
+        }
+        None => None,
+    };
+    let resolved = match module_remaining {
         Some(remaining) => resolve_receive_damage_with_input(
             &event,
             entities,
@@ -604,13 +605,13 @@ pub(crate) fn wave_post_object_damage(
             terrain,
         ),
     };
-    match shield_remaining {
-        // A later Techno body write, when there is one, wins over the shield's.
+    Ok(match module_remaining {
+        // A later Techno body write, when there is one, wins over the module's.
         Some(remaining) => {
             resolved.map(|resolved| resolved.outcome.post_object_damage.unwrap_or(remaining))
         }
         None => resolved.and_then(|resolved| resolved.outcome.post_object_damage),
-    }
+    })
 }
 
 /// TechnoClass::ReceiveDamage builds the anger-node increment from the final

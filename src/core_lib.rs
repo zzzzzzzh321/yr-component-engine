@@ -20,6 +20,9 @@ compile_error!("browser builds require --features wasm");
 // No dependencies on game modules. Standalone parser library.
 pub mod assets;
 
+/// Versioned, optional external gameplay components.
+pub mod mod_sdk;
+
 // Game data from rules.ini and art.ini.
 // Defines every unit type, building, weapon, warhead.
 pub mod rules;

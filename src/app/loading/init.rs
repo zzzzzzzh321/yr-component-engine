@@ -1661,7 +1661,13 @@ fn validate_fresh_transport_before_effects(
     materialization: FreshMapMaterialization,
     has_mapgen_continuation: bool,
     has_construction_journal: bool,
+    has_external_gameplay: bool,
 ) -> anyhow::Result<()> {
+    // The first SDK binds configuration during the authored load corridor.
+    // Reject the unsupported generated path before it can silently omit code.
+    if has_external_gameplay && materialization == FreshMapMaterialization::AcceptedGenerated {
+        anyhow::bail!("Mod SDK v1 requires an authored map; generated maps are not supported");
+    }
     match materialization {
         FreshMapMaterialization::Authored => {
             if has_mapgen_continuation || has_construction_journal {
@@ -1772,6 +1778,7 @@ mod fresh_transport_tests {
             FreshMapMaterialization::AcceptedGenerated,
             true,
             false,
+            false,
         )
         .expect("missing journal is not an authored-classification signal");
         let err = construction_trace_after_fill(FreshMapMaterialization::AcceptedGenerated, None)
@@ -1786,6 +1793,7 @@ mod fresh_transport_tests {
                 FreshMapMaterialization::Authored,
                 true,
                 false,
+                false,
             )
             .is_err()
         );
@@ -1794,6 +1802,7 @@ mod fresh_transport_tests {
                 FreshMapMaterialization::Authored,
                 false,
                 true,
+                false,
             )
             .is_err()
         );
@@ -1802,8 +1811,44 @@ mod fresh_transport_tests {
                 FreshMapMaterialization::AcceptedGenerated,
                 false,
                 true,
+                false,
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn module_declaration_rejects_generated_materialization_before_effects() {
+        let error = validate_fresh_transport_before_effects(
+            FreshMapMaterialization::AcceptedGenerated,
+            true,
+            true,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Mod SDK v1 requires an authored map")
+        );
+        assert!(
+            validate_fresh_transport_before_effects(
+                FreshMapMaterialization::AcceptedGenerated,
+                true,
+                true,
+                false,
+            )
+            .is_ok(),
+            "vanilla generation remains admitted"
+        );
+        assert!(
+            validate_fresh_transport_before_effects(
+                FreshMapMaterialization::Authored,
+                false,
+                false,
+                true,
+            )
+            .is_ok(),
+            "the authored corridor binds external gameplay"
         );
     }
 }
@@ -2825,6 +2870,7 @@ fn load_map_first_step(
         materialization,
         mapgen_rng_continuation.is_some(),
         generated_construction_trace.is_some(),
+        services.asset_manager.contains("vera-mod.json"),
     )?;
     let game_mode_nonzero = campaign.is_none();
     if !game_mode_nonzero {
@@ -4446,7 +4492,8 @@ mod random_map_retail_tests {
         let dir = std::env::temp_dir().join(format!("vera20k-rmg-retail-{tag}"));
         crate::util::file_system::create_dir_all(&dir).expect("scratch dir");
         let name = format!("{tag}.sed");
-        crate::util::file_system::write(dir.join(&name), options.to_sed_bytes()).expect("write .SED");
+        crate::util::file_system::write(dir.join(&name), options.to_sed_bytes())
+            .expect("write .SED");
         (dir, name)
     }
 

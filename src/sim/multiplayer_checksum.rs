@@ -4,7 +4,8 @@
 //! network checksum is a narrow 32-bit diagnostic fold over class arrays,
 //! display-layer order, LogicClass order, and one Scenario RNG sample. Computing
 //! it also consumes one additional Scenario RNG sample for the native diagnostic
-//! snapshot path.
+//! snapshot path. An admitted external gameplay module adds a separate,
+//! canonical state domain after that native fold; it consumes no RNG.
 
 use std::collections::BTreeMap;
 
@@ -227,6 +228,13 @@ impl Simulation {
         let diagnostic_rng_sample = self.scenario_rng.next_u32();
         let mut checksum = objects?;
         checksum.fold_value(checksum_rng_sample);
+        // VERA SDK protocol extension, not gamemd behavior. Preserve both
+        // native draws above and the byte-identical no-module return value.
+        if let Some(digest) = self.external_mod_digest() {
+            checksum.fold_value(0x4d4f_4453); // MODS domain separator.
+            checksum.fold_value(digest as u32);
+            checksum.fold_value((digest >> 32) as u32);
+        }
         Ok(MultiplayerChecksumFrame {
             value: checksum.value(),
             diagnostic_rng_sample,
@@ -560,6 +568,75 @@ mod tests {
         }
         expected.fold_value(rng_sample);
         expected.value()
+    }
+
+    /// Synthetic saved authority; these tests exercise hashing, not component
+    /// admission/execution (which the SDK runtime tests cover with real Wasm).
+    fn sdk_scene(config: &[u8], identity: &str, reversed: bool) -> Simulation {
+        let mut sim = Simulation::with_seed(0x22_11);
+        sim.external_mod = Some(serde_json::from_value(serde_json::json!({
+            "bytes":[],"digest":identity,
+            "manifest":{"api_version":1,"id":"test.authority","version":"1",
+                "state_version":1,"config_version":1,"hooks":["tick"]},
+            "config":config
+        })).unwrap());
+        for id in if reversed { [20, 10] } else { [10, 20] } {
+            let mut entity = GameEntity::test_default(id, "UNIT", "Owner", 3, 4);
+            entity.mod_component = vec![id as u8];
+            sim.substrate.entities.insert(entity);
+        }
+        sim
+    }
+
+    #[test]
+    fn sdk_component_bytes_enter_real_crc_without_extra_scenario_draws() {
+        let mut a = sdk_scene(&[1], &"1".repeat(64), false);
+        let mut b = sdk_scene(&[1], &"1".repeat(64), false);
+        b.substrate.entities.get_mut(10).unwrap().mod_component.push(9);
+        assert_ne!(a.state_hash(), b.state_hash());
+        let mut reference = a.scenario_rng.clone();
+        reference.next_u32();
+        let diagnostic = reference.next_u32();
+        let expected_next = reference.next_u32();
+        let ca = a.compute_retail_multiplayer_checksum().unwrap();
+        let cb = b.compute_retail_multiplayer_checksum().unwrap();
+        assert_ne!(ca.value, cb.value, "opaque state must reach actual FRAMEINFO CRC");
+        assert_eq!(ca.diagnostic_rng_sample, diagnostic);
+        assert_eq!(cb.diagnostic_rng_sample, diagnostic);
+        assert_eq!(a.scenario_rng.next_u32(), expected_next);
+        assert_eq!(b.scenario_rng.next_u32(), expected_next);
+    }
+
+    #[test]
+    fn sdk_crc_binds_program_config_and_canonical_entity_order() {
+        let mut a = sdk_scene(&[1], &"1".repeat(64), false);
+        let mut reordered = sdk_scene(&[1], &"1".repeat(64), true);
+        let mut configured = sdk_scene(&[2], &"1".repeat(64), false);
+        let mut replaced = sdk_scene(&[1], &"2".repeat(64), false);
+        assert_eq!(a.state_hash(), reordered.state_hash());
+        assert_ne!(a.state_hash(), configured.state_hash());
+        assert_ne!(a.state_hash(), replaced.state_hash());
+        let original = a.compute_retail_multiplayer_checksum().unwrap();
+        assert_eq!(original, reordered.compute_retail_multiplayer_checksum().unwrap());
+        assert_ne!(original.value, configured.compute_retail_multiplayer_checksum().unwrap().value);
+        assert_ne!(original.value, replaced.compute_retail_multiplayer_checksum().unwrap().value);
+    }
+
+    #[test]
+    fn sdk_absence_retains_exact_native_crc_and_inactive_component_bytes_are_ignored() {
+        let mut sim = sdk_scene(&[1], &"1".repeat(64), false);
+        sim.external_mod = None;
+        let before = sim.state_hash();
+        sim.substrate.entities.get_mut(10).unwrap().mod_component.push(99);
+        assert_eq!(before, sim.state_hash());
+        let mut expected = sim.fold_checksum_objects().unwrap();
+        let mut reference = sim.scenario_rng.clone();
+        expected.fold_value(reference.next_u32());
+        let diagnostic = reference.next_u32();
+        let result = sim.compute_retail_multiplayer_checksum().unwrap();
+        assert_eq!(result.value, expected.value());
+        assert_eq!(result.diagnostic_rng_sample, diagnostic);
+        assert_eq!(sim.scenario_rng.next_u32(), reference.next_u32());
     }
 
     #[test]

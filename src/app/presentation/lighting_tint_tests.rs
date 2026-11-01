@@ -386,10 +386,9 @@ fn a_bound_radiation_type_tints_the_field_with_its_own_color() {
 
 /// Phobos `ApplyCustomTintValues` selects the viewer's shield-tint bucket and
 /// `Drawing::RGB_To_Int` packs `Tint.Color` as RGB565.
-#[cfg(feature = "phobos")]
 #[test]
-fn shield_tint_uses_the_viewers_bucket_and_rgb565_word() {
-    use crate::rules::phobos_shields::AffectedHouse;
+fn module_tint_uses_the_viewers_bucket_and_rgb565_word() {
+    use crate::rules::affected_house::AffectedHouse;
     use crate::sim::intern::InternedId;
     let owner = InternedId::from_index(0);
     let other = InternedId::from_index(1);
@@ -419,4 +418,33 @@ fn shield_tint_uses_the_viewers_bucket_and_rgb565_word() {
     assert!(AffectedHouse::OWNER.contains(AffectedHouse::OWNER));
     assert!(!AffectedHouse::ENEMIES.contains(AffectedHouse::OWNER));
     assert!(AffectedHouse::ALL.contains(AffectedHouse::ENEMIES));
+}
+
+#[test]
+fn module_tint_consumes_resolved_intensity_and_filters_the_viewer() {
+    use crate::mod_sdk::{Projection, Tint};
+    use crate::rules::affected_house::AffectedHouse;
+    use crate::sim::game_entity::GameEntity;
+
+    let mut sim = Simulation::new();
+    let owner = sim.intern("Owner");
+    let enemy = sim.intern("Enemy");
+    sim.session_mut_for_test()
+        .set_current_house_for_test(Some(owner));
+    let mut entity = GameEntity::test_default(1, "TEST", "Owner", 10, 10);
+    entity.set_owner_for_test(owner);
+    assert_eq!(mod_tint(&entity, &sim), (0, 0));
+
+    entity.set_mod_presentation_for_test(Projection {
+        tint: Some(Tint {
+            color_rgb: [0, 0, 255],
+            intensity: 1375,
+            visible_to_houses: AffectedHouse::OWNER.bits(),
+        }),
+        ..Default::default()
+    });
+    assert_eq!(mod_tint(&entity, &sim), (0x001F, 1375));
+    sim.session_mut_for_test()
+        .set_current_house_for_test(Some(enemy));
+    assert_eq!(mod_tint(&entity, &sim), (0, 0));
 }

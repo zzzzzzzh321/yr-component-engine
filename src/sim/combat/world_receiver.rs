@@ -1162,12 +1162,9 @@ pub(crate) fn commit_entities(
             receiver_event.damage = writeback.read(world, rules);
         }
         let event = &receiver_event;
-        // Phobos `TechnoClass_ReceiveDamage @ 0x701900+0x6` runs the shield
-        // before gamemd's receiver body and replaces `args->Damage` with the
-        // surviving damage. The stage owns the mutation here, before the
-        // otherwise-immutable resolver is entered.
-        #[cfg(feature = "phobos")]
-        let shield_receipt = {
+        // External components return a plan before the ordinary receiver.
+
+        let component_receipt = {
             let warhead = rules.warhead(world.interner.resolve(event.warhead_ref));
             let target = world.substrate.entities.get(target_id);
             match (target, warhead) {
@@ -1181,13 +1178,16 @@ pub(crate) fn commit_entities(
                         &world.houses,
                     );
                     let input = event.damage;
-                    crate::sim::shield::pre_receive_damage(world, rules, event, input, &divisors)
+                    crate::mod_sdk::pre_receive_damage(world, rules, event, input, &divisors)
                 }
                 _ => None,
             }
         };
-        #[cfg(feature = "phobos")]
-        let receiver_outcome = match shield_receipt {
+
+        if world.external_mod_fault.is_some() {
+            break;
+        }
+        let receiver_outcome = match component_receipt {
             Some(receipt) => resolve_receive_damage_with_input(
                 event,
                 &world.substrate.entities,
@@ -1213,18 +1213,7 @@ pub(crate) fn commit_entities(
                 world.resolved_terrain.as_ref(),
             ),
         };
-        #[cfg(not(feature = "phobos"))]
-        let receiver_outcome = resolve_receive_damage(
-            event,
-            &world.substrate.entities,
-            rules,
-            &world.interner,
-            &world.houses,
-            world.house_alliances.as_map(),
-            scenario_no_damage,
-            current_tick,
-            world.resolved_terrain.as_ref(),
-        );
+
         // Techno701ADB..701B62 precedes bunker/warhead/Object gates, even
         // when those gates suppress the HP write. It also runs for healing
         // and IgnoreDefenses; only the earlier receiver exits skip it.

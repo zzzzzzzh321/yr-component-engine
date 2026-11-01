@@ -1457,16 +1457,7 @@ pub(crate) fn scale_percent(value: f64) -> f64 {
     f64::from_bits(MaskedX87Chop53::store_f64_masked_chop(scaled).bits())
 }
 
-/// A `strncpy` cut to `max_bytes` source bytes. The store widens each source
-/// byte to one character (`util::native_string::widen_bytes`), so the cut
-/// counts characters, not UTF-8 bytes; test text outside that byte domain has
-/// no native identity and is cut the same way.
-pub(crate) fn truncate_native_bytes(value: &str, max_bytes: usize) -> &str {
-    value
-        .char_indices()
-        .nth(max_bytes)
-        .map_or(value, |(end, _)| &value[..end])
-}
+pub(crate) use vera_mod_api::native_string::truncate_native_bytes;
 
 /// `strtrim` @ `0x00727CF0`, over chars (one per native byte): drop the
 /// leading chars <= 0x20, shift the text down, then clear trailing chars

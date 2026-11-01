@@ -20,11 +20,11 @@
 //! `VERA.INI` (seeded from `RA2MD.INI`) by
 //! `app::persistence::phobos_settings`.
 
+use crate::rules::affected_house::AffectedHouse;
 #[cfg(feature = "phobos")]
 use crate::rules::ini_parser::IniFile;
 #[cfg(feature = "phobos")]
 use crate::rules::ini_value::truncate_native_bytes;
-use crate::rules::phobos_shields::AffectedHouse;
 
 /// `Enumerable` stores `Name[32]` with `_TRUNCATE`.
 #[cfg(feature = "phobos")]

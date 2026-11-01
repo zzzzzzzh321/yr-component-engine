@@ -760,12 +760,12 @@ fn project_map_entities(
             generated_inits,
         )
     } else {
-        Ok(sim.spawn_from_map_with_resolved_and_overlay_registry(
+        sim.spawn_from_map_with_resolved_and_overlay_registry(
             entities,
             rules,
             resolved_terrain,
             overlay_registry,
-        ))
+        )
     }
 }
 
@@ -1152,6 +1152,8 @@ pub struct AuthoredScenarioLoadOutput {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthoredScenarioLoadError {
+    #[error("gameplay component: {0}")]
+    Gameplay(String),
     #[error(transparent)]
     NativeIdentity(#[from] crate::sim::native_identity::NativeMapTubeConstructionError),
     #[error(transparent)]
@@ -1195,6 +1197,10 @@ pub fn finalize_and_populate_staged_authored_scenario<F>(
 where
     F: FnOnce(&mut Simulation, &RuleSet),
 {
+    rules
+        .bind_external_mod(assets)
+        .map_err(AuthoredScenarioLoadError::Gameplay)?;
+    sim.external_mod = rules.external_mod.as_deref().cloned();
     // ReadMap4AD0C5 materializes Home only after the earlier start-slot pass.
     // The updated map feeds the single Scenario waypoint table, camera and
     // later trigger/Team consumers below. Generated and saved worlds bypass it.

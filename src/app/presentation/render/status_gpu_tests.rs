@@ -268,20 +268,16 @@ fn native_mobile_health_strips_preserve_color_a_and_z() {
 /// ShieldClass::DrawShieldBar_Other (0x6F683C) uses PIPBRD/E00 for the
 /// background. Compare its production replay with the existing health-border
 /// material using the same physical frame, so PIPS UV/material mixing fails.
-#[cfg(feature = "phobos")]
 #[test]
-#[ignore = "requires retail assets and GPU; shield PIPBRD texture and E00 material"]
-fn a_selected_mobile_shield_background_keeps_its_pipbrd_binding() {
+#[ignore = "requires retail assets and GPU; module meter PIPBRD texture and E00 material"]
+fn a_selected_mobile_module_meter_keeps_its_pipbrd_binding() {
     use crate::app::presentation::ui_overlays::TechnoExtras;
     use crate::rules::ini_parser::IniFile;
     let retail = crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch(
         "XMP03T4.MAP",
-        &IniFile::from_str(
-            "[MTNK]\nShieldType=S\n[ShieldTypes]\n0=S\n\
-             [S]\nStrength=100\nInitialStrength=0\nRespawn=1\n",
-        ),
+        &IniFile::from_str(""),
     )
-    .expect("physical Battle rules with an empty respawning shield");
+    .expect("physical Battle rules for an empty auxiliary meter");
     let (_, assets) = crate::rules::retail_ini_fixture::retail_assets().unwrap();
     let gpu = Gpu::new();
     let format = wgpu::TextureFormat::Bgra8UnormSrgb;
@@ -310,8 +306,20 @@ fn a_selected_mobile_shield_background_keeps_its_pipbrd_binding() {
     entity.lifecycle.set_in_limbo_for_test(false);
     entity.discovery.set_owned_by_current_house_for_test(true);
     entity.selection.set_selected_for_test(true);
-    // The held constructor binds the shield but deliberately skips Unlimbo's
-    // Display submission. Establish that drawing prior for this consumer test.
+    entity.set_mod_presentation_for_test(crate::mod_sdk::Projection {
+        meters: vec![crate::mod_sdk::Meter {
+            current: 0,
+            maximum: 100,
+            visible: true,
+            active: false,
+            pip_frame: 16,
+            building_pip_frame: 5,
+            ..Default::default()
+        }],
+        tint: None,
+    });
+    // The held constructor deliberately skips Unlimbo's Display submission.
+    // Establish that drawing prior for this consumer-only projection test.
     sim.resubmit_entity_display_for_test(id);
     assert!(sim.display_layers().layer_of(id).is_some());
     *sim.fog_mut_for_test() = crate::sim::vision::FogState::new(64, 64);

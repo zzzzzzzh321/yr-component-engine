@@ -12,7 +12,7 @@
 compile_error!("browser builds require --features wasm");
 
 pub use vera20k_core::{
-    assets, headless_scenario, map, net, rules, sim, skirmish_launch, skirmish_modes, util,
+    assets, headless_scenario, map, mod_sdk, net, rules, sim, skirmish_launch, skirmish_modes, util,
 };
 
 // Cargo unifies dependency features across a workspace. Refuse a client built

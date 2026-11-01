@@ -65,6 +65,8 @@ debug-tools = ["telemetry"]
 test-support = []
 
 [dependencies]
+vera-mod-api = { path = "../sdk/api" }
+vera-mod-runtime = { path = "../sdk/runtime" }
 base64 = "0.22"
 vera-package = { path = "../../format" }
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -1,0 +1,553 @@
+//! Window-free acceptance through the production retail loader and simulation.
+//! Each process admits one optional component and one memory-only test map.
+//! No profile, window, audio device or network service is opened.
+
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Value, json};
+
+use crate::{
+    assets::{
+        asset_manager::{AssetManager, MediaArchiveMode},
+        community,
+    },
+    headless_scenario::{self, HeadlessScenario},
+    sim::{
+        combat::{EntityDamageEvent, ReceiverCallFlags},
+        world::FrameEffects,
+    },
+};
+
+const PROBE_MAP: &str = "sdk-probe.map";
+// An authored demonstration layer, never a host implementation of shield rules.
+// A 100% receiver for every retail armor isolates the component from unrelated
+// weapon/armor tuning. The same bytes are admitted in all three modes.
+const PROBE_INI: &str = "\r\n[ShieldTypes]\r\nSDKProbe=SDKShield\r\n[SDKShield]\r\nStrength=100\r\nArmor=none\r\nSelfHealing=0.25\r\nSelfHealing.Rate=0.1\r\nRespawn=0.5\r\nRespawn.Rate=0.1\r\nPips=16,16,16\r\n[MTNK]\r\nShieldType=SDKShield\r\n[Warheads]\r\nSDKProbe=SDKProbeWH\r\n[SDKProbeWH]\r\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\r\nCellSpread=0\r\nPercentAtMax=1\r\n[VeraOverload]\r\nHeatLimit=60\r\nDuration=75\r\nCooling=1\r\n";
+
+/// Early main dispatch. Named probe arguments are deliberately separate from
+/// the native substring switch parser, so paths cannot turn into game switches.
+pub fn try_run<I>(args: I) -> Option<Result<i32>>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let flag = args.next()?;
+    if flag == OsStr::new("--game-data-checkfast") {
+        return Some((|| {
+            let retail = PathBuf::from(args.next().context("missing retail directory")?);
+            let map = args
+                .next()
+                .context("missing retail map name")?
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("map name must be Unicode"))?;
+            let output = PathBuf::from(args.next().context("missing report path")?);
+            ensure!(
+                args.next().is_none(),
+                "usage: --game-data-checkfast RETAIL MAP OUTPUT"
+            );
+            validate_output(&retail, &output)?;
+            let result = (|| {
+                let mut scenario = headless_scenario::load(&retail, &map, 0x5344_4b31)
+                    .map_err(anyhow::Error::msg)?;
+                advance(&mut scenario)?;
+                Ok(
+                    json!({"ok":true,"kind":"game_data_checkfast","map":map,"source":scenario.source,"frame":scenario.sim().session().binary_frame(),"entities":scenario.sim().entities().len(),"rulesHash":format!("{:016x}",scenario.runtime.resources.rules.simulation_config_hash())}),
+                )
+            })();
+            write_result(&output, result)
+        })());
+    }
+    if flag != OsStr::new("--mod-sdk-probe") {
+        return None;
+    }
+    Some((|| {
+        let mut fields = BTreeMap::new();
+        while let Some(key) = args.next() {
+            let key = key
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("invalid probe option"))?;
+            ensure!(
+                ["--retail-dir", "--map", "--mode", "--module", "--output"].contains(&key.as_str()),
+                "unknown probe option {key}"
+            );
+            let value = args
+                .next()
+                .with_context(|| format!("missing value for {key}"))?;
+            ensure!(
+                fields.insert(key, value).is_none(),
+                "duplicate probe option"
+            );
+        }
+        let mut take = |key: &str| fields.remove(key).with_context(|| format!("missing {key}"));
+        let retail = PathBuf::from(take("--retail-dir")?);
+        let map = take("--map")?
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("map name must be Unicode"))?;
+        let mode = take("--mode")?
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("invalid probe mode"))?;
+        let output = PathBuf::from(take("--output")?);
+        let module = fields.remove("--module").map(PathBuf::from);
+        ensure!(
+            ["none", "compat", "overload"].contains(&mode.as_str()),
+            "mode must be none, compat or overload"
+        );
+        ensure!(
+            (mode == "none") == module.is_none(),
+            "none takes no component; compat/overload require --module"
+        );
+        validate_output(&retail, &output)?;
+        write_result(
+            &output,
+            run_probe(&retail, &map, &mode, module.as_deref(), &output),
+        )
+    })())
+}
+
+fn validate_output(retail: &Path, output: &Path) -> Result<()> {
+    let retail = retail
+        .canonicalize()
+        .context("resolve read-only retail directory")?;
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = parent
+        .canonicalize()
+        .context("report parent must already exist")?;
+    ensure!(
+        !cwd.starts_with(&retail) && !parent.starts_with(&retail),
+        "run the probe in an isolated work directory, with output outside retail data"
+    );
+    ensure!(!output.exists(), "probe report already exists");
+    Ok(())
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+fn write_result(output: &Path, result: Result<Value>) -> Result<i32> {
+    let (code, receipt) = match result {
+        Ok(receipt) => (0, receipt),
+        Err(error) => (1, json!({"ok":false,"error":format!("{error:#}")})),
+    };
+    write_new(output, &serde_json::to_vec_pretty(&receipt)?)?;
+    println!("{}", serde_json::to_string(&receipt)?);
+    Ok(code)
+}
+
+fn advance(scenario: &mut HeadlessScenario) -> Result<()> {
+    scenario
+        .runtime
+        .advance_frame_for_tooling(&[], headless_scenario::SIM_TICK_MS)
+        .map_err(|e| anyhow::anyhow!("advance production frame: {e}"))
+}
+
+fn spawn_target(scenario: &mut HeadlessScenario) -> Result<u64> {
+    let owner = scenario
+        .sim()
+        .houses()
+        .iter()
+        .find(|(_, house)| house.is_human())
+        .map(|(owner, _)| scenario.sim().interner().resolve(*owner).to_owned())
+        .context("retail launch has no human house")?;
+    let mut starts = scenario
+        .map
+        .waypoints
+        .values()
+        .map(|w| (w.index, w.rx, w.ry))
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    for (_, x, y) in starts {
+        for radius in 1..=8i32 {
+            for (dx, dy) in [
+                (radius, 0),
+                (0, radius),
+                (-radius, 0),
+                (0, -radius),
+                (radius, radius),
+                (-radius, -radius),
+            ] {
+                let (Ok(rx), Ok(ry)) = (
+                    u16::try_from(i32::from(x) + dx),
+                    u16::try_from(i32::from(y) + dy),
+                ) else {
+                    continue;
+                };
+                let runtime = &mut scenario.runtime;
+                if let Some(id) = runtime.simulation.spawn_object_with_overlay_registry(
+                    "MTNK",
+                    &owner,
+                    rx,
+                    ry,
+                    0,
+                    &runtime.resources.rules,
+                    &runtime.resources.overlay_registry,
+                ) {
+                    return Ok(id);
+                }
+            }
+        }
+    }
+    bail!("retail map has no free MTNK placement near its waypoints")
+}
+
+fn sample(scenario: &HeadlessScenario, target: u64, stage: &str) -> Result<Value> {
+    let entity = scenario
+        .sim()
+        .entities()
+        .get(target)
+        .context("probe target disappeared")?;
+    Ok(
+        json!({"stage":stage,"frame":scenario.sim().session().binary_frame(),"health":entity.health.current(),"projection":entity.mod_presentation(),"componentBytes":entity.mod_component().len(),"componentSha256":crate::util::sha256::sha256_hex(entity.mod_component()),"stateHash":format!("{:016x}",scenario.sim().state_hash())}),
+    )
+}
+
+fn run_probe(
+    retail: &Path,
+    selected_map: &str,
+    mode: &str,
+    module_path: Option<&Path>,
+    output: &Path,
+) -> Result<Value> {
+    let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
+    ensure!(
+        !assets.contains("vera-mod.json"),
+        "acceptance requires a retail base without an installed gameplay component"
+    );
+    // Source selection and bounded read are the same ones used for map upload.
+    let selected =
+        crate::map::source::load_map_by_name_or_path_with_assets(retail, selected_map, &assets)?;
+    let (length, digest) = selected
+        .source
+        .physical_identity()
+        .context("probe needs an authored retail map")?;
+    let mut bytes = crate::map::source::prepare_transfer_map_source(&selected.source, &assets)?
+        .read(digest, length)?;
+    // A packed .mmx wrapper must be selected as its plain inner .map instead:
+    // appending INI to a MIX wrapper would silently test the wrong source.
+    crate::map::map_file::MapFile::from_bytes(&bytes)
+        .context("choose a plain authored .map entry, not a wrapped .mmx")?;
+    ensure!(
+        !selected
+            .map
+            .ini
+            .section_or_empty("MTNK")
+            .is_present("ShieldType"),
+        "test map already overrides MTNK ShieldType"
+    );
+    ensure!(
+        selected.map.ini.section("SDKProbeWH").is_none()
+            && selected.map.ini.section("SDKShield").is_none(),
+        "test map reserves SDK probe identities"
+    );
+    let original_source = selected.source;
+    drop(selected.map);
+    bytes.extend_from_slice(PROBE_INI.as_bytes());
+    let mut files = vec![(PROBE_MAP.to_string(), bytes)];
+    if let Some(module_path) = module_path {
+        ensure!(
+            std::fs::metadata(module_path)?.len() <= 16 * 1024 * 1024,
+            "component exceeds admission limit"
+        );
+        let component = std::fs::read(module_path)?;
+        let digest = crate::util::sha256::sha256_hex(&component);
+        files.push(("vera-mod.json".into(), serde_json::to_vec(&json!({"api_version":vera_mod_api::API_VERSION,"program":"probe-gameplay.wasm","sha256":digest}))?));
+        files.push(("probe-gameplay.wasm".into(), component));
+    }
+    community::install(community::Snapshot::new("mod-sdk-probe".into(), files)?)?;
+    drop(assets);
+    let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
+    let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
+    let (_, _, mut owner) = crate::rules::retail_sources::load_startup_rules(
+        &assets,
+        std::sync::Arc::clone(audio.sounds()),
+        std::sync::Arc::clone(audio.eva()),
+    )
+    .context("read native startup rules")?
+    .into_parts();
+    let launch = crate::sim::scenario_bootstrap::MatchLaunchDescriptor::from_resolved(
+        headless_scenario::battle_session(PROBE_MAP, &[]),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let mut scenario = headless_scenario::load_with_launch_and_ini(
+        retail,
+        PROBE_MAP,
+        0x5344_4b31,
+        launch,
+        &Default::default(),
+        crate::sim::scenario_session::ScenarioGameMode::Skirmish,
+        None,
+        Some(&mut owner),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let identity = scenario
+        .sim()
+        .external_mod
+        .as_ref()
+        .map(|p| json!({"sha256":p.sha256(),"manifest":p.manifest()}));
+    match mode {
+        "none" => ensure!(identity.is_none(), "no-module mode admitted a module"),
+        _ => {
+            let expected = if mode == "compat" {
+                "vera.compat-shield"
+            } else {
+                "vera.overload-shield"
+            };
+            ensure!(
+                scenario
+                    .sim()
+                    .external_mod
+                    .as_ref()
+                    .is_some_and(|p| p.manifest().id == expected),
+                "component identity does not match requested mode"
+            );
+        }
+    }
+    let target = spawn_target(&mut scenario)?;
+    let initial = scenario
+        .sim()
+        .entities()
+        .get(target)
+        .context("constructed target absent")?
+        .health
+        .current();
+    ensure!(initial > 180, "retail MTNK health too low for probe");
+    let mut samples = vec![sample(&scenario, target, "attached")?];
+    for shot in 0..3 {
+        let runtime = &mut scenario.runtime;
+        ensure!(
+            runtime.resources.rules.warhead("SDKProbeWH").is_some(),
+            "authored probe warhead missing from Rules"
+        );
+        let warhead = runtime.simulation.interner.intern("SDKProbeWH");
+        let event = EntityDamageEvent::direct_receiver(
+            target,
+            60,
+            0,
+            0,
+            None,
+            warhead,
+            ReceiverCallFlags {
+                ignore_defenses: false,
+                arg6: false,
+            },
+        );
+        runtime.simulation.commit_direct_damage_receiver(
+            &runtime.resources.rules,
+            Some(&runtime.resources.overlay_registry),
+            event,
+            FrameEffects::default(),
+        );
+        ensure!(
+            runtime.simulation.external_mod_fault.is_none(),
+            "component damage fault: {:?}",
+            runtime.simulation.external_mod_fault
+        );
+        samples.push(sample(&scenario, target, &format!("damage-{}", shot + 1))?);
+        let entity = scenario
+            .sim()
+            .entities()
+            .get(target)
+            .context("probe target died")?;
+        let expected_loss = match mode {
+            "none" => [60, 120, 180],
+            "compat" => [0, 20, 80],
+            _ => [0, 60, 120],
+        }[shot];
+        ensure!(
+            entity.health.current() == initial - expected_loss,
+            "{mode} damage {}: health {}, expected {}",
+            shot + 1,
+            entity.health.current(),
+            initial - expected_loss
+        );
+        if mode == "none" {
+            ensure!(
+                entity.mod_presentation().meters.is_empty() && entity.mod_component().is_empty(),
+                "no-module entity contains component state"
+            );
+        } else {
+            let meter = entity
+                .mod_presentation()
+                .meters
+                .first()
+                .context("component omitted its meter")?;
+            let expected = if mode == "compat" && shot > 0 { 0 } else { 40 };
+            ensure!(
+                meter.current == expected && meter.maximum == 100,
+                "unexpected component meter after damage {}",
+                shot + 1
+            );
+        }
+        advance(&mut scenario)?;
+    }
+    let crc = scenario
+        .runtime
+        .simulation
+        .compute_retail_multiplayer_checksum()?;
+    let snapshot = snapshot_roundtrip(&mut scenario, &owner, &assets, target, output)?;
+    Ok(
+        json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
+    )
+}
+
+fn snapshot_roundtrip(
+    scenario: &mut HeadlessScenario,
+    owner: &crate::rules::process_owner::NativeRulesProcessOwner,
+    assets: &AssetManager,
+    target: u64,
+    output: &Path,
+) -> Result<Value> {
+    use crate::sim::snapshot::{
+        GameSnapshot,
+        saved_local_view::SavedLocalView,
+        scenario_resources::{SavedMapMetadata, SavedScenarioResourcesRef},
+    };
+    let rules = &scenario.runtime.resources.rules;
+    let sim = &scenario.runtime.simulation;
+    let before = sim
+        .entities()
+        .get(target)
+        .context("snapshot target absent")?
+        .mod_component()
+        .to_vec();
+    let module_before = sim.external_mod_digest();
+    let live = sim.resolved_terrain().context("live terrain missing")?;
+    let terrain = live.capture_saved_template()?;
+    let map_hash = scenario.map.ini.content_hash();
+    let roster = crate::map::houses::parse_house_roster(
+        &scenario.map.ini,
+        rules.color_schemes.as_slice(),
+        Some(rules),
+    );
+    let map = SavedMapMetadata::capture(
+        map_hash,
+        &scenario.source,
+        &scenario.map.basic,
+        &scenario.map.ranking,
+        &Default::default(),
+        &scenario.map.terrain_objects,
+        &roster,
+        &Default::default(),
+        &crate::map::lighting::parse_lighting(&scenario.map.ini),
+        0,
+        Some("Player"),
+        [-1, -1],
+        false,
+    );
+    let mut resources = SavedScenarioResourcesRef::capture(
+        &scenario.runtime.resources,
+        owner
+            .saved_scenario_rules()
+            .context("native process did not retain Rules passes")?,
+        owner.fixed_art().content_hash(),
+        terrain,
+        map,
+    );
+    resources.capture_live_cell_land(live)?;
+    let view = SavedLocalView::new([[0, 0]; 4], Vec::new(), false, None, Default::default())?;
+    let bytes = GameSnapshot::save_validated_with_presentation(
+        sim,
+        map_hash,
+        rules.simulation_config_hash(),
+        "SDK acceptance",
+        0,
+        &[],
+        &[],
+        None,
+        None,
+        Some(&view),
+        Some(&resources),
+    );
+    let save_path = output.with_extension("vsave");
+    write_new(&save_path, &bytes)?;
+    let mut loaded = GameSnapshot::load_with_resources(&bytes)?;
+    ensure!(
+        loaded.rules_hash == rules.simulation_config_hash(),
+        "snapshot Rules digest changed"
+    );
+    ensure!(
+        loaded
+            .sim
+            .entities()
+            .get(target)
+            .context("loaded target absent")?
+            .mod_component()
+            == before,
+        "snapshot lost opaque entity state"
+    );
+    ensure!(
+        loaded.sim.external_mod_digest() == module_before,
+        "snapshot changed module/config/component digest"
+    );
+    // This is the same saved-program admission used by App. In particular it
+    // restores Rules' constructor binding without re-running Configure.
+    // Simulate a freshly projected RuleSet, whose module binding starts empty.
+    // Otherwise an implementation that only validates and forgets to rebind
+    // would pass by retaining the outgoing world's constructor hook.
+    scenario.runtime.resources.rules.external_mod = None;
+    super::adopt_saved_program(&mut scenario.runtime.resources.rules, &loaded.sim, assets)
+        .map_err(anyhow::Error::msg)?;
+    let resources = loaded
+        .take_scenario_resources()
+        .context("saved resource owner absent")?;
+    let saved_land = resources.terrain().user_load_land_values()?;
+    let dummy = crate::map::resolved_terrain::SharedCellDummy::fresh();
+    let terrain = resources.terrain().clone().restore_values(dummy.clone())?;
+    let mut restored = loaded.sim;
+    restored.retain_process_state_for_load(crate::sim::world::SnapshotProcessState::Live(
+        &scenario.runtime.simulation,
+    ));
+    restored.bind_shared_cell_dummy(dummy);
+    restored.reconstruct_cellclass_dummy_for_map_resize();
+    restored.restore_after_snapshot_load()?;
+    let rules = &scenario.runtime.resources.rules;
+    restored.rebuild_caches_after_load(
+        terrain,
+        scenario.runtime.simulation.terrain_speed_config().clone(),
+        rules,
+    );
+    restored.restore_map_authority_after_user_load(
+        rules,
+        &scenario.runtime.resources.overlay_registry,
+        None,
+        saved_land,
+    )?;
+    restored.intern_rule_type_ids(rules);
+    restored.resolve_type_handles(rules);
+    restored.rebuild_lighting_sources_after_load(rules);
+    scenario.runtime.simulation = restored;
+    advance(scenario)?;
+    // A post-load constructor verifies that the Rules owner also retained the
+    // saved program; continuing only old entities would miss this regression.
+    let new_target = spawn_target(scenario)?;
+    let new_entity = scenario
+        .sim()
+        .entities()
+        .get(new_target)
+        .context("post-load constructor absent")?;
+    let module_enabled = scenario.sim().external_mod.is_some();
+    ensure!(
+        module_enabled == !new_entity.mod_component().is_empty(),
+        "post-load constructor lost its module binding"
+    );
+    Ok(
+        json!({"resourceAdmission":true,"opaqueStatePreserved":true,"simulationResume":true,"postLoadAttach":true,"file":save_path,"bytes":bytes.len(),"sha256":crate::util::sha256::sha256_hex(&bytes),"guiStateRestored":false,"residentAssetRebindExercised":false}),
+    )
+}

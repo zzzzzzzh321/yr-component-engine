@@ -491,11 +491,6 @@ pub struct ObjectType {
     /// reparsing this text later could retroactively bind an unknown Ares name.
     pub armor: String,
     armor_id: crate::rules::armor::ArmorId,
-    /// Phobos `TechnoTypeExt::ShieldType` (`ShieldType=`): the bound
-    /// `[ShieldTypes]` entry, or `None` for an absent/`none` key. Retained as
-    /// the authored name; the Rules catalog resolves it at use.
-    #[cfg(feature = "phobos")]
-    shield_type: Option<String>,
     /// Phobos `TechnoTypeExt::DigitalDisplayTypes` (`DigitalDisplayTypes=`):
     /// authored `[DigitalDisplayTypes]` names in list order. Empty means the
     /// techno uses its category's `[AudioVisual]` default list.
@@ -2613,12 +2608,6 @@ impl ObjectType {
         self.armor_id = armor;
     }
 
-    /// Phobos `ShieldType=`: the bound `[ShieldTypes]` entry name.
-    #[cfg(feature = "phobos")]
-    pub(crate) fn shield_type(&self) -> Option<&str> {
-        self.shield_type.as_deref()
-    }
-
     /// Phobos `DigitalDisplayTypes=`, in authored list order.
     #[cfg(feature = "phobos")]
     pub fn digital_display_types(&self) -> &[String] {
@@ -3344,15 +3333,6 @@ impl ObjectType {
             ),
             armor_id: crate::rules::armor::armor_index(&armor),
             armor,
-            #[cfg(feature = "phobos")]
-            shield_type: section
-                .read_name("ShieldType", 0x80)
-                .filter(|name| {
-                    !name.is_empty()
-                        && !name.eq_ignore_ascii_case("none")
-                        && !name.eq_ignore_ascii_case("<none>")
-                })
-                .map(str::to_owned),
             #[cfg(feature = "phobos")]
             digital_display_types: section
                 .read_list("DigitalDisplayTypes", 0x100)

@@ -75,6 +75,9 @@ impl Simulation {
         rules: &RuleSet,
         init: TechnoConstructorInit,
     ) -> Result<Option<GameEntity>, GeneratedTechnoInitError> {
+        if self.external_mod_fault.is_some() {
+            return Ok(None);
+        }
         // Native class constructors copy signed type Strength unchanged.
         // Original copy slices: object_health corpus / constructors.
         let health = Health::new(obj.strength);
@@ -106,7 +109,7 @@ impl Simulation {
             techno_ctor_random_word,
         );
 
-        Self::install_techno_components(
+        let components = Self::install_techno_components(
             &mut self.interner,
             &self.session,
             &self.houses,
@@ -115,7 +118,14 @@ impl Simulation {
             rules,
             ComponentOrigin::Runtime,
         );
-        Ok(Some(ge))
+        match components {
+            Ok(()) => Ok(Some(ge)),
+            Err(GeneratedTechnoInitError::Gameplay(error)) => {
+                self.external_mod_fault = Some(error);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn install_techno_components(
@@ -126,7 +136,7 @@ impl Simulation {
         obj: Option<&ObjectType>,
         rules: &RuleSet,
         origin: ComponentOrigin,
-    ) {
+    ) -> Result<(), GeneratedTechnoInitError> {
         let category = ge.category();
         let initial = ge.body_facing.destination();
         let uses_voxel = ge.is_voxel();
@@ -155,21 +165,8 @@ impl Simulation {
         }
 
         ge.refresh_type_projection(obj, rules);
-        // Phobos `TechnoClass_Init` (`Hooks.cpp:297..301`): allocate the
-        // ShieldClass only when the bound type resolves and its `Strength` is
-        // above zero; `SetHP(InitialStrength.Get(Strength))` clamps at creation.
-        #[cfg(feature = "phobos")]
-        if let Some(object) = obj
-            && let Some(name) = object.shield_type()
-            && let Some(ty) = rules.shield_type(name)
-            && ty.strength() > 0
-        {
-            ge.shield = Some(crate::sim::shield::ShieldState::new(
-                name.to_owned(),
-                ty.initial_strength(),
-                ty.strength(),
-            ));
-        }
+        crate::mod_sdk::attach_entity(ge, rules, interner, session.binary_frame() as i32)
+            .map_err(GeneratedTechnoInitError::Gameplay)?;
         // The class constructor's one `+0x388` rate write (`Set_ROT`): `ROT=`
         // for a unit (`0x00735579`), an aircraft (`0x00413FE7`) and a building
         // (`BuildingClass::Init`, `0x00442CA5`, without testing `Turret=`: a
@@ -213,7 +210,7 @@ impl Simulation {
         }
         let Some(obj) = obj else {
             install_authored_bridge(ge, origin);
-            return;
+            return Ok(());
         };
         if category == EntityCategory::Structure {
             // Building43BCBD..43BCD0 calls Radio65AE60 with the signed
@@ -368,6 +365,7 @@ impl Simulation {
         if veteran {
             ge.veterancy.set_veteran();
         }
+        Ok(())
     }
 }
 

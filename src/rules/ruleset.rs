@@ -4245,6 +4245,8 @@ pub struct TypeHandle(pub u32);
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-support"), derive(Clone))]
 pub struct RuleSet {
+    pub(crate) external_mod: Option<std::sync::Arc<crate::mod_sdk::Program>>,
+    sdk_passes: Vec<IniFile>,
     /// All game objects in registry insertion order, indexed by `TypeHandle`.
     object_list: Vec<ObjectType>,
     /// Uppercase type ID → handle. Uppercase keys give O(1) case-insensitive
@@ -4460,14 +4462,6 @@ pub struct RuleSet {
     pub elevation_model: ElevationModel,
     /// Per-cell radiation-field constants from [Radiation].
     pub radiation: RadiationRules,
-    /// Phobos `[ShieldTypes]` catalog, read per Rules pass by the ordered
-    /// Process owner. Empty in builds without the capability.
-    #[cfg(feature = "phobos")]
-    pub(crate) shield_types: crate::rules::phobos_shields::ShieldTypeCatalog,
-    /// Phobos shield globals: `[CombatDamage] ShieldApplyArmorMult` and
-    /// `[AudioVisual] Shield.ConditionYellow/ConditionRed`.
-    #[cfg(feature = "phobos")]
-    pub(crate) shield_globals: crate::rules::phobos_shields::ShieldGlobals,
     /// Phobos `[DigitalDisplayTypes]` catalog, read per Rules pass by the
     /// ordered Process owner. Empty in builds without the capability.
     #[cfg(feature = "phobos")]
@@ -4579,6 +4573,14 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
+    pub(crate) fn bind_external_mod(&mut self, assets: &crate::assets::asset_manager::AssetManager) -> Result<(), String> {
+        let object_types = self.object_list.iter().map(|object| object.id.clone()).collect::<Vec<_>>();
+        let mut warheads = self.warheads.values().map(|warhead| warhead.id.clone()).collect::<Vec<_>>();
+        warheads.sort();
+        self.external_mod = crate::mod_sdk::load_from_assets(assets, &self.sdk_passes, &object_types, &warheads)?;
+        Ok(())
+    }
+
     /// RulesExt+14A indexed by native House difficulty0/1/2 (hardest first).
     /// Only the compiled Ares CanBuild owner consumes this retained policy.
     pub fn ares_ai_bypasses_build_limit(&self, difficulty_index: usize) -> bool {
@@ -5678,18 +5680,6 @@ impl RuleSet {
         let elevation_model = ElevationModel::from_ini(ini);
         let radiation: RadiationRules = RadiationRules::from_ini(ini);
         #[cfg(feature = "phobos")]
-        let (shield_types, shield_globals) = {
-            let shield_types = processed.shield_types().cloned().unwrap_or_default();
-            log::info!(
-                "Phobos shield types: [{}]",
-                shield_types.names().collect::<Vec<_>>().join(", ")
-            );
-            (
-                shield_types,
-                crate::rules::phobos_shields::ShieldGlobals::from_ini(ini),
-            )
-        };
-        #[cfg(feature = "phobos")]
         let (digital_display_types, digital_display_globals) = {
             let digital_display_types = processed
                 .digital_display_types()
@@ -6019,6 +6009,8 @@ impl RuleSet {
         }
 
         let mut rules = RuleSet {
+            external_mod: None,
+            sdk_passes: processed.sdk_passes().to_vec(),
             object_list,
             object_index,
             serial: next_rule_set_serial(),
@@ -6108,10 +6100,6 @@ impl RuleSet {
             allied_wall_transparency,
             elevation_model,
             radiation,
-            #[cfg(feature = "phobos")]
-            shield_types,
-            #[cfg(feature = "phobos")]
-            shield_globals,
             #[cfg(feature = "phobos")]
             digital_display_types,
             #[cfg(feature = "phobos")]
@@ -6519,19 +6507,6 @@ impl RuleSet {
         Self::lookup_ci(&self.warheads, id)
     }
 
-    /// Phobos `[ShieldTypes]` entry by name (case-insensitive, first spelling
-    /// retained). No entry in a build without the capability.
-    #[cfg(feature = "phobos")]
-    pub fn shield_type(&self, name: &str) -> Option<&crate::rules::phobos_shields::ShieldType> {
-        self.shield_types.entry(name)
-    }
-
-    /// Phobos shield globals (`[CombatDamage]`/`[AudioVisual]`).
-    #[cfg(feature = "phobos")]
-    pub fn shield_globals(&self) -> &crate::rules::phobos_shields::ShieldGlobals {
-        &self.shield_globals
-    }
-
     /// Phobos `[DigitalDisplayTypes]` catalog.
     #[cfg(feature = "phobos")]
     pub fn digital_display_types(
@@ -6675,6 +6650,10 @@ impl RuleSet {
     /// slices and are not claimed by this hash yet.
     pub fn simulation_config_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(program) = &self.external_mod {
+            b"vera-mod-config-v1".hash(&mut hasher);
+            program.fold(&mut hasher);
+        }
         // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);
         self.source_ini_hash.hash(&mut hasher);
@@ -6789,27 +6768,6 @@ impl RuleSet {
             self.weapons
                 .iter()
                 .map(|(id, weapon)| (id, &weapon.rad_type))
-                .collect::<Vec<_>>()
-                .hash(&mut hasher);
-            b"phobos-shield-types-v1".hash(&mut hasher);
-            self.shield_types.hash(&mut hasher);
-            self.shield_globals.apply_armor_mult.hash(&mut hasher);
-            self.shield_globals
-                .condition_yellow
-                .to_bits()
-                .hash(&mut hasher);
-            self.shield_globals
-                .condition_red
-                .to_bits()
-                .hash(&mut hasher);
-            self.shield_globals.pips.hash(&mut hasher);
-            self.shield_globals.pips_building.hash(&mut hasher);
-            self.shield_globals.pips_background.hash(&mut hasher);
-            self.shield_globals.pips_building_empty.hash(&mut hasher);
-            // Bound techno `ShieldType=` names, in registry order.
-            self.object_list
-                .iter()
-                .map(|object| (&object.id, object.shield_type()))
                 .collect::<Vec<_>>()
                 .hash(&mut hasher);
             b"phobos-digital-display-v1".hash(&mut hasher);

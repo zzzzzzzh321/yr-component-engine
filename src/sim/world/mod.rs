@@ -1239,6 +1239,10 @@ where
 /// The game simulation - owns all authoritative game state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Simulation {
+    #[serde(default)]
+    pub(crate) external_mod: Option<crate::mod_sdk::Program>,
+    #[serde(default)]
+    pub(crate) external_mod_fault: Option<String>,
     /// String interner for owner/type_ref — zero-cost ID clones instead of heap Strings.
     pub(crate) interner: crate::sim::intern::StringInterner,
     /// Runtime TechnoType+634 writes; RuleSet remains the frozen read projection.
@@ -2540,7 +2544,7 @@ impl Simulation {
         let mut under_attack_events = Vec::new();
 
         {
-            for recorded in &request.recorded_cells {
+            'wave_cells: for recorded in &request.recorded_cells {
                 let cell = recorded.current_cell(self.resolved_terrain.as_ref());
                 // GetWeapon(0) is re-entered exactly once per cell, with the
                 // owner's current rank. A null owner aborts DamageArea before
@@ -2643,7 +2647,7 @@ impl Simulation {
                                 if self.unit_in_contact_war_factory(target_id, rules) {
                                     None
                                 } else {
-                                    crate::sim::combat::wave_post_object_damage(
+                                    match crate::sim::combat::wave_post_object_damage(
                                         &event,
                                         &self.substrate.entities,
                                         rules,
@@ -2653,9 +2657,14 @@ impl Simulation {
                                         scenario_no_damage,
                                         current_tick,
                                         self.resolved_terrain.as_ref(),
-                                        #[cfg(feature = "phobos")]
                                         Some(&*self),
-                                    )
+                                    ) {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            self.external_mod_fault = Some(error);
+                                            break 'wave_cells;
+                                        }
+                                    }
                                 };
                             if let Some(value) = post_object_damage {
                                 shared_damage = value;
@@ -4378,6 +4387,8 @@ impl Simulation {
             expiry_listeners: Default::default(),
             path_batch: None,
             scan_batch: None,
+            external_mod: None,
+            external_mod_fault: None,
             interner: crate::sim::intern::StringInterner::new(),
             type_tech_levels: TypeTechLevels::default(),
             rule_handles: None,
@@ -7532,6 +7543,9 @@ impl Simulation {
         effects: FrameEffects<'_>,
         cursor: Option<house_defeat::HouseOutcomeCursor>,
     ) -> Result<FrameTailResult, FrameAdvanceError> {
+        if let Some(error) = &self.external_mod_fault {
+            return Err(FrameAdvanceError::new(self.session.tick(), self.session.binary_frame(), 0, format!("gameplay component: {error}")));
+        }
         #[cfg(any(test, feature = "test-support"))]
         if cursor.is_none() {
             self.trace_master_frame_rung(MasterFrameTestRung::Houses);
@@ -7556,6 +7570,10 @@ impl Simulation {
         #[cfg(any(test, feature = "test-support"))]
         if self.session.tick() > 0 {
             self.trace_house_ai_activation_order(HouseAiActivationOrderTestEvent::DefeatProcessed);
+        }
+
+        if let Some(error) = &self.external_mod_fault {
+            return Err(FrameAdvanceError::new(self.session.tick(), self.session.binary_frame(), 0, format!("gameplay component: {error}")));
         }
 
         // `Queue_AI_Multiplayer` computes and stores the sync checksum
@@ -7664,7 +7682,7 @@ impl Simulation {
             return Ok(FrameTailResult::Checksum(failure.expect("checksum failure")));
         }
         Ok(FrameTailResult::Complete(self.commit_frame_tail(
-            rules, overlay_registry, tick_ms, execute_tick, effects)))
+            rules, overlay_registry, tick_ms, execute_tick, effects)?))
     }
 
     /// MainTick55DE7E..55DEA4 is also reached after a CRC modal returns.
@@ -7676,12 +7694,15 @@ impl Simulation {
         tick_ms: u32,
         execute_tick: u64,
         effects: FrameEffects<'_>,
-    ) -> bool {
+    ) -> Result<bool, FrameAdvanceError> {
+        if let Some(error) = &self.external_mod_fault {
+            return Err(FrameAdvanceError::new(self.session.tick(), self.session.binary_frame(), 0, format!("gameplay component: {error}")));
+        }
         // Main_Tick returns immediately on a terminal result. The wrapping
         // frame commit, pacing tail, and pending-delete drain are all skipped
         // on that same terminating call.
         if self.termination_frame_requested() {
-            return false;
+            return Ok(false);
         }
 
         // Commit the wrapping native frame LATE, after every phase has observed
@@ -7725,8 +7746,11 @@ impl Simulation {
 
         // The separate Rust session tick has no direct native field; preserve
         // its existing post-debug-validation relation.
+        if let Some(error) = &self.external_mod_fault {
+            return Err(FrameAdvanceError::new(self.session.tick(), self.session.binary_frame(), 0, format!("gameplay component: {error}")));
+        }
         self.session.complete_tick(execute_tick);
-        true
+        Ok(true)
     }
 
     /// Run the copied TeamClass AI pass before the live LogicClass object walk.
@@ -8010,7 +8034,7 @@ impl Simulation {
             Some(FrameContinuation::Interrupted(pending)) => (pending.tick_ms, pending.frame),
             _ => unreachable!("checked fatal network continuation"),
         };
-        Ok(self.finish_aborted_network_frame(frame, tick_ms, rules, overlay_registry, effects))
+        self.finish_aborted_network_frame(frame, tick_ms, rules, overlay_registry, effects)
     }
 
     /// Wait result8 (Quit Game) has no additional error modal. Native still
@@ -8028,7 +8052,7 @@ impl Simulation {
         let Some(FrameContinuation::Waiting(pending)) = self.frame_continuation.take() else {
             unreachable!("checked wait continuation")
         };
-        Ok(self.finish_aborted_network_frame(pending.frame, pending.tick_ms, rules, overlay_registry, effects))
+        self.finish_aborted_network_frame(pending.frame, pending.tick_ms, rules, overlay_registry, effects)
     }
 
     fn finish_aborted_network_frame(
@@ -8038,16 +8062,16 @@ impl Simulation {
         rules: &RuleSet,
         overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
         effects: FrameEffects<'_>,
-    ) -> SimFrameOutput {
+    ) -> Result<SimFrameOutput, FrameAdvanceError> {
         let effects = effects.with_overlay_registry(overlay_registry);
         let committed = self.commit_frame_tail(rules, overlay_registry,
-            tick_ms, frame.execute_tick, effects);
+            tick_ms, frame.execute_tick, effects)?;
         let mut frame = self.finish_master_frame(frame, committed, rules, overlay_registry,
             #[cfg(feature = "telemetry")] None);
         // This is the terminal match frame even when its native commit ran.
         frame.tick.state_hash = Some(self.state_hash());
         self.unit_voice_visit_interest.clear();
-        self.collect_frame_output(frame, effects)
+        Ok(self.collect_frame_output(frame, effects))
     }
 
     /// Poll the saved post-Logic Queue_AI visit without re-running House,
@@ -8204,6 +8228,9 @@ impl Simulation {
         poll_triggers: bool,
         effects: FrameEffects<'_>,
     ) -> Result<MasterFrameOutput, FrameAdvanceError> {
+        if let Some(error) = &self.external_mod_fault {
+            return Err(FrameAdvanceError::new(self.session.tick(), self.session.binary_frame(), 0, format!("gameplay component: {error}")));
+        }
         if self.frame_continuation.is_some() {
             return Err(FrameAdvanceError::new(self.session.tick(), self.session.binary_frame(), 0,
                 "pending frame must be resumed before another Logic visit".to_owned()));

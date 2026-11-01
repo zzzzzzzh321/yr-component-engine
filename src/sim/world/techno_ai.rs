@@ -708,12 +708,8 @@ fn techno_ai_shell(
     }
     let temporal_frozen =
         sim.temporal_ai_prologue(id, rules, ctx, &mut outcome.bridge_state_changed);
-    // Phobos `ShieldClass::AI_Temporal` pauses recovery during the Temporal
-    // prologue; frozen leaves never reach the normal `ShieldClass::AI` at
-    // `TechnoClass_AI @ 0x6F9E50+0x5`. The shield owner handles that paused
-    // visit or the normal recovery visit after this frame's warp update.
-    #[cfg(feature = "phobos")]
-    crate::sim::shield::tick(sim, id, rules);
+    crate::mod_sdk::tick_entity(sim, id, rules);
+    if sim.external_mod_fault.is_some() { return; }
     if temporal_frozen {
         return;
     }

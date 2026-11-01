@@ -1711,8 +1711,8 @@ fn emit_building_anims(
         // AnimClass::Draw's tint hook (`0x00423420`) ORs the custom shield
         // tint into the building anim's colour word independently of the
         // ShouldUseCellDrawer intensity arm.
-        let shield_word = rules.map_or(0, |rules| {
-            crate::app::presentation::lighting::shield_tint(building, sim, rules).0
+        let shield_word = rules.map_or(0, |_| {
+            crate::app::presentation::lighting::mod_tint(building, sim).0
         });
         let palette_light = palette_light.with_colour_word(anim_word(anim_id) | shield_word);
         // DrawIt422CA0 -> 4AED70 retains the Anim's Convert selector. Reducing
