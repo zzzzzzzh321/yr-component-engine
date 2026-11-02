@@ -8877,3 +8877,6 @@ mod building_occupant_storage_tests;
 
 #[cfg(test)]
 mod sdk_house_survival_tests;
+
+#[cfg(test)]
+mod sdk_armor_tests;

@@ -7,7 +7,6 @@
 //! overrides each index before the next one, so backward inheritance sees the
 //! earlier override while a forward reference takes its own fallback record.
 
-#[cfg(feature = "ares")]
 use crate::rules::armor::ArmorInteraction;
 use crate::rules::armor::{ArmorId, RETAIL_ARMOR_NAMES};
 #[cfg(feature = "ares")]
@@ -15,7 +14,6 @@ use crate::rules::ini_parser::{IniFile, IniSection};
 #[cfg(feature = "ares")]
 use crate::rules::ini_value::truncate_native_bytes;
 use crate::util::native_x87::NativeF64Bits;
-#[cfg(feature = "ares")]
 use crate::util::native_x87::{MaskedX87Chop53 as X87, MaskedX87Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -37,7 +35,6 @@ impl Default for Versus {
     }
 }
 
-#[cfg(feature = "ares")]
 impl Versus {
     ///100523E0..100524B6. The numeric read is shared with the original
     /// Verses parser; only Ares's independent flag conventions are added.
@@ -93,6 +90,18 @@ impl Versus {
     }
 }
 
+/// Shared literal numeric reader100523E0. No INI key or catalog policy is
+/// interpreted here; the caller supplies its already bounded native token.
+pub(crate) fn parse_verse_token(token: &str) -> vera_mod_api::ArmorVersePolicy {
+    let value = Versus::parse(token);
+    vera_mod_api::ArmorVersePolicy {
+        multiplier_bits: value.multiplier.bits(),
+        force_fire: value.force_fire,
+        retaliate: value.retaliate,
+        passive_acquire: value.passive_acquire,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct ArmorDefinition {
     name: String,
@@ -124,6 +133,12 @@ impl Default for ArmorCatalog {
 }
 
 impl ArmorCatalog {
+    pub(crate) fn name(&self, armor: ArmorId) -> Option<&str> {
+        self.armors
+            .get(armor.index())
+            .map(|entry| entry.name.as_str())
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.armors.len()
     }
@@ -205,6 +220,10 @@ impl Default for AresWarheadVerses {
 }
 
 impl AresWarheadVerses {
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(crate) fn valid_saved_state(&self, catalog: &ArmorCatalog) -> bool {
         // A type constructed after its family's body loop can still hold
         // only the11 constructor entries until the next reached read.

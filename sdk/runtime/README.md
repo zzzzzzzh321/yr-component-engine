@@ -13,6 +13,20 @@ messages have separate bounds. Host adapters must themselves be trusted and
 bounded; fuel limits guest instructions, not arbitrary Rust callbacks or code
 compilation. Content admission and host operation validation remain mandatory.
 
+Defaults allocate base fuel of 50 million to each one-time physical Configure
+pass and 5 million to each manifest/resource/gameplay call. Every call also
+receives 256 fuel per serialized input byte, since decoding opaque JSON byte
+arrays consumes guest instructions before the requested logic runs. This total
+is shared by decoding and logic; it is not a separate strict 5-million gameplay
+cap. `max_input_fuel` caps this extra allowance at 50 million even for the largest
+valid input, so default total budgets never exceed 55 million for ordinary calls
+or 100 million for Configure. The 8 MiB wire limit remains separately enforced.
+Setting `fuel_per_input_byte=0` restores a fixed budget. Memory, host-call and
+wire bounds remain independent; infinite loops still exhaust fuel. Traps report
+input size and consumed fuel/host calls; Rules admission adds its physical pass
+index and frozen configuration size. This allowance does not reduce repeated
+configuration decoding cost or guarantee arbitrary large-Mod throughput.
+
 The host's `config-read` uses the engine's existing typed INI reader semantics.
 Reader names are `int`, `bool`, `double-bits`, `nullable-int`, `nullable-bool`,
 `nullable-double-bits`, `string:N`, `name:N`, `nullable-name:N`, `list:N`,
@@ -23,6 +37,13 @@ The development host also exposes the existing `ares-int`, `ares-bool`,
 same native readers used by the engine. Reference scopes preserve the visible
 registry prefix at each reached physical Rules reader; the final registry must
 not retroactively resolve an earlier unknown reference.
+`verse-token` takes a literal JSON string as its current argument and returns
+the existing armor numeric parser's binary64/independent-flag record. It does
+not perform another INI read or implement a second numeric algorithm.
+`comma-list:N` delegates the native comma-only `IniSection::read_list`, retaining
+the current value on missing/empty reads. The earlier `list:N` reader retains
+its comma/space/tab tokenization; callers select the semantics their native
+reader requires rather than sharing a misleading common list interpretation.
 Current values and results are JSON; doubles use raw `u64` bits. `N` is the native
 read capacity. `registry` returns physical section keys in authored order, so the
 component reads their values through the same typed reader. The engine adapter
@@ -41,3 +62,6 @@ rejects an unpaired effect capability. Ordered effect plans are validated before
 the host commits them to its existing instance and animation owners; the runtime
 does not keep another gameplay state store. API version 1 does not imply that an
 older host understands newly declared optional hooks.
+The optional `armor_resource` query uses the same stateless channel for catalog,
+object/Terrain and warhead projections; the engine validates their indices and
+lengths together before binding them to existing rules owners.

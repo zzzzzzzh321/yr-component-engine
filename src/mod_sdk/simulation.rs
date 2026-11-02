@@ -24,7 +24,10 @@ fn entity_context(
         id: entity.stable_id(),
         type_name: interner.resolve(entity.type_ref()).into(),
         owner: interner.resolve(entity.owner()).into(),
-        armor: object.map(|o| o.armor.clone()).unwrap_or_default(),
+        armor: object
+            .and_then(|o| rules.armor_name(o.armor_id()))
+            .unwrap_or_default()
+            .into(),
         health: entity.health.current(),
         max_health: object.map_or(0, |o| o.strength),
         alive: entity.lifecycle.object_alive(),
@@ -116,27 +119,14 @@ fn damage_context(
         .houses
         .get(&target.owner())
         .is_some_and(|h| h.multiplay_passive());
-    let mut names = crate::rules::armor::RETAIL_ARMOR_NAMES
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-    for object in rules.all_objects() {
-        if !names.iter().any(|n| n.eq_ignore_ascii_case(&object.armor)) {
-            names.push(object.armor.clone());
-        }
-    }
-    let verses = names
-        .into_iter()
-        .map(|armor| {
-            let id = rules
-                .all_objects()
-                .find(|o| o.armor.eq_ignore_ascii_case(&armor))
-                .map_or_else(
-                    || crate::rules::armor::armor_index(&armor),
-                    |o| o.armor_id(),
-                );
+    // Use the authoritative bound IDs and this WH's actually reached prefix.
+    // A late WH can own only11 entries despite a larger catalog; unrelated
+    // damage facts must not query a custom record it has never initialized.
+    let verses = (0..warhead.armor_record_count().min(rules.armor_count()))
+        .map(|index| {
+            let id = crate::rules::armor::ArmorId::from_index(index);
             api::ArmorVerses {
-                armor,
+                armor: rules.armor_name(id).expect("active armor prefix").into(),
                 multiplier_bits: warhead.interaction(id).multiplier().bits(),
             }
         })

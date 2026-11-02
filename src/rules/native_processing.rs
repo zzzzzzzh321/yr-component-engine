@@ -692,7 +692,9 @@ const PARADROP_INFANTRY_KEYS: [&str; 4] = [
 /// Read-only SDK view of a physical Rules pass. Animation identities are stored
 /// once; each reached Type suffix records only its then-current prefix length.
 /// Later body reads can allocate animations and must not make an earlier
-/// registered-pointer read succeed retroactively.
+/// registered-pointer read succeed retroactively. The same read-only ledger
+/// exposes common Armor reads, the BeforeTypeData slot and unconditional WH
+/// suffix visits; these do not interpret or retain external gameplay fields.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SdkRegistryPass {
     animations: Vec<String>,
@@ -5639,6 +5641,26 @@ impl RulesPassProcessor {
         });
     }
 
+    /// Common ObjectType Armor4753F0/10006E10 and the independent WH
+    /// suffix10006460 have different visitation from the Techno extension.
+    /// These are read-point facts only; the component interprets its tags.
+    fn record_sdk_armor_read(&mut self, family: RulesTypeFamily, index: usize) {
+        let registry = match family {
+            RulesTypeFamily::Vehicle => "$armor-units",
+            RulesTypeFamily::Infantry => "$armor-infantry",
+            RulesTypeFamily::Building => "$armor-buildings",
+            RulesTypeFamily::Aircraft => "$armor-aircraft",
+            RulesTypeFamily::Terrain => "$armor-terrain",
+            RulesTypeFamily::Warhead => "$armor-warheads",
+            _ => return,
+        };
+        self.sdk_type_reads.push(SdkRegistryRead {
+            registry,
+            owner: self.families[&family][index].native_stored_id.clone(),
+            animation_count: 0,
+        });
+    }
+
     fn sdk_registry_pass(&self) -> SdkRegistryPass {
         SdkRegistryPass {
             animations: self
@@ -5685,7 +5707,11 @@ impl RulesPassProcessor {
         let member = self.families.get_mut(&family)?.get_mut(index)?;
         member.armor_id = armor;
         member.body.overlay_rules_pass(&raw);
-        Some((native_stored_id, raw, member.body.clone()))
+        let effective = member.body.clone();
+        if family.object_category().is_some() || family == RulesTypeFamily::Terrain {
+            self.record_sdk_armor_read(family, index);
+        }
+        Some((native_stored_id, raw, effective))
     }
 
     fn process_type_data(
@@ -5726,6 +5752,14 @@ impl RulesPassProcessor {
                 self.family_mut(RulesTypeFamily::Side)[array_index].ares_side = Some(side);
             }
         }
+        // The optional component gets the real BeforeTypeData679A15 slot,
+        // including a pass with no physical ArmorTypes section. Final merged
+        // Configure is not another RulesClass::Process visit.
+        self.sdk_type_reads.push(SdkRegistryRead {
+            registry: "$armor-before-type-data",
+            owner: "ArmorTypes".into(),
+            animation_count: 0,
+        });
         // Installed BeforeTypeData679A15 reads ArmorTypes/defaults before
         // any ordinary ObjectType/Warhead body in this Process pass.
         #[cfg(feature = "ares")]
@@ -7128,6 +7162,10 @@ impl RulesPassProcessor {
                     .map(|value| NativeF64Bits::from_bits(value.to_bits()));
                 }
             }
+            //10006460 expands the current armor vector even when the native
+            // WH body had no physical section. Keep this visit independent of
+            // the pointer-reader metadata below.
+            self.record_sdk_armor_read(RulesTypeFamily::Warhead, index);
             // WarheadType's extension suffix follows its original body. Only
             // a reached physical section supplies pointer reads for this type.
             if pass

@@ -83,10 +83,13 @@ impl Program {
         let runtime = ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
         let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
         let manifest = module.manifest().clone();
-        if manifest.hooks.contains(&api::HookKind::Effects)
+        if (manifest.hooks.contains(&api::HookKind::Effects)
+            || manifest.hooks.contains(&api::HookKind::ArmorResource))
             && (passes.is_empty() || registries.len() + 1 != passes.len())
         {
-            return Err("effect runtime requires physical Rules read-point registries".into());
+            return Err(
+                "resource configuration requires physical Rules read-point registries".into(),
+            );
         }
         if [
             api::HookKind::Configure,
@@ -143,7 +146,12 @@ impl Program {
             let plan = executor
                 .runtime
                 .evaluate(&executor.module, &request, Arc::new(host))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    format!(
+                        "configuration pass {index} (final={final_pass}, frozen bytes={}): {e}",
+                        program.config.len(),
+                    )
+                })?;
             if !plan.state.is_empty() || plan.damage.is_some() || !plan.operations.is_empty() {
                 return Err("configuration returned simulation writes".into());
             }
@@ -179,6 +187,21 @@ impl Program {
             &[],
         )?;
         Ok(plan.weapon_resource)
+    }
+
+    pub(crate) fn has_armor_resource(&self) -> bool {
+        self.manifest.hooks.contains(&api::HookKind::ArmorResource)
+    }
+
+    pub(crate) fn armor_resource_policy(
+        &self,
+        resource: &api::ArmorResourceContext,
+    ) -> Result<Option<api::ArmorResourcePolicy>, String> {
+        if !self.has_armor_resource() {
+            return Ok(None);
+        }
+        let plan = self.evaluate(Context::ArmorResource(resource.clone()), &[])?;
+        Ok(plan.armor_resource)
     }
 
     pub(crate) fn has_effect_runtime(&self) -> bool {

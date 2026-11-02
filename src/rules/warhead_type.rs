@@ -47,6 +47,8 @@ pub struct WarheadType {
     pub verses_f64: [f64; 11],
     /// Immutable view of the separately retained Ares WH extension.
     ares_verses: Option<AresWarheadVerses>,
+    /// Rebuilt from the frozen component; never written into the raw11/native extension.
+    external_armor: Option<crate::rules::armor::FrozenArmorTable>,
     ares: Option<crate::rules::ares_warhead::AresWarheadRules>,
     /// Splash radius in cells (0 = direct hit only). Native `CellSpread=` is a
     /// **float** at `WarheadTypeClass+0x124` (ReadDouble `0x005283d0` called at
@@ -356,7 +358,34 @@ impl WarheadType {
     /// `0x0075CED0`): what a warhead whose sections name no `InfDeath=` keeps.
     pub(crate) const DEFAULT_INF_DEATH: i32 = 0;
 
+    /// A late-allocated WH can still own only its eleven constructor records.
+    /// Exposing facts must not query unrelated custom indices it never read.
+    pub(crate) fn armor_record_count(&self) -> usize {
+        if let Some(table) = &self.external_armor {
+            return table.len();
+        }
+        self.native_armor_record_count()
+    }
+
+    /// Original profile table, independent of a previous external projection.
+    pub(crate) fn native_armor_record_count(&self) -> usize {
+        #[cfg(feature = "ares")]
+        {
+            self.ares_verses
+                .as_ref()
+                .expect("Ares Warhead extension")
+                .len()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            self.verses_f64.len()
+        }
+    }
+
     pub fn interaction(&self, armor: ArmorId) -> ArmorInteraction {
+        if let Some(table) = &self.external_armor {
+            return table.interaction(armor);
+        }
         #[cfg(feature = "ares")]
         {
             self.ares_verses
@@ -376,6 +405,9 @@ impl WarheadType {
     /// installed Ares75DDCC hook skips its native derivation and clears it;
     /// effective extension entries must never reintroduce that shortcut.
     pub fn uses_medium_wood_target_mask(&self) -> bool {
+        if let Some(table) = &self.external_armor {
+            return table.use_medium_wood_target_mask();
+        }
         #[cfg(feature = "ares")]
         {
             false
@@ -384,6 +416,19 @@ impl WarheadType {
         {
             self.verses_f64[4] == 0.0 && self.verses_f64[6] == 0.0
         }
+    }
+
+    pub(crate) fn bind_external_armor(
+        &mut self,
+        table: Option<crate::rules::armor::FrozenArmorTable>,
+    ) {
+        self.external_armor = table;
+    }
+
+    pub(crate) fn external_armor_hash_state(
+        &self,
+    ) -> Option<&crate::rules::armor::FrozenArmorTable> {
+        self.external_armor.as_ref()
     }
 
     pub(crate) fn install_ares_verses(&mut self, state: Option<&AresWarheadVerses>) {
@@ -431,6 +476,7 @@ impl WarheadType {
             particle_system: None,
             verses_f64,
             ares_verses: cfg!(feature = "ares").then(AresWarheadVerses::default),
+            external_armor: None,
             ares: None,
             cell_spread_f64,
             cell_inset_f32,

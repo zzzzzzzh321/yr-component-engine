@@ -52,6 +52,11 @@ impl HostServices for NativeHost {
         reader: &str,
         current: &[u8],
     ) -> Result<Vec<u8>, String> {
+        if reader == "verse-token" {
+            let token: String = serde_json::from_slice(current).map_err(|e| e.to_string())?;
+            return serde_json::to_vec(&crate::rules::ares_armor::parse_verse_token(&token))
+                .map_err(|e| e.to_string());
+        }
         let ini = self
             .ini
             .as_ref()
@@ -182,6 +187,9 @@ impl HostServices for NativeHost {
                             value
                         }
                     }
+                    "comma-list" => section
+                        .read_list(key, size)
+                        .map_or(value, |items| serde_json::json!(items)),
                     _ => return Err(bad()),
                 }
             }

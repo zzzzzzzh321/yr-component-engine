@@ -49,7 +49,7 @@ fn fixture(api: u32, body: &str, extra: &str) -> Vec<u8> {
         version: "1".into(),
         state_version: 1,
         config_version: 1,
-        hooks: vec![HookKind::Tick],
+        hooks: vec![HookKind::Tick, HookKind::Configure],
     })
     .unwrap();
     let plan = serde_json::to_vec(&Plan {
@@ -187,6 +187,118 @@ fn runtime_bounds_guest_fuel_and_linear_memory_without_poisoning_later_calls() {
             .unwrap()
             .state,
         [1]
+    );
+}
+
+#[test]
+fn runtime_separates_bounded_configuration_work_from_actor_work() {
+    let runtime = ComponentRuntime::new(RuntimeLimits {
+        fuel: 10_000,
+        configure_fuel: 200_000,
+        fuel_per_input_byte: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let workload = load(
+        &runtime,
+        &fixture(
+            API_VERSION,
+            r#"
+        (global.set $counter (i32.const 10000))
+        (loop $work
+            (global.set $counter (i32.sub (global.get $counter) (i32.const 1)))
+            (br_if $work (global.get $counter)))
+    "#,
+            "",
+        ),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .evaluate(&workload, &request(), Arc::new(ManifestHost))
+            .is_err()
+    );
+    let configure = Request {
+        context: Context::Configure(vera_mod_api::ConfigureContext {
+            pass: 0,
+            source: "rules".into(),
+            final_pass: false,
+            object_types: Vec::new(),
+            warheads: Vec::new(),
+        }),
+        ..request()
+    };
+    assert!(
+        runtime
+            .evaluate(&workload, &configure, Arc::new(ManifestHost))
+            .is_ok()
+    );
+    let infinite = load(
+        &runtime,
+        &fixture(API_VERSION, "(loop $spin (br $spin))", ""),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .evaluate(&infinite, &configure, Arc::new(ManifestHost))
+            .is_err()
+    );
+    assert!(
+        ComponentRuntime::new(RuntimeLimits {
+            configure_fuel: 0,
+            ..Default::default()
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn runtime_accounts_for_bounded_wire_input_without_disabling_fuel() {
+    let runtime = ComponentRuntime::new(RuntimeLimits {
+        fuel: 10_000,
+        fuel_per_input_byte: 64,
+        max_input_fuel: 200_000,
+        ..Default::default()
+    })
+    .unwrap();
+    let workload = load(
+        &runtime,
+        &fixture(
+            API_VERSION,
+            r#"
+        (global.set $counter (i32.const 10000))
+        (loop $work
+            (global.set $counter (i32.sub (global.get $counter) (i32.const 1)))
+            (br_if $work (global.get $counter)))
+    "#,
+            "",
+        ),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .evaluate(&workload, &request(), Arc::new(ManifestHost))
+            .is_err()
+    );
+    let padded = Request {
+        config: vec![255; 1024],
+        ..request()
+    };
+    assert_eq!(runtime.limits.fuel_for("tick", usize::MAX), 210_000);
+    assert!(
+        runtime
+            .evaluate(&workload, &padded, Arc::new(ManifestHost))
+            .is_ok()
+    );
+    let infinite = load(
+        &runtime,
+        &fixture(API_VERSION, "(loop $spin (br $spin))", ""),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .evaluate(&infinite, &padded, Arc::new(ManifestHost))
+            .is_err()
     );
 }
 

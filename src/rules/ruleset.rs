@@ -4234,6 +4234,111 @@ fn next_rule_set_serial() -> u64 {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeHandle(pub u32);
 
+struct ArmorResourceBindings {
+    names: Option<Vec<String>>,
+    objects: Vec<Option<crate::rules::armor::ArmorId>>,
+    terrain: Vec<(String, Option<crate::rules::armor::ArmorId>)>,
+    warheads: Vec<(String, Option<crate::rules::armor::FrozenArmorTable>)>,
+}
+
+impl ArmorResourceBindings {
+    fn validate_coverage(&self, rules: &RuleSet) -> Result<(), String> {
+        // Merely declaring the optional hook must not tighten the legacy
+        // profile when the component returns no projections at all.
+        if self.names.is_none()
+            && self.objects.iter().all(Option::is_none)
+            && self.terrain.iter().all(|(_, binding)| binding.is_none())
+            && self.warheads.iter().all(|(_, table)| table.is_none())
+        {
+            return Ok(());
+        }
+        let required = self
+            .objects
+            .iter()
+            .zip(&rules.object_list)
+            .map(|(binding, object)| binding.unwrap_or(object.native_armor_id()).index())
+            .chain(self.terrain.iter().map(|(name, binding)| {
+                binding
+                    .unwrap_or(rules.terrain_object_types[name].native_armor_id())
+                    .index()
+            }))
+            .max()
+            .unwrap_or(0);
+        for (name, table) in &self.warheads {
+            let count = table.as_ref().map_or_else(
+                || rules.warheads[name].native_armor_record_count(),
+                |table| table.len(),
+            );
+            if required >= count {
+                return Err(format!(
+                    "warhead armor table cannot address bound armor ID {required}: {name}"
+                ));
+            }
+        }
+        // An unused catalog suffix does not require manufactured WH records.
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod armor_admission_tests {
+    use super::*;
+
+    #[test]
+    fn external_armor_admission_rejects_unaddressable_bindings_but_keeps_unused_suffixes() {
+        use crate::rules::armor::{ArmorId, FrozenArmorTable};
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[VehicleTypes]\n0=TARGET\n[TARGET]\n[Warheads]\n0=TestWH\n[TestWH]\n",
+        ))
+        .unwrap();
+        let mut names = vera_mod_api::BASE_ARMOR_NAMES
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        names.push("paper".into());
+        let mut bundle = ArmorResourceBindings {
+            names: Some(names),
+            objects: rules
+                .object_list
+                .iter()
+                .map(|_| Some(ArmorId::from_index(11)))
+                .collect(),
+            terrain: Vec::new(),
+            warheads: rules
+                .warheads
+                .keys()
+                .map(|name| (name.clone(), None))
+                .collect(),
+        };
+        assert!(
+            bundle.validate_coverage(&rules).is_err(),
+            "native fallback is only11 records"
+        );
+        for (_, table) in &mut bundle.warheads {
+            *table = Some(FrozenArmorTable::new(vec![Default::default(); 11], false));
+        }
+        assert!(
+            bundle.validate_coverage(&rules).is_err(),
+            "explicit short tables cannot address ID11 either"
+        );
+        bundle.objects.fill(Some(ArmorId::NONE));
+        assert!(
+            bundle.validate_coverage(&rules).is_ok(),
+            "unused catalog tails keep legitimate constructor prefixes"
+        );
+        bundle.names = None;
+        bundle.objects.fill(None);
+        bundle
+            .warheads
+            .iter_mut()
+            .for_each(|(_, table)| *table = None);
+        assert!(
+            bundle.validate_coverage(&rules).is_ok(),
+            "all-None retains the original profile"
+        );
+    }
+}
+
 /// Master container for all game data parsed from rules.ini.
 ///
 /// Name lookups are case-insensitive (matching the engine's find-or-allocate),
@@ -4250,6 +4355,9 @@ pub struct RuleSet {
     /// None retains this build's native compatibility mode; Retail is an
     /// explicit component-owned choice, not the absence of a choice.
     match_rules_policy: Option<vera_mod_api::MatchRulesPolicy>,
+    /// Canonical identity projection from the frozen armor component. None
+    /// retains the native profile catalog; this never mutates its history.
+    external_armor_names: Option<Vec<String>>,
     sdk_passes: Vec<IniFile>,
     sdk_registries: Vec<crate::rules::native_processing::SdkRegistryPass>,
     sdk_animation_names: Vec<String>,
@@ -4616,6 +4724,7 @@ impl RuleSet {
     }
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
+        let armor = self.collect_armor_resource_bindings()?;
         let mut effect_resources = std::collections::BTreeMap::new();
         if let Some(program) = self
             .external_mod
@@ -4706,7 +4815,165 @@ impl RuleSet {
             object.bind_type_resource_policy(policy);
         }
         self.project_resource_reload();
+        self.external_armor_names = armor.names;
+        for (object, binding) in self.object_list.iter_mut().zip(armor.objects) {
+            object.bind_external_armor(binding);
+        }
+        for (name, binding) in armor.terrain {
+            self.terrain_object_types
+                .get_mut(&name)
+                .expect("retained Terrain")
+                .bind_external_armor(binding);
+        }
+        for (name, table) in armor.warheads {
+            self.warheads
+                .get_mut(&name)
+                .expect("retained Warhead")
+                .bind_external_armor(table);
+        }
         Ok(())
+    }
+
+    fn collect_armor_resource_bindings(&self) -> Result<ArmorResourceBindings, String> {
+        use crate::rules::armor::{ArmorId, FrozenArmorTable, object_kind};
+        use vera_mod_api::{
+            ArmorObjectKind, ArmorResourceContext as Query, ArmorResourcePolicy as Policy,
+        };
+        let program = self
+            .external_mod
+            .as_deref()
+            .filter(|p| p.has_armor_resource());
+        let query = |context| {
+            program
+                .map(|p| p.armor_resource_policy(&context))
+                .transpose()
+                .map(Option::flatten)
+        };
+        let names = match query(Query::Catalog)? {
+            None => None,
+            Some(Policy::Catalog { names }) => Some(names),
+            _ => return Err("armor catalog query returned another resource kind".into()),
+        };
+        let count = names
+            .as_ref()
+            .map_or_else(|| self.native_armor_count(), Vec::len);
+        let binding = |category, name: &str, native: ArmorId| -> Result<Option<ArmorId>, String> {
+            let selected = match query(Query::Object {
+                category,
+                name: name.into(),
+            })? {
+                None => None,
+                Some(Policy::Object { armor }) => Some(ArmorId::from_index(armor as usize)),
+                _ => {
+                    return Err(format!(
+                        "armor binding returned another resource kind: {name}"
+                    ));
+                }
+            };
+            if selected.unwrap_or(native).index() >= count {
+                return Err(format!(
+                    "armor binding is outside the active catalog: {name}"
+                ));
+            }
+            Ok(selected)
+        };
+        let objects = self
+            .object_list
+            .iter()
+            .map(|object| {
+                binding(
+                    object_kind(object.category),
+                    &object.id,
+                    object.native_armor_id(),
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut terrain_names = self
+            .terrain_object_types
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        terrain_names.sort();
+        let terrain = terrain_names
+            .into_iter()
+            .map(|key| {
+                let object = &self.terrain_object_types[&key];
+                Ok((
+                    key.clone(),
+                    binding(
+                        ArmorObjectKind::Terrain,
+                        &object.name,
+                        object.native_armor_id(),
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut warhead_names = self.warheads.keys().cloned().collect::<Vec<_>>();
+        warhead_names.sort();
+        let warheads = warhead_names
+            .into_iter()
+            .map(|key| {
+                let warhead = &self.warheads[&key];
+                let table = match query(Query::Warhead {
+                    name: warhead.id.clone(),
+                })? {
+                    None => None,
+                    Some(Policy::Warhead {
+                        entries,
+                        use_medium_wood_target_mask,
+                    }) => {
+                        if entries.len() < vera_mod_api::BASE_ARMOR_NAMES.len()
+                            || entries.len() > count
+                        {
+                            return Err(format!(
+                                "warhead armor table is outside the active catalog: {}",
+                                warhead.id
+                            ));
+                        }
+                        Some(FrozenArmorTable::new(entries, use_medium_wood_target_mask))
+                    }
+                    _ => {
+                        return Err(format!(
+                            "armor query returned another resource kind: {}",
+                            warhead.id
+                        ));
+                    }
+                };
+                Ok((key, table))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let bindings = ArmorResourceBindings {
+            names,
+            objects,
+            terrain,
+            warheads,
+        };
+        bindings.validate_coverage(self)?;
+        Ok(bindings)
+    }
+
+    fn native_armor_count(&self) -> usize {
+        self.ares_armors
+            .as_ref()
+            .map_or(vera_mod_api::BASE_ARMOR_NAMES.len(), |catalog| {
+                catalog.len()
+            })
+    }
+
+    pub(crate) fn armor_count(&self) -> usize {
+        self.external_armor_names
+            .as_ref()
+            .map_or_else(|| self.native_armor_count(), Vec::len)
+    }
+
+    pub(crate) fn armor_name(&self, armor: crate::rules::armor::ArmorId) -> Option<&str> {
+        if let Some(names) = &self.external_armor_names {
+            return names.get(armor.index()).map(String::as_str);
+        }
+        if let Some(catalog) = &self.ares_armors {
+            return catalog.name(armor);
+        }
+        vera_mod_api::BASE_ARMOR_NAMES.get(armor.index()).copied()
     }
 
     pub(crate) const fn match_rules_policy(&self) -> Option<vera_mod_api::MatchRulesPolicy> {
@@ -6246,6 +6513,7 @@ impl RuleSet {
         let mut rules = RuleSet {
             external_mod: None,
             match_rules_policy: None,
+            external_armor_names: None,
             sdk_passes: processed.sdk_passes().to_vec(),
             sdk_registries: processed.sdk_registries().to_vec(),
             sdk_animation_names: processed
@@ -7132,6 +7400,20 @@ impl RuleSet {
                 b"ares-secondary-turn-rate-v1".hash(&mut hasher);
                 turn_overrides.hash(&mut hasher);
             }
+        }
+        if self.external_armor_names.is_some()
+            || self
+                .warheads
+                .values()
+                .any(|wh| wh.external_armor_hash_state().is_some())
+        {
+            b"component-armor-projection-v1".hash(&mut hasher);
+            self.external_armor_names.hash(&mut hasher);
+            self.warheads
+                .iter()
+                .map(|(name, wh)| (name.to_ascii_uppercase(), wh.external_armor_hash_state()))
+                .collect::<BTreeMap<_, _>>()
+                .hash(&mut hasher);
         }
         // Equal flattened INIs may have different retained group lists.
         self.ares_prerequisites.hash(&mut hasher);

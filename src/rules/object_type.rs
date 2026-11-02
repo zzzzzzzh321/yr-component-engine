@@ -491,6 +491,8 @@ pub struct ObjectType {
     /// reparsing this text later could retroactively bind an unknown Ares name.
     pub armor: String,
     armor_id: crate::rules::armor::ArmorId,
+    /// Read-only frozen component binding; the native reader state remains separate.
+    external_armor_id: Option<crate::rules::armor::ArmorId>,
     /// Phobos `TechnoTypeExt::DigitalDisplayTypes` (`DigitalDisplayTypes=`):
     /// authored `[DigitalDisplayTypes]` names in list order. Empty means the
     /// techno uses its category's `[AudioVisual]` default list.
@@ -2624,7 +2626,15 @@ impl ObjectType {
     }
 
     pub fn armor_id(&self) -> crate::rules::armor::ArmorId {
+        self.external_armor_id.unwrap_or(self.armor_id)
+    }
+
+    pub(crate) fn native_armor_id(&self) -> crate::rules::armor::ArmorId {
         self.armor_id
+    }
+
+    pub(crate) fn bind_external_armor(&mut self, armor: Option<crate::rules::armor::ArmorId>) {
+        self.external_armor_id = armor;
     }
 
     pub(crate) fn bind_armor(&mut self, armor: crate::rules::armor::ArmorId) {
@@ -3383,6 +3393,7 @@ impl ObjectType {
                 crate::util::native_x87::NativeF64Bits::POSITIVE_ZERO,
             ),
             armor_id: crate::rules::armor::armor_index(&armor),
+            external_armor_id: None,
             armor,
             #[cfg(feature = "phobos")]
             digital_display_types: section

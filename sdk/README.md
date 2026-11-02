@@ -3,10 +3,19 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.8.0 development candidate**, config version **8**, state version **1**;
+is the **0.9.0 development candidate**, config version **9**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+The armor increment adds optional `armor_resource` catalog, class-qualified
+object/Terrain bindings and warhead interaction tables. `AresArmor` defaults to
+enabled only for new configurations; historical missing flags stay disabled.
+The host reuses the same interaction query for damage, weapon choice and target
+admission. Configuration uses the original `verse-token` numeric reader, with
+no duplicate guest percentage or x87 parser. Focused armor/consumer and retail
+loader checks passed for this increment; the broader migration remains open
+and this is not a new stable delivery. See [armor resources](api/src/armor.rs).
 
 The candidate adds `match_rules`, paired `effect_resource` / `effects`, and
 optional type survival and cloak permissions. `AresKeepAlive` and

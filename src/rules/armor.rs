@@ -3,19 +3,7 @@
 
 use crate::util::native_x87::NativeF64Bits;
 
-pub(crate) const RETAIL_ARMOR_NAMES: [&str; 11] = [
-    "none",
-    "flak",
-    "plate",
-    "light",
-    "medium",
-    "heavy",
-    "wood",
-    "steel",
-    "concrete",
-    "special_1",
-    "special_2",
-];
+pub(crate) const RETAIL_ARMOR_NAMES: [&str; 11] = vera_mod_api::BASE_ARMOR_NAMES;
 
 /// An index in the scenario's ordered armor registry. Construction and saved
 /// index validation belong to the rules owner; consumers cannot invent IDs.
@@ -75,7 +63,6 @@ impl ArmorInteraction {
         self.passive_acquire
     }
 
-    #[cfg(not(feature = "ares"))]
     pub(crate) fn retail(multiplier: NativeF64Bits) -> Self {
         let value = f64::from_bits(multiplier.bits());
         Self {
@@ -89,7 +76,6 @@ impl ArmorInteraction {
         }
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn ares(
         multiplier: NativeF64Bits,
         force_fire: bool,
@@ -104,5 +90,59 @@ impl ArmorInteraction {
             retaliate,
             passive_acquire,
         }
+    }
+}
+
+/// Immutable component projection. The frozen Program is its source; binding
+/// rebuilds it before constructors and after saved configuration is restored.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FrozenArmorTable {
+    entries: Vec<vera_mod_api::ArmorVersePolicy>,
+    use_medium_wood_target_mask: bool,
+}
+
+impl FrozenArmorTable {
+    pub(crate) fn new(
+        entries: Vec<vera_mod_api::ArmorVersePolicy>,
+        use_medium_wood_target_mask: bool,
+    ) -> Self {
+        Self {
+            entries,
+            use_medium_wood_target_mask,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn interaction(&self, armor: ArmorId) -> ArmorInteraction {
+        let entry = self
+            .entries
+            .get(armor.index())
+            .expect("armor interaction requires a reached Warhead read");
+        ArmorInteraction::ares(
+            NativeF64Bits::from_bits(entry.multiplier_bits),
+            entry.force_fire,
+            entry.retaliate,
+            entry.passive_acquire,
+        )
+    }
+
+    pub(crate) fn use_medium_wood_target_mask(&self) -> bool {
+        self.use_medium_wood_target_mask
+    }
+}
+
+pub(crate) fn object_kind(
+    category: crate::rules::object_type::ObjectCategory,
+) -> vera_mod_api::ArmorObjectKind {
+    use crate::rules::object_type::ObjectCategory;
+    use vera_mod_api::ArmorObjectKind;
+    match category {
+        ObjectCategory::Vehicle => ArmorObjectKind::Unit,
+        ObjectCategory::Infantry => ArmorObjectKind::Infantry,
+        ObjectCategory::Building => ArmorObjectKind::Building,
+        ObjectCategory::Aircraft => ArmorObjectKind::Aircraft,
     }
 }

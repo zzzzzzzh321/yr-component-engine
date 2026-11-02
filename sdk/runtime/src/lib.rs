@@ -41,7 +41,16 @@ pub trait HostServices: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeLimits {
+    /// Base budget for manifest, immutable resource and gameplay queries.
     pub fuel: u64,
+    /// A physical Rules pass initializes a whole catalog once, rather than
+    /// updating one actor. It has a separate, still bounded startup budget.
+    pub configure_fuel: u64,
+    /// Additional shared budget per serialized input byte. JSON opaque byte
+    /// arrays also cost guest instructions to decode before gameplay begins.
+    /// Zero retains a fixed per-call budget; the extra allowance is capped.
+    pub fuel_per_input_byte: u64,
+    pub max_input_fuel: u64,
     pub memory_bytes: usize,
     pub component_bytes: usize,
     pub host_calls: u32,
@@ -52,11 +61,29 @@ impl Default for RuntimeLimits {
     fn default() -> Self {
         Self {
             fuel: 5_000_000,
+            configure_fuel: 50_000_000,
+            fuel_per_input_byte: 256,
+            max_input_fuel: 50_000_000,
             memory_bytes: 32 * 1024 * 1024,
             component_bytes: 16 * 1024 * 1024,
             host_calls: 65_536,
             cache_entries: 8,
         }
+    }
+}
+
+impl RuntimeLimits {
+    fn fuel_for(&self, kind: &str, input_bytes: usize) -> u64 {
+        let base = if kind == "configure" {
+            self.configure_fuel
+        } else {
+            self.fuel
+        };
+        let input_fuel = self
+            .fuel_per_input_byte
+            .saturating_mul(input_bytes as u64)
+            .min(self.max_input_fuel);
+        base.saturating_add(input_fuel)
     }
 }
 
@@ -210,6 +237,7 @@ impl HostServices for ManifestHost {
 impl ComponentRuntime {
     pub fn new(limits: RuntimeLimits) -> Result<Self, RuntimeError> {
         if limits.fuel == 0
+            || limits.configure_fuel == 0
             || limits.memory_bytes < 65_536
             || limits.component_bytes == 0
             || limits.host_calls == 0
@@ -344,14 +372,24 @@ impl ComponentRuntime {
             },
         );
         store.limiter(|state| &mut state.limits);
+        let fuel = self.limits.fuel_for(kind, input.len());
         store
-            .set_fuel(self.limits.fuel)
+            .set_fuel(fuel)
             .map_err(|e| RuntimeError::Execution(format!("{e:#}")))?;
         let instance = bindings::Gameplay::instantiate(&mut store, component, &self.linker)
             .map_err(|e| RuntimeError::Execution(format!("{e:#}")))?;
         let output = instance
             .call_evaluate(&mut store, kind, input)
-            .map_err(|e| RuntimeError::Execution(format!("{e:#}")))?
+            .map_err(|e| {
+                RuntimeError::Execution(format!(
+                    "{kind} failed (input bytes {}, fuel used {}/{fuel}, host calls {}): {e:#}",
+                    input.len(),
+                    fuel.saturating_sub(store.get_fuel().unwrap_or(0)),
+                    self.limits
+                        .host_calls
+                        .saturating_sub(store.data().calls_left),
+                ))
+            })?
             .map_err(|e| RuntimeError::Rejected(e.chars().take(4096).collect()))?;
         if output.len() > MAX_MESSAGE_BYTES {
             return Err(RuntimeError::Invalid(

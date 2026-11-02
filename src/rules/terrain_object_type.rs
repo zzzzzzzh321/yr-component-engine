@@ -42,6 +42,10 @@ pub struct TerrainObjectType {
     /// Kept as authored text for diagnostics; gameplay uses `armor_id()`.
     pub armor: String,
     armor_id: crate::rules::armor::ArmorId,
+    /// Disposable frozen component binding, rebuilt after saved Program admission.
+    /// Only the native reader state belongs to the retained Rules payload.
+    #[serde(skip)]
+    external_armor_id: Option<crate::rules::armor::ArmorId>,
     /// Inherited `Strength=`. The constructor value and explicit -1 resolve
     /// through `[General] TreeStrength` after successful ObjectType ReadINI.
     pub strength: i32,
@@ -157,6 +161,7 @@ impl TerrainObjectType {
             // ObjectType `Armor=` (`0x005F94C8`): ReadString 0x80 ahead of the
             // armor-name lookup, over the constructor's Wood (`0x0071DBB6`).
             armor_id: crate::rules::armor::armor_index(&armor),
+            external_armor_id: None,
             armor,
             strength: read_state.strength,
             immune: section.read_bool("Immune", false),
@@ -239,7 +244,15 @@ impl TerrainObjectType {
     }
 
     pub fn armor_id(&self) -> crate::rules::armor::ArmorId {
+        self.external_armor_id.unwrap_or(self.armor_id)
+    }
+
+    pub(crate) fn native_armor_id(&self) -> crate::rules::armor::ArmorId {
         self.armor_id
+    }
+
+    pub(crate) fn bind_external_armor(&mut self, armor: Option<crate::rules::armor::ArmorId>) {
+        self.external_armor_id = armor;
     }
 
     pub fn raw_occupation_bits(&self, snow_theater: bool) -> i32 {
