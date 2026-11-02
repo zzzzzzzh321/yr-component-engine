@@ -445,7 +445,7 @@ impl PreparedSavedGame {
             .expect("synchronous saved-load selector adoption");
         owner
             .expect("prepared process Rules owner")
-            .install_saved_scenario_rules(processed_rules);
+            .install_saved_scenario_rules(processed_rules, Some(&resources.rules));
         let selector = cache.selector();
         let (mut simulation, details) = world.into_committed(dummy.clone(), process_main);
         simulation.bind_tile_variant_selector(selector.clone());

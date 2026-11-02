@@ -74,7 +74,7 @@ impl Default for RuntimeLimits {
 
 impl RuntimeLimits {
     fn fuel_for(&self, kind: &str, input_bytes: usize) -> u64 {
-        let base = if kind == "configure" {
+        let base = if matches!(kind, "configure" | "configure_boundary") {
             self.configure_fuel
         } else {
             self.fuel
@@ -177,7 +177,14 @@ impl bindings::vera::mod_sdk::host::Host for HostState {
             ));
         }
         let result = self.services.config_read(&section, &key, &reader, &current);
-        if result.as_ref().is_ok_and(|v| v.len() > 65_536)
+        // A physical registry snapshot is a bounded bulk message, not one
+        // scalar INI value. Keep scalar readers at their original64KiB cap.
+        let output_limit = if reader == "rules-registry-view" {
+            MAX_MESSAGE_BYTES
+        } else {
+            65_536
+        };
+        if result.as_ref().is_ok_and(|v| v.len() > output_limit)
             || result.as_ref().is_err_and(|e| e.len() > 4096)
         {
             return Err(wasmtime::Error::msg(

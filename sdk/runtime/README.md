@@ -14,7 +14,7 @@ bounded; fuel limits guest instructions, not arbitrary Rust callbacks or code
 compilation. Content admission and host operation validation remain mandatory.
 
 Defaults allocate base fuel of 50 million to each one-time physical Configure
-pass and 5 million to each manifest/resource/gameplay call. Every call also
+pass or `configure_boundary` call and 5 million to each manifest/resource/gameplay call. Every call also
 receives 256 fuel per serialized input byte, since decoding opaque JSON byte
 arrays consumes guest instructions before the requested logic runs. This total
 is shared by decoding and logic; it is not a separate strict 5-million gameplay
@@ -40,6 +40,9 @@ not retroactively resolve an earlier unknown reference.
 `verse-token` takes a literal JSON string as its current argument and returns
 the existing armor numeric parser's binary64/independent-flag record. It does
 not perform another INI read or implement a second numeric algorithm.
+`rules-registry-view` returns the typed catalogs and actual read-point prefixes
+for a physical Rules pass. Its bulk output uses the 8 MiB message cap; ordinary
+INI reader outputs and all reader current-value inputs retain their 64 KiB cap.
 `comma-list:N` delegates the native comma-only `IniSection::read_list`, retaining
 the current value on missing/empty reads. The earlier `list:N` reader retains
 its comma/space/tab tokenization; callers select the semantics their native
@@ -65,3 +68,7 @@ older host understands newly declared optional hooks.
 The optional `armor_resource` query uses the same stateless channel for catalog,
 object/Terrain and warhead projections; the engine validates their indices and
 lengths together before binding them to existing rules owners.
+The optional `production_resource` channel similarly publishes immutable groups
+and type policies. `configure_boundary` may replace configuration but cannot
+write actor state or presentation; the existing process Rules owner supplies
+the real reset/read chronology and exact-component opaque continuation.

@@ -208,7 +208,6 @@ pub struct GameEntity {
     initial_owner: InternedId,
     /// Ares3.0 TechnoExt+40, initialized by1004A776..1004A791 and
     /// transferred by10045B54. Capture preserves this Country identity.
-    #[cfg(feature = "ares")]
     original_factory_country: Option<crate::rules::ruleset::CountryIdx>,
     /// The object's health (`ObjectClass+0x6C`), a [`Health`] that
     /// `combat::object_health` owns.
@@ -1461,14 +1460,12 @@ impl GameEntity {
         self.initial_owner
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn original_factory_country(&self) -> Option<crate::rules::ruleset::CountryIdx> {
         self.original_factory_country
     }
 
     /// InitManagers1004A776 and the conversion10045B54 use the same retained
     /// identity; ordinary ownership changes never call this writer.
-    #[cfg(feature = "ares")]
     pub(crate) fn initialize_factory_country(
         &mut self,
         country: Option<crate::rules::ruleset::CountryIdx>,
@@ -1835,7 +1832,6 @@ impl GameEntity {
             unit_firing_counter: Default::default(),
             owner,
             initial_owner: owner,
-            #[cfg(feature = "ares")]
             original_factory_country: None,
             health,
             estimated_health: crate::sim::estimated_health::EstimatedHealth::from_raw(

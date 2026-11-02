@@ -556,7 +556,6 @@ pub struct HouseState {
     country: Option<InternedId>,
     /// Ares3.0 HouseExt+4C: ordered permanent Country plans. Constructor
     ///10021072 leaves it empty; live factory ownership is a separate source.
-    #[cfg(feature = "ares")]
     permanent_factory_plans: Vec<crate::rules::ruleset::CountryIdx>,
     /// Native HouseClass `IsHuman` byte.
     is_human: bool,
@@ -1371,14 +1370,12 @@ impl HouseState {
         self.country
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn permanent_factory_plans(&self) -> &[crate::rules::ruleset::CountryIdx] {
         &self.permanent_factory_plans
     }
 
     ///10021130 checks membership before appending. Selling/capture/loss does
     /// not revoke a plan, and this append does not write tech-recheck/timers.
-    #[cfg(feature = "ares")]
     pub(crate) fn acquire_factory_plan(&mut self, country: crate::rules::ruleset::CountryIdx) {
         if !self.permanent_factory_plans.contains(&country) {
             self.permanent_factory_plans.push(country);
@@ -1387,7 +1384,6 @@ impl HouseState {
 
     /// House.ReadINI500CC5 ->100244C9..10024516 appends without a dedupe
     /// guard. Only the scenario reader invokes this; CreateHouses does not.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_scenario_factory_plan(
         &mut self,
         country: Option<crate::rules::ruleset::CountryIdx>,
@@ -2582,7 +2578,6 @@ impl HouseState {
             initial_techno_records: Vec::new(),
             side_index: side_index.into(),
             country,
-            #[cfg(feature = "ares")]
             permanent_factory_plans: Vec::new(),
             is_human,
             player_control: is_human,

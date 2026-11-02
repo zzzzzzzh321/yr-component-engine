@@ -1059,7 +1059,6 @@ impl Simulation {
     fn hash_houses(&self, hasher: &mut impl Hasher) {
         for (owner, house) in &self.houses {
             owner.hash(hasher);
-            #[cfg(feature = "ares")]
             if !house.permanent_factory_plans().is_empty() {
                 b"ares-permanent-factory-plans-v1".hash(hasher);
                 house.permanent_factory_plans().hash(hasher);
@@ -1849,7 +1848,6 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         animation.finished().hash(hasher);
     }
     entity.owner().hash(hasher);
-    #[cfg(feature = "ares")]
     if let Some(country) = entity.original_factory_country() {
         b"ares-original-factory-country-v1".hash(hasher);
         country.hash(hasher);

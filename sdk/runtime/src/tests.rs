@@ -1,6 +1,49 @@
 use super::*;
 use vera_mod_api::{Context, EntityContext, HookKind, TickContext};
 
+#[test]
+fn registry_snapshot_has_a_bounded_bulk_limit_without_widening_scalar_readers() {
+    use bindings::vera::mod_sdk::host::Host;
+    struct ReaderOutput(usize);
+    impl HostServices for ReaderOutput {
+        fn config(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn config_read(&self, _: &str, _: &str, _: &str, _: &[u8]) -> Result<Vec<u8>, String> {
+            Ok(vec![0; self.0])
+        }
+        fn registry(&self, _: &str) -> Vec<String> {
+            vec![]
+        }
+        fn damage_kernel(&self, _: &DamageKernelInput) -> Result<i32, String> {
+            Err("unused test service".into())
+        }
+    }
+    let state = |bytes| HostState {
+        services: Arc::new(ReaderOutput(bytes)),
+        limits: StoreLimitsBuilder::new().build(),
+        calls_left: 1,
+    };
+    assert!(
+        state(65_537)
+            .config_read("".into(), "".into(), "name:32".into(), vec![])
+            .is_err()
+    );
+    assert_eq!(
+        state(65_537)
+            .config_read("".into(), "".into(), "rules-registry-view".into(), vec![])
+            .unwrap()
+            .unwrap()
+            .len(),
+        65_537
+    );
+    assert!(
+        state(MAX_MESSAGE_BYTES + 1)
+            .config_read("".into(), "".into(), "rules-registry-view".into(), vec![])
+            .is_err()
+    );
+}
+
 fn entity() -> EntityContext {
     EntityContext {
         id: 7,

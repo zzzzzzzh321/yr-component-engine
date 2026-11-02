@@ -80,11 +80,39 @@ impl Program {
         weapons: &[String],
         registries: &[crate::rules::native_processing::SdkRegistryPass],
     ) -> Result<Self, String> {
+        Self::load_with_process_context(
+            bytes,
+            expected,
+            passes,
+            object_types,
+            warheads,
+            weapons,
+            registries,
+            None,
+            &[],
+        )
+    }
+
+    /// New boundary-aware components consume the actual pending native Process
+    /// timeline. Legacy components retain their original current-scenario input.
+    /// Opaque continuation is reusable only by the exact same saved component.
+    pub(crate) fn load_with_process_context(
+        bytes: Vec<u8>,
+        expected: &str,
+        passes: &[IniFile],
+        object_types: &[String],
+        warheads: &[String],
+        weapons: &[String],
+        registries: &[crate::rules::native_processing::SdkRegistryPass],
+        seed: Option<&Program>,
+        steps: &[crate::rules::native_processing::SdkConfigurationStep],
+    ) -> Result<Self, String> {
         let runtime = ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
         let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
         let manifest = module.manifest().clone();
         if (manifest.hooks.contains(&api::HookKind::Effects)
-            || manifest.hooks.contains(&api::HookKind::ArmorResource))
+            || manifest.hooks.contains(&api::HookKind::ArmorResource)
+            || manifest.hooks.contains(&api::HookKind::ProductionResource))
             && (passes.is_empty() || registries.len() + 1 != passes.len())
         {
             return Err(
@@ -102,61 +130,74 @@ impl Program {
         {
             return Err("engine SDK v1 requires configure, attach, damage and tick hooks".into());
         }
+        let boundary_aware = manifest.hooks.contains(&api::HookKind::ConfigureBoundary);
+        let config = if let Some(seed) = seed.filter(|_| boundary_aware) {
+            if seed.digest != expected || seed.manifest != manifest {
+                return Err(
+                    "retained process component identity changed without ScenarioClear".into(),
+                );
+            }
+            seed.config.clone()
+        } else {
+            Vec::new()
+        };
         let mut program = Self {
             bytes,
             digest: expected.into(),
             manifest,
-            config: Vec::new(),
+            config,
             compiled: OnceLock::new(),
         };
         let executor = Arc::new(Executor { runtime, module });
-        for (index, ini) in passes.iter().enumerate() {
-            let final_pass = index + 1 == passes.len();
-            let request = Request {
-                api_version: api::API_VERSION,
-                context: Context::Configure(api::ConfigureContext {
-                    pass: index as u64,
-                    source: format!("rules-pass-{index}"),
-                    final_pass,
-                    object_types: if final_pass {
-                        object_types.to_vec()
-                    } else {
-                        Vec::new()
-                    },
-                    warheads: if final_pass {
-                        warheads.to_vec()
-                    } else {
-                        Vec::new()
-                    },
-                }),
-                config: program.config.clone(),
-                state: Vec::new(),
-            };
-            let mut host = NativeHost::configuration(
-                ini.clone(),
-                if final_pass {
-                    weapons.to_vec()
-                } else {
-                    Vec::new()
-                },
-            );
-            if let Some(registries) = registries.get(index) {
-                host = host.with_registries(registries.clone());
+        if boundary_aware && !steps.is_empty() {
+            use crate::rules::native_processing::SdkConfigurationStep;
+            for (index, step) in steps.iter().enumerate() {
+                match step {
+                    SdkConfigurationStep::RulesPass { ini, registry } => program.configure_pass(
+                        &executor,
+                        index,
+                        ini,
+                        false,
+                        &[],
+                        &[],
+                        &[],
+                        Some(registry),
+                    )?,
+                    SdkConfigurationStep::Boundary(boundary) => program.configure(
+                        &executor,
+                        Context::ConfigureBoundary(api::ConfigureBoundaryContext {
+                            boundary: *boundary,
+                        }),
+                        NativeHost::simulation(),
+                        &format!("configuration boundary {index} ({boundary:?})"),
+                    )?,
+                }
             }
-            let plan = executor
-                .runtime
-                .evaluate(&executor.module, &request, Arc::new(host))
-                .map_err(|e| {
-                    format!(
-                        "configuration pass {index} (final={final_pass}, frozen bytes={}): {e}",
-                        program.config.len(),
-                    )
-                })?;
-            if !plan.state.is_empty() || plan.damage.is_some() || !plan.operations.is_empty() {
-                return Err("configuration returned simulation writes".into());
-            }
-            if let Some(config) = plan.config {
-                program.config = config;
+            let final_ini = passes
+                .last()
+                .ok_or("no final Rules projection after process history")?;
+            program.configure_pass(
+                &executor,
+                steps.len(),
+                final_ini,
+                true,
+                object_types,
+                warheads,
+                weapons,
+                None,
+            )?;
+        } else {
+            for (index, ini) in passes.iter().enumerate() {
+                program.configure_pass(
+                    &executor,
+                    index,
+                    ini,
+                    index + 1 == passes.len(),
+                    object_types,
+                    warheads,
+                    weapons,
+                    registries.get(index),
+                )?;
             }
         }
         program
@@ -164,6 +205,77 @@ impl Program {
             .set(Ok(executor))
             .map_err(|_| "component cache already set".to_string())?;
         Ok(program)
+    }
+
+    fn configure_pass(
+        &mut self,
+        executor: &Executor,
+        index: usize,
+        ini: &IniFile,
+        final_pass: bool,
+        object_types: &[String],
+        warheads: &[String],
+        weapons: &[String],
+        registry: Option<&crate::rules::native_processing::SdkRegistryPass>,
+    ) -> Result<(), String> {
+        let context = Context::Configure(api::ConfigureContext {
+            pass: index as u64,
+            source: format!("rules-pass-{index}"),
+            final_pass,
+            object_types: if final_pass {
+                object_types.to_vec()
+            } else {
+                Vec::new()
+            },
+            warheads: if final_pass {
+                warheads.to_vec()
+            } else {
+                Vec::new()
+            },
+        });
+        let mut host = NativeHost::configuration(
+            ini.clone(),
+            if final_pass {
+                weapons.to_vec()
+            } else {
+                Vec::new()
+            },
+        );
+        if let Some(registry) = registry {
+            host = host.with_registries(registry.clone());
+        }
+        self.configure(
+            executor,
+            context,
+            host,
+            &format!("configuration pass {index} (final={final_pass})"),
+        )
+    }
+
+    fn configure(
+        &mut self,
+        executor: &Executor,
+        context: Context,
+        host: NativeHost,
+        label: &str,
+    ) -> Result<(), String> {
+        let request = Request {
+            api_version: api::API_VERSION,
+            context,
+            config: self.config.clone(),
+            state: Vec::new(),
+        };
+        let plan = executor
+            .runtime
+            .evaluate(&executor.module, &request, Arc::new(host))
+            .map_err(|e| format!("{label} (frozen bytes={}): {e}", self.config.len()))?;
+        if !plan.state.is_empty() || plan.damage.is_some() || !plan.operations.is_empty() {
+            return Err("configuration returned simulation writes".into());
+        }
+        if let Some(config) = plan.config {
+            self.config = config;
+        }
+        Ok(())
     }
 
     pub fn sha256(&self) -> &str {
@@ -187,6 +299,23 @@ impl Program {
             &[],
         )?;
         Ok(plan.weapon_resource)
+    }
+
+    pub(crate) fn has_production_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::ProductionResource)
+    }
+
+    pub(crate) fn production_resource_policy(
+        &self,
+        resource: &api::ProductionResourceContext,
+    ) -> Result<Option<api::ProductionResourcePolicy>, String> {
+        if !self.has_production_resource() {
+            return Ok(None);
+        }
+        let plan = self.evaluate(Context::ProductionResource(resource.clone()), &[])?;
+        Ok(plan.production_resource)
     }
 
     pub(crate) fn has_armor_resource(&self) -> bool {

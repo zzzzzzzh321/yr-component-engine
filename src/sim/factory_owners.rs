@@ -68,6 +68,9 @@ impl Simulation {
     ///100449D0 scans the base Type and all three installed upgrade pointers;
     ///one Permanent flag grants the host's preserved Country to its current House.
     pub(crate) fn grant_factory_plans(&mut self, id: u64, rules: &RuleSet) {
+        if !rules.production_semantics().factory_country_plans {
+            return;
+        }
         let Some(building) = self.substrate.entities.get(id) else {
             return;
         };
@@ -96,7 +99,7 @@ impl Simulation {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "factory_owners_tests.rs"]
 mod tests;
 

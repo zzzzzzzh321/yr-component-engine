@@ -312,8 +312,7 @@ pub(crate) fn prerequisites_satisfied(
     present: &[&ObjectType],
     rules: &RuleSet,
 ) -> bool {
-    candidate.prerequisite.iter().all(|entry| {
-        #[cfg(feature = "ares")]
+    candidate.prerequisites().iter().all(|entry| {
         if let Some(group) = rules.ares_prerequisite_group(*entry) {
             // Ares3.0 hook505360 -> ListContainsAll10008370 inspects only
             // immediate building members. Runtime alternates are unread;

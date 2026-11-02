@@ -599,7 +599,10 @@ mod tests {
         bind_scenario_gameplay_resources(
             &mut rules,
             &assets,
-            ScenarioGameplayProgram::Fresh(&mut sim),
+            ScenarioGameplayProgram::Fresh {
+                simulation: &mut sim,
+                rules_owner: &mut owner,
+            },
             "tem",
             "TEMPERATE",
         )
@@ -1289,7 +1292,10 @@ pub enum AuthoredScenarioLoadError {
 
 /// The existing program authority supplied by one scenario lifecycle.
 pub enum ScenarioGameplayProgram<'a> {
-    Fresh(&'a mut Simulation),
+    Fresh {
+        simulation: &'a mut Simulation,
+        rules_owner: &'a mut crate::rules::process_owner::NativeRulesProcessOwner,
+    },
     Saved(&'a Simulation),
 }
 
@@ -1305,9 +1311,16 @@ pub fn bind_scenario_gameplay_resources(
     theater_name: &str,
 ) -> Result<(), String> {
     match program {
-        ScenarioGameplayProgram::Fresh(sim) => {
-            rules.bind_external_mod(assets)?;
-            sim.external_mod = rules.external_mod.as_deref().cloned();
+        ScenarioGameplayProgram::Fresh {
+            simulation,
+            rules_owner,
+        } => {
+            let processed = rules_owner
+                .saved_scenario_rules()
+                .ok_or("fresh gameplay configuration requires completed scenario Rules")?;
+            rules.bind_external_mod_for_process(assets, processed)?;
+            rules_owner.retain_sdk_configuration_program(rules.external_mod.clone());
+            simulation.external_mod = rules.external_mod.as_deref().cloned();
         }
         ScenarioGameplayProgram::Saved(sim) => {
             crate::mod_sdk::adopt_saved_program(rules, sim, assets)?;
@@ -1351,7 +1364,10 @@ where
     bind_scenario_gameplay_resources(
         rules,
         assets,
-        ScenarioGameplayProgram::Fresh(&mut *sim),
+        ScenarioGameplayProgram::Fresh {
+            simulation: &mut *sim,
+            rules_owner: &mut *rules_owner,
+        },
         theater_ext,
         theater_name,
     )

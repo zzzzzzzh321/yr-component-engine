@@ -91,6 +91,41 @@ impl Default for GenericPrerequisites {
 }
 
 impl GenericPrerequisites {
+    /// Bind already-validated canonical identities into the same immutable
+    /// group projection consumed by House and AI prerequisite owners.
+    pub(crate) fn from_sdk(
+        groups: Vec<vera_mod_api::ProductionGroup>,
+        resolve: impl Fn(vera_mod_api::ProductionTypeRef) -> Option<String>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            groups: groups
+                .into_iter()
+                .map(|group| {
+                    Ok(GenericPrerequisite {
+                        name: group.name,
+                        members: group
+                            .members
+                            .into_iter()
+                            .map(crate::rules::prerequisite::bind_production_requirement)
+                            .collect::<Result<_, _>>()?,
+                        alternates: group
+                            .alternates
+                            .into_iter()
+                            .map(|identity| {
+                                Ok(PrerequisiteAlternate {
+                                    category: crate::rules::prerequisite::production_category(
+                                        identity.category,
+                                    ),
+                                    id: resolve(identity)
+                                        .ok_or("production alternate is outside its registry")?,
+                                })
+                            })
+                            .collect::<Result<_, String>>()?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        })
+    }
     pub(crate) fn groups(&self) -> &[GenericPrerequisite] {
         &self.groups
     }

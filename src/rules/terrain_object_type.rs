@@ -844,7 +844,7 @@ mod tests {
         let bytes = save_codec::serialize(&processed).unwrap();
         let saved: ProcessedRulesLayers = save_codec::deserialize(&bytes).unwrap();
         let restored_rules = owner.project_saved_scenario_rules(&saved).unwrap();
-        owner.install_saved_scenario_rules(saved);
+        owner.install_saved_scenario_rules(saved, None);
         assert_eq!(restored_rules.general.tree_strength, 375);
         assert_eq!(
             restored_rules

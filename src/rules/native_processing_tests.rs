@@ -4,6 +4,37 @@ use super::*;
 use crate::util::save_codec;
 
 #[test]
+fn failed_process_retains_only_reached_component_read_points() {
+    let pass = IniFile::from_str(
+        "[Sides]\nGDI=<random>\n[BuildingTypes]\n0=LATE\n[LATE]\nFactory=UnitType\n",
+    );
+    let failure = RulesLayerStack::new(pass.clone())
+        .process_with_fixed_art_and_registry_state_recovering(
+            &IniFile::empty(),
+            NativeRulesRegistryState::default(),
+            RulesProcessContext::Ordinary,
+            &EvaRegistry::default(),
+        )
+        .unwrap_err();
+    let (_, trace) = failure.into_parts();
+    let state = trace.into_registry_state_discarding_events();
+    let [SdkConfigurationStep::RulesPass { ini, registry }] = state.sdk_configuration_steps()
+    else {
+        panic!("failed physical Process must remain in the pending timeline");
+    };
+    assert_eq!(ini.content_hash(), pass.content_hash());
+    assert_eq!(registry.production_view().reads.len(), 1);
+    assert!(matches!(
+        registry.production_view().reads[0].site,
+        vera_mod_api::ProductionReadSite::ProcessEntry
+    ));
+    assert!(
+        registry.production_view().technos.is_empty(),
+        "failure precedes Building allocation and BeforeTypeData"
+    );
+}
+
+#[test]
 fn airburst_retained_flag_matches_native_reads_and_registry_restore() {
     let native = crate::test_fixture::json("tools/projectile_oracle/airburst_retained.json");
     let initial = IniFile::from_str(

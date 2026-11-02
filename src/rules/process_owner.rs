@@ -739,9 +739,31 @@ impl NativeRulesProcessOwner {
 
     /// Commit the validated saved registry, replacing the outgoing authority.
     /// Deserialization excludes constructor receipts, so load cannot replay IDs.
-    pub fn install_saved_scenario_rules(&mut self, processed: ProcessedRulesLayers) {
+    pub fn install_saved_scenario_rules(
+        &mut self,
+        mut processed: ProcessedRulesLayers,
+        validated_rules: Option<&RuleSet>,
+    ) {
         self.assert_no_prepared_prefix();
+        // Saved loading has already validated and rebound this exact program;
+        // its skipped continuation inputs must not replay Configure on restore.
+        processed.retain_sdk_configuration_program(
+            validated_rules.and_then(|rules| rules.external_mod.clone()),
+        );
         self.registry = Some(NativeRulesRegistryOwner::Scenario(Box::new(processed)));
+    }
+
+    /// Checkpoint the exact immutable program as soon as fresh configuration
+    /// succeeds. A later map-load failure may leave the outgoing Simulation
+    /// resident, so retirement must never replace this with its older program.
+    pub(crate) fn retain_sdk_configuration_program(
+        &mut self,
+        program: Option<Arc<crate::mod_sdk::Program>>,
+    ) {
+        let Some(NativeRulesRegistryOwner::Scenario(processed)) = self.registry.as_mut() else {
+            panic!("fresh gameplay configuration requires completed scenario Rules");
+        };
+        processed.retain_sdk_configuration_program(program);
     }
 
     /// Consume the outgoing Simulation's runtime Rules writes once that
@@ -888,24 +910,19 @@ impl NativeRulesProcessOwner {
     /// cannot drop the pending trace or leave the owner empty during unwinding.
     fn take_pre_reset_state(&mut self, clear_classes: bool) -> NativeRulesRegistryState {
         self.assert_no_prepared_prefix();
-        let state = self
+        let mut state = self
             .registry
             .take()
             .expect("native Rules registry transition may not be re-entered")
             .into_registry_state();
-        #[cfg(feature = "ares")]
-        let state = {
-            let mut state = state;
-            // Full_Init686B5D/686B65 clears classes before the early map/rules
-            // pass on ordinary loads. Generated RMG retains RulesExt, and the
-            // later TypeReset6686C0 is a separate, retaining transaction.
-            if clear_classes {
-                state.clear_scenario_global_controls();
-            }
-            state
-        };
-        #[cfg(not(feature = "ares"))]
-        let _ = clear_classes;
+        // Full_Init686B5D/686B65 clears classes before the early map/rules
+        // pass on ordinary loads. Generated RMG retains RulesExt, and the
+        // later TypeReset6686C0 is a separate, retaining transaction.
+        if clear_classes {
+            state.clear_sdk_configuration_for_scenario();
+            #[cfg(feature = "ares")]
+            state.clear_scenario_global_controls();
+        }
         state
     }
 
@@ -1197,6 +1214,67 @@ mod tests {
     use crate::rules::retail_sources::RetailRulesSources;
 
     #[test]
+    fn sdk_configuration_history_follows_real_scenario_clear_and_type_reset() {
+        use crate::rules::native_processing::SdkConfigurationStep;
+        use vera_mod_api::ConfigurationBoundary;
+
+        let source = |name: &str| IniFile::from_str(&format!("[SdkTimeline]\nName={name}\n"));
+        let mut owner = NativeRulesProcessOwner::from_cold_start_sources(
+            source("root"),
+            Some(source("lang")),
+            IniFile::empty(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
+        let chronology = |owner: &NativeRulesProcessOwner| {
+            owner
+                .saved_scenario_rules()
+                .unwrap()
+                .native_registry_state()
+                .sdk_configuration_steps()
+                .iter()
+                .map(|step| match step {
+                    SdkConfigurationStep::Boundary(ConfigurationBoundary::ScenarioClear) => {
+                        "clear".to_owned()
+                    }
+                    SdkConfigurationStep::Boundary(ConfigurationBoundary::TypeReset) => {
+                        "reset".to_owned()
+                    }
+                    SdkConfigurationStep::RulesPass { ini, .. } => ini
+                        .section("SdkTimeline")
+                        .unwrap()
+                        .read_name("Name", 32)
+                        .unwrap()
+                        .to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        owner
+            .load_scenario(NativeScenarioRulesPrefix::RandomMap(None), &source("first"))
+            .unwrap();
+        assert_eq!(
+            chronology(&owner),
+            ["lang", "reset", "root", "lang", "first"]
+        );
+        owner.retain_sdk_configuration_program(None);
+        owner
+            .load_scenario(NativeScenarioRulesPrefix::RandomMap(None), &source("next"))
+            .unwrap();
+        assert_eq!(chronology(&owner), ["reset", "root", "lang", "next"]);
+        owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::Campaign(Some(&source("named"))),
+                &source("last"),
+            )
+            .unwrap();
+        assert_eq!(
+            chronology(&owner),
+            ["clear", "named", "reset", "root", "lang", "last"],
+        );
+    }
+
+    #[test]
     fn retired_voxel_damage_survives_omitted_read_until_type_reset() {
         let root = IniFile::from_str("[VoxelAnims]\n0=CHUNK\n[CHUNK]\nName=Chunk\n");
         let mut owner = NativeRulesProcessOwner::from_cold_start_sources(
@@ -1233,7 +1311,7 @@ mod tests {
 
         // Full_Init's later TypeReset6686C0 deletes the old type; its new
         // constructor74AD80 starts Damage at zero rather than transplanting3.
-        owner.install_saved_scenario_rules(reread);
+        owner.install_saved_scenario_rules(reread, None);
         let reset = owner
             .load_scenario(NativeScenarioRulesPrefix::Campaign(None), &IniFile::empty())
             .unwrap();

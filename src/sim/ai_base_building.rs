@@ -838,7 +838,7 @@ fn power_plant_to_splice(
             .filter(|&advanced| {
                 rules
                     .building_type_at(advanced)
-                    .is_some_and(|advanced| advanced.prerequisite.is_empty())
+                    .is_some_and(|advanced| advanced.prerequisites().is_empty())
             })
             .or_else(|| index(plants.nod_regular_power.as_deref())),
     }

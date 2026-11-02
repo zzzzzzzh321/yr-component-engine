@@ -412,7 +412,6 @@ pub enum SnapshotRestoreError {
     InvalidFrameContinuation { reason: &'static str },
     #[error("invalid saved multiplayer session: {reason}")]
     InvalidMultiplayerSession { reason: &'static str },
-    #[cfg(feature = "ares")]
     #[error("invalid saved factory-source Country reference: {reason}")]
     InvalidFactoryCountry { reason: &'static str },
     #[error("entity {object_id} is a live infantryman with the dying mark")]
@@ -2146,7 +2145,6 @@ impl Simulation {
                     reason,
                 },
             )?;
-        #[cfg(feature = "ares")]
         self.validate_factory_country_references(rules)
             .map_err(|reason| SnapshotRestoreError::InvalidFactoryCountry { reason })?;
         self.validate_disk_lasers_after_restore(rules)

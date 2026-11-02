@@ -52,6 +52,13 @@ impl HostServices for NativeHost {
         reader: &str,
         current: &[u8],
     ) -> Result<Vec<u8>, String> {
+        if reader == "rules-registry-view" {
+            let registry = self
+                .registries
+                .as_ref()
+                .ok_or("registry view requires physical Rules read-point data")?;
+            return serde_json::to_vec(registry.production_view()).map_err(|e| e.to_string());
+        }
         if reader == "verse-token" {
             let token: String = serde_json::from_slice(current).map_err(|e| e.to_string())?;
             return serde_json::to_vec(&crate::rules::ares_armor::parse_verse_token(&token))
@@ -67,6 +74,10 @@ impl HostServices for NativeHost {
             serde_json::from_slice(current).map_err(|e| e.to_string())?;
         let bad = || format!("invalid config reader/default: {reader}");
         let result = match reader {
+            "bool-prefix-reverse3" => serde_json::json!(section.read_bool_prefix_reverse3(
+                key,
+                serde_json::from_value(value).map_err(|e| e.to_string())?,
+            )),
             "int" => serde_json::json!(
                 section.read_int(
                     key,

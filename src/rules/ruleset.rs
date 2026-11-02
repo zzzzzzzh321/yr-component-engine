@@ -4347,9 +4347,17 @@ mod armor_admission_tests {
 ///
 /// Tests may clone a set to reuse one retail load; a clone keeps the serial
 /// until [`Self::with_fresh_serial`] gives it its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FrozenProductionCatalog {
+    groups: GenericPrerequisites,
+    semantics: vera_mod_api::ProductionSemantics,
+    ai_bypass_build_limit: [bool; 3],
+}
+
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-support"), derive(Clone))]
 pub struct RuleSet {
+    external_production: Option<FrozenProductionCatalog>,
     pub(crate) external_mod: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     /// Derived from the frozen component, rebuilt with all other projections.
     /// None retains this build's native compatibility mode; Retail is an
@@ -4691,6 +4699,35 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
+    pub(crate) fn bind_external_mod_for_process(
+        &mut self,
+        assets: &crate::assets::asset_manager::AssetManager,
+        processed: &crate::rules::native_processing::ProcessedRulesLayers,
+    ) -> Result<(), String> {
+        let objects = self
+            .object_list
+            .iter()
+            .map(|object| object.id.clone())
+            .collect::<Vec<_>>();
+        let mut warheads = self
+            .warheads
+            .values()
+            .map(|wh| wh.id.clone())
+            .collect::<Vec<_>>();
+        warheads.sort();
+        let registry = processed.native_registry_state();
+        self.external_mod = crate::mod_sdk::load_from_assets_for_process(
+            assets,
+            &self.sdk_passes,
+            &self.sdk_registries,
+            &objects,
+            &warheads,
+            &self.weapon_names(),
+            registry.sdk_configuration_seed().map(|p| p.as_ref()),
+            registry.sdk_configuration_steps(),
+        )?;
+        self.bind_resource_policies()
+    }
     pub(crate) fn bind_external_mod(
         &mut self,
         assets: &crate::assets::asset_manager::AssetManager,
@@ -4725,6 +4762,7 @@ impl RuleSet {
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
         let armor = self.collect_armor_resource_bindings()?;
+        let (production, production_objects) = self.collect_production_resource_bindings()?;
         let mut effect_resources = std::collections::BTreeMap::new();
         if let Some(program) = self
             .external_mod
@@ -4804,6 +4842,11 @@ impl RuleSet {
             );
         }
         self.match_rules_policy = match_rules_policy;
+        self.external_production = production;
+        for (object, policy) in self.object_list.iter_mut().zip(production_objects) {
+            object.bind_external_production(policy);
+        }
+        self.rebuild_production_alternates();
         self.effect_resources = effect_resources;
         for (name, policy) in policies {
             self.weapons
@@ -4832,6 +4875,168 @@ impl RuleSet {
                 .bind_external_armor(table);
         }
         Ok(())
+    }
+
+    fn collect_production_resource_bindings(
+        &self,
+    ) -> Result<
+        (
+            Option<FrozenProductionCatalog>,
+            Vec<Option<crate::rules::prerequisite::FrozenProductionObject>>,
+        ),
+        String,
+    > {
+        use crate::rules::prerequisite::{
+            FrozenProductionObject, production_category, production_kind,
+        };
+        use vera_mod_api::{
+            ProductionRequirement as Requirement, ProductionResourceContext as Query,
+            ProductionResourcePolicy as Policy,
+        };
+        let program = self
+            .external_mod
+            .as_deref()
+            .filter(|p| p.has_production_resource());
+        let query = |context| {
+            program
+                .map(|p| p.production_resource_policy(&context))
+                .transpose()
+                .map(Option::flatten)
+        };
+        let catalog = match query(Query::Catalog)? {
+            None => None,
+            Some(Policy::Catalog {
+                groups,
+                semantics,
+                ai_bypass_build_limit,
+            }) => Some((groups, semantics, ai_bypass_build_limit)),
+            _ => return Err("production catalog query returned another resource kind".into()),
+        };
+        let valid_requirement = |entry: &Requirement| match *entry {
+            Requirement::Building(index) => {
+                (index as usize) < self.building_ids.len() && index <= i32::MAX as u32
+            }
+            Requirement::Group(index) => catalog
+                .as_ref()
+                .is_some_and(|(groups, _, _)| (index as usize) < groups.len()),
+        };
+        if let Some((groups, _, _)) = &catalog {
+            for group in groups {
+                if group.members.iter().any(|entry| !valid_requirement(entry))
+                    || group.alternates.iter().any(|identity| {
+                        self.type_array_ids(production_category(identity.category))
+                            .get(identity.ordinal as usize)
+                            .is_none()
+                    })
+                {
+                    return Err("production group reference is outside its registry".into());
+                }
+            }
+        }
+        let objects = self
+            .object_list
+            .iter()
+            .map(|object| {
+                let result = query(Query::Object {
+                    category: production_kind(object.category),
+                    name: object.id.clone(),
+                })?;
+                match result {
+                    None if catalog.is_none() => Ok(None),
+                    Some(Policy::Object { policy }) if catalog.is_some() => {
+                        if policy
+                            .prerequisites
+                            .iter()
+                            .chain(&policy.prerequisite_override)
+                            .any(|entry| !valid_requirement(entry))
+                            || policy.built_at.iter().any(|&index| {
+                                index > i32::MAX as u32 || index as usize >= self.building_ids.len()
+                            })
+                            || policy
+                                .factory_owners
+                                .iter()
+                                .chain(&policy.forbidden_factory_owners)
+                                .any(|&index| {
+                                    index > u16::MAX as u32
+                                        || index as usize >= self.country_ids.len()
+                                })
+                        {
+                            return Err(format!(
+                                "production reference is outside its registry: {}",
+                                object.id
+                            ));
+                        }
+                        FrozenProductionObject::bind(policy).map(Some)
+                    }
+                    _ => Err(format!(
+                        "production catalog requires complete type bindings: {}",
+                        object.id
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let catalog = catalog
+            .map(|(groups, semantics, ai_bypass_build_limit)| {
+                Ok::<_, String>(FrozenProductionCatalog {
+                    groups: GenericPrerequisites::from_sdk(groups, |identity| {
+                        self.type_array_ids(production_category(identity.category))
+                            .get(identity.ordinal as usize)
+                            .cloned()
+                    })?,
+                    semantics,
+                    ai_bypass_build_limit,
+                })
+            })
+            .transpose()?;
+        Ok((catalog, objects))
+    }
+
+    pub(crate) fn production_semantics(&self) -> vera_mod_api::ProductionSemantics {
+        if let Some(policy) = &self.external_production {
+            return policy.semantics;
+        }
+        let mut semantics = vera_mod_api::ProductionSemantics::default();
+        if crate::rules::ARES_ENABLED {
+            semantics = vera_mod_api::ProductionSemantics {
+                prerequisite_rule: vera_mod_api::ProductionPrerequisiteRule::ActiveAndInstalled,
+                build_limit_rule: vera_mod_api::ProductionBuildLimitRule::TrackedCapacity,
+                override_uses_groups: true,
+                require_factory_for_build: true,
+                ai_checks_build_limit: true,
+                negative_one_tech_level_human_only: true,
+                campaign_ignores_shell_superweapon_option: true,
+                factory_checks_limit_before_search: true,
+                factory_respects_explicit_sources: true,
+                factory_retains_offline_status: true,
+                deactivated_factory_is_offline: true,
+                factory_honors_stop_first: true,
+                factory_country_plans: true,
+            };
+        }
+        semantics
+    }
+
+    fn rebuild_production_alternates(&mut self) {
+        if self.production_semantics().prerequisite_rule
+            != vera_mod_api::ProductionPrerequisiteRule::ActiveAndInstalled
+        {
+            self.ares_prerequisite_alternates.clear();
+            return;
+        }
+        self.ares_prerequisite_alternates = self
+            .external_production
+            .as_ref()
+            .map(|p| &p.groups)
+            .or(self.ares_prerequisites.as_ref())
+            .into_iter()
+            .flat_map(|catalog| catalog.groups())
+            .flat_map(|group| group.alternates())
+            .filter_map(|alternate| {
+                self.object_category_index
+                    .get(&(alternate.category(), alternate.id().to_ascii_uppercase()))
+                    .copied()
+            })
+            .collect();
     }
 
     fn collect_armor_resource_bindings(&self) -> Result<ArmorResourceBindings, String> {
@@ -5086,6 +5291,13 @@ impl RuleSet {
     /// RulesExt+14A indexed by native House difficulty0/1/2 (hardest first).
     /// Only the compiled Ares CanBuild owner consumes this retained policy.
     pub fn ares_ai_bypasses_build_limit(&self, difficulty_index: usize) -> bool {
+        if let Some(policy) = &self.external_production {
+            return policy
+                .ai_bypass_build_limit
+                .get(difficulty_index)
+                .copied()
+                .unwrap_or(false);
+        }
         #[cfg(feature = "ares")]
         {
             self.ares_global_controls
@@ -5228,19 +5440,7 @@ impl RuleSet {
             processed.prerequisite_proc_alternate().map(str::to_owned);
         rules.prerequisite_lists = processed.prerequisite_lists().clone();
         rules.ares_prerequisites = processed.ares_prerequisites().cloned();
-        rules.ares_prerequisite_alternates = rules
-            .ares_prerequisites
-            .as_ref()
-            .into_iter()
-            .flat_map(|catalog| catalog.groups())
-            .flat_map(|group| group.alternates())
-            .filter_map(|alternate| {
-                rules
-                    .object_category_index
-                    .get(&(alternate.category(), alternate.id().to_ascii_uppercase()))
-                    .copied()
-            })
-            .collect();
+        rules.rebuild_production_alternates();
         rules.general.building_types = processed.building_types().clone();
         let (lightning, weather_anim, nullify_anim, splash) = processed.select_anim_rules();
         rules.general.lightning_warhead = lightning.to_owned();
@@ -6514,6 +6714,7 @@ impl RuleSet {
             external_mod: None,
             match_rules_policy: None,
             external_armor_names: None,
+            external_production: None,
             sdk_passes: processed.sdk_passes().to_vec(),
             sdk_registries: processed.sdk_registries().to_vec(),
             sdk_animation_names: processed
@@ -7400,6 +7601,21 @@ impl RuleSet {
                 b"ares-secondary-turn-rate-v1".hash(&mut hasher);
                 turn_overrides.hash(&mut hasher);
             }
+        }
+        if self.external_production.is_some() {
+            b"component-production-resources-v1".hash(&mut hasher);
+            self.external_production.hash(&mut hasher);
+            self.object_list
+                .iter()
+                .map(|object| {
+                    (
+                        object.category,
+                        object.id.to_ascii_uppercase(),
+                        object.external_production_hash_state(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .hash(&mut hasher);
         }
         if self.external_armor_names.is_some()
             || self
@@ -9379,8 +9595,15 @@ impl RuleSet {
         &self,
         entry: Prerequisite,
     ) -> Option<&GenericPrerequisite> {
-        self.ares_prerequisites
-            .as_ref()?
+        if self.production_semantics().prerequisite_rule
+            != vera_mod_api::ProductionPrerequisiteRule::ActiveAndInstalled
+        {
+            return None;
+        }
+        self.external_production
+            .as_ref()
+            .map(|policy| &policy.groups)
+            .or(self.ares_prerequisites.as_ref())?
             .group(entry.group_index()?)
     }
 

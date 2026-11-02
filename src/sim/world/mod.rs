@@ -6301,8 +6301,7 @@ impl Simulation {
         // Ares3.0 ChangeOwner7015EB ->1004E7F0 follows the two tracking
         // calls and precedes both the capture stats and owner pointer store.
         // Buildings retain their own existing44936E/449379 recheck tail.
-        if crate::rules::ARES_ENABLED
-            && category != EntityCategory::Structure
+        if category != EntityCategory::Structure
             && self
                 .substrate
                 .entities
@@ -8880,3 +8879,6 @@ mod sdk_house_survival_tests;
 
 #[cfg(test)]
 mod sdk_armor_tests;
+
+#[cfg(test)]
+mod sdk_production_tests;

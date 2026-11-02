@@ -847,6 +847,20 @@ impl IniSection {
             .map(|value| strtok(value, COMMA).collect())
     }
 
+    /// Ares tokenizer1002A180: at most three bools, written to slots2/1/0.
+    /// Stop at the first invalid token; untouched suffix slots retain current.
+    pub(crate) fn read_bool_prefix_reverse3(&self, key: &str, mut current: [bool; 3]) -> [bool; 3] {
+        if let Some(tokens) = self.read_list(key, 2048) {
+            for (slot, token) in (0..3).rev().zip(tokens) {
+                let Some(value) = read_bool_decision(token) else {
+                    break;
+                };
+                current[slot] = value;
+            }
+        }
+        current
+    }
+
     /// ReadHousesList475260: ReadString128, comma-only strtok, then the
     /// caller's byte-exact House::FromName50C170 lookup. An unknown (-1)
     /// index sets bit31 through x86's masked shift. Missing/empty keeps the

@@ -51,10 +51,32 @@ pub(crate) fn load_from_assets(
     warheads: &[String],
     weapons: &[String],
 ) -> Result<Option<Arc<Program>>, String> {
+    load_from_assets_for_process(
+        assets,
+        passes,
+        registries,
+        object_types,
+        warheads,
+        weapons,
+        None,
+        &[],
+    )
+}
+
+pub(crate) fn load_from_assets_for_process(
+    assets: &crate::assets::asset_manager::AssetManager,
+    passes: &[IniFile],
+    registries: &[crate::rules::native_processing::SdkRegistryPass],
+    object_types: &[String],
+    warheads: &[String],
+    weapons: &[String],
+    seed: Option<&Program>,
+    steps: &[crate::rules::native_processing::SdkConfigurationStep],
+) -> Result<Option<Arc<Program>>, String> {
     let Some((digest, bytes)) = asset_program(assets)? else {
         return Ok(None);
     };
-    Program::load_with_registries(
+    Program::load_with_process_context(
         bytes,
         &digest,
         passes,
@@ -62,6 +84,8 @@ pub(crate) fn load_from_assets(
         warheads,
         weapons,
         registries,
+        seed,
+        steps,
     )
     .map(|p| Some(Arc::new(p)))
 }

@@ -493,6 +493,7 @@ pub struct ObjectType {
     armor_id: crate::rules::armor::ArmorId,
     /// Read-only frozen component binding; the native reader state remains separate.
     external_armor_id: Option<crate::rules::armor::ArmorId>,
+    external_production: Option<crate::rules::prerequisite::FrozenProductionObject>,
     /// Phobos `TechnoTypeExt::DigitalDisplayTypes` (`DigitalDisplayTypes=`):
     /// authored `[DigitalDisplayTypes]` names in list order. Empty means the
     /// techno uses its category's `[AudioVisual]` default list.
@@ -2524,6 +2525,9 @@ impl ObjectType {
     /// BuiltAt BuildingTypes ordinals, bound at each reached TechnoType read.
     /// An empty list leaves the source factory unspecified; duplicates are kept.
     pub fn built_at(&self) -> &[i32] {
+        if let Some(policy) = &self.external_production {
+            return &policy.built_at;
+        }
         #[cfg(feature = "ares")]
         {
             self.factory_owners.built_at()
@@ -2536,6 +2540,9 @@ impl ObjectType {
 
     /// BuildingExt+126: source factory only admits an explicit BuiltAt match.
     pub fn factory_explicit_only(&self) -> bool {
+        if let Some(policy) = &self.external_production {
+            return policy.factory_explicit_only;
+        }
         #[cfg(feature = "ares")]
         {
             self.explicit_factory.explicit_only()
@@ -2548,6 +2555,9 @@ impl ObjectType {
 
     /// Allowed original factory Countries in native list order, duplicates kept.
     pub fn factory_owners(&self) -> &[crate::rules::ruleset::CountryIdx] {
+        if let Some(policy) = &self.external_production {
+            return &policy.factory_owners;
+        }
         #[cfg(feature = "ares")]
         {
             self.factory_owners.allowed()
@@ -2560,6 +2570,9 @@ impl ObjectType {
 
     /// Countries excluded for the same candidate that satisfies FactoryOwners.
     pub fn forbidden_factory_owners(&self) -> &[crate::rules::ruleset::CountryIdx] {
+        if let Some(policy) = &self.external_production {
+            return &policy.forbidden_factory_owners;
+        }
         #[cfg(feature = "ares")]
         {
             self.factory_owners.forbidden()
@@ -2572,6 +2585,9 @@ impl ObjectType {
 
     /// TypeExt+320: HaveAllPlans followed by Permanent writes the same field.
     pub fn factory_owners_permanent(&self) -> bool {
+        if let Some(policy) = &self.external_production {
+            return policy.permanent_factory_plan;
+        }
         #[cfg(feature = "ares")]
         {
             self.factory_owners.permanent()
@@ -2584,6 +2600,9 @@ impl ObjectType {
 
     /// Independent TypeExt+321: a live building supplies all factory categories.
     pub fn factory_has_all_plans(&self) -> bool {
+        if let Some(policy) = &self.external_production {
+            return policy.factory_has_all_plans;
+        }
         #[cfg(feature = "ares")]
         {
             self.factory_owners.has_all_plans()
@@ -2635,6 +2654,35 @@ impl ObjectType {
 
     pub(crate) fn bind_external_armor(&mut self, armor: Option<crate::rules::armor::ArmorId>) {
         self.external_armor_id = armor;
+    }
+
+    pub(crate) fn bind_external_production(
+        &mut self,
+        policy: Option<crate::rules::prerequisite::FrozenProductionObject>,
+    ) {
+        self.external_production = policy;
+    }
+
+    pub(crate) fn external_production_hash_state(
+        &self,
+    ) -> Option<&crate::rules::prerequisite::FrozenProductionObject> {
+        self.external_production.as_ref()
+    }
+
+    pub(crate) fn prerequisites(&self) -> &[crate::rules::prerequisite::Prerequisite] {
+        self.external_production
+            .as_ref()
+            .map_or(self.prerequisite.as_slice(), |policy| {
+                policy.prerequisites.as_slice()
+            })
+    }
+
+    pub(crate) fn prerequisite_overrides(&self) -> &[crate::rules::prerequisite::Prerequisite] {
+        self.external_production
+            .as_ref()
+            .map_or(self.prerequisite_override.as_slice(), |policy| {
+                policy.prerequisite_override.as_slice()
+            })
     }
 
     pub(crate) fn bind_armor(&mut self, armor: crate::rules::armor::ArmorId) {
@@ -3394,6 +3442,7 @@ impl ObjectType {
             ),
             armor_id: crate::rules::armor::armor_index(&armor),
             external_armor_id: None,
+            external_production: None,
             armor,
             #[cfg(feature = "phobos")]
             digital_display_types: section

@@ -253,9 +253,11 @@ fn permanent_grant_scans_all_upgrade_slots_and_persists_without_the_building() {
         sim.houses[&owner].permanent_factory_plans(),
         &[source, source]
     );
-    // Native restore deliberately resets Scenario RNG to seed zero. Isolate
-    //the retained factory state from that independent load transition.
+    // Player load seeds Scenario RNG to zero and clears PlanMgr
+    // (ClearScene6370B0/TechnoLoad70BF79). Isolate retained factory state
+    // from both independent load boundaries, retaining the full hash check.
     sim.scenario_rng = crate::sim::rng::SimRng::new(0);
+    sim.reset_planning_after_player_load();
     let before = sim.state_hash();
     let bytes = GameSnapshot::save_validated(&sim, 1, 2, "factory plans", 0);
     let mut restored = GameSnapshot::load_validated(&bytes, 1, 2, "").unwrap().sim;

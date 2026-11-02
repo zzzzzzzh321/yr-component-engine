@@ -2052,15 +2052,23 @@ impl MapLoadInitial {
             Some(&match_launch_descriptor.session().mode.override_file),
         )
         .expect("select the generated-map mode INI layer");
-        let (mut rules, _, art_ini, native_rules_receipt) =
-            crate::app::loading::init_helpers::load_rules_with_prefix_for_test(
-                asset_manager,
+        let audio = crate::rules::audio_sources::AudioDefinitions::select(asset_manager);
+        let (_, _, mut native_rules_owner) = crate::rules::retail_sources::load_startup_rules(
+            asset_manager,
+            std::sync::Arc::clone(audio.sounds()),
+            std::sync::Arc::clone(audio.eva()),
+        )
+        .expect("retail generated-map startup Rules")
+        .into_parts();
+        let (mut rules, _, art_ini, native_rules_receipt) = native_rules_owner
+            .load_scenario(
                 crate::rules::process_owner::NativeScenarioRulesPrefix::RandomMap(
                     mode_override_ini.as_ref(),
                 ),
-                Some(&map_data.ini),
+                &map_data.ini,
             )
-            .expect("retail generated-map rules");
+            .expect("retail generated-map rules")
+            .into_parts();
         rules.install_art_data(ArtRegistry::from_ini(&art_ini));
         let infantry_sequences =
             crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art_ini);
@@ -2191,7 +2199,10 @@ impl MapLoadInitial {
         crate::sim::runtime::bind_scenario_gameplay_resources(
             &mut rules,
             asset_manager,
-            crate::sim::runtime::ScenarioGameplayProgram::Fresh(&mut simulation),
+            crate::sim::runtime::ScenarioGameplayProgram::Fresh {
+                simulation: &mut simulation,
+                rules_owner: &mut native_rules_owner,
+            },
             theater_ext,
             &map_data.header.theater,
         )
@@ -3295,9 +3306,10 @@ fn load_map_first_step(
                                         crate::sim::runtime::bind_scenario_gameplay_resources(
                                             &mut rules,
                                             services.asset_manager,
-                                            crate::sim::runtime::ScenarioGameplayProgram::Fresh(
-                                                &mut staged_simulation,
-                                            ),
+                                            crate::sim::runtime::ScenarioGameplayProgram::Fresh {
+                                                simulation: &mut staged_simulation,
+                                                rules_owner: &mut *services.native_rules_owner,
+                                            },
                                             theater_ext,
                                             &map_data.header.theater,
                                         )

@@ -699,6 +699,18 @@ const PARADROP_INFANTRY_KEYS: [&str; 4] = [
 pub(crate) struct SdkRegistryPass {
     animations: Vec<String>,
     reads: Vec<SdkRegistryRead>,
+    production: vera_mod_api::ProductionRegistryView,
+}
+
+/// Pending physical reads belong to the same move-only Rules transaction.
+/// Opaque configuration is checkpointed only after a successful component bind.
+#[derive(Debug, Clone)]
+pub(crate) enum SdkConfigurationStep {
+    RulesPass {
+        ini: IniFile,
+        registry: SdkRegistryPass,
+    },
+    Boundary(vera_mod_api::ConfigurationBoundary),
 }
 
 #[derive(Debug, Clone)]
@@ -709,6 +721,9 @@ struct SdkRegistryRead {
 }
 
 impl SdkRegistryPass {
+    pub(crate) fn production_view(&self) -> &vera_mod_api::ProductionRegistryView {
+        &self.production
+    }
     pub(crate) fn names(&self, registry: &str) -> Vec<String> {
         if registry == "$animations" {
             return self.animations.clone();
@@ -767,6 +782,23 @@ pub struct ProcessedRulesLayers {
 }
 
 impl ProcessedRulesLayers {
+    pub(crate) fn sdk_configuration_seed(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::mod_sdk::Program>> {
+        self.native_registry_state().sdk_configuration_seed()
+    }
+
+    pub(crate) fn sdk_configuration_steps(&self) -> &[SdkConfigurationStep] {
+        self.native_registry_state().sdk_configuration_steps()
+    }
+    pub(crate) fn retain_sdk_configuration_program(
+        &mut self,
+        program: Option<std::sync::Arc<crate::mod_sdk::Program>>,
+    ) {
+        self.native_type_construction_trace
+            .registry_state
+            .retain_sdk_configuration_program(program);
+    }
     pub(crate) fn sdk_passes(&self) -> &[IniFile] {
         &self.sdk_passes
     }
@@ -3145,17 +3177,9 @@ impl AresGlobalControls {
         //1002B3D3/10005800 reads2048, then1002A180 consumes at most3 bools.
         // A successful prefix writes+14C,+14B,+14A in reverse difficulty order;
         // failure stops, retaining the unparsed suffix of the current array.
-        if let Some(tokens) = pass
-            .section("GlobalControls")
-            .and_then(|section| section.read_list("AllowBypassBuildLimit", 2048))
-        {
-            for (slot, token) in (0..3).rev().zip(tokens) {
-                let Some(value) = crate::rules::ini_value::read_bool_decision(token) else {
-                    break;
-                };
-                self.allow_bypass_build_limit[slot] = value;
-            }
-        }
+        self.allow_bypass_build_limit = pass
+            .section_or_empty("GlobalControls")
+            .read_bool_prefix_reverse3("AllowBypassBuildLimit", self.allow_bypass_build_limit);
         self.phase = 2;
     }
 }
@@ -3169,6 +3193,10 @@ impl AresGlobalControls {
 /// RulesClass scalars share this process lifetime and survive Type resets.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct NativeRulesRegistryState {
+    #[serde(skip)]
+    sdk_configuration_steps: Vec<SdkConfigurationStep>,
+    #[serde(skip)]
+    sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     /// Build capability is retained with the Rules owner, never selected by INI.
     compatibility: RulesCompatibility,
     /// Ares Clear/AddDefaults rebuilds these at a destructive scenario reset;
@@ -3261,6 +3289,8 @@ impl Default for NativeRulesRegistryState {
         // RulesClass constructor values; `GeneralRules::default` owns them.
         let general = crate::rules::ruleset::GeneralRules::default();
         Self {
+            sdk_configuration_steps: Vec::new(),
+            sdk_configuration_seed: None,
             compatibility: RulesCompatibility::default(),
             ares_prerequisites: crate::rules::ARES_ENABLED.then(GenericPrerequisites::default),
             ares_armors: crate::rules::ARES_ENABLED.then(ArmorCatalog::default),
@@ -3331,6 +3361,34 @@ impl Default for NativeRulesRegistryState {
 }
 
 impl NativeRulesRegistryState {
+    pub(crate) fn sdk_configuration_seed(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::mod_sdk::Program>> {
+        self.sdk_configuration_seed.as_ref()
+    }
+
+    pub(crate) fn sdk_configuration_steps(&self) -> &[SdkConfigurationStep] {
+        &self.sdk_configuration_steps
+    }
+
+    pub(crate) fn retain_sdk_configuration_program(
+        &mut self,
+        program: Option<std::sync::Arc<crate::mod_sdk::Program>>,
+    ) {
+        self.sdk_configuration_seed = program;
+        self.sdk_configuration_steps.clear();
+    }
+
+    /// ScenarioClear10004EF1 recreates RulesExt; TypeReset6686C0 does not.
+    /// Only the opaque component owns the interpretation of this boundary.
+    pub(crate) fn clear_sdk_configuration_for_scenario(&mut self) {
+        self.sdk_configuration_seed = None;
+        self.sdk_configuration_steps.clear();
+        self.sdk_configuration_steps
+            .push(SdkConfigurationStep::Boundary(
+                vera_mod_api::ConfigurationBoundary::ScenarioClear,
+            ));
+    }
     /// Read one presentation HSV from the retained paired Colors registry.
     /// Native66D3A0 appends kind1 then kind53 for each entry; Ares loading
     /// stores a kind1 ordinal. A negative index is no override: the loading
@@ -3657,8 +3715,14 @@ impl NativeRulesRegistryState {
     ///
     /// Numeric-ID history is intentionally not represented here and therefore
     /// cannot be rewound by this operation.
-    pub(crate) fn destructive_reset(self) -> Self {
+    pub(crate) fn destructive_reset(mut self) -> Self {
+        self.sdk_configuration_steps
+            .push(SdkConfigurationStep::Boundary(
+                vera_mod_api::ConfigurationBoundary::TypeReset,
+            ));
         Self {
+            sdk_configuration_steps: self.sdk_configuration_steps,
+            sdk_configuration_seed: self.sdk_configuration_seed,
             //6686C0..668BF0 has no RulesExt reconstruction. Early-map Process
             //686D35 precedes this TypeReset6876AC and its flags/phase survive.
             #[cfg(feature = "ares")]
@@ -4642,6 +4706,9 @@ fn find_or_construct_type(
 
 #[derive(Debug, Clone)]
 struct RulesPassProcessor {
+    sdk_configuration_steps: Vec<SdkConfigurationStep>,
+    sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
+    sdk_production_reads: Vec<vera_mod_api::ProductionReadPoint>,
     image_theater: ImageTheater,
     compatibility: RulesCompatibility,
     ares_prerequisites: Option<GenericPrerequisites>,
@@ -4722,6 +4789,9 @@ impl Default for RulesPassProcessor {
 impl RulesPassProcessor {
     fn with_registry_state(registry_state: NativeRulesRegistryState) -> Self {
         Self {
+            sdk_configuration_steps: registry_state.sdk_configuration_steps,
+            sdk_configuration_seed: registry_state.sdk_configuration_seed,
+            sdk_production_reads: Vec::new(),
             image_theater: ImageTheater::Uninitialized,
             compatibility: registry_state.compatibility,
             ares_prerequisites: registry_state.ares_prerequisites,
@@ -4791,6 +4861,26 @@ impl RulesPassProcessor {
     }
 
     fn apply_pass(
+        &mut self,
+        pass: &IniFile,
+        fixed_art: &IniFile,
+        fixed_eva: &EvaRegistry,
+        primary_rules: bool,
+    ) -> Result<(), RulesError> {
+        self.sdk_production_reads.clear();
+        self.record_sdk_production_read(vera_mod_api::ProductionReadSite::ProcessEntry);
+        // Preserve reached partial reads too: Side/Tiberium failure keeps the
+        // same native registry, so its pending component chronology must agree.
+        let result = self.apply_pass_inner(pass, fixed_art, fixed_eva, primary_rules);
+        self.sdk_configuration_steps
+            .push(SdkConfigurationStep::RulesPass {
+                ini: pass.clone(),
+                registry: self.sdk_registry_pass(),
+            });
+        result
+    }
+
+    fn apply_pass_inner(
         &mut self,
         pass: &IniFile,
         fixed_art: &IniFile,
@@ -5671,7 +5761,59 @@ impl RulesPassProcessor {
                 .map(|member| member.native_stored_id.clone())
                 .collect(),
             reads: self.sdk_type_reads.clone(),
+            production: vera_mod_api::ProductionRegistryView {
+                buildings: self
+                    .families
+                    .get(&RulesTypeFamily::Building)
+                    .into_iter()
+                    .flatten()
+                    .map(|member| member.native_stored_id.clone())
+                    .collect(),
+                countries: self
+                    .families
+                    .get(&RulesTypeFamily::Country)
+                    .into_iter()
+                    .flatten()
+                    .map(|member| member.native_stored_id.clone())
+                    .collect(),
+                technos: self
+                    .techno_type_order
+                    .iter()
+                    .map(|&(family, index)| vera_mod_api::ProductionRegisteredType {
+                        identity: self.sdk_production_identity(family, index),
+                        name: self.families[&family][index].native_stored_id.clone(),
+                    })
+                    .collect(),
+                reads: self.sdk_production_reads.clone(),
+            },
         }
+    }
+
+    fn sdk_production_identity(
+        &self,
+        family: RulesTypeFamily,
+        index: usize,
+    ) -> vera_mod_api::ProductionTypeRef {
+        vera_mod_api::ProductionTypeRef {
+            category: crate::rules::prerequisite::production_kind(
+                family.object_category().expect("Techno identity"),
+            ),
+            ordinal: u32::try_from(index).expect("native Type ordinal exceeds u32"),
+        }
+    }
+
+    fn record_sdk_production_read(&mut self, site: vera_mod_api::ProductionReadSite) {
+        self.sdk_production_reads
+            .push(vera_mod_api::ProductionReadPoint {
+                prefix: vera_mod_api::ProductionRegistryPrefix {
+                    buildings: u32::try_from(self.family_len(RulesTypeFamily::Building))
+                        .expect("Building ordinal"),
+                    countries: u32::try_from(self.family_len(RulesTypeFamily::Country))
+                        .expect("Country ordinal"),
+                    technos: u32::try_from(self.techno_type_order.len()).expect("Techno ordinal"),
+                },
+                site,
+            });
     }
 
     fn begin_rules_member_read(
@@ -5771,6 +5913,7 @@ impl RulesPassProcessor {
         // registry allocation but before any TechnoType body in this pass.
         // Move out and back while reading the existing registries; this is
         // still the one retained catalog, not a merged-INI reconstruction.
+        self.record_sdk_production_read(vera_mod_api::ProductionReadSite::BeforeTypeData);
         #[cfg(feature = "ares")]
         if let Some(mut catalog) = self.ares_prerequisites.take() {
             catalog.apply_pass(
@@ -6348,6 +6491,11 @@ impl RulesPassProcessor {
                 self.begin_rules_member_read(family, index, pass)
             {
                 self.process_techno_base(family, index, &raw);
+                self.record_sdk_production_read(
+                    vera_mod_api::ProductionReadSite::TechnoPrerequisite {
+                        object: self.sdk_production_identity(family, index),
+                    },
+                );
                 // TechnoTypeClass::ReadINI parses `Prerequisite=` (`0x007141C5`)
                 // and `PrerequisiteOverride=` (`0x0071424B`) after `Dock=` and
                 // `DeploysInto=` (`0x00713180`, `0x00713279`), the reads above
@@ -6436,6 +6584,11 @@ impl RulesPassProcessor {
                 // Registry-only SDK input is available in bare builds too;
                 // extension fields remain exclusively plugin-configured there.
                 self.record_sdk_type_read(family, index);
+                self.record_sdk_production_read(
+                    vera_mod_api::ProductionReadSite::TechnoExtension {
+                        object: self.sdk_production_identity(family, index),
+                    },
+                );
                 #[cfg(feature = "ares")]
                 {
                     // Find only: this nullable Anim reader never allocates.
@@ -6673,18 +6826,31 @@ impl RulesPassProcessor {
                     }
                     _ => unreachable!("only Techno families enter the Techno reader"),
                 }
-                #[cfg(feature = "ares")]
                 if family == RulesTypeFamily::Building {
                     // Building suffix464A49/464A56 ->1000FDB0 runs after
                     // original Building fields. Use the current reached-body
                     // projection's stock readers, including prior defaults.
-                    let aircraft_repair = effective.read_bool("UnitRepair", false)
-                        && effective.read_factory("Factory", 0) == 3;
+                    let unit_repair = effective.read_bool("UnitRepair", false);
+                    let factory = effective.read_factory("Factory", 0);
+                    self.record_sdk_production_read(
+                        vera_mod_api::ProductionReadSite::BuildingExtension {
+                            object: self.sdk_production_identity(family, index),
+                            factory: match factory {
+                                3 => Some(vera_mod_api::ProductionObjectKind::Aircraft),
+                                7 => Some(vera_mod_api::ProductionObjectKind::Building),
+                                16 => Some(vera_mod_api::ProductionObjectKind::Infantry),
+                                40 => Some(vera_mod_api::ProductionObjectKind::Unit),
+                                _ => None,
+                            },
+                            unit_repair,
+                        },
+                    );
+                    #[cfg(feature = "ares")]
                     self.family_mut(family)[index]
                         .explicit_factory
                         .as_mut()
                         .expect("BuildingType owns its Ares extension")
-                        .read_pass(&raw, aircraft_repair);
+                        .read_pass(&raw, unit_repair && factory == 3);
                 }
             }
             index += 1;
@@ -7686,6 +7852,8 @@ impl RulesPassProcessor {
                 events: self.native_type_construction_events,
                 allocated_super_weapon_type_count,
                 registry_state: NativeRulesRegistryState {
+                    sdk_configuration_steps: self.sdk_configuration_steps,
+                    sdk_configuration_seed: self.sdk_configuration_seed,
                     compatibility: self.compatibility,
                     ares_prerequisites: self.ares_prerequisites,
                     ares_armors: self.ares_armors,

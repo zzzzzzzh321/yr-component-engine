@@ -459,7 +459,7 @@ fn command_bar_sound_history_survives_saved_rules_and_normal_restore_rebinding()
     // SavedScenarioResources carries this same existing processed authority;
     // the app's load route projects it against the current process catalog.
     let restored = owner.project_saved_scenario_rules(&saved).unwrap();
-    owner.install_saved_scenario_rules(saved);
+    owner.install_saved_scenario_rules(saved, None);
     assert!(Arc::ptr_eq(owner.fixed_sounds(), &sounds));
     assert_eq!(restored.general.gui_open_sound(), Some("RootOpen"));
     assert_eq!(restored.general.gui_close_sound(), Some("MapClose"));

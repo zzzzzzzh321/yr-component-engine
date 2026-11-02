@@ -22,6 +22,95 @@
 //! memory natively. Frequency: no retail list does (rulesmd's three overrides
 //! and six lists name BuildingTypes only).
 
+use crate::rules::object_type::ObjectCategory;
+
+pub(crate) fn production_kind(category: ObjectCategory) -> vera_mod_api::ProductionObjectKind {
+    match category {
+        ObjectCategory::Vehicle => vera_mod_api::ProductionObjectKind::Unit,
+        ObjectCategory::Infantry => vera_mod_api::ProductionObjectKind::Infantry,
+        ObjectCategory::Building => vera_mod_api::ProductionObjectKind::Building,
+        ObjectCategory::Aircraft => vera_mod_api::ProductionObjectKind::Aircraft,
+    }
+}
+
+pub(crate) fn production_category(kind: vera_mod_api::ProductionObjectKind) -> ObjectCategory {
+    match kind {
+        vera_mod_api::ProductionObjectKind::Unit => ObjectCategory::Vehicle,
+        vera_mod_api::ProductionObjectKind::Infantry => ObjectCategory::Infantry,
+        vera_mod_api::ProductionObjectKind::Building => ObjectCategory::Building,
+        vera_mod_api::ProductionObjectKind::Aircraft => ObjectCategory::Aircraft,
+    }
+}
+
+pub(crate) fn bind_production_requirement(
+    entry: vera_mod_api::ProductionRequirement,
+) -> Result<Prerequisite, String> {
+    match entry {
+        vera_mod_api::ProductionRequirement::Building(index) => i32::try_from(index)
+            .map(Prerequisite::Building)
+            .map_err(|_| "Building ordinal exceeds native index space".into()),
+        vera_mod_api::ProductionRequirement::Group(index) => {
+            Ok(match PrerequisiteGroup::ALL.get(index as usize) {
+                Some(&group) => Prerequisite::Group(group),
+                None => Prerequisite::GenericGroup(index),
+            })
+        }
+    }
+}
+
+/// Immutable projection of the admitted component declaration. It never owns
+/// live counts, installed slots or acquired House plans.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FrozenProductionObject {
+    pub(crate) prerequisites: Vec<Prerequisite>,
+    pub(crate) prerequisite_override: Vec<Prerequisite>,
+    pub(crate) built_at: Vec<i32>,
+    pub(crate) factory_owners: Vec<crate::rules::ruleset::CountryIdx>,
+    pub(crate) forbidden_factory_owners: Vec<crate::rules::ruleset::CountryIdx>,
+    pub(crate) permanent_factory_plan: bool,
+    pub(crate) factory_has_all_plans: bool,
+    pub(crate) factory_explicit_only: bool,
+}
+
+impl FrozenProductionObject {
+    pub(crate) fn bind(policy: vera_mod_api::ProductionObjectPolicy) -> Result<Self, String> {
+        let countries = |ids: Vec<u32>| {
+            ids.into_iter()
+                .map(|index| {
+                    u16::try_from(index)
+                        .map(crate::rules::ruleset::CountryIdx)
+                        .map_err(|_| "Country ordinal exceeds native index space".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(Self {
+            prerequisites: policy
+                .prerequisites
+                .into_iter()
+                .map(bind_production_requirement)
+                .collect::<Result<_, _>>()?,
+            prerequisite_override: policy
+                .prerequisite_override
+                .into_iter()
+                .map(bind_production_requirement)
+                .collect::<Result<_, _>>()?,
+            built_at: policy
+                .built_at
+                .into_iter()
+                .map(|index| {
+                    i32::try_from(index)
+                        .map_err(|_| "Building ordinal exceeds native index space".to_owned())
+                })
+                .collect::<Result<_, _>>()?,
+            factory_owners: countries(policy.factory_owners)?,
+            forbidden_factory_owners: countries(policy.forbidden_factory_owners)?,
+            permanent_factory_plan: policy.permanent_factory_plan,
+            factory_has_all_plans: policy.factory_has_all_plans,
+            factory_explicit_only: policy.factory_explicit_only,
+        })
+    }
+}
+
 /// The six named groups, the original's codes -1..-6. Each names a `[General]
 /// Prerequisite*` list for `HouseClass::CanBuild` and an `[AI] Build*` list
 /// for the base planner.

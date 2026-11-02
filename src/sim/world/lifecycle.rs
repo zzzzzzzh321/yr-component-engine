@@ -1429,16 +1429,14 @@ impl Simulation {
         // locomotor Put and precedes owner discovery4D722F. Declaration
         // membership alone requests the owner's existing House+1FC pass.
         let rules = context.rules();
-        if crate::rules::ARES_ENABLED
-            && let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
-                (entity.category() != EntityCategory::Structure
-                    && rules.is_ares_prerequisite_alternate(
-                        entity.category().into(),
-                        self.interner.resolve(entity.type_ref()),
-                    ))
-                .then_some(entity.owner())
-            })
-        {
+        if let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
+            (entity.category() != EntityCategory::Structure
+                && rules.is_ares_prerequisite_alternate(
+                    entity.category().into(),
+                    self.interner.resolve(entity.type_ref()),
+                ))
+            .then_some(entity.owner())
+        }) {
             self.houses.request_house_tech_tree_recheck(owner);
         }
         // ObjectUnlimbo5F4FB4 Mark/CellPUT has already run. Foot4D722F calls
@@ -1974,16 +1972,14 @@ impl Simulation {
         // The live owner is read after Tag callbacks, before the conditional
         //1F4 notification; repeated discovery returned before either site.
         let rules = context.rules();
-        if crate::rules::ARES_ENABLED
-            && let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
-                (entity.category() != EntityCategory::Structure
-                    && rules.is_ares_prerequisite_alternate(
-                        entity.category().into(),
-                        self.interner.resolve(entity.type_ref()),
-                    ))
-                .then_some(entity.owner())
-            })
-        {
+        if let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
+            (entity.category() != EntityCategory::Structure
+                && rules.is_ares_prerequisite_alternate(
+                    entity.category().into(),
+                    self.interner.resolve(entity.type_ref()),
+                ))
+            .then_some(entity.owner())
+        }) {
             self.houses.request_house_tech_tree_recheck(owner);
         }
         //6F4A1D reloads owner AFTER synchronous Tag actions.
@@ -6550,16 +6546,14 @@ impl Simulation {
             // before LeaveTeam/RemoveTracking. Every declared alternate
             // requests a pass, even while another copy remains tracked.
             let rules = context.rules();
-            if crate::rules::ARES_ENABLED
-                && let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
-                    rules
-                        .is_ares_prerequisite_alternate(
-                            entity.category().into(),
-                            self.interner.resolve(entity.type_ref()),
-                        )
-                        .then_some(entity.owner())
-                })
-            {
+            if let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
+                rules
+                    .is_ares_prerequisite_alternate(
+                        entity.category().into(),
+                        self.interner.resolve(entity.type_ref()),
+                    )
+                    .then_some(entity.owner())
+            }) {
                 self.houses.request_house_tech_tree_recheck(owner);
             }
             self.leave_team(stable_id, false, context.rules(), context.effects());

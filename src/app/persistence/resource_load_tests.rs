@@ -1120,7 +1120,8 @@ fn unread_cell_anim_loads_its_own_retail_shape_without_replaying_construction() 
         ..
     } = prepared;
     let (simulation, _) = world.into_committed(SharedCellDummy::fresh(), &frontend);
-    save.owner.install_saved_scenario_rules(processed_rules);
+    save.owner
+        .install_saved_scenario_rules(processed_rules, Some(&resources.rules));
     let loaded = SimRuntime {
         simulation,
         resources,
@@ -1302,7 +1303,8 @@ fn unknown_terrain_type_load_validates_then_commits_and_resaves_its_same_owner()
         ..
     } = prepared;
     let (simulation, _) = world.into_committed(SharedCellDummy::fresh(), &frontend);
-    save.owner.install_saved_scenario_rules(processed_rules);
+    save.owner
+        .install_saved_scenario_rules(processed_rules, Some(&resources.rules));
     let runtime = SimRuntime {
         simulation,
         resources,
@@ -1465,7 +1467,8 @@ fn arctic_type_load_validates_before_mutation_and_resaves_the_same_owner() {
         ..
     } = prepared;
     let (simulation, _) = world.into_committed(SharedCellDummy::fresh(), &frontend);
-    save.owner.install_saved_scenario_rules(processed_rules);
+    save.owner
+        .install_saved_scenario_rules(processed_rules, Some(&resources.rules));
     let runtime = SimRuntime {
         simulation,
         resources,

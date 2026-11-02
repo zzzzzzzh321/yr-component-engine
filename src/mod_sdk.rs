@@ -11,7 +11,7 @@ mod program;
 mod simulation;
 
 pub use assets::adopt_saved_program;
-pub(crate) use assets::load_from_assets;
+pub(crate) use assets::{load_from_assets, load_from_assets_for_process};
 pub use program::Program;
 pub(crate) use simulation::{
     attach_entity, live_entity_context, pre_receive_damage, preview_receive_damage, tick_entity,
