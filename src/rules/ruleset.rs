@@ -4354,10 +4354,24 @@ struct FrozenProductionCatalog {
     ai_bypass_build_limit: [bool; 3],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FrozenEmpRules {
+    enabled: bool,
+    ai_recover_mission: Option<crate::rules::mission_data::MissionType>,
+    reactivation_requires_powered_center: bool,
+}
+
+struct EmpResourceBindings {
+    rules: Option<FrozenEmpRules>,
+    objects: Vec<Option<crate::rules::ares_emp::EmpTypeRules>>,
+    warheads: Vec<(String, Option<crate::rules::ares_emp::EmpWarheadRules>)>,
+}
+
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-support"), derive(Clone))]
 pub struct RuleSet {
     external_production: Option<FrozenProductionCatalog>,
+    external_emp: Option<FrozenEmpRules>,
     pub(crate) external_mod: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     /// Derived from the frozen component, rebuilt with all other projections.
     /// None retains this build's native compatibility mode; Retail is an
@@ -4762,6 +4776,7 @@ impl RuleSet {
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
         let armor = self.collect_armor_resource_bindings()?;
+        let emp = self.collect_emp_resource_bindings()?;
         let (production, production_objects) = self.collect_production_resource_bindings()?;
         let mut effect_resources = std::collections::BTreeMap::new();
         if let Some(program) = self
@@ -4842,6 +4857,16 @@ impl RuleSet {
             );
         }
         self.match_rules_policy = match_rules_policy;
+        self.external_emp = emp.rules;
+        for (object, policy) in self.object_list.iter_mut().zip(emp.objects) {
+            object.bind_external_emp(policy);
+        }
+        for (name, policy) in emp.warheads {
+            self.warheads
+                .get_mut(&name)
+                .expect("retained Warhead")
+                .bind_external_emp(policy);
+        }
         self.external_production = production;
         for (object, policy) in self.object_list.iter_mut().zip(production_objects) {
             object.bind_external_production(policy);
@@ -4875,6 +4900,115 @@ impl RuleSet {
                 .bind_external_armor(table);
         }
         Ok(())
+    }
+
+    fn collect_emp_resource_bindings(&self) -> Result<EmpResourceBindings, String> {
+        use vera_mod_api::{
+            EmpResourceContext as Query, EmpResourcePolicy as Policy, NullableResourceName,
+        };
+        let program = self
+            .external_mod
+            .as_deref()
+            .filter(|p| p.has_emp_resource());
+        let query = |context| {
+            program
+                .map(|p| p.emp_resource_policy(&context))
+                .transpose()
+                .map(Option::flatten)
+        };
+        let rules = match query(Query::Rules)? {
+            None => None,
+            Some(Policy::Rules {
+                enabled,
+                ai_recover_mission,
+                reactivation_requires_powered_center,
+            }) => {
+                let mission = ai_recover_mission
+                    .map(|id| {
+                        u8::try_from(id)
+                            .ok()
+                            .and_then(crate::rules::mission_data::MissionType::from_id)
+                            .ok_or_else(|| format!("invalid EMP recovery mission: {id}"))
+                    })
+                    .transpose()?;
+                Some(FrozenEmpRules {
+                    enabled,
+                    ai_recover_mission: mission,
+                    reactivation_requires_powered_center,
+                })
+            }
+            _ => return Err("EMP Rules query returned another resource kind".into()),
+        };
+        let canonical_animation = |name: &str| {
+            self.sdk_animation_names
+                .iter()
+                .find(|id| id.eq_ignore_ascii_case(name))
+                .cloned()
+                .ok_or_else(|| format!("EMP animation is not registered: {name}"))
+        };
+        let objects = self
+            .object_list
+            .iter()
+            .map(|object| {
+                match query(Query::Type {
+                    user: object.resource_user(),
+                    name: object.id.clone(),
+                })? {
+                    None if rules.is_none() => Ok(None),
+                    Some(Policy::Type { mut policy }) if rules.is_some() => {
+                        if let NullableResourceName::Named(name) = &mut policy.sparkles {
+                            *name = canonical_animation(name)?;
+                        }
+                        Ok(Some(crate::rules::ares_emp::EmpTypeRules::from_sdk(policy)))
+                    }
+                    _ => Err(format!(
+                        "EMP Rules require complete type bindings: {}",
+                        object.id
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut warheads = self.warheads.keys().cloned().collect::<Vec<_>>();
+        warheads.sort();
+        let warheads = warheads
+            .into_iter()
+            .map(|name| {
+                let policy = match query(Query::Warhead { name: self.warheads[&name].id.clone() })? {
+                    None if rules.is_none() => None,
+                    Some(Policy::Warhead { mut policy }) if rules.is_some() => {
+                        if let Some(name) = &mut policy.sparkles {
+                            *name = canonical_animation(name)?;
+                        }
+                        Some(crate::rules::ares_emp::EmpWarheadRules::from_sdk(policy))
+                    }
+                    _ => return Err(format!("EMP Rules require complete WH bindings: {name}")),
+                };
+                Ok((name, policy))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(EmpResourceBindings {
+            rules,
+            objects,
+            warheads,
+        })
+    }
+
+    pub(crate) fn emp_enabled(&self) -> bool {
+        self.external_emp
+            .as_ref()
+            .map_or(crate::rules::ARES_ENABLED, |policy| policy.enabled)
+    }
+
+    pub(crate) fn emp_reactivation_requires_powered_center(&self) -> bool {
+        self.external_emp
+            .as_ref()
+            .map_or(crate::rules::ARES_ENABLED, |policy| {
+                policy.reactivation_requires_powered_center
+            })
+    }
+
+    pub(crate) fn emp_event_policy_override(&self) -> Option<bool> {
+        self.external_emp.as_ref().map(|policy| policy.enabled)
     }
 
     fn collect_production_resource_bindings(
@@ -5315,6 +5449,9 @@ impl RuleSet {
     pub(crate) fn ares_emp_ai_recover_mission(
         &self,
     ) -> Option<crate::rules::mission_data::MissionType> {
+        if let Some(policy) = &self.external_emp {
+            return policy.ai_recover_mission;
+        }
         #[cfg(feature = "ares")]
         {
             self.ares_global_controls.emp_ai_recover_mission()
@@ -6715,6 +6852,7 @@ impl RuleSet {
             match_rules_policy: None,
             external_armor_names: None,
             external_production: None,
+            external_emp: None,
             sdk_passes: processed.sdk_passes().to_vec(),
             sdk_registries: processed.sdk_registries().to_vec(),
             sdk_animation_names: processed
@@ -7601,6 +7739,26 @@ impl RuleSet {
                 b"ares-secondary-turn-rate-v1".hash(&mut hasher);
                 turn_overrides.hash(&mut hasher);
             }
+        }
+        if self.external_emp.is_some() {
+            b"component-emp-resources-v1".hash(&mut hasher);
+            self.external_emp.hash(&mut hasher);
+            self.object_list
+                .iter()
+                .map(|object| {
+                    (
+                        object.category,
+                        object.id.to_ascii_uppercase(),
+                        object.external_emp_hash_state(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .hash(&mut hasher);
+            self.warheads
+                .iter()
+                .map(|(name, wh)| (name.to_ascii_uppercase(), wh.external_emp_hash_state()))
+                .collect::<BTreeMap<_, _>>()
+                .hash(&mut hasher);
         }
         if self.external_production.is_some() {
             b"component-production-resources-v1".hash(&mut hasher);

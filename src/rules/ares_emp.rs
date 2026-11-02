@@ -27,6 +27,20 @@ impl Default for EmpTypeRules {
     }
 }
 impl EmpTypeRules {
+    pub(crate) fn from_sdk(policy: vera_mod_api::EmpTypePolicy) -> Self {
+        Self {
+            modifier: NativeF64Bits::from_bits(policy.modifier_bits),
+            threshold: policy.threshold,
+            immune: policy.immune,
+            sparkles: match policy.sparkles {
+                vera_mod_api::NullableResourceName::Inherit => None,
+                vera_mod_api::NullableResourceName::Clear => Some(None),
+                vera_mod_api::NullableResourceName::Named(name) => Some(Some(name)),
+            },
+            veteran_immune: policy.veteran_immune,
+            elite_immune: policy.elite_immune,
+        }
+    }
     pub(crate) fn modifier(&self) -> NativeF64Bits {
         self.modifier
     }
@@ -62,6 +76,76 @@ impl EmpTypeRules {
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case("EMPIMMUNE"));
         }
+    }
+}
+
+/// EMP's immutable WH declaration. The legacy shared extension and the
+/// component projection use this same consumer view; neither owns live status.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EmpWarheadRules {
+    duration: i32,
+    cap: i32,
+    sparkles: Option<String>,
+    affects_enemies: bool,
+    affects_owner: Option<bool>,
+}
+impl Default for EmpWarheadRules {
+    fn default() -> Self {
+        Self::from_sdk(vera_mod_api::EmpWarheadPolicy::default())
+    }
+}
+impl EmpWarheadRules {
+    pub(crate) fn from_sdk(policy: vera_mod_api::EmpWarheadPolicy) -> Self {
+        Self {
+            duration: policy.duration,
+            cap: policy.cap,
+            sparkles: policy.sparkles,
+            affects_enemies: policy.affects_enemies,
+            affects_owner: policy.affects_owner,
+        }
+    }
+    pub(crate) fn duration(&self) -> i32 {
+        self.duration
+    }
+    pub(crate) fn cap(&self) -> i32 {
+        self.cap
+    }
+    pub(crate) fn sparkles(&self) -> Option<&str> {
+        self.sparkles.as_deref()
+    }
+    pub(crate) fn affects_enemies(&self) -> bool {
+        self.affects_enemies
+    }
+    pub(crate) fn affects_owner(&self) -> Option<bool> {
+        self.affects_owner
+    }
+    pub(crate) fn can_affect_house(
+        &self,
+        source_exists: bool,
+        same_owner: bool,
+        allied: bool,
+        affects_allies: bool,
+    ) -> bool {
+        // Installed WarheadExt10051B70, shared with the legacy AE descriptor.
+        vera_mod_api::relationship::permits_house(
+            source_exists,
+            same_owner,
+            allied,
+            affects_allies,
+            self.affects_enemies,
+            self.affects_owner,
+        )
+    }
+    #[cfg(feature = "ares")]
+    pub(crate) fn read_pass(&mut self, section: &IniSection, sparkle: Option<Option<String>>) {
+        // Warhead suffix75DEA0 ->10051890 retains these fields per read.
+        self.duration = section.read_ares_int("EMP.Duration", self.duration);
+        self.cap = section.read_ares_int("EMP.Cap", self.cap);
+        if let Some(sparkle) = sparkle {
+            self.sparkles = sparkle;
+        }
+        self.affects_enemies = section.read_ares_bool("AffectsEnemies", self.affects_enemies);
+        self.affects_owner = section.read_ares_nullable_bool("AffectsOwner", self.affects_owner);
     }
 }
 

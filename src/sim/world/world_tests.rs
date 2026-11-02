@@ -5399,6 +5399,7 @@ fn event33_select_command_raises_tags_once_in_payload_order_after_admission() {
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        &rules,
     );
     sim.classify_map_triggers(&rules);
     sim.attach_object_trigger_tag(first, Some("ONE"));

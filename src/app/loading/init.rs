@@ -1738,6 +1738,7 @@ mod fresh_transport_tests {
             &Default::default(),
             None,
             None,
+            crate::rules::ruleset::RuleSet::empty_for_test(),
         );
         let resident_hash = resident.state_hash();
         let mut initial = MapLoadInitial::from_test_map_source(
@@ -1757,9 +1758,9 @@ mod fresh_transport_tests {
         staged.inherit_local_variables_for_fresh_load(
             initial.retained_local_variables.take().unwrap(),
         );
-        staged.initialize_trigger_definitions(&initial.map_data, &Default::default(), None, None);
+        staged.initialize_trigger_definitions(&initial.map_data, &Default::default(), None, None, crate::rules::ruleset::RuleSet::empty_for_test());
         let mut cold = Simulation::new();
-        cold.initialize_trigger_definitions(&initial.map_data, &Default::default(), None, None);
+        cold.initialize_trigger_definitions(&initial.map_data, &Default::default(), None, None, crate::rules::ruleset::RuleSet::empty_for_test());
         assert_ne!(
             staged.state_hash(),
             cold.state_hash(),
@@ -3194,6 +3195,7 @@ fn load_map_first_step(
                                 services
                                     .audio
                                     .map(crate::app::process_assets::ProcessAudioCatalog::sounds),
+                                &rules,
                             );
                             let (mut scenario_fill_rng, variant_main_rng) =
                                 staged_simulation.terrain_load_draws();

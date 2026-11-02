@@ -546,6 +546,19 @@ impl IniSection {
         })
     }
 
+    /// Ares ReadString2048 + MissionType lookup5B3910. Invalid or absent
+    /// names retain the previous nullable mission; numeric/none aliases are
+    /// deliberately not accepted. Shared by the retained and external readers.
+    pub(crate) fn read_ares_nullable_mission(
+        &self,
+        key: &str,
+        current: Option<crate::rules::mission_data::MissionType>,
+    ) -> Option<crate::rules::mission_data::MissionType> {
+        self.read_name(key, 2048)
+            .and_then(crate::rules::mission_data::MissionType::from_map_name)
+            .or(current)
+    }
+
     /// Ares TechnoType EMP.Threshold: inair, int TryParse, then a boolean
     /// scratch initialized false. Missing/empty keeps the current field.
     pub fn read_ares_emp_threshold(&self, key: &str, default: i32) -> i32 {

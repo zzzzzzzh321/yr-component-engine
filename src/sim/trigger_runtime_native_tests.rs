@@ -105,7 +105,7 @@ fn loss_threshold_events_match_original_incoming_house_and_signed_counters() {
         // polls. Their original StateA0/StateB1 does not latch completion.
         assert_eq!(classification["state_a"], 0);
         assert_eq!(classification["state_b"], 1);
-        assert_eq!(event_classification(integer(&classification["kind"])), 8);
+        assert_eq!(event_classification(integer(&classification["kind"]), crate::rules::ARES_ENABLED), 8);
     }
 }
 
@@ -149,7 +149,7 @@ fn loss_threshold_events_bind_retail_all04_reinforcement_operands() {
         Some(&map.ini),
     );
     sim.install_team_ai_registry(&teams, &rules).unwrap();
-    sim.initialize_trigger_definitions(&map, &teams, None, None);
+    sim.initialize_trigger_definitions(&map, &teams, None, None, &rules);
     let routes = corpus["retail_routes"].as_array().unwrap();
     assert_eq!(routes.len(), 2);
     for route in routes {
@@ -247,7 +247,7 @@ fn naval_land_events_match_original_signed_tracking_and_country_selection() {
     for classification in corpus["classification"].as_array().unwrap() {
         assert_eq!(classification["state_a"], 0);
         assert_eq!(classification["state_b"], 1);
-        assert_eq!(event_classification(integer(&classification["kind"])), 8);
+        assert_eq!(event_classification(integer(&classification["kind"]), crate::rules::ARES_ENABLED), 8);
     }
     let controls = corpus["controls"].as_array().unwrap();
     assert_eq!(controls.len(), 39);
@@ -479,7 +479,7 @@ fn naval_event_retail_all05_removal_enables_black_eagle_support_once() {
         &IniFile::from_bytes(assets.get_ref("EVAMD.INI").unwrap()).unwrap(),
     );
     let cue = eva.index_of("Mis_xA5_EvaBlackEagles").unwrap();
-    sim.initialize_trigger_definitions(&excerpt, &Default::default(), Some(&eva), None);
+    sim.initialize_trigger_definitions(&excerpt, &Default::default(), Some(&eva), None, &rules);
     sim.classify_map_triggers(&rules);
     let tag_type = sim.trigger_runtime.definitions.tag_type(tag_id).unwrap();
     let tag = sim.shared_trigger_tag(tag_type);
@@ -805,7 +805,7 @@ fn funds_event_sov06_retail_cash_taunt_reaches_named_eva_once() {
         crate::sim::credit_income::available_money(&sim.houses, owner),
         70000
     );
-    sim.initialize_trigger_definitions(&map, &Default::default(), Some(&eva), None);
+    sim.initialize_trigger_definitions(&map, &Default::default(), Some(&eva), None, &rules);
     let typ = sim
         .trigger_runtime
         .definitions
@@ -983,7 +983,7 @@ fn building_loss_event_retail_all04_sets_the_rescue_route_local() {
     );
     let owner = sim.house_by_country_index(CountryIdx(9), &rules).unwrap();
     assert_eq!(sim.interner.resolve(owner), "YuriCountry");
-    sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, &rules);
     let typ = sim
         .trigger_runtime
         .definitions
@@ -1682,6 +1682,7 @@ fn all01_due_charge_and_damage_share_the_production_house_power_phase() {
         &teams,
         Some(audio.eva()),
         Some(audio.sounds().as_ref()),
+        &rules,
     );
     // Preserve every actual list position. Shrinking the list would change
     // repeat0's synchronous removal/cursor advancement at indices72/107.
@@ -3083,7 +3084,7 @@ fn physical_team_tag_references_match_original_retention_and_long_id_controls() 
             };
             let map = crate::map::map_file::MapFile::from_bytes(scenario.as_bytes()).unwrap();
             let teams = TeamAiIniRegistry::from_sources(&fixed, &map.ini, false);
-            let definitions = RuntimeDefinitions::read_map(&map, &teams, None, None);
+            let definitions = RuntimeDefinitions::read_map(&map, &teams, None, None, None);
             assert_eq!(definitions.team_types, ["TT"]);
             assert_eq!(
                 json!(
@@ -3549,7 +3550,7 @@ fn physical_retail_sov01_registration_and_enable_timers_match_original_at_all_di
                     house, 0, country, false, 0, 10,
                 ));
         }
-        sim.initialize_trigger_definitions(&map, &teams, Some(&eva), None);
+        sim.initialize_trigger_definitions(&map, &teams, Some(&eva), None, &rules);
         sim.trigger_runtime.fixture_difficulty = Some(integer(&row["input"]["difficulty"]));
         let runtime = &sim.trigger_runtime;
         let final_order = row["type_orders"].as_array().unwrap().last().unwrap();
@@ -4455,6 +4456,7 @@ fn native_trigger_reveal_initial_event48_tags_receive_neutral_discovery_dispatch
             &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
             None,
             None,
+            &rules,
         );
         let typ = sim.interner.intern("GTGCAN");
         let id = sim.substrate.allocate_stable_id();

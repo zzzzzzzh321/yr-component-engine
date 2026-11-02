@@ -385,6 +385,7 @@ fn load_with_assets(
         &team_ai_registry,
         Some(audio_definitions.eva()),
         Some(audio_definitions.sounds().as_ref()),
+        &rules,
     );
     let (mut scenario_fill_rng, variant_main_rng) = sim.terrain_load_draws();
     let mut scenario_fill_ranged =

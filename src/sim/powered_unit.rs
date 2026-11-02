@@ -364,17 +364,17 @@ impl Simulation {
         // Installed Ares Activate1004CCB0 replaces70FBE0 and vetoes before
         // ResetOrders/Power_On/sound. Keep this admission in the shared owner:
         // House50E010's power-center recovery also calls this function.
-        #[cfg(feature = "ares")]
         {
             let entity = self.substrate.entities.get(id).expect("same receiver");
             // Selected live Drive/Walk path: Techno70EFD0 tests signed>0.
             // Unit746C90's separate DeathFrame override remains outside this chain.
-            if entity.emp_remaining() > 0 {
+            if rules.emp_enabled() && entity.emp_remaining() > 0 {
                 return;
             }
-            if self
-                .object_type(entity.type_ref(), rules)
-                .is_some_and(|object| object.powered_unit)
+            if rules.emp_reactivation_requires_powered_center()
+                && self
+                    .object_type(entity.type_ref(), rules)
+                    .is_some_and(|object| object.powered_unit)
             {
                 //100454F0 scans the existing House+6C building order, not its
                 // aggregate center count: matching PowersUnit, counted+662,

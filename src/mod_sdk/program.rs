@@ -112,7 +112,8 @@ impl Program {
         let manifest = module.manifest().clone();
         if (manifest.hooks.contains(&api::HookKind::Effects)
             || manifest.hooks.contains(&api::HookKind::ArmorResource)
-            || manifest.hooks.contains(&api::HookKind::ProductionResource))
+            || manifest.hooks.contains(&api::HookKind::ProductionResource)
+            || manifest.hooks.contains(&api::HookKind::EmpResource))
             && (passes.is_empty() || registries.len() + 1 != passes.len())
         {
             return Err(
@@ -299,6 +300,21 @@ impl Program {
             &[],
         )?;
         Ok(plan.weapon_resource)
+    }
+
+    pub(crate) fn has_emp_resource(&self) -> bool {
+        self.manifest.hooks.contains(&api::HookKind::EmpResource)
+    }
+
+    pub(crate) fn emp_resource_policy(
+        &self,
+        resource: &api::EmpResourceContext,
+    ) -> Result<Option<api::EmpResourcePolicy>, String> {
+        if !self.has_emp_resource() {
+            return Ok(None);
+        }
+        let plan = self.evaluate(Context::EmpResource(resource.clone()), &[])?;
+        Ok(plan.emp_resource)
     }
 
     pub(crate) fn has_production_resource(&self) -> bool {

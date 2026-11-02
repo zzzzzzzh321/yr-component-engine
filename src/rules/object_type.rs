@@ -1486,6 +1486,7 @@ pub struct ObjectType {
     /// Nullifies damage from an exact same-type, same-owner source object.
     pub type_immune: bool,
     emp: Option<crate::rules::ares_emp::EmpTypeRules>,
+    external_emp: Option<crate::rules::ares_emp::EmpTypeRules>,
     #[cfg(feature = "ares")]
     self_attach_effect: Option<crate::rules::ares_warhead::AttachEffectRules>,
     #[cfg(feature = "ares")]
@@ -2389,7 +2390,16 @@ impl ObjectType {
         self.ore_gathering = gathering.clone();
     }
     pub(crate) fn emp_rules(&self) -> Option<&crate::rules::ares_emp::EmpTypeRules> {
-        self.emp.as_ref()
+        self.external_emp.as_ref().or(self.emp.as_ref())
+    }
+    pub(crate) fn bind_external_emp(
+        &mut self,
+        policy: Option<crate::rules::ares_emp::EmpTypeRules>,
+    ) {
+        self.external_emp = policy;
+    }
+    pub(crate) fn external_emp_hash_state(&self) -> Option<&crate::rules::ares_emp::EmpTypeRules> {
+        self.external_emp.as_ref()
     }
     pub(crate) fn self_attach_effect(
         &self,
@@ -3955,6 +3965,7 @@ impl ObjectType {
             immune: section.read_bool("Immune", false),
             type_immune: section.read_bool("TypeImmune", false),
             emp: None,
+            external_emp: None,
             #[cfg(feature = "ares")]
             self_attach_effect: None,
             #[cfg(feature = "ares")]

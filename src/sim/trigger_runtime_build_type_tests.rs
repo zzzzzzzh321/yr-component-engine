@@ -118,7 +118,7 @@ fn build_type_events_match_native_house_selection_persistence_and_rng() {
     for row in native["classification"].as_array().unwrap() {
         assert_eq!(row["state_a"], 1);
         assert_eq!(row["state_b"], 1);
-        assert_eq!(event_classification(integer(&row["kind"])), 8);
+        assert_eq!(event_classification(integer(&row["kind"]), crate::rules::ARES_ENABLED), 8);
     }
 }
 
@@ -387,7 +387,7 @@ fn build_type_retail_all07_placement_reaches_house_poll_and_eva_once() {
     )
     .unwrap();
     // Bind the original EVA operand through the ordinary definition reader.
-    sim.initialize_trigger_definitions(&excerpt, &Default::default(), Some(&eva), None);
+    sim.initialize_trigger_definitions(&excerpt, &Default::default(), Some(&eva), None, &rules);
     sim.classify_map_triggers(&rules);
     let tag_type = sim.trigger_runtime.definitions.tag_type(tag_id).unwrap();
     let tag = sim.shared_trigger_tag(tag_type);

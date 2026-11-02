@@ -20,7 +20,11 @@ arrays consumes guest instructions before the requested logic runs. This total
 is shared by decoding and logic; it is not a separate strict 5-million gameplay
 cap. `max_input_fuel` caps this extra allowance at 50 million even for the largest
 valid input, so default total budgets never exceed 55 million for ordinary calls
-or 100 million for Configure. The 8 MiB wire limit remains separately enforced.
+or 100 million for Configure. Configuration also counts the frozen registry
+payload supplied through the host bulk reader within that same extra allowance.
+The host memoizes and measures the exact payload once per immutable read view;
+gameplay calls receive no allowance for host configuration metadata. The 8 MiB
+wire limit remains separately enforced.
 Setting `fuel_per_input_byte=0` restores a fixed budget. Memory, host-call and
 wire bounds remain independent; infinite loops still exhaust fuel. Traps report
 input size and consumed fuel/host calls; Rules admission adds its physical pass
@@ -72,3 +76,8 @@ The optional `production_resource` channel similarly publishes immutable groups
 and type policies. `configure_boundary` may replace configuration but cannot
 write actor state or presentation; the existing process Rules owner supplies
 the real reset/read chronology and exact-component opaque continuation.
+
+`emp_resource` publishes immutable rules, type and warhead declarations. It has
+no entity state or operations. EMP counters and phase-sensitive status transitions
+remain in the existing host owner. `ares-nullable-ref` preserves explicit unset /
+clear / named resource states through the same native reference reader and prefix.

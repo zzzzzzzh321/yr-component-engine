@@ -91,7 +91,7 @@ pub(crate) fn issue_order(
     }
     // Event9 4C771C..4C7756 checks the current cell's slope before the
     // Techno70C620 terrain projection query. It does not test health/dying.
-    // EMP504 has no active state producer in this engine yet.
+    // The existing EMP producer's positive+504 veto is in the shared query below.
     if let Some(terrain) = sim.resolved_terrain.as_ref() {
         let actor = sim.substrate.entities.get(id).expect("admitted Unit");
         if !actor.on_bridge() {
@@ -293,7 +293,7 @@ impl Simulation {
     /// `vt+0x310` (`0x00700D10`), the deploy key's other test, refuses only a
     /// Unit in a tube or under EMP, which this already refuses.
     ///
-    /// The feature-gated Ares producer reaches the existing Unit EMP refusal.
+    /// The selected EMP producer reaches the existing Unit EMP refusal.
     /// Aircraft EMP and Unit DeathFrame's separate virtual override remain
     /// outside the ordinary live ground-victim chain.
     pub fn can_deploy_slash_unload(&self, id: u64, rules: &RuleSet) -> bool {
@@ -317,8 +317,7 @@ impl Simulation {
                 // both AI Hunt deploy and Guard→Unload through this owner.
                 // Active-retail EMP producer reachability is not established;
                 // default builds retain their current constructor-zero path.
-                #[cfg(feature = "ares")]
-                if entity.emp_remaining() > 0 {
+                if rules.emp_enabled() && entity.emp_remaining() > 0 {
                     return false;
                 }
                 if entity.low_bridge_tube_state.is_some() {

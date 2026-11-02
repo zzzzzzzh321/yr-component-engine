@@ -50,6 +50,7 @@ pub struct WarheadType {
     /// Rebuilt from the frozen component; never written into the raw11/native extension.
     external_armor: Option<crate::rules::armor::FrozenArmorTable>,
     ares: Option<crate::rules::ares_warhead::AresWarheadRules>,
+    external_emp: Option<crate::rules::ares_emp::EmpWarheadRules>,
     /// Splash radius in cells (0 = direct hit only). Native `CellSpread=` is a
     /// **float** at `WarheadTypeClass+0x124` (ReadDouble `0x005283d0` called at
     /// `0x0075d3e6`, `FSTP float ptr` at `0x0075d3eb`, key string
@@ -344,6 +345,22 @@ pub struct WarheadType {
 }
 
 impl WarheadType {
+    pub(crate) fn emp_rules(&self) -> Option<&crate::rules::ares_emp::EmpWarheadRules> {
+        self.external_emp
+            .as_ref()
+            .or_else(|| self.ares.as_ref().map(|wh| wh.emp()))
+    }
+    pub(crate) fn bind_external_emp(
+        &mut self,
+        policy: Option<crate::rules::ares_emp::EmpWarheadRules>,
+    ) {
+        self.external_emp = policy;
+    }
+    pub(crate) fn external_emp_hash_state(
+        &self,
+    ) -> Option<&crate::rules::ares_emp::EmpWarheadRules> {
+        self.external_emp.as_ref()
+    }
     pub(crate) fn ares_rules(&self) -> Option<&crate::rules::ares_warhead::AresWarheadRules> {
         self.ares.as_ref()
     }
@@ -478,6 +495,7 @@ impl WarheadType {
             ares_verses: cfg!(feature = "ares").then(AresWarheadVerses::default),
             external_armor: None,
             ares: None,
+            external_emp: None,
             cell_spread_f64,
             cell_inset_f32,
             percent_at_max_f64,

@@ -585,7 +585,7 @@ fn retail_all05_elapsed_stop_keeps_explicit_teams_and_saved_activation() {
     );
     sim.session.install_waypoints(&map.waypoints);
     sim.install_team_ai_registry(&teams, &rules).unwrap();
-    sim.initialize_trigger_definitions(&map, &teams, None, None);
+    sim.initialize_trigger_definitions(&map, &teams, None, None, &rules);
     let targets: Vec<_> = retail["target_houses"]
         .as_array()
         .unwrap()

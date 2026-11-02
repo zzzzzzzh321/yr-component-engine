@@ -6704,6 +6704,7 @@ mod tests {
             &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
             None,
             None,
+            &rules,
         );
         sim.classify_map_triggers(&rules);
         (sim, rules, player)

@@ -2145,6 +2145,8 @@ impl Simulation {
                     reason,
                 },
             )?;
+        self.validate_trigger_event_policy(rules)
+            .map_err(|reason| SnapshotRestoreError::InvalidTriggerRuntime { reason })?;
         self.validate_factory_country_references(rules)
             .map_err(|reason| SnapshotRestoreError::InvalidFactoryCountry { reason })?;
         self.validate_disk_lasers_after_restore(rules)

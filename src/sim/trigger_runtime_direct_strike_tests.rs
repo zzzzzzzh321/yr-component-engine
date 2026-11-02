@@ -142,6 +142,7 @@ fn counted_trigger_dispatches_both_strikes_then_continues() {
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
     );
     sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
     sim.session.publish_started();

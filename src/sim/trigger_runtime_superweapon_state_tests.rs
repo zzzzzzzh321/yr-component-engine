@@ -153,7 +153,7 @@ fn all03_authored_nuke_order_preserves_current_timer_and_recharges_at_override()
         );
         sim.session.install_waypoints(&map.waypoints);
         sim.install_team_ai_registry(&teams, &rules).unwrap();
-        sim.initialize_trigger_definitions(&map, &teams, None, None);
+        sim.initialize_trigger_definitions(&map, &teams, None, None, &rules);
         let owner = sim.interner.get("YuriCountry").unwrap();
         let enemy = sim.interner.get("Americans").unwrap();
         let id = sim.interner.get("NukeSpecial").unwrap();

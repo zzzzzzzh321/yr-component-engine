@@ -122,6 +122,7 @@ fn ordered_tag_rgb_actions_then_the_production_fade_keep_distinct_palette_operat
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
     );
     sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
     sim.session.publish_started();

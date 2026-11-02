@@ -1,7 +1,7 @@
 //! Read-only native INI readers, canonical registries and the shared damage
 //! kernel. No feature-specific configuration interpretation belongs here.
 use crate::rules::ini_parser::IniFile;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use vera_mod_api as api;
 use vera_mod_runtime::HostServices;
 
@@ -9,6 +9,9 @@ pub(super) struct NativeHost {
     ini: Option<Arc<IniFile>>,
     weapons: Vec<String>,
     registries: Option<Arc<crate::rules::native_processing::SdkRegistryPass>>,
+    /// Derived bytes of the immutable per-call registry. The same payload is
+    /// counted for bounded decode work and returned by the bulk reader.
+    registry_message: OnceLock<Result<Vec<u8>, String>>,
 }
 
 impl NativeHost {
@@ -17,6 +20,7 @@ impl NativeHost {
             ini: Some(Arc::new(ini)),
             weapons,
             registries: None,
+            registry_message: OnceLock::new(),
         }
     }
 
@@ -25,6 +29,7 @@ impl NativeHost {
         registries: crate::rules::native_processing::SdkRegistryPass,
     ) -> Self {
         self.registries = Some(Arc::new(registries));
+        self.registry_message = OnceLock::new();
         self
     }
 
@@ -33,11 +38,30 @@ impl NativeHost {
             ini: None,
             weapons: Vec::new(),
             registries: None,
+            registry_message: OnceLock::new(),
         }
+    }
+
+    fn registry_view_bytes(&self) -> Result<&[u8], String> {
+        self.registry_message
+            .get_or_init(|| {
+                let registry = self
+                    .registries
+                    .as_ref()
+                    .ok_or("registry view requires physical Rules read-point data")?;
+                serde_json::to_vec(registry.production_view()).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
     }
 }
 
 impl HostServices for NativeHost {
+    fn configuration_input_bytes(&self) -> usize {
+        self.registry_view_bytes().map_or(0, <[u8]>::len)
+    }
+
     fn config(&self, section: &str, key: &str) -> Option<String> {
         let section = self.ini.as_ref()?.section(section)?;
         section
@@ -53,11 +77,7 @@ impl HostServices for NativeHost {
         current: &[u8],
     ) -> Result<Vec<u8>, String> {
         if reader == "rules-registry-view" {
-            let registry = self
-                .registries
-                .as_ref()
-                .ok_or("registry view requires physical Rules read-point data")?;
-            return serde_json::to_vec(registry.production_view()).map_err(|e| e.to_string());
+            return self.registry_view_bytes().map(<[u8]>::to_vec);
         }
         if reader == "verse-token" {
             let token: String = serde_json::from_slice(current).map_err(|e| e.to_string())?;
@@ -96,6 +116,28 @@ impl HostServices for NativeHost {
                         .ok_or_else(bad)?,
                 )
             ),
+            "ares-emp-threshold" => serde_json::json!(section.read_ares_emp_threshold(
+                key,
+                serde_json::from_value(value).map_err(|e| e.to_string())?,
+            )),
+            "ares-nullable-mission" => {
+                use crate::rules::mission_data::MissionType;
+                let current: Option<u16> =
+                    serde_json::from_value(value).map_err(|e| e.to_string())?;
+                let current = current
+                    .map(|id| {
+                        u8::try_from(id)
+                            .ok()
+                            .and_then(MissionType::from_id)
+                            .ok_or_else(bad)
+                    })
+                    .transpose()?;
+                serde_json::json!(
+                    section
+                        .read_ares_nullable_mission(key, current)
+                        .map(|mission| mission as u16)
+                )
+            }
             "bool" => serde_json::json!(section.read_bool(key, value.as_bool().ok_or_else(bad)?)),
             "ares-bool" => {
                 serde_json::json!(section.read_ares_bool(key, value.as_bool().ok_or_else(bad)?))
@@ -144,10 +186,14 @@ impl HostServices for NativeHost {
                 let old: [u8; 3] = serde_json::from_value(value).map_err(|e| e.to_string())?;
                 serde_json::json!(section.read_color_rgb(key, old, None))
             }
-            _ if reader.starts_with("ares-ref:") => {
-                let (target, scope) = reader["ares-ref:".len()..]
-                    .split_once('@')
-                    .ok_or_else(bad)?;
+            _ if reader.starts_with("ares-ref:") || reader.starts_with("ares-nullable-ref:") => {
+                let (nullable, spec) = if let Some(spec) = reader.strip_prefix("ares-nullable-ref:")
+                {
+                    (true, spec)
+                } else {
+                    (false, &reader["ares-ref:".len()..])
+                };
+                let (target, scope) = spec.split_once('@').ok_or_else(bad)?;
                 if target != "$animations" {
                     return Err(bad());
                 }
@@ -155,13 +201,23 @@ impl HostServices for NativeHost {
                     .registries
                     .as_ref()
                     .ok_or("registered references require physical Rules read-point data")?;
-                serde_json::json!(registries.read_animation_reference(
-                    owner,
-                    &section,
-                    key,
-                    scope,
-                    serde_json::from_value(value).map_err(|e| e.to_string())?,
-                )?)
+                if nullable {
+                    serde_json::json!(registries.read_nullable_animation_reference(
+                        owner,
+                        &section,
+                        key,
+                        scope,
+                        serde_json::from_value(value).map_err(|e| e.to_string())?,
+                    )?)
+                } else {
+                    serde_json::json!(registries.read_animation_reference(
+                        owner,
+                        &section,
+                        key,
+                        scope,
+                        serde_json::from_value(value).map_err(|e| e.to_string())?,
+                    )?)
+                }
             }
             _ => {
                 let (kind, size) = reader.split_once(':').ok_or_else(bad)?;

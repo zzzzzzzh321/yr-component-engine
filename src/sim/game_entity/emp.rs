@@ -197,7 +197,6 @@ impl Simulation {
     }
 }
 
-#[cfg(feature = "ares")]
 mod receiver {
     use super::*;
     use crate::rules::{locomotor_type::LocomotorKind, warhead_type::WarheadType};
@@ -281,7 +280,7 @@ mod receiver {
             rules: &RuleSet,
             effects: FrameEffects<'_>,
         ) {
-            if !warhead.ares_rules().is_some_and(|emp| emp.duration() != 0) {
+            if !rules.emp_enabled() || !warhead.emp_rules().is_some_and(|emp| emp.duration() != 0) {
                 return;
             }
             for target in self.ares_effect_ground_targets(impact, warhead.cell_spread_f64, rules) {
@@ -302,8 +301,11 @@ mod receiver {
             rules: &RuleSet,
             effects: FrameEffects<'_>,
         ) -> EmpDelivery {
+            if !rules.emp_enabled() {
+                return EmpDelivery::Rejected;
+            }
             let Some(settings) = warhead
-                .ares_rules()
+                .emp_rules()
                 .filter(|settings| settings.duration() != 0)
             else {
                 return EmpDelivery::Rejected;
@@ -374,7 +376,7 @@ mod receiver {
                     .and_then(|name| rules.weapon(name))
                     .and_then(|weapon| weapon.warhead.as_deref())
                     .and_then(|name| rules.warhead(name))
-                    .and_then(|wh| wh.ares_rules())
+                    .and_then(|wh| wh.emp_rules())
                     .is_some_and(|emp| emp.duration() != 0)
                 }) {
                     return EmpDelivery::Rejected;
@@ -601,6 +603,9 @@ mod receiver {
             rules: &RuleSet,
             effects: FrameEffects<'_>,
         ) {
+            if !rules.emp_enabled() {
+                return;
+            }
             let Some(entity) = self.substrate.entities.get(target) else {
                 return;
             };
@@ -651,6 +656,9 @@ mod receiver {
             rules: &RuleSet,
             effects: FrameEffects<'_>,
         ) {
+            if !rules.emp_enabled() {
+                return;
+            }
             let Some(entity) = self.substrate.entities.get_mut(target) else {
                 return;
             };
@@ -717,7 +725,7 @@ mod receiver {
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "ares"))]
     mod tests {
         use super::*;
         use crate::rules::ini_parser::IniFile;
@@ -774,7 +782,13 @@ mod receiver {
                 .as_bytes(),
             )
             .unwrap();
-            sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+            sim.initialize_trigger_definitions(
+                &map,
+                &Default::default(),
+                None,
+                None,
+                crate::rules::ruleset::RuleSet::empty_for_test(),
+            );
         }
         fn tagged_emp_scene(
             source_house_delta: i32,
@@ -973,7 +987,7 @@ mod receiver {
                     .as_bytes(),
                 )
                 .unwrap();
-                sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+                sim.initialize_trigger_definitions(&map, &Default::default(), None, None, &rules);
                 sim.attach_object_trigger_tag(target, Some("EMP"));
                 sim.deliver_ares_emp(
                     target,

@@ -442,7 +442,7 @@ fn damage_event_predicates_match_original_discrete_controls() {
     for row in classification {
         assert_eq!(row["state_a"], 1);
         assert_eq!(row["state_b"], 1);
-        assert_eq!(event_classification(integer(&row["kind"])), 2);
+        assert_eq!(event_classification(integer(&row["kind"]), crate::rules::ARES_ENABLED), 2);
     }
 }
 
@@ -648,7 +648,7 @@ fn retail_damage_scene(route: &Value) -> Option<RetailDamageScene> {
     sim.install_team_ai_registry(&teams, &rules).unwrap();
     let eva =
         EvaRegistry::from_ini(&IniFile::from_bytes(assets.get_ref("EVAMD.INI").unwrap()).unwrap());
-    sim.initialize_trigger_definitions(&excerpt, &teams, Some(&eva), None);
+    sim.initialize_trigger_definitions(&excerpt, &teams, Some(&eva), None, &rules);
     sim.classify_map_triggers(&rules);
     // Declared clear geometry isolates the selected received-damage route.
     // Retail rules/roster/definitions remain intact; whole campaign timing,

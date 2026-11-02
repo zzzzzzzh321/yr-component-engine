@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the actual reference component in VERA_SDK_REFERENCE_WASM"]
+    #[ignore = "requires the current EMP-capable reference component in VERA_SDK_REFERENCE_WASM"]
     fn generated_component_admission_uses_final_rules_before_first_constructor() {
         use crate::assets::asset_manager::AssetManager;
         use crate::map::construction_trace::{RmgConstructionPhase, RmgConstructionTrace};
@@ -549,6 +549,7 @@ mod tests {
         use crate::rules::process_owner::{NativeRulesProcessOwner, NativeScenarioRulesPrefix};
         use crate::sim::native_identity::build_noncampaign_fresh_id_prefix;
 
+        assert!(!crate::rules::ARES_ENABLED, "exercise the ordinary engine");
         let wasm = std::fs::read(std::env::var_os("VERA_SDK_REFERENCE_WASM").unwrap()).unwrap();
         let directory = TestDirectory::new("generated-component-admission");
         directory.write("gameplay.wasm", &wasm);
@@ -561,14 +562,21 @@ mod tests {
             }))
             .unwrap(),
         );
+        // A real header/table boundary, not the test-only frame-count setter.
+        let mut sparkle_shp = vec![0u8; 8 + 6 * 24];
+        sparkle_shp[6..8].copy_from_slice(&6u16.to_le_bytes());
+        sparkle_shp[12..14].copy_from_slice(&1u16.to_le_bytes());
+        sparkle_shp[14..16].copy_from_slice(&1u16.to_le_bytes());
+        directory.write("SDK_EMP_SPARK.SHP", &sparkle_shp);
         let assets = AssetManager::from_loose_root_for_test(directory.path());
         let mut owner = NativeRulesProcessOwner::from_cold_start_sources(
             IniFile::from_str(
-                "[BuildingTypes]\n0=TEST\n[TEST]\nStrength=300\nArmor=none\nShieldType=SDKShield\nNoManualFire=no\n\
+                "[BuildingTypes]\n0=TEST\n[Animations]\n0=SDK_EMP_SPARK\n1=ELECTRO\n\
+                 [TEST]\nStrength=300\nArmor=none\nShieldType=SDKShield\nNoManualFire=no\nEMP.Sparkles=SDK_EMP_SPARK\n\
                  [ShieldTypes]\n0=SDKShield\n[SDKShield]\nStrength=100\nArmor=none\n",
             ),
             None,
-            IniFile::empty(),
+            IniFile::from_str("[SDK_EMP_SPARK]\nLoopCount=-1\n"),
             Default::default(),
             Default::default(),
         ).unwrap();
@@ -590,12 +598,24 @@ mod tests {
             .unwrap();
         let (mut rules, _, art, _) = loaded.into_parts();
         rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
+        let roots = crate::rules::effect_asset_catalog::tolerant_anim_class_roots(&rules);
+        rules.bind_anim_class_assets(&roots, &assets, "tem", "TEMPERATE");
+        assert_eq!(
+            rules.art().anim_runtime_config("SDK_EMP_SPARK").unwrap().raw_shp_frame_count,
+            None,
+            "the ordinary pre-component closure has no EMP producer yet"
+        );
         let descriptor = crate::sim::scenario_session::ScenarioDescriptor {
             map_width: 80,
             map_height: 80,
             ..Default::default()
         };
         let mut sim = Simulation::from_descriptor(&descriptor);
+        // Both formal authored and generated loaders prepare definitions before
+        // their final component bind. Keep that order, even with no EMP tags:
+        // the cached policy must still agree when saved resources are restored.
+        sim.initialize_trigger_definitions(&map, &Default::default(), None, None, &rules);
+        let rng_before_binding = sim.scenario_rng.logical_state();
         bind_scenario_gameplay_resources(
             &mut rules,
             &assets,
@@ -607,6 +627,13 @@ mod tests {
             "TEMPERATE",
         )
         .unwrap();
+        sim.validate_trigger_event_policy(&rules).unwrap();
+        assert_eq!(sim.scenario_rng.logical_state(), rng_before_binding);
+        assert_eq!(
+            rules.art().anim_runtime_config("SDK_EMP_SPARK").unwrap().raw_shp_frame_count,
+            Some(6),
+            "the shared post-component closure binds the EMP-only physical resource"
+        );
         assert!(sim.entities().is_empty());
         assert!(
             rules.object("TEST").unwrap().no_manual_fire(),
@@ -1031,7 +1058,7 @@ where
             &map_data.ini,
             descriptor.game_mode_nonzero,
         );
-        sim.initialize_trigger_definitions(map_data, &teams, None, None);
+        sim.initialize_trigger_definitions(map_data, &teams, None, None, rules);
     }
     // Active YR `ScenarioClass__Full_Init @ 0x00686B20` calls
     // `ScenarioClass__Create_Houses @ 0x00687F10` before
@@ -1321,16 +1348,17 @@ pub fn bind_scenario_gameplay_resources(
             rules.bind_external_mod_for_process(assets, processed)?;
             rules_owner.retain_sdk_configuration_program(rules.external_mod.clone());
             simulation.external_mod = rules.external_mod.as_deref().cloned();
+            simulation.bind_fresh_trigger_resource_policy(rules);
         }
         ScenarioGameplayProgram::Saved(sim) => {
             crate::mod_sdk::adopt_saved_program(rules, sim, assets)?;
         }
     }
-    // Configure may publish effect resources after the ordinary closure pass.
+    // Configure may publish AE or EMP resources after the ordinary closure pass.
     // Saved loading's later strict pass restores these same roots through the
     // common tolerant closure; neither route creates AnimClass objects here.
     let component_anim_roots =
-        crate::rules::effect_asset_catalog::component_effect_anim_roots(rules);
+        crate::rules::effect_asset_catalog::gameplay_effect_anim_roots(rules);
     rules.bind_anim_class_assets(&component_anim_roots, assets, theater_ext, theater_name);
     Ok(())
 }

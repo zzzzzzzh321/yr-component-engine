@@ -27,6 +27,12 @@ mod bindings {
 /// A read-only, frozen host view for one evaluation. Engine adapters must use
 /// the existing typed INI readers and damage kernel, not duplicate their math.
 pub trait HostServices: Send + Sync {
+    /// Additional frozen input exposed out of band during configuration, for
+    /// example a physical registry snapshot. It shares the existing capped
+    /// input allowance and never increases gameplay-call budgets.
+    fn configuration_input_bytes(&self) -> usize {
+        0
+    }
     fn config(&self, section: &str, key: &str) -> Option<String>;
     fn config_read(
         &self,
@@ -46,8 +52,8 @@ pub struct RuntimeLimits {
     /// A physical Rules pass initializes a whole catalog once, rather than
     /// updating one actor. It has a separate, still bounded startup budget.
     pub configure_fuel: u64,
-    /// Additional shared budget per serialized input byte. JSON opaque byte
-    /// arrays also cost guest instructions to decode before gameplay begins.
+    /// Additional shared budget per input byte, including frozen host metadata
+    /// for configuration. JSON data costs guest instructions to decode too.
     /// Zero retains a fixed per-call budget; the extra allowance is capped.
     pub fuel_per_input_byte: u64,
     pub max_input_fuel: u64,
@@ -370,6 +376,11 @@ impl ComponentRuntime {
             .table_elements(65_536)
             .trap_on_grow_failure(true)
             .build();
+        let configuration_bytes = if matches!(kind, "configure" | "configure_boundary") {
+            host.configuration_input_bytes()
+        } else {
+            0
+        };
         let mut store = Store::new(
             &self.engine,
             HostState {
@@ -379,7 +390,9 @@ impl ComponentRuntime {
             },
         );
         store.limiter(|state| &mut state.limits);
-        let fuel = self.limits.fuel_for(kind, input.len());
+        let fuel = self
+            .limits
+            .fuel_for(kind, input.len().saturating_add(configuration_bytes));
         store
             .set_fuel(fuel)
             .map_err(|e| RuntimeError::Execution(format!("{e:#}")))?;
@@ -389,7 +402,7 @@ impl ComponentRuntime {
             .call_evaluate(&mut store, kind, input)
             .map_err(|e| {
                 RuntimeError::Execution(format!(
-                    "{kind} failed (input bytes {}, fuel used {}/{fuel}, host calls {}): {e:#}",
+                    "{kind} failed (input bytes {}, configuration metadata bytes {configuration_bytes}, fuel used {}/{fuel}, host calls {}): {e:#}",
                     input.len(),
                     fuel.saturating_sub(store.get_fuel().unwrap_or(0)),
                     self.limits

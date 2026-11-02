@@ -32,7 +32,7 @@ fn entity() -> api::EntityContext {
 fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     let host = NativeHost::configuration(
         IniFile::from_str(
-            "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nCppClear=<none>\nRate=0.125\nPrecise=0.10000000000000001\nName=none\nYes=  yes\nEmpty=\n",
+            "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nCppClear=<none>\nRate=0.125\nPrecise=0.10000000000000001\nName=none\nYes=  yes\nEmpty=\nMission=Hunt\nThreshold=inair\n",
         ),
         Vec::new(),
     );
@@ -77,6 +77,11 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
         section.read_double("Precise", 1.0).to_bits()
     );
     assert_eq!(read("Bad", "ares-double-bits", b"17"), 17);
+    assert_eq!(read("Threshold", "ares-emp-threshold", b"6"), -1);
+    assert_eq!(read("Bad", "ares-emp-threshold", b"6"), 0);
+    assert_eq!(read("Mission", "ares-nullable-mission", b"null"), 15);
+    assert_eq!(read("Name", "ares-nullable-mission", b"15"), 15);
+    assert_eq!(read("Number", "ares-nullable-mission", b"15"), 15);
 }
 
 #[test]
@@ -111,6 +116,36 @@ fn sdk_registered_references_use_each_types_reached_reader_not_the_final_catalog
         serde_json::from_slice::<Option<String>>(&value).unwrap()
     };
     let root = host(0);
+    assert_eq!(
+        root.configuration_input_bytes(),
+        root.config_read("", "", "rules-registry-view", b"null")
+            .unwrap()
+            .len(),
+        "fuel accounts for the exact frozen bulk payload supplied to the guest"
+    );
+    let nullable_read = |owner, key, scope| {
+        let value = root
+            .config_read(
+                owner,
+                key,
+                &format!("ares-nullable-ref:$animations@{scope}"),
+                &serde_json::to_vec(&api::NullableResourceName::Inherit).unwrap(),
+            )
+            .unwrap();
+        serde_json::from_slice::<api::NullableResourceName>(&value).unwrap()
+    };
+    assert_eq!(
+        nullable_read("EARLY", "AttachEffect.Animation", "$buildings"),
+        api::NullableResourceName::Inherit
+    );
+    assert_eq!(
+        nullable_read("EFFECT", "Clear", "$warheads"),
+        api::NullableResourceName::Clear
+    );
+    assert_eq!(
+        nullable_read("EFFECT", "AttachEffect.Animation", "$warheads"),
+        api::NullableResourceName::Named("LATE_ANIM".into())
+    );
     assert!(
         root.registry("$animations")
             .iter()

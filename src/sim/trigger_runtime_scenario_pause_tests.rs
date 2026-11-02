@@ -141,6 +141,7 @@ fn counted_logic_tag_emits_pause_requests_in_authored_order() {
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
     );
     sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
     sim.session.publish_started();
@@ -237,7 +238,7 @@ fn scenario_services_replay_between_production_frames() {
         let map = crate::map::map_file::MapFile::from_bytes(text.as_bytes()).unwrap();
         let runtime = || {
             let mut sim = Simulation::with_seed(0);
-            sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+            sim.initialize_trigger_definitions(&map, &Default::default(), None, None, crate::rules::ruleset::RuleSet::empty_for_test());
             sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
             sim.session.publish_started();
             sim.hash_state_every(std::num::NonZeroU64::MIN);

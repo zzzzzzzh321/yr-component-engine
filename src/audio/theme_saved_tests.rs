@@ -51,7 +51,7 @@ fn map_music_action_follows_native_read_and_queue() {
         )
         .unwrap();
         let mut sim = Simulation::with_seed(31);
-        sim.initialize_trigger_definitions(&map, &TeamAiIniRegistry::default(), None, None);
+        sim.initialize_trigger_definitions(&map, &TeamAiIniRegistry::default(), None, None, crate::rules::ruleset::RuleSet::empty_for_test());
         sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
         sim.set_trigger_variable_for_test(false, 9, true);
         let effects = sim.advance_triggers(

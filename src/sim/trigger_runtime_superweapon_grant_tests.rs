@@ -49,6 +49,7 @@ fn scene_with_rules(
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        &rules,
     );
     sim.classify_map_triggers(&rules);
     let id = sim.interner.get(&rules.super_weapon_order[index]).unwrap();

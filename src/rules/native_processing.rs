@@ -742,8 +742,33 @@ impl SdkRegistryPass {
         section: &IniSection,
         key: &str,
         registry: &str,
-        mut current: Option<String>,
+        current: Option<String>,
     ) -> Result<Option<String>, String> {
+        let value = self.read_nullable_animation_reference(
+            owner,
+            section,
+            key,
+            registry,
+            current.map_or(
+                vera_mod_api::NullableResourceName::Clear,
+                vera_mod_api::NullableResourceName::Named,
+            ),
+        )?;
+        Ok(match value {
+            vera_mod_api::NullableResourceName::Named(name) => Some(name),
+            vera_mod_api::NullableResourceName::Inherit
+            | vera_mod_api::NullableResourceName::Clear => None,
+        })
+    }
+
+    pub(crate) fn read_nullable_animation_reference(
+        &self,
+        owner: &str,
+        section: &IniSection,
+        key: &str,
+        registry: &str,
+        mut current: vera_mod_api::NullableResourceName,
+    ) -> Result<vera_mod_api::NullableResourceName, String> {
         let mut reached = false;
         for read in &self.reads {
             if read.registry != registry || read.owner != owner {
@@ -757,7 +782,10 @@ impl SdkRegistryPass {
             if let Some(value) =
                 read_ares_registered_reference(section, key, ids.iter().map(String::as_str))
             {
-                current = value;
+                current = value.map_or(
+                    vera_mod_api::NullableResourceName::Clear,
+                    vera_mod_api::NullableResourceName::Named,
+                );
             }
         }
         if !reached {
@@ -3158,12 +3186,9 @@ impl AresGlobalControls {
     /// Unlike the Process-entry controls above, this unconditional reader
     /// runs immediately before Type data. The native named lookup is5B3910.
     fn read_before_type_data(&mut self, pass: &IniFile) {
-        if let Some(mission) = pass
-            .section("CombatDamage")
-            .and_then(|section| section.read_name("EMPAIRecoverMission", 2048))
-            .and_then(crate::rules::mission_data::MissionType::from_map_name)
-        {
-            self.emp_ai_recover_mission = Some(mission);
+        if let Some(section) = pass.section("CombatDamage") {
+            self.emp_ai_recover_mission = section
+                .read_ares_nullable_mission("EMPAIRecoverMission", self.emp_ai_recover_mission);
         }
     }
 

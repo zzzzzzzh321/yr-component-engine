@@ -237,7 +237,7 @@ fn no_factories_event_matches_original_incoming_house_list_and_raw_class() {
     assert_eq!(compared, 18);
     assert_eq!(native["classification"]["state_a"], 0);
     assert_eq!(native["classification"]["state_b"], 1);
-    assert_eq!(event_classification(17), 8);
+    assert_eq!(event_classification(17, crate::rules::ARES_ENABLED), 8);
 }
 
 #[test]

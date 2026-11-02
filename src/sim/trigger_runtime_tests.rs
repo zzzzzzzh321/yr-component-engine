@@ -27,12 +27,14 @@ fn local_reload_preserves_unnamed_and_unassigned_values() {
         &Default::default(),
         None,
         None,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
     );
     sim.initialize_trigger_definitions(
         &map("8=Renamed\n9=ExplicitClear,0\n"),
         &Default::default(),
         None,
         None,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
     );
     assert!(sim.trigger_local_is_set_for_test(7), "unnamed slot");
     assert!(sim.trigger_local_is_set_for_test(8), "no assignment token");
@@ -168,7 +170,7 @@ fn loss_threshold_events_poll_recorded_losses_and_create_real_reinforcements() {
         sim.install_team_ai_registry(&teams, &rules).unwrap();
         // The shared simple-map fixture initially has no Team registry.
         // Re-enter the real definition reader with the authored Team inputs.
-        sim.initialize_trigger_definitions(&map, &teams, None, None);
+        sim.initialize_trigger_definitions(&map, &teams, None, None, &rules);
         sim.session.install_waypoints(&map.waypoints);
         sim.classify_map_triggers(&rules);
         let team_type = sim.interner.get("TT").unwrap();
@@ -937,6 +939,7 @@ fn all_change_house_retail_sov01_handoff_transfers_units_and_powered_buildings()
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        &rules,
     );
     sim.classify_map_triggers(&rules);
     let typ = trigger_type_index(&sim, "07F2978C");
@@ -1243,7 +1246,7 @@ fn retail_sov01_script_context() -> Option<(
         ));
     sim.session.set_current_house_for_test(Some(owner));
     sim.install_team_ai_registry(&registry, &rules).unwrap();
-    sim.initialize_trigger_definitions(&map, &registry, None, None);
+    sim.initialize_trigger_definitions(&map, &registry, None, None, &rules);
     Some((sim, rules, overlay, map))
 }
 
@@ -2291,6 +2294,7 @@ fn install_map_triggers(sim: &mut Simulation, map: &crate::map::map_file::MapFil
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
     );
 }
 
@@ -3893,7 +3897,7 @@ fn physical_readers_take_each_record_by_the_type_id() {
         .as_bytes(),
     )
     .unwrap();
-    let definitions = RuntimeDefinitions::read_map(&map, &Default::default(), None, None);
+    let definitions = RuntimeDefinitions::read_map(&map, &Default::default(), None, None, None);
     let [trigger] = definitions.trigger_types.as_slice() else {
         panic!("one TriggerType: {:?}", definitions.trigger_types);
     };
@@ -3951,7 +3955,7 @@ fn cell_tags_split_by_ini_format_and_keep_the_first_tag_per_cell() {
             16,
             crate::map::resolved_terrain::test_clear_cell,
         ));
-        sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+        sim.initialize_trigger_definitions(&map, &Default::default(), None, None, crate::rules::ruleset::RuleSet::empty_for_test());
         sim.install_authored_cell_trigger_tags(&map);
         let identity = Simulation::trigger_cell_identity(&sim.resolved_terrain, (5, 6));
         let tag = sim.trigger_runtime.cell_tags[&identity];

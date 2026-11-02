@@ -7,31 +7,26 @@ use crate::util::native_x87::NativeF64Bits;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AresWarheadRules {
-    duration: i32,
-    cap: i32,
-    sparkles: Option<String>,
-    affects_enemies: bool,
-    affects_owner: Option<bool>,
+    emp: crate::rules::ares_emp::EmpWarheadRules,
     attach_effect: AttachEffectRules,
 }
 impl Default for AresWarheadRules {
     fn default() -> Self {
         Self {
-            duration: 0,
-            cap: -1,
-            sparkles: None,
-            affects_enemies: true,
-            affects_owner: None,
+            emp: Default::default(),
             attach_effect: Default::default(),
         }
     }
 }
 impl AresWarheadRules {
+    pub(crate) fn emp(&self) -> &crate::rules::ares_emp::EmpWarheadRules {
+        &self.emp
+    }
     pub(crate) fn duration(&self) -> i32 {
-        self.duration
+        self.emp.duration()
     }
     pub(crate) fn cap(&self) -> i32 {
-        self.cap
+        self.emp.cap()
     }
     pub(crate) fn can_affect_house(
         &self,
@@ -41,26 +36,20 @@ impl AresWarheadRules {
         affects_allies: bool,
     ) -> bool {
         // Installed WarheadExt10051B70: the source tests the target's bit.
-        vera_mod_api::relationship::permits_house(
-            source_exists,
-            same_owner,
-            allied,
-            affects_allies,
-            self.affects_enemies,
-            self.affects_owner,
-        )
+        self.emp
+            .can_affect_house(source_exists, same_owner, allied, affects_allies)
     }
     pub(crate) fn sparkles(&self) -> Option<&str> {
-        self.sparkles.as_deref()
+        self.emp.sparkles()
     }
     pub(crate) fn attach_effect(&self) -> &AttachEffectRules {
         &self.attach_effect
     }
     pub(crate) fn affects_enemies(&self) -> bool {
-        self.affects_enemies
+        self.emp.affects_enemies()
     }
     pub(crate) fn affects_owner(&self) -> Option<bool> {
-        self.affects_owner
+        self.emp.affects_owner()
     }
     #[cfg(feature = "ares")]
     pub(crate) fn read_pass(
@@ -69,13 +58,7 @@ impl AresWarheadRules {
         sparkle: Option<Option<String>>,
         animation: Option<Option<String>>,
     ) {
-        self.duration = section.read_ares_int("EMP.Duration", self.duration);
-        self.cap = section.read_ares_int("EMP.Cap", self.cap);
-        if let Some(sparkle) = sparkle {
-            self.sparkles = sparkle;
-        }
-        self.affects_enemies = section.read_ares_bool("AffectsEnemies", self.affects_enemies);
-        self.affects_owner = section.read_ares_nullable_bool("AffectsOwner", self.affects_owner);
+        self.emp.read_pass(section, sparkle);
         self.attach_effect.read_pass(section, animation);
     }
 }

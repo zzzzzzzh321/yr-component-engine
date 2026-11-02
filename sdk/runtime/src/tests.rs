@@ -346,6 +346,102 @@ fn runtime_accounts_for_bounded_wire_input_without_disabling_fuel() {
 }
 
 #[test]
+fn runtime_counts_frozen_configuration_input_within_the_existing_cap() {
+    struct MetadataHost;
+    impl HostServices for MetadataHost {
+        fn configuration_input_bytes(&self) -> usize {
+            2048
+        }
+        fn config(&self, section: &str, key: &str) -> Option<String> {
+            ManifestHost.config(section, key)
+        }
+        fn config_read(
+            &self,
+            section: &str,
+            key: &str,
+            reader: &str,
+            current: &[u8],
+        ) -> Result<Vec<u8>, String> {
+            ManifestHost.config_read(section, key, reader, current)
+        }
+        fn registry(&self, section: &str) -> Vec<String> {
+            ManifestHost.registry(section)
+        }
+        fn damage_kernel(&self, input: &DamageKernelInput) -> Result<i32, String> {
+            ManifestHost.damage_kernel(input)
+        }
+    }
+    let runtime = ComponentRuntime::new(RuntimeLimits {
+        fuel: 10_000,
+        configure_fuel: 10_000,
+        fuel_per_input_byte: 64,
+        max_input_fuel: 200_000,
+        ..Default::default()
+    })
+    .unwrap();
+    let workload = load(
+        &runtime,
+        &fixture(
+            API_VERSION,
+            r#"
+        (global.set $counter (i32.const 10000))
+        (loop $work
+            (global.set $counter (i32.sub (global.get $counter) (i32.const 1)))
+            (br_if $work (global.get $counter)))
+    "#,
+            "",
+        ),
+    )
+    .unwrap();
+    let configure = Request {
+        context: Context::Configure(vera_mod_api::ConfigureContext {
+            pass: 0,
+            source: "rules".into(),
+            final_pass: false,
+            object_types: vec![],
+            warheads: vec![],
+        }),
+        ..request()
+    };
+    assert!(
+        runtime
+            .evaluate(&workload, &configure, Arc::new(ManifestHost))
+            .is_err()
+    );
+    assert!(
+        runtime
+            .evaluate(&workload, &configure, Arc::new(MetadataHost))
+            .is_ok()
+    );
+    assert!(
+        runtime
+            .evaluate(&workload, &request(), Arc::new(MetadataHost))
+            .is_err(),
+        "configuration metadata cannot grant an actor more fuel"
+    );
+    let infinite = load(
+        &runtime,
+        &fixture(API_VERSION, "(loop $spin (br $spin))", ""),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .evaluate(&infinite, &configure, Arc::new(MetadataHost))
+            .is_err()
+    );
+    assert_eq!(runtime.limits.fuel_for("configure", usize::MAX), 210_000);
+    assert_eq!(
+        RuntimeLimits {
+            configure_fuel: 10_000,
+            fuel_per_input_byte: 0,
+            ..Default::default()
+        }
+        .fuel_for("configure", usize::MAX),
+        10_000
+    );
+}
+
+#[test]
 #[ignore = "requires the built reference component in VERA_SDK_COMPAT_WASM"]
 fn runtime_admits_the_built_reference_component_without_wasi_services() {
     let bytes =

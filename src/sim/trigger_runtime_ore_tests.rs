@@ -308,6 +308,7 @@ fn counted_tag_pauses_drivers_preserves_saved_gate_and_reenables_due_timers() {
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
     );
     sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
     waypoints(&mut sim, &[(0, (8, 9)), (1, (8, 8))]);

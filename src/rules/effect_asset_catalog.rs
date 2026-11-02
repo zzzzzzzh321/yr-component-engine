@@ -208,6 +208,42 @@ pub(crate) const PSI_WARNING_ANIM: &str = "PSIWARN";
 /// (83665C), independently of weapon AnimList and other authored roots.
 pub(crate) const SQUID_GRAPPLE_ANIM: &str = "SQDG";
 
+/// Effective effect roots, shared by the ordinary animation closure and the
+/// final gameplay-resource admission. Components may publish these only after
+/// the early asset pass; every producer needs the same physical Anim bounds.
+pub(crate) fn gameplay_effect_anim_roots(rules: &RuleSet) -> Vec<String> {
+    let mut roots = rules
+        .effect_descriptors()
+        .filter_map(|descriptor| descriptor.animation.as_ref())
+        .map(|name| name.to_ascii_uppercase())
+        .collect::<BTreeSet<_>>();
+    let mut insert = |name: &str| {
+        if !name.is_empty() {
+            roots.insert(name.to_ascii_uppercase());
+        }
+    };
+    if rules.emp_enabled() {
+        // Installed EMP10062610/10062FD0 constructs the WH sparkle through
+        // AnimClass421EA0. Registered identity alone does not bind its bounds.
+        for warhead in rules.warheads_iter() {
+            if let Some(name) = warhead.emp_rules().and_then(|emp| emp.sparkles()) {
+                insert(name);
+            }
+        }
+        // First activation10062625 can fall back through Type/General;
+        // refresh1006256D uses only the explicit WH pointer.
+        for object in rules.all_objects() {
+            if let Some(Some(name)) = object.emp_rules().and_then(|emp| emp.sparkles()) {
+                insert(name);
+            }
+        }
+        if let Some(name) = rules.emp_sparkles() {
+            insert(name);
+        }
+    }
+    roots.into_iter().collect()
+}
+
 /// Every animation name the simulation can turn into an `AnimClass` instance,
 /// which the loader must bind before the match starts.
 ///
@@ -226,16 +262,6 @@ pub(crate) const SQUID_GRAPPLE_ANIM: &str = "SQDG";
 /// The list is derived from loaded rules, never hand-written, and retail
 /// authors several names with no art section or sprite, which is why the
 /// binder that consumes it is the tolerant one.
-pub(crate) fn component_effect_anim_roots(rules: &RuleSet) -> Vec<String> {
-    rules
-        .effect_descriptors()
-        .filter_map(|descriptor| descriptor.animation.as_ref())
-        .map(|name| name.to_ascii_uppercase())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     let mut roots = BTreeSet::new();
     let mut insert = |name: &str| {
@@ -245,7 +271,7 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
             roots.insert(name.to_ascii_uppercase());
         }
     };
-    for name in component_effect_anim_roots(rules) {
+    for name in gameplay_effect_anim_roots(rules) {
         insert(&name);
     }
     // Ares common Launch10033068..100330AA constructs SW.Animation through
@@ -260,13 +286,6 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
         for name in &warhead.anim_list {
             insert(name);
         }
-        // Installed Ares EMP10062610/10062FD0 constructs the retained
-        // Warhead sparkle as AnimClass421EA0. Existing-pointer lookup alone
-        // does not bind its physical bounds for that constructor.
-        #[cfg(feature = "ares")]
-        if let Some(name) = warhead.ares_rules().and_then(|emp| emp.sparkles()) {
-            insert(name);
-        }
         // AttachedEffect 100586E0 constructs the registered AnimClass with
         // flags 0x600 and then attaches it to the victim. It needs physical
         // bounds through this same loader closure before construction.
@@ -279,15 +298,9 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
             insert(name);
         }
     }
-    // First activation10062625 may fall back through Type/General, while
-    // refresh uses only the explicit Warhead pointer. Bind every configured
-    // producer through this same closure, for graphical and headless loads.
     #[cfg(feature = "ares")]
     {
         for object in rules.all_objects() {
-            if let Some(Some(name)) = object.emp_rules().and_then(|emp| emp.sparkles()) {
-                insert(name);
-            }
             // Self effects reach the same Anim constructor as Warhead effects
             // (Ares Update10058E00, self-attach10058FC5 -> Attach10058520
             // -> CreateAnim100586E0). Their image
@@ -300,9 +313,6 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
             {
                 insert(name);
             }
-        }
-        if let Some(name) = rules.emp_sparkles() {
-            insert(name);
         }
     }
     // Muzzle animations `TechnoClass::Fire_At` constructs

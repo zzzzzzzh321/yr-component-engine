@@ -8882,3 +8882,6 @@ mod sdk_armor_tests;
 
 #[cfg(test)]
 mod sdk_production_tests;
+
+#[cfg(test)]
+mod sdk_emp_tests;

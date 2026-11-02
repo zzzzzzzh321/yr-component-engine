@@ -1660,6 +1660,7 @@ fn a_select_started_by_a_partners_tag_event_does_not_expand() {
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        &rules,
     );
     sim.classify_map_triggers(&rules);
     sim.attach_object_trigger_tag(apc, Some("BLOW_TAG"));

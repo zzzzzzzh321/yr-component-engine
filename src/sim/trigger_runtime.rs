@@ -230,7 +230,7 @@ struct TagType {
     trigger: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RuntimeDefinitions {
     team_types: Vec<String>,
     /// TeamType+D0 references resolved during physical Read6F1341. This is
@@ -239,9 +239,29 @@ struct RuntimeDefinitions {
     team_tags: Vec<Option<usize>>,
     trigger_types: Vec<TriggerType>,
     tag_types: Vec<TagType>,
+    /// Frozen definition-time classification override. None retains the
+    /// legacy profile; a component's explicit false never falls back to Ares.
+    emp_event_policy: Option<bool>,
+}
+
+impl Hash for RuntimeDefinitions {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Keep the original definition stream when no component takes over.
+        self.team_types.hash(state);
+        self.team_tags.hash(state);
+        self.trigger_types.hash(state);
+        self.tag_types.hash(state);
+        if let Some(enabled) = self.emp_event_policy {
+            b"component-emp-trigger-classification-v1".hash(state);
+            enabled.hash(state);
+        }
+    }
 }
 
 impl RuntimeDefinitions {
+    fn emp_events_enabled(&self) -> bool {
+        self.emp_event_policy.unwrap_or(crate::rules::ARES_ENABLED)
+    }
     fn team_type(&mut self, name: &str) -> Option<usize> {
         if is_native_none_type_name(name) {
             return None;
@@ -365,8 +385,12 @@ impl RuntimeDefinitions {
         teams: &crate::rules::team_ai_ini::TeamAiIniRegistry,
         eva: Option<&crate::rules::sound_ini::EvaRegistry>,
         sounds: Option<&crate::rules::sound_ini::SoundRegistry>,
+        emp_event_policy: Option<bool>,
     ) -> Self {
-        let mut definitions = Self::default();
+        let mut definitions = Self {
+            emp_event_policy,
+            ..Self::default()
+        };
         // Full_Init687984/68798D: reads are transactions, not the final merged
         // TeamType vector. Team.Tag can first-construct TagTypes here.
         for team in teams.team_type_read_sequence() {
@@ -482,7 +506,7 @@ impl RuntimeDefinitions {
             }
             let typ = &self.trigger_types[index];
             for event in &typ.events {
-                flags |= event_classification(event.kind);
+                flags |= event_classification(event.kind, self.emp_events_enabled());
             }
             for action in &typ.actions {
                 flags |= action_classification(action.entry.kind);
@@ -531,11 +555,10 @@ impl RuntimeDefinitions {
 
 // Original jump-table bytes71F700/71F744/71F780/71F7C0 and6E3F08.
 // These are classification only, never substitutes for event predicates.
-fn event_classification(kind: i32) -> u8 {
+fn event_classification(kind: i32, emp_events: bool) -> u8 {
     // Ares3.0 GetFlags1004F6A0: EMP62..65 are attached-object events;
     // Persistable1004F610 returns false for every one of them.
-    #[cfg(feature = "ares")]
-    if matches!(kind, 62..=65) {
+    if emp_events && matches!(kind, 62..=65) {
         return 2;
     }
     let mut flags = 0;
@@ -1105,6 +1128,34 @@ impl Simulation {
         assert!(!self.trigger_runtime.definitions_prepared);
         self.trigger_runtime.locals_set = prior.set;
     }
+
+    /// Fresh Rules/asset admission may finish after Full_Init's definition
+    /// reads. Freeze only this derived policy against the final component.
+    /// EMP62..65 add attached-object flag2, never Map/House/Logic flags4/8/16;
+    /// no registration, live Tag, timer, cursor, identity or RNG is rebuilt.
+    /// Unprepared definitions still use the ordinary initializer below.
+    pub(crate) fn bind_fresh_trigger_resource_policy(
+        &mut self,
+        rules: &crate::rules::ruleset::RuleSet,
+    ) {
+        if self.trigger_runtime.definitions_prepared {
+            self.trigger_runtime.definitions.emp_event_policy = rules.emp_event_policy_override();
+        }
+    }
+
+    pub(crate) fn validate_trigger_event_policy(
+        &self,
+        rules: &crate::rules::ruleset::RuleSet,
+    ) -> Result<(), String> {
+        if self.trigger_runtime.definitions_prepared
+            && self.trigger_runtime.definitions.emp_event_policy
+                != rules.emp_event_policy_override()
+        {
+            return Err("saved trigger classification differs from frozen EMP policy".into());
+        }
+        Ok(())
+    }
+
     /// Full_Init687984..6879CB registry ingress. No live instance is created
     /// until a Cell/Object attachment or Fill classification requires it.
     pub fn initialize_trigger_definitions(
@@ -1113,6 +1164,7 @@ impl Simulation {
         teams: &crate::rules::team_ai_ini::TeamAiIniRegistry,
         eva: Option<&crate::rules::sound_ini::EvaRegistry>,
         sounds: Option<&crate::rules::sound_ini::SoundRegistry>,
+        rules: &crate::rules::ruleset::RuleSet,
     ) {
         // ReadLocal689B2E clears names only. Missing second tokens and slots
         // absent from the map keep their current value;689C24 writes explicit
@@ -1130,7 +1182,13 @@ impl Simulation {
             }
         }
         self.trigger_runtime = TriggerRuntime {
-            definitions: RuntimeDefinitions::read_map(map, teams, eva, sounds),
+            definitions: RuntimeDefinitions::read_map(
+                map,
+                teams,
+                eva,
+                sounds,
+                rules.emp_event_policy_override(),
+            ),
             definitions_prepared: true,
             locals_set,
             ..TriggerRuntime::default()
@@ -1497,13 +1555,14 @@ impl Simulation {
             .condition
             .clone();
         match condition.kind {
-            #[cfg(feature = "ares")]
             62..=65 => {
                 // Installed HasOccurred71E949 ->100503E0/1004F7DC..870.
                 // The actor is the affected Techno. House-specific63/65
                 // compare the source's raw House+30, without Country/MP
                 // lookup; no mutable persistence or shared House is written.
-                if input.kind != condition.kind {
+                if !self.trigger_runtime.definitions.emp_events_enabled()
+                    || input.kind != condition.kind
+                {
                     return false;
                 }
                 let Some(actor) = input.actor.and_then(|id| self.substrate.entities.get(id)) else {

@@ -556,7 +556,7 @@ fn crate_predicates_match_all_original_controls_and_registration_classes() {
         assert_eq!(case["state_a"], 1);
         assert_eq!(case["state_b"], 1);
         assert_eq!(
-            event_classification(integer(&case["kind"])),
+            event_classification(integer(&case["kind"]), crate::rules::ARES_ENABLED),
             if case["kind"] == 49 { 2 } else { 16 }
         );
     }
