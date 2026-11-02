@@ -28,7 +28,7 @@ use crate::sim::intern::InternedId;
 use crate::sim::world::Simulation;
 use crate::util::save_codec;
 
-/// The layout this build writes and accepts: a digest of the
+/// The layout this build writes: a digest of the
 /// [`save_codec::layout`] description of [`GameSnapshot`], traced once per
 /// process. It changes whenever a saved type, field or enum variant does, so
 /// nothing bumps it by hand and two branches cannot share one id for different
@@ -43,6 +43,15 @@ fn snapshot_layout() -> u32 {
         let digest = crate::util::sha256::sha256_bytes(description.as_bytes());
         u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]) | 0x8000_0000
     })
+}
+
+/// Admission owns compatibility for both the browser and the full reader.
+/// SDK 0.6 replaced delayed WeaponSlot's u32 enum tag with an i32 index;
+/// previous 0/1 payloads are byte-identical. Admit only this measured retail
+/// release pair: future schema changes must not inherit this exception.
+fn accepts_snapshot_layout(saved: u32) -> bool {
+    let current = snapshot_layout();
+    saved == current || (saved, current) == (0xdcc2_949c, 0xf894_3a6b)
 }
 
 const SNAPSHOT_PRODUCT_MAGIC: [u8; 8] = *b"VERA20K\0";
@@ -205,7 +214,8 @@ pub struct GameSnapshot {
     pub product_magic: [u8; 8],
     /// Public envelope contract. This changes only when the outer prefix does.
     pub envelope_version: u32,
-    /// [`snapshot_layout`] of the writing build; load rejects any other.
+    /// [`snapshot_layout`] of the writing build; admission also recognizes
+    /// explicitly compatible preceding layouts.
     pub layout: u32,
     /// Player-authored save description used by the load-game list.
     pub description: String,
@@ -832,12 +842,11 @@ impl GameSnapshot {
         Ok(snapshot)
     }
 
-    /// Admit a current-layout header without deserializing Simulation. The
-    /// fixed preamble rejects other layouts before any variable-length header
-    /// fields; browser metadata has a separate compatibility policy.
+    /// Admit a compatible header without deserializing Simulation. The fixed
+    /// preamble rejects unknown layouts before any variable-length header fields.
     pub fn read_header(bytes: &[u8]) -> Result<GameSnapshotHeader, SnapshotError> {
         let preamble = Self::read_preamble(bytes)?;
-        if preamble.layout != snapshot_layout() {
+        if !accepts_snapshot_layout(preamble.layout) {
             return Err(SnapshotError::LayoutMismatch {
                 expected: snapshot_layout(),
                 found: preamble.layout,
@@ -855,7 +864,7 @@ impl GameSnapshot {
 
     /// SaveInfo681840/559ED0 reads metadata even when its internal version is
     /// incompatible. Browser5596A0 sorts those rows before5599DF hides them;
-    /// full load still requires the strict current-layout header above.
+    /// full load still requires compatible-layout admission above.
     pub fn read_metadata(bytes: &[u8]) -> Result<GameSnapshotHeader, SnapshotError> {
         let preamble = Self::read_preamble(bytes)?;
         // Counter saves before 459 carry no capability marker. A layout id
@@ -905,7 +914,7 @@ impl GameSnapshotHeader {
     }
 
     pub fn is_compatible(&self) -> bool {
-        self.layout == snapshot_layout() && self.compatibility.matches_build()
+        accepts_snapshot_layout(self.layout) && self.compatibility.matches_build()
     }
 }
 

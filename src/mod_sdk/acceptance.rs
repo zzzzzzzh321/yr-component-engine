@@ -42,6 +42,19 @@ where
 {
     let mut args = args.into_iter();
     let flag = args.next()?;
+    if flag == OsStr::new("--mod-sdk-save-probe") {
+        return Some((|| {
+            let retail = PathBuf::from(args.next().context("missing retail directory")?);
+            let save = PathBuf::from(args.next().context("missing previous snapshot")?);
+            let output = PathBuf::from(args.next().context("missing report path")?);
+            ensure!(
+                args.next().is_none(),
+                "usage: --mod-sdk-save-probe RETAIL SAVE OUTPUT"
+            );
+            validate_output(&retail, &output)?;
+            write_result(&output, probe_saved_snapshot(&save))
+        })());
+    }
     if flag == OsStr::new("--game-data-checkfast") {
         return Some((|| {
             let retail = PathBuf::from(args.next().context("missing retail directory")?);
@@ -161,6 +174,38 @@ fn write_result(output: &Path, result: Result<Value>) -> Result<i32> {
     write_new(output, &serde_json::to_vec_pretty(&receipt)?)?;
     println!("{}", serde_json::to_string(&receipt)?);
     Ok(code)
+}
+
+/// Use the shipping build's schema: lib tests retain TriggerRuntime's fixture
+/// difficulty field and cannot decode a shipping save as the same layout.
+/// The caller supplies an actual preceding-release file, not a current save
+/// relabelled with an older header. No saved component is replaced/configured.
+fn probe_saved_snapshot(path: &Path) -> Result<Value> {
+    use crate::sim::snapshot::GameSnapshot;
+    let bytes = std::fs::read(path).context("read previous full snapshot")?;
+    let metadata = GameSnapshot::read_metadata(&bytes)?;
+    let mut loaded = GameSnapshot::load_with_resources(&bytes)?;
+    ensure!(
+        metadata.is_compatible(),
+        "browser rejected admitted snapshot"
+    );
+    let digest = loaded.sim.external_mod_digest();
+    let module = loaded
+        .sim
+        .external_mod
+        .as_ref()
+        .map(|p| p.manifest().clone());
+    loaded.sim.restore_after_snapshot_load()?;
+    ensure!(
+        loaded.sim.external_mod_digest() == digest,
+        "restored program changed"
+    );
+    Ok(json!({
+        "ok":true, "kind":"mod_sdk_saved_snapshot", "layout":metadata.layout,
+        "browserAdmission":true, "resourceAdmission":true, "stateRestore":true,
+        "frozenProgramPreserved":true, "module":module,
+        "scope":"saved resources and structural restore; no resident asset rebind or GUI"
+    }))
 }
 
 fn advance(scenario: &mut HeadlessScenario) -> Result<()> {
