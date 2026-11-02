@@ -1,6 +1,6 @@
 # VERA Mod SDK：外置功能原型
 
-本目录保留 VERA20K 外置插件的 API、WIT 契约和运行时；插件实现与开发工具统一迁到相邻的 [plugin-dev 独立工程](../../plugin-dev/README.md)。第一份参考插件位于其中的 `plugins/vera20k-ares`，发布文件名为 `vera20k-ares.wasm`。一个作品加载一个可选的外置功能组件；当前参考组件0.6.0包含护盾、自定义过载及Ares武器弹药成本、装填数量、低弹量武器选择，通过INI选择功能，无须按组合重新编译。
+本目录保留 VERA20K 外置插件的 API、WIT 契约和运行时；插件实现与开发工具统一迁到相邻的 [plugin-dev 独立工程](../../plugin-dev/README.md)。第一份参考插件位于其中的 `plugins/vera20k-ares`，发布文件名为 `vera20k-ares.wasm`。一个作品加载一个可选的外置功能组件；当前参考组件0.7.0包含护盾、自定义过载及Ares武器弹药成本、装填数量、低弹量武器选择、手动操作限制，通过INI配置，无须按组合重新编译。新对局安装组件后，四个已外置Ares模块默认启用，护盾和过载仍须显式开启。
 
 护盾的配置解释、状态、伤害处理和恢复逻辑已经移到外置 Rust 插件中。作者可以修改插件源码、重新编译发布，无须为这两种护盾分别修改或编译引擎。INI 仍用于配置，功能实现位于插件代码中。
 
@@ -10,7 +10,7 @@
 
 [Ares弹药与武器选择说明](../../plugin-dev/plugins/vera20k-ares/AMMO.zh-CN.md)介绍三个独立开关：`AresAmmo`解释武器成本，`AresReload`解释普通/空仓装填量，`AresNoAmmoWeapon`解释低弹量选用的武器。可选的`weapon_resource`和`type_resource`在加载时提供静态策略，复用引擎已有开火、弹仓、装填时钟与武器选择；原有四个回调仍是基础要求。
 
-`AresManualControl` 接入 `NoManualFire`、`NoManualUnload`、`NoManualEnter`、`NoSelfGuardArea`，通过类型上的可选 `InputPolicy` 供已有鼠标与按键操作流程消费；不在模拟层过滤 AI、脚本或回放命令。见[手动操作说明](../../plugin-dev/plugins/vera20k-ares/MANUAL.zh-CN.md)。0.5.0 的配置版本为5，状态版本仍为1。
+`AresManualControl` 接入 `NoManualFire`、`NoManualUnload`、`NoManualEnter`、`NoSelfGuardArea`，通过类型上的可选 `InputPolicy` 供已有鼠标与按键操作流程消费；不在模拟层过滤 AI、脚本或回放命令。模块默认启用不改变四个标签自身默认`no`，隧道与混合/多选治疗步兵仍有未外置部分。见[手动操作说明](../../plugin-dev/plugins/vera20k-ares/MANUAL.zh-CN.md)。配置版本5和状态版本1沿用0.5.0的结构。
 
 0.6.0 的低弹药选择保留完整武器索引，建筑动画延迟、射击、存档和状态校验继续使用宿主原有所有者。配套宿主保留旧主/副武器的存档字节与哈希，支持有效0..17槽；索引越界时安全地返回无武器。它不改变 SDK/WIT 消息结构，但高槽延迟射击需要配套新版引擎。
 
@@ -18,7 +18,7 @@ Ares 完整公开功能目录、INI 键索引与后续开发拆分见 [Ares 功�
 
 Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 SDK 实现建议见 [Phobos 功能中文开发参考](../docs/zh-CN/phobos-feature-guide.md)。目录还区分了原生 DLL 互操作接口与本 SDK，以及护盾示例的已完成范围和待补能力。
 
-发布文件名和 Cargo 包名为 `vera20k-ares`，内部组件标识仍为 `vera.reference-gameplay` 0.6.0，config_version=5、state_version=1。名称整理不改变已有功能和协议；Phobos兼容护盾与自定义过载仍作为现有示例保留，文件名不表示完整兼容Ares。
+发布文件名和 Cargo 包名为 `vera20k-ares`，内部组件标识仍为 `vera.reference-gameplay` 0.7.0，config_version=5、state_version=1，API v1及WIT不变。本版只改变新对局初始功能选择，不迁移旧冻结配置；Phobos兼容护盾与自定义过载仍作为现有示例保留，文件名不表示完整兼容Ares。
 
 后续插件代码在 `plugin-dev` 中维护，按[独立构建指南](../../plugin-dev/sdk/dev-kit/README.zh-CN.md)使用标准 Cargo 完成测试、编译和打包。引擎仓库中的 `sdk/api` 和 `sdk/wit` 是接口权威定义，独立工程使用固定版本的 SDK 开发快照；协议扩展先更新定义及引擎支持，再同步快照。插件构建无需引擎源码、可执行文件、Python 或游戏资源；引擎构建和验收继续在引擎仓库运行 `tools.cargo_run`。
 
@@ -88,7 +88,7 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 | 回调 | 查询时机 | 返回策略 |
 | --- | --- | --- |
 | `weapon_resource` | 加载时按实际登记武器查询，读档后从冻结配置重建 | 每次开火成本、是否请求装填、适用类别、建筑是否采用普通武器ROF |
-| `type_resource` | 加载时按对象类型与实际类别查询，读档后从冻结配置重建 | 普通/空仓装填量及低弹量武器选择 |
+| `type_resource` | 加载时按对象类型与实际类别查询，读档后从冻结配置重建 | 普通/空仓装填量、低弹量武器选择及手动输入策略 |
 
 查询消息和策略统一定义于`api/src/resource.rs`，经已有`evaluate`导出传递，没有增加Host服务。正式模拟路径读取不可变投影；三个Ares功能不占用额外对象插件状态，也不新增一套弹药或计时器。
 
@@ -100,26 +100,33 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 
 ## 通过 INI 选择功能
 
-开关放在作品已经加载的 Rules INI 或地图 Rules 配置层中，不需要新增 JSON 功能清单：
+0.7.0新对局加载组件后，`AresAmmo`、`AresReload`、`AresNoAmmoWeapon`、`AresManualControl`默认启用，直接使用原Ares标签即可。Phobos护盾和自定义过载仍默认关闭；例如要在默认Ares功能上加护盾，把下列开关放在作品已经加载的Rules INI或地图Rules配置层中，不需要新增JSON功能清单：
 
 ```ini
 [VeraFeatures]
 Shield=yes
 Overload=no
-AresAmmo=yes
-AresReload=yes
-AresNoAmmoWeapon=yes
 ```
 
-五个开关默认都是`no`；缺失、空值和无效布尔值沿用原有INI读取器的保留规则。Overload必须同时开启Shield，否则最终加载会明确报错。只在最终阶段检查依赖，允许先定义、后开启。三个Ares开关彼此独立，开启装填量或低弹量选择不要求同时开启武器成本。
+需要隔离对照时，可分别显式关闭Ares模块：
 
-`Shield`控制对象护盾订阅，`Overload`控制自定义过载行为。`AresAmmo`控制武器节`Ammo`成本，`AresReload`控制对象类型节`ReloadAmount/EmptyReloadAmount`，`AresNoAmmoWeapon`控制`NoAmmoWeapon/NoAmmoAmount`。关闭某项就不发布该项策略；关闭Shield时不创建护盾状态和护盾条。原版对象类型节中的`Ammo`容量、`InitialAmmo`和装填间隔仍由引擎已有读取器处理。
+```ini
+[VeraFeatures]
+AresAmmo=no
+AresReload=no
+AresNoAmmoWeapon=no
+AresManualControl=no
+```
 
-组合示例见[resource-cycle.ini](../../plugin-dev/plugins/vera20k-ares/examples/resource-cycle.ini)：每发成本2，普通装填2、空仓装填3，弹量不高于阈值时选副武器。若副武器需要在空仓继续开火，须同时开启AresAmmo并将该武器成本设为0；选择到副武器后仍接受正常开火条件检查。飞机不应用武器成本与装填量扩展，但可以使用低弹量选择策略。完整默认值、原始指令差异及适用边界见[Ares功能说明](../../plugin-dev/plugins/vera20k-ares/AMMO.zh-CN.md)。
+这些是VERA自有的选择开关，原Ares标签本身的默认值不变。缺失、空值和无效布尔值保留前一规则层的有效选择；显式`no`不会因后层缺失而重新启用。Overload必须同时开启Shield，否则最终加载会明确报错。只在最终阶段检查依赖，允许先定义、后开启。四个Ares开关彼此独立，关闭一项不代表其余安装修复也关闭；若宿主还启用了内置`ares`构建特性，其行为须单独区分。
+
+`Shield`控制对象护盾订阅，`Overload`控制自定义过载行为。`AresAmmo`控制武器节`Ammo`成本及已接入的建筑ROF安装修复，`AresReload`控制对象类型节`ReloadAmount/EmptyReloadAmount`，`AresNoAmmoWeapon`控制`NoAmmoWeapon/NoAmmoAmount`，`AresManualControl`控制四个手动操作限制标签的解释。关闭某项就不发布该项外置策略；关闭Shield时不创建护盾状态和护盾条。原版对象类型节中的`Ammo`容量、`InitialAmmo`和装填间隔仍由引擎已有读取器处理。
+
+组合示例见[resource-cycle.ini](../../plugin-dev/plugins/vera20k-ares/examples/resource-cycle.ini)：每发成本2，普通装填2、空仓装填3，弹量不高于阈值时选副武器。若副武器需要在空仓继续开火，须保持AresAmmo启用（新对局默认值）并将该武器成本设为0；选择到副武器后仍接受正常开火条件检查。飞机不应用武器成本与装填量扩展，但可以使用低弹量选择策略。完整默认值、原始指令差异及适用边界见[Ares功能说明](../../plugin-dev/plugins/vera20k-ares/AMMO.zh-CN.md)。
 
 每次实际 Rules 层都读取配置，地图层也能覆盖。最终选择随配置冻结，进入存档和联机校验。对局中不重新读取 INI；读档使用保存的选择，修改磁盘上的开关仅影响新对局。修改算法或增加功能仍需重新编译插件。
 
-完整开关示例见[features.ini](../../plugin-dev/plugins/vera20k-ares/examples/features.ini)。多个示例合并时，保留一个`[VeraFeatures]`节，统一填写五个开关，避免重复节头。
+完整开关示例见[features.ini](../../plugin-dev/plugins/vera20k-ares/examples/features.ini)。多个示例合并时，保留一个`[VeraFeatures]`节，合并所需的显式选择，避免重复节头；四个Ares模块不必重复填写`yes`。
 
 ## 护盾配置示例
 
@@ -132,6 +139,7 @@ Overload=no
 AresAmmo=no
 AresReload=no
 AresNoAmmoWeapon=no
+AresManualControl=no
 
 [ShieldTypes]
 0=SDKShield
@@ -248,12 +256,12 @@ $retail = "D:/steam/steamapps/common/Command & Conquer Red Alert II"
 python -m tools.cargo_run -- test --locked -p vera20k-core --lib sdk_ -- --include-ignored --skip sdk_refactor_preserves_
 ```
 
-`COMPAT`、`AMMO`是历史测试变量名；测试INI须显式开启所需功能。目录或包装迁移时，可分别设置`VERA_SDK_BASELINE_WASM`和`VERA_SDK_CANDIDATE_WASM`为迁移前后的组件，再运行`sdk_refactor_preserves_`，比较同一接口与配置版本的manifest、冻结配置和状态字节。该检查仅用于声明、接口和配置/状态布局保持相同的纯移动或重构；本次0.6.0行为扩展不以产物字节相同作为验收条件，也不表示支持跨配置版本迁移。新增机制的验证应覆盖实际WASM、正式选武器/装填路径与存读档，不能只检查返回的策略字段。
+`COMPAT`、`AMMO`是历史测试变量名；测试INI应明确区分默认Ares组合、显式关闭对照和显式开启的护盾/过载。验证0.7.0默认安装时，应省略四个Ares的`yes`，检查原Ares标签及已接入的无标签修复；隔离模式须显式关闭不测的模块。目录或包装迁移时，可分别设置`VERA_SDK_BASELINE_WASM`和`VERA_SDK_CANDIDATE_WASM`为迁移前后的组件，再运行`sdk_refactor_preserves_`，比较同一接口与配置版本的manifest、冻结配置和状态字节。该检查仅用于声明、接口和配置/状态布局保持相同的纯移动或重构；0.6.0行为扩展和0.7.0新对局默认变化都不能用跨版本冻结配置相等来验收，也不表示支持跨配置版本迁移。新增机制的验证应覆盖实际WASM、正式选武器/装填路径与存读档，不能只检查返回的策略字段。
 
 ## 状态、存档与联机一致性
 
 - 组件内容、摘要、接口声明、冻结后的配置和每个对象的插件状态随世界保存；编译后的机器码缓存不写入存档。
-- 读档校验当前作品的组件是否与存档一致，并复用存档中的配置。更新组件需要开始新对局；旧存档需要对应的原组件版本。本版不提供状态格式迁移或运行中热替换。
+- 读档要求当前作品提供与存档摘要完全相同的组件，再使用保存的原组件字节与冻结配置；即使存档含有Wasm字节，也不能用新版资源替代。旧非空配置不补入新默认，不重读当前INI。更新组件需要开始新对局；保留原组件及声明供旧存档使用。本版不提供状态格式迁移或运行中热替换。
 - 组件身份、配置与对象状态进入诊断状态哈希和实际联机 `FRAMEINFO` 校验。原有校验收集中的两次 Scenario 随机数抽取保持不变。
 - 进度条、染色等显示投影由权威状态派生，不作为独立权威状态参与哈希。预览与提交使用同一插件处理入口；预览不发布状态或投影，也不消耗模拟随机数。
 - 公共数值计算继续调用引擎已有实现。浮点配置通过明确的 IEEE-754 位模式传递，避免另写一套伤害计算算法。

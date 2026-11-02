@@ -69,7 +69,7 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
         std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
             .unwrap();
     let mut layers = RulesLayerStack::new(IniFile::from_str(
-        "[VeraFeatures]\nAresAmmo=yes\nAresReload=yes\nAresNoAmmoWeapon=yes\nAresManualControl=yes\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\nReloadAmount=2\nNoAmmoWeapon=1\nNoAmmoAmount=1\nNoManualFire=yes\nNoManualUnload=yes\nNoManualEnter=yes\nNoSelfGuardArea=yes\n\
+        "[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\nReloadAmount=2\nNoAmmoWeapon=1\nNoAmmoAmount=1\nNoManualFire=yes\nNoManualUnload=yes\nNoManualEnter=yes\nNoSelfGuardArea=yes\n\
          [PAIR]\nAmmo=$12\n[FREE]\nAmmo=0\n[pair]\nAmmo=99\n",
     ));
     layers.push(
@@ -194,6 +194,69 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
             .unwrap()
             .cost,
         12
+    );
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with default Ares installation"]
+fn sdk_ares_opt_out_survives_missing_invalid_layers_and_only_explicit_reenable() {
+    use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+    use crate::rules::ruleset::RuleSet;
+    let bytes = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let digest = crate::util::sha256::sha256_hex(&bytes);
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[VeraFeatures]\nAresAmmo=no\nAresReload=no\nAresNoAmmoWeapon=no\nAresManualControl=no\n\
+         [VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=PAIR\n\
+         ReloadAmount=3\nNoAmmoWeapon=1\nNoManualFire=yes\n[PAIR]\nAmmo=2\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str(
+            "[VeraFeatures]\nAresAmmo=invalid\nAresReload=\nAresNoAmmoWeapon=invalid\n",
+        ),
+    );
+    let load = |layers: &RulesLayerStack| {
+        let processed = layers.process().unwrap();
+        let rules = RuleSet::from_processed_rules(&processed).unwrap();
+        Program::load_with_types(
+            bytes.clone(),
+            &digest,
+            processed.sdk_passes(),
+            &["TANK".into()],
+            &[],
+            &rules.weapon_names(),
+        )
+        .unwrap()
+    };
+    let disabled = load(&layers);
+    let query = |program: &Program| {
+        program
+            .type_resource_policy("TANK", api::WEAPON_USER_UNIT)
+            .unwrap()
+    };
+    assert!(disabled.weapon_resource_policy("PAIR").unwrap().is_none());
+    assert!(query(&disabled).is_none());
+    let saved = crate::util::save_codec::serialize(&disabled).unwrap();
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[VeraFeatures]\nAresNoAmmoWeapon=yes\n"),
+    );
+    let enabled = load(&layers);
+    let policy = query(&enabled).unwrap();
+    assert_eq!(
+        policy.depleted_weapon,
+        Some(api::DepletedWeaponPolicy {
+            weapon_index: 1,
+            threshold: 0
+        })
+    );
+    assert!(policy.reload.is_none() && policy.input.is_none());
+    assert!(enabled.weapon_resource_policy("PAIR").unwrap().is_none());
+    let restored: Program = crate::util::save_codec::deserialize(&saved).unwrap();
+    restored.validate_restore().unwrap();
+    assert!(
+        query(&restored).is_none(),
+        "current INI cannot reenable a frozen disabled module"
     );
 }
 
@@ -435,7 +498,7 @@ fn sdk_ini_selection_is_layered_frozen_and_restored_with_the_program() {
     let digest = crate::util::sha256::sha256_hex(&bytes);
     let load = |patch: &str| {
         let mut layers = RulesLayerStack::new(IniFile::from_str(
-            "[VeraFeatures]\nOverload=yes\nAresAmmo=yes\n\
+            "[VeraFeatures]\nOverload=yes\n\
              [VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nShieldType=TEST\n\
              [PAIR]\nAmmo=2\n[ShieldTypes]\n0=TEST\n[TEST]\nStrength=100\n",
         ));
@@ -456,7 +519,7 @@ fn sdk_ini_selection_is_layered_frozen_and_restored_with_the_program() {
     let (enabled, _) = load("[VeraFeatures]\nShield=yes\nAresAmmo=invalid\n").unwrap();
     let saved = crate::util::save_codec::serialize(&enabled).unwrap();
     let (disabled, mut current_rules) =
-        load("[VeraFeatures]\nShield=no\nOverload=no\nAresAmmo=no\n").unwrap();
+        load("[VeraFeatures]\nShield=no\nOverload=no\nAresAmmo=no\nAresReload=no\nAresNoAmmoWeapon=no\nAresManualControl=no\n").unwrap();
     assert_eq!(
         enabled.sha256(),
         disabled.sha256(),

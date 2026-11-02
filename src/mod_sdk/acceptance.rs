@@ -47,12 +47,16 @@ where
             let retail = PathBuf::from(args.next().context("missing retail directory")?);
             let save = PathBuf::from(args.next().context("missing previous snapshot")?);
             let output = PathBuf::from(args.next().context("missing report path")?);
+            let module = args.next().map(PathBuf::from);
             ensure!(
                 args.next().is_none(),
-                "usage: --mod-sdk-save-probe RETAIL SAVE OUTPUT"
+                "usage: --mod-sdk-save-probe RETAIL SAVE OUTPUT [CURRENT_MODULE]"
             );
             validate_output(&retail, &output)?;
-            write_result(&output, probe_saved_snapshot(&save))
+            write_result(
+                &output,
+                probe_saved_snapshot(&save, &retail, module.as_deref()),
+            )
         })());
     }
     if flag == OsStr::new("--game-data-checkfast") {
@@ -119,10 +123,11 @@ where
                 "overload",
                 "ammo",
                 "ammo-only",
-                "all"
+                "all",
+                "ares"
             ]
             .contains(&mode.as_str()),
-            "mode must be none, disabled, compat, overload, ammo, ammo-only or all"
+            "mode must be none, disabled, compat, overload, ammo, ammo-only, all or ares"
         );
         ensure!(
             (mode == "none") == module.is_none(),
@@ -180,7 +185,7 @@ fn write_result(output: &Path, result: Result<Value>) -> Result<i32> {
 /// difficulty field and cannot decode a shipping save as the same layout.
 /// The caller supplies an actual preceding-release file, not a current save
 /// relabelled with an older header. No saved component is replaced/configured.
-fn probe_saved_snapshot(path: &Path) -> Result<Value> {
+fn probe_saved_snapshot(path: &Path, retail: &Path, module_path: Option<&Path>) -> Result<Value> {
     use crate::sim::snapshot::GameSnapshot;
     let bytes = std::fs::read(path).context("read previous full snapshot")?;
     let metadata = GameSnapshot::read_metadata(&bytes)?;
@@ -195,6 +200,28 @@ fn probe_saved_snapshot(path: &Path) -> Result<Value> {
         .external_mod
         .as_ref()
         .map(|p| p.manifest().clone());
+    let rebound = if let Some(module_path) = module_path {
+        let mut files = Vec::new();
+        push_probe_component(&mut files, module_path)?;
+        community::install(community::Snapshot::new(
+            "mod-sdk-save-probe".into(),
+            files,
+        )?)?;
+        let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
+        let resources = loaded
+            .take_scenario_resources()
+            .context("saved resources missing")?;
+        let mut rules =
+            crate::rules::ruleset::RuleSet::from_processed_rules(resources.processed_rules())
+                .map_err(anyhow::Error::msg)?;
+        super::adopt_saved_program(&mut rules, &loaded.sim, &assets).map_err(anyhow::Error::msg)?;
+        Some(json!({
+            "weapon":rules.weapon("SDKAmmoGun").and_then(|w| w.resource_policy(vera_mod_api::WEAPON_USER_UNIT)),
+            "object":rules.object("MTNK").and_then(|t| t.type_resource_policy()),
+        }))
+    } else {
+        None
+    };
     loaded.sim.restore_after_snapshot_load()?;
     ensure!(
         loaded.sim.external_mod_digest() == digest,
@@ -203,9 +230,26 @@ fn probe_saved_snapshot(path: &Path) -> Result<Value> {
     Ok(json!({
         "ok":true, "kind":"mod_sdk_saved_snapshot", "layout":metadata.layout,
         "browserAdmission":true, "resourceAdmission":true, "stateRestore":true,
-        "frozenProgramPreserved":true, "module":module,
+        "frozenProgramPreserved":true, "module":module, "reboundPolicies":rebound,
         "scope":"saved resources and structural restore; no resident asset rebind or GUI"
     }))
+}
+
+fn push_probe_component(files: &mut Vec<(String, Vec<u8>)>, module_path: &Path) -> Result<()> {
+    ensure!(
+        std::fs::metadata(module_path)?.len() <= 16 * 1024 * 1024,
+        "component exceeds admission limit"
+    );
+    let component = std::fs::read(module_path)?;
+    let digest = crate::util::sha256::sha256_hex(&component);
+    files.push((
+        "vera-mod.json".into(),
+        serde_json::to_vec(&json!({
+            "api_version":vera_mod_api::API_VERSION,"program":"probe-gameplay.wasm","sha256":digest
+        }))?,
+    ));
+    files.push(("probe-gameplay.wasm".into(), component));
+    Ok(())
 }
 
 fn advance(scenario: &mut HeadlessScenario) -> Result<()> {
@@ -284,8 +328,9 @@ fn run_probe(
 ) -> Result<Value> {
     let has_shield = matches!(mode, "compat" | "overload" | "ammo" | "all");
     let has_overload = matches!(mode, "overload" | "all");
-    let has_ammo = matches!(mode, "ammo" | "ammo-only" | "all");
-    let has_manual = mode == "all";
+    let has_ammo = matches!(mode, "ammo" | "ammo-only" | "all" | "ares");
+    let has_manual = matches!(mode, "all" | "ares");
+    let full_ares = matches!(mode, "all" | "ares");
     let tests_ammo = has_ammo || mode == "disabled";
     let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
     ensure!(
@@ -335,30 +380,34 @@ fn run_probe(
     } else {
         probe_ini
     };
+    let probe_ini = if full_ares {
+        probe_ini.replacen("ShieldType=SDKShield\r\n", "ShieldType=SDKShield\r\nReloadAmount=2\r\nEmptyReloadAmount=3\r\nNoAmmoWeapon=1\r\nNoAmmoAmount=0\r\nSecondary=SDKAmmoGun\r\nEliteSecondary=SDKAmmoGun\r\n", 1)
+    } else {
+        probe_ini
+    };
     bytes.extend_from_slice(probe_ini.as_bytes());
     if tests_ammo {
         bytes.extend_from_slice(AMMO_PROBE_INI.as_bytes());
     }
-    bytes.extend_from_slice(
+    // The default-installation case writes NO VeraFeatures section. Other
+    // modes explicitly select every module to retain isolated comparisons.
+    if mode != "ares" {
+        bytes.extend_from_slice(
         format!(
-            "\r\n[VeraFeatures]\r\nShield={}\r\nOverload={}\r\nAresAmmo={}\r\nAresManualControl={}\r\n",
+            "\r\n[VeraFeatures]\r\nShield={}\r\nOverload={}\r\nAresAmmo={}\r\nAresManualControl={}\r\nAresReload={}\r\nAresNoAmmoWeapon={}\r\n",
             if has_shield { "yes" } else { "no" },
             if has_overload { "yes" } else { "no" },
             if has_ammo { "yes" } else { "no" },
             if has_manual { "yes" } else { "no" },
+            if full_ares { "yes" } else { "no" },
+            if full_ares { "yes" } else { "no" },
         )
         .as_bytes(),
     );
+    }
     let mut files = vec![(PROBE_MAP.to_string(), bytes)];
     if let Some(module_path) = module_path {
-        ensure!(
-            std::fs::metadata(module_path)?.len() <= 16 * 1024 * 1024,
-            "component exceeds admission limit"
-        );
-        let component = std::fs::read(module_path)?;
-        let digest = crate::util::sha256::sha256_hex(&component);
-        files.push(("vera-mod.json".into(), serde_json::to_vec(&json!({"api_version":vera_mod_api::API_VERSION,"program":"probe-gameplay.wasm","sha256":digest}))?));
-        files.push(("probe-gameplay.wasm".into(), component));
+        push_probe_component(&mut files, module_path)?;
     }
     community::install(community::Snapshot::new("mod-sdk-probe".into(), files)?)?;
     drop(assets);
@@ -425,6 +474,53 @@ fn run_probe(
             == expected_input,
         "manual input projection did not bind through production retail Rules"
     );
+    let default_policies = if full_ares {
+        use vera_mod_api::{DepletedWeaponPolicy, ReloadPolicy, WEAPON_USER_BUILDING};
+        let rules = &scenario.runtime.resources.rules;
+        let policy = rules
+            .object("MTNK")
+            .and_then(|t| t.type_resource_policy())
+            .context("Ares object policies missing")?;
+        ensure!(
+            policy.reload
+                == Some(ReloadPolicy {
+                    normal_amount: 2,
+                    empty_amount: 3
+                })
+                && policy.depleted_weapon
+                    == Some(DepletedWeaponPolicy {
+                        weapon_index: 1,
+                        threshold: 0
+                    }),
+            "original reload/NoAmmoWeapon tags did not bind"
+        );
+        let ordinary = rules
+            .weapon("120mm")
+            .and_then(|w| w.resource_policy(WEAPON_USER_BUILDING))
+            .context("ordinary weapon policy missing")?;
+        ensure!(
+            ordinary.cost == 1 && ordinary.use_weapon_rof,
+            "installed Ares must also own untagged weapon cost and building cadence"
+        );
+        let defence = rules
+            .object("TESLA")
+            .and_then(|t| t.type_resource_policy())
+            .context("ordinary defence policies missing")?;
+        ensure!(
+            defence.reload
+                == Some(ReloadPolicy {
+                    normal_amount: 1,
+                    empty_amount: 1
+                }),
+            "installed Ares omitted ordinary building reload"
+        );
+        Some(
+            json!({"featureOptInWritten":mode != "ares", "object":policy,
+            "ordinaryWeapon":ordinary, "ordinaryDefence":defence}),
+        )
+    } else {
+        None
+    };
     let target = spawn_target(&mut scenario)?;
     let initial = scenario
         .sim()
@@ -526,7 +622,7 @@ fn run_probe(
         "restored frozen manual input projection differs"
     );
     Ok(
-        json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"ammunition":ammunition,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
+        json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"ammunition":ammunition,"defaultPolicies":default_policies,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
     )
 }
 
@@ -633,6 +729,7 @@ fn snapshot_roundtrip(
     let weapon_policy_before = rules
         .weapon("SDKAmmoGun")
         .and_then(|weapon| weapon.resource_policy(vera_mod_api::WEAPON_USER_UNIT));
+    let type_policy_before = rules.object("MTNK").and_then(|t| t.type_resource_policy());
     let live = sim.resolved_terrain().context("live terrain missing")?;
     let terrain = live.capture_saved_template()?;
     let map_hash = scenario.map.ini.content_hash();
@@ -724,6 +821,16 @@ fn snapshot_roundtrip(
             .and_then(|weapon| weapon.resource_policy(vera_mod_api::WEAPON_USER_UNIT))
             == weapon_policy_before,
         "saved weapon policy was not rebound"
+    );
+    ensure!(
+        scenario
+            .runtime
+            .resources
+            .rules
+            .object("MTNK")
+            .and_then(|t| t.type_resource_policy())
+            == type_policy_before,
+        "saved type policies were not rebound"
     );
     let resources = loaded
         .take_scenario_resources()

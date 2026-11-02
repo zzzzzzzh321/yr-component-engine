@@ -378,7 +378,7 @@ fn sdk_resources_reload_only_infantry_and_building_start_the_empty_clock_after_f
     let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
     for kind in ["E1", "GAPILL"] {
         let patch = format!(
-            "[VeraFeatures]\nAresReload=yes\nAresAmmo=no\n[{kind}]\nAmmo=1\nInitialAmmo=1\nReload=8\nEmptyReload=24\nReloadAmount=1\nEmptyReloadAmount=1\nPrimary=ReloadProbe\nElitePrimary=ReloadProbe\nCanPassiveAquire=no\n\
+            "[VeraFeatures]\nAresReload=yes\nAresAmmo=no\nAresNoAmmoWeapon=no\nAresManualControl=no\n[{kind}]\nAmmo=1\nInitialAmmo=1\nReload=8\nEmptyReload=24\nReloadAmount=1\nEmptyReloadAmount=1\nPrimary=ReloadProbe\nElitePrimary=ReloadProbe\nCanPassiveAquire=no\n\
              [ReloadProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\n"
         );
         let Some(mut scene) = Scene::with_component(&patch, Some(&wasm)) else {
@@ -762,6 +762,15 @@ fn sdk_ammo_building_weapon_rearm_preserves_legacy_and_survives_restore() {
         ("old guest", Some(old.as_slice())),
         ("new guest", Some(new.as_slice())),
     ] {
+        // The preceding guest required a prototype opt-in; the new component
+        // must install this untagged-weapon cadence fix without that section.
+        let patch = if label == "new guest" {
+            patch
+                .strip_prefix("[VeraFeatures]\nAresAmmo=yes\n")
+                .unwrap()
+        } else {
+            patch
+        };
         let Some(mut scene) = Scene::with_component(patch, component) else {
             return;
         };

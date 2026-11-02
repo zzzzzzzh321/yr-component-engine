@@ -2,8 +2,10 @@
 
 One work loads one optional portable gameplay component. The same engine runs
 retail YR without a declaration or one reference component whose shields, authored
-overload, Ares weapon ammo costs, reload amounts and low-ammo weapon selection are
-selected through INI. This prototype migrates the existing supported shield chain;
+overload, Ares weapon ammo costs, reload amounts, low-ammo weapon selection and
+manual-action restrictions are configured through INI. New matches with component
+0.7.0 enable its four implemented Ares modules by default; Shield and Overload
+still need explicit opt-in. This prototype migrates the existing supported shield chain;
 it does not migrate every Ares/Phobos feature or claim full upstream parity.
 
 This engine checkout retains the shared API, WIT contract, Wasmtime runtime and
@@ -33,10 +35,13 @@ and host support before refreshing that SDK snapshot.
   without executing it; it is not an engine workspace member.
 - [`plugin-dev/plugins/vera20k-ares`](../../plugin-dev/plugins/vera20k-ares/README.md):
   author-editable Rust reference. One artifact contains the
-  features; `[VeraFeatures] Shield/Overload/AresAmmo/AresReload/AresNoAmmoWeapon`
-  selects them through INI. Defense mechanisms live in `features/defense`; weapon
-  policies live in `features/weapons`. All use the same `support/host.rs` facade.
-  All default to no; Overload requires Shield. Selection is frozen per match.
+  features. New matches default AresAmmo, AresReload, AresNoAmmoWeapon and
+  AresManualControl to yes; `[VeraFeatures]` can explicitly set each to no for
+  comparison. Shield and Overload still default to no, and Overload requires
+  Shield. Individual Ares tags retain their own defaults, including no for all
+  four manual restrictions. Defense mechanisms live in `features/defense`, weapon
+  policies in `features/weapons`, and input policy in `features/units`.
+  All use the same `support/host.rs` facade. Selection is frozen per match.
 - `src/mod_sdk.rs`: production asset admission, entity/combat/tick adapter,
   bounded change-plan validation and frozen saved-program admission.
 
@@ -58,23 +63,31 @@ health or another entity. Reserved operations are rejected in this prototype.
 
 The reference component also declares two optional immutable queries:
 `weapon_resource` returns a weapon's cost policy; `type_resource` returns reload
-amounts and low-ammo weapon selection for an object type and actual category.
+amounts, low-ammo weapon selection and local input policy for an object type and actual category.
 Admission queries them once and save restoration rebuilds them from frozen
 configuration. Hot paths use the resulting read-only projections. These features
 do not own a second ammo count or reload clock, and need no additional per-entity
 component state. Both queries use the existing `evaluate` message channel and
 add no Host service or WIT import.
 
-The component identifies as `vera.reference-gameplay` 0.4.0, config_version=4,
-state_version=1. This internal manifest identity is retained independently of the
+The component identifies as `vera.reference-gameplay` 0.7.0, config_version=5,
+state_version=1; API v1 and WIT remain unchanged. Its new defaults apply only to a
+new match's empty initial configuration, not to nonempty frozen configurations.
+This internal manifest identity is retained independently of the
 publication filename and Cargo package name. Older components receive only the queries they declare; changing
 INI cannot add a feature absent from their original binary. Existing saves still
 require their exact corresponding component bytes.
 
+The matching host must support `use_weapon_rof`, optional `input` type policies
+and complete weapon indices in building delayed-fire state/save paths. Sharing
+API v1 alone does not make an older host compatible with those requirements.
+
 See the [Ares resource guide](../../plugin-dev/plugins/vera20k-ares/AMMO.zh-CN.md) and
 [resource-cycle.ini](../../plugin-dev/plugins/vera20k-ares/examples/resource-cycle.ini) for the combined
-configuration, defaults, category restrictions and documented compatibility
-boundary for unsupported `NoAmmoWeapon` indices.
+configuration, defaults, category restrictions and the documented 0..17 weapon
+array and safe no-weapon behavior for `NoAmmoWeapon` indices at or above 18.
+The [manual-control guide](../../plugin-dev/plugins/vera20k-ares/MANUAL.zh-CN.md)
+retains the tunnel and mixed/multi-healer gaps; default enabling does not complete them.
 
 Every call creates a fresh guest instance with fuel/memory/call limits. Preview
 and commit use the same guest leaf; preview publishes nothing. A fault rejects
@@ -128,9 +141,11 @@ intentionally links only the SDK interface. The unknown-unknown build plus
 explicit component wrapping keeps the guest independent of WASI.
 
 The current gameplay component bytes and its frozen parsed configuration are
-saved with the world. Restore checks the current work's component identity and
-reuses the saved configuration. Updating a component requires a new match;
-existing saves require the corresponding original version.
+saved with the world. Restore requires the current work's component digest to
+match the saved digest exactly, then uses the saved original component bytes and
+frozen configuration. It neither reapplies current INI nor inserts new defaults.
+Updating a component requires a new match; retain the old artifact and declaration
+for existing saves, even though those saves also contain component bytes.
 
 ## Scope
 
