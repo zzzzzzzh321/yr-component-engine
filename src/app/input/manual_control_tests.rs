@@ -398,3 +398,275 @@ fn no_self_guard_area_restores_the_deploy_successor_for_a_healing_infantryman() 
         "explicit false restores the original self-guard rung"
     );
 }
+
+#[test]
+fn mixed_medics_use_one_cursor_owner_then_each_receivers_complete_class_action() {
+    let mut rules = rules();
+    let mut sim = arena(&rules);
+    let target = sim
+        .spawn_object("MEDIC", "Americans", 10, 5, 0, &rules)
+        .unwrap();
+    let healer = sim
+        .spawn_object("MEDIC", "Americans", 8, 5, 0, &rules)
+        .unwrap();
+    let spy = sim
+        .spawn_object("SPY", "Americans", 7, 5, 0, &rules)
+        .unwrap();
+    let group = [target, healer, spy];
+    for id in group {
+        sim.entities_mut_for_test()
+            .get_mut(id)
+            .unwrap()
+            .selection
+            .set_selected_for_test(true);
+    }
+    sim.entities_mut_for_test().get_mut(target).unwrap().health =
+        crate::sim::combat::Health::new(50);
+    let hover = hover(target, HoverTargetKind::FriendlyUnit);
+    let overlays = crate::rules::overlay_types::OverlayTypeRegistry::empty();
+    // NoManualFire rejects Techno's attack rung; Infantry's later healer
+    // action still supplies Guard26 for self and Heal27 for the other medic.
+    rules.bind_input_policy_for_test(
+        "MEDIC",
+        InputPolicy {
+            deny_manual_attack: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(cursor_owner(&sim, &rules, &group, target), Some(target));
+    let feedback = capability_cursor_for_hover(
+        &sim,
+        &group,
+        Some(target),
+        &hover,
+        Some(&rules),
+        Some(&overlays),
+        OrderModifier::Normal,
+        false,
+        false,
+    );
+    assert_eq!(feedback, CursorFeedbackKind::GuardArea);
+    let dispatch = |rules: &RuleSet| {
+        infantry_class_branch_orders(
+            &sim,
+            rules,
+            &group,
+            &group,
+            &hover,
+            OrderModifier::Normal,
+            crate::app::types::OrderMode::Move,
+            false,
+            &overlays,
+        )
+        .unwrap()
+    };
+    let (release, orders) = dispatch(&rules);
+    assert_eq!(release, LeftRelease::Dispatch);
+    assert_eq!(
+        orders.commands,
+        [
+            Command::Guard {
+                entity_id: target,
+                target: Some(TargetKind::Entity(target))
+            },
+            Command::Attack {
+                attacker_id: healer,
+                target_id: target
+            },
+        ]
+    );
+    assert!(
+        !orders.receivers.contains(&spy),
+        "unrelated receiver keeps its existing class path"
+    );
+    rules.bind_input_policy_for_test(
+        "MEDIC",
+        InputPolicy {
+            deny_manual_attack: true,
+            deny_self_guard_area: true,
+            ..Default::default()
+        },
+    );
+    let (release, orders) = dispatch(&rules);
+    assert_eq!(release, LeftRelease::Dispatch);
+    assert_eq!(
+        orders.commands,
+        [Command::Attack {
+            attacker_id: healer,
+            target_id: target
+        }]
+    );
+    assert!(
+        !orders.receivers.contains(&target),
+        "self continues after the skipped guard rung"
+    );
+
+    let rifle = sim
+        .spawn_object("GI", "Americans", 6, 5, 0, &rules)
+        .unwrap();
+    sim.entities_mut_for_test()
+        .get_mut(target)
+        .unwrap()
+        .selection
+        .set_selected_for_test(false);
+    sim.entities_mut_for_test()
+        .get_mut(rifle)
+        .unwrap()
+        .selection
+        .set_selected_for_test(true);
+    let group = [healer, rifle];
+    assert_eq!(cursor_owner(&sim, &rules, &group, target), Some(rifle));
+    let (release, orders) = infantry_class_branch_orders(
+        &sim,
+        &rules,
+        &group,
+        &group,
+        &hover,
+        OrderModifier::Normal,
+        crate::app::types::OrderMode::Move,
+        false,
+        &overlays,
+    )
+    .unwrap();
+    assert_eq!(
+        release,
+        LeftRelease::Select,
+        "the rifle owner's Select decides the whole group release"
+    );
+    assert!(
+        orders.commands.is_empty(),
+        "a lower-ranked medic cannot force group dispatch"
+    );
+}
+
+#[test]
+fn infantry_heal_overrides_attack_rejection_but_preserves_the_transport_and_enemy_successors() {
+    let mut rules = rules();
+    let mut sim = arena(&rules);
+    let medic = sim
+        .spawn_object("MEDIC", "Americans", 5, 5, 0, &rules)
+        .unwrap();
+    let patient = sim
+        .spawn_object("GI", "Americans", 8, 5, 0, &rules)
+        .unwrap();
+    let carrier = sim
+        .spawn_object("TRANSPORT", "Americans", 10, 5, 0, &rules)
+        .unwrap();
+    let enemy = sim
+        .spawn_object("GI", "Russians", 10, 7, 0, &rules)
+        .unwrap();
+    sim.entities_mut_for_test().get_mut(patient).unwrap().health =
+        crate::sim::combat::Health::new(99);
+    rules.bind_input_policy_for_test(
+        "MEDIC",
+        InputPolicy {
+            deny_manual_attack: true,
+            ..Default::default()
+        },
+    );
+    let overlays = crate::rules::overlay_types::OverlayTypeRegistry::empty();
+    let patient_hover = hover(patient, HoverTargetKind::FriendlyUnit);
+    assert_eq!(
+        cursor(&sim, &rules, medic, &patient_hover),
+        CursorFeedbackKind::InfantryHeal
+    );
+    assert_eq!(
+        crate::app::input::cursor::cursor_id_for_feedback(CursorFeedbackKind::InfantryHeal),
+        Some(crate::render::cursor_atlas::CursorId::NoTogglePower)
+    );
+    assert_eq!(
+        object_attack_click_command(
+            &sim,
+            &rules,
+            &overlays,
+            sim.session().current_house().unwrap(),
+            crate::app::types::OrderMode::Move,
+            OrderModifier::GuardArea,
+            true,
+            medic,
+            patient
+        ),
+        Some(Command::Attack {
+            attacker_id: medic,
+            target_id: patient
+        })
+    );
+    let carrier_hover = hover(carrier, HoverTargetKind::FriendlyUnit);
+    assert_eq!(
+        cursor(&sim, &rules, medic, &carrier_hover),
+        CursorFeedbackKind::Enter,
+        "a Foot with nonzero Passengers continues to the transport entry row"
+    );
+    assert!(
+        infantry_class_branch_orders(
+            &sim,
+            &rules,
+            &[medic],
+            &[medic],
+            &carrier_hover,
+            OrderModifier::Normal,
+            crate::app::types::OrderMode::Move,
+            false,
+            &overlays,
+        )
+        .is_none(),
+        "the healer prefix leaves the ordinary entry command owner reachable"
+    );
+    assert_eq!(
+        entry_orders(
+            &sim,
+            &rules,
+            &[medic],
+            &mut vec![medic],
+            &carrier_hover,
+            OrderModifier::Normal,
+            false,
+            Some(&overlays),
+        ),
+        Some(vec![Command::MegaMission {
+            entity_id: medic,
+            mission: crate::sim::mission::MissionType::Enter,
+            target: None,
+            destination: Some(TargetKind::Entity(carrier)),
+        }])
+    );
+    assert_eq!(
+        capability_cursor_for_hover(
+            &sim,
+            &[medic],
+            Some(medic),
+            &carrier_hover,
+            Some(&rules),
+            Some(&overlays),
+            OrderModifier::ForceMove,
+            true,
+            false
+        ),
+        CursorFeedbackKind::Enter,
+        "Alt's Move survives the healer prefix and reaches entry"
+    );
+    assert_eq!(
+        cursor(
+            &sim,
+            &rules,
+            medic,
+            &hover(enemy, HoverTargetKind::EnemyUnit)
+        ),
+        CursorFeedbackKind::Default,
+        "enemy healer action59 keeps the default arrow"
+    );
+    assert_eq!(
+        object_attack_click_command(
+            &sim,
+            &rules,
+            &overlays,
+            sim.session().current_house().unwrap(),
+            crate::app::types::OrderMode::Move,
+            OrderModifier::ForceFire,
+            false,
+            medic,
+            enemy
+        ),
+        None
+    );
+}

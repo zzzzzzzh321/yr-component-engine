@@ -14,7 +14,8 @@ pub use assets::adopt_saved_program;
 pub(crate) use assets::load_from_assets;
 pub use program::Program;
 pub(crate) use simulation::{
-    attach_entity, pre_receive_damage, preview_receive_damage, tick_entity, weapon_user,
+    attach_entity, live_entity_context, pre_receive_damage, preview_receive_damage, tick_entity,
+    weapon_user,
 };
 pub use vera_mod_api::{InputPolicy, Meter, Projection, Tint};
 

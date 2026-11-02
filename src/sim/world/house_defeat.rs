@@ -398,6 +398,7 @@ impl Simulation {
             .get(2)
             .and_then(|name| self.interner.get(name));
         !house.tracking().game_alive(
+            rules.survival_rule(),
             self.session.game_options().short_game,
             base_units,
             build_refinery_2,

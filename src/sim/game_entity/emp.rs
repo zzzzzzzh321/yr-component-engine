@@ -4,6 +4,10 @@
 //! Evidence/transport bounds: tools/rules_oracle/ares_emp.{py,json,meta.json};
 //! full chain ownership and residuals: docs/ares-emp.md.
 use super::GameEntity;
+use crate::map::entities::EntityCategory;
+use crate::rules::ruleset::RuleSet;
+use crate::sim::world::Simulation;
+use crate::util::native_x87::{MaskedX87Chop53 as X87, NativeF64Bits};
 use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -42,20 +46,165 @@ impl GameEntity {
     }
 }
 
+/// Installed10035C26..10035D74 ring/row cursor. The first ring differs
+/// from gamemd's static AreaDamage table, and this cursor extends to256.
+fn visit_emp_cells(center: (i16, i16), radius: i32, mut visit: impl FnMut((i16, i16))) {
+    visit(center);
+    for ring in 1..=radius {
+        let (mut x, mut y) = (-1i32, -ring);
+        let (mut advance, mut mirror_advance) = (true, true);
+        loop {
+            visit((
+                center.0.wrapping_add(x as i16),
+                center.1.wrapping_add(y as i16),
+            ));
+            if x == 1 && y == ring {
+                break;
+            }
+            if advance {
+                x += 1;
+                advance = x == 0;
+            } else if x < 0 {
+                x = -x;
+                advance = mirror_advance;
+            } else {
+                y += 1;
+                let magnitude = y.abs();
+                x = -2 * (ring - magnitude) - 1;
+                let edge = x + magnitude;
+                advance = edge >= 0;
+                if edge < 0 {
+                    x = if edge == -1 {
+                        x + 1
+                    } else {
+                        -ring + magnitude / 2
+                    };
+                }
+                mirror_advance = advance;
+            }
+        }
+    }
+}
+/// Native100767F2 squares signed wrapped XYZ differences, FSQRTs and
+/// compares against CellSpread*256. Compare squared nonnegative lengths
+/// instead: ordinary map deltas have exact integer squares in binary64,
+/// avoid integer sqrt truncation, and are deterministic on every target.
+/// Native FSQRT rounding at arbitrary fractional boundaries is a residual;
+/// native corpus pins exact zero, half-cell and nonzero-Z controls.
+fn emp_ground_in_range(
+    impact: crate::sim::projectile::ProjectileCoord,
+    coord: [i32; 3],
+    spread: f64,
+) -> bool {
+    let delta = [
+        coord[0].wrapping_sub(impact.x),
+        coord[1].wrapping_sub(impact.y),
+        coord[2].wrapping_sub(impact.z),
+    ];
+    let cutoff = spread * 256.0;
+    if cutoff < 0.0 || cutoff.is_nan() {
+        return false;
+    }
+    let square = delta.map(|value| {
+        let value = f64::from(value);
+        value * value
+    });
+    square[0] + square[1] + square[2] <= cutoff * cutoff
+}
+impl Simulation {
+    pub(crate) fn ares_effect_ground_targets(
+        &self,
+        impact: crate::sim::projectile::ProjectileCoord,
+        spread: f64,
+        rules: &RuleSet,
+    ) -> Vec<u64> {
+        use crate::map::{cell_index::NativeCellIdentity, resolved_terrain::NativeCellQuery};
+        use crate::sim::movement::{ground_pose, locomotor::MovementLayer};
+        let radius = (X87::fistp_i32_masked(X87::add(
+            X87::load_f64(NativeF64Bits::from_bits(spread.to_bits())),
+            X87::load_f64(NativeF64Bits::from_bits(0.99f64.to_bits())),
+        )) as u32)
+            .min(256) as i32;
+        let cells = self
+            .resolved_terrain
+            .as_ref()
+            .map(NativeCellQuery::canonical);
+        let center = crate::sim::movement::coord_cell(crate::sim::components::DriveCoord {
+            x: impact.x,
+            y: impact.y,
+            z: impact.z,
+        });
+        let mut candidates = Vec::new();
+        visit_emp_cells(center, radius, |requested| {
+            let (rx, ry, layer) = if let Some(cells) = cells.as_ref() {
+                //10035B2A..10035B48 indexes the fixed cell array and
+                // skips null, rather than stamping MapClass's Dummy.
+                let Some(index) = cells
+                    .terrain()
+                    .native_fixed_cell_index(requested.0, requested.1)
+                else {
+                    return;
+                };
+                let cell = NativeCellIdentity::Real(index);
+                let (x, y) = cells.coord(cell);
+                (
+                    x as u16,
+                    y as u16,
+                    if cells.flags(cell) & 0x100 != 0 {
+                        MovementLayer::Bridge
+                    } else {
+                        MovementLayer::Ground
+                    },
+                )
+            } else {
+                (
+                    requested.0 as u16,
+                    requested.1 as u16,
+                    MovementLayer::Ground,
+                )
+            };
+            if let Some(occupancy) = self.substrate.occupancy.get(rx, ry) {
+                for occupant in occupancy.iter_layer(layer) {
+                    let Some(entity) = self.substrate.entities.get(occupant.entity_id) else {
+                        continue;
+                    };
+                    if entity.category() == EntityCategory::Structure
+                        && self
+                            .interner
+                            .object_type(entity.type_ref(), rules)
+                            .is_some_and(|kind| kind.invisible_in_game)
+                    {
+                        continue;
+                    }
+                    let Some(coord) = ground_pose::target_get_coords(
+                        crate::sim::combat::TargetKind::Entity(occupant.entity_id),
+                        self,
+                        cells.as_ref(),
+                    ) else {
+                        continue;
+                    };
+                    if emp_ground_in_range(impact, [coord.x, coord.y, coord.z], spread) {
+                        candidates.push((entity.native_unique_id(), occupant.entity_id));
+                    }
+                }
+            }
+        });
+        // Native set comparator10035BA8/100765BA uses signed Abstract+10,
+        // including equality: two references to the same UID deliver once.
+        candidates.sort_by_key(|(uid, _)| *uid);
+        candidates.dedup_by_key(|(uid, _)| *uid);
+        candidates.into_iter().map(|(_, id)| id).collect()
+    }
+}
+
 #[cfg(feature = "ares")]
 mod receiver {
     use super::*;
-    use crate::map::entities::EntityCategory;
-    use crate::rules::{
-        locomotor_type::LocomotorKind, ruleset::RuleSet, warhead_type::WarheadType,
-    };
+    use crate::rules::{locomotor_type::LocomotorKind, warhead_type::WarheadType};
     use crate::sim::{
-        anim_class::AnimWorldCoord,
-        components::AnimClassSpawnDescriptor,
-        mission::MissionType,
-        world::{FrameEffects, Simulation},
+        anim_class::AnimWorldCoord, components::AnimClassSpawnDescriptor, mission::MissionType,
+        world::FrameEffects,
     };
-    use crate::util::native_x87::{MaskedX87Chop53 as X87, NativeF64Bits};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum EmpDelivery {
@@ -120,71 +269,6 @@ mod receiver {
             && !object.can_be_occupied
             && !object.overpowerable
     }
-    /// Installed10035C26..10035D74 ring/row cursor. The first ring differs
-    /// from gamemd's static AreaDamage table, and this cursor extends to256.
-    fn visit_emp_cells(center: (i16, i16), radius: i32, mut visit: impl FnMut((i16, i16))) {
-        visit(center);
-        for ring in 1..=radius {
-            let (mut x, mut y) = (-1i32, -ring);
-            let (mut advance, mut mirror_advance) = (true, true);
-            loop {
-                visit((
-                    center.0.wrapping_add(x as i16),
-                    center.1.wrapping_add(y as i16),
-                ));
-                if x == 1 && y == ring {
-                    break;
-                }
-                if advance {
-                    x += 1;
-                    advance = x == 0;
-                } else if x < 0 {
-                    x = -x;
-                    advance = mirror_advance;
-                } else {
-                    y += 1;
-                    let magnitude = y.abs();
-                    x = -2 * (ring - magnitude) - 1;
-                    let edge = x + magnitude;
-                    advance = edge >= 0;
-                    if edge < 0 {
-                        x = if edge == -1 {
-                            x + 1
-                        } else {
-                            -ring + magnitude / 2
-                        };
-                    }
-                    mirror_advance = advance;
-                }
-            }
-        }
-    }
-    /// Native100767F2 squares signed wrapped XYZ differences, FSQRTs and
-    /// compares against CellSpread*256. Compare squared nonnegative lengths
-    /// instead: ordinary map deltas have exact integer squares in binary64,
-    /// avoid integer sqrt truncation, and are deterministic on every target.
-    /// Native FSQRT rounding at arbitrary fractional boundaries is a residual;
-    /// native corpus pins exact zero, half-cell and nonzero-Z controls.
-    fn emp_ground_in_range(
-        impact: crate::sim::projectile::ProjectileCoord,
-        coord: [i32; 3],
-        spread: f64,
-    ) -> bool {
-        let delta = [
-            coord[0].wrapping_sub(impact.x),
-            coord[1].wrapping_sub(impact.y),
-            coord[2].wrapping_sub(impact.z),
-        ];
-        let cutoff = spread * 256.0;
-        if cutoff < 0.0 || cutoff.is_nan() {
-            return false;
-        }
-        let square = delta.map(|value| {
-            let value = f64::from(value);
-            value * value
-        });
-        square[0] + square[1] + square[2] <= cutoff * cutoff
-    }
     impl Simulation {
         /// Installed Bullet46920B calls this pre-effect even when Damage=0.
         /// The bounded producer collects the ground CellClass lists. Airborne
@@ -206,89 +290,6 @@ mod receiver {
                     log::debug!("Ares EMP victim {target} requires a later dependency chain");
                 }
             }
-        }
-        pub(crate) fn ares_effect_ground_targets(
-            &self,
-            impact: crate::sim::projectile::ProjectileCoord,
-            spread: f64,
-            rules: &RuleSet,
-        ) -> Vec<u64> {
-            use crate::map::{cell_index::NativeCellIdentity, resolved_terrain::NativeCellQuery};
-            use crate::sim::movement::{ground_pose, locomotor::MovementLayer};
-            let radius = (X87::fistp_i32_masked(X87::add(
-                X87::load_f64(NativeF64Bits::from_bits(spread.to_bits())),
-                X87::load_f64(NativeF64Bits::from_bits(0.99f64.to_bits())),
-            )) as u32)
-                .min(256) as i32;
-            let cells = self
-                .resolved_terrain
-                .as_ref()
-                .map(NativeCellQuery::canonical);
-            let center = crate::sim::movement::coord_cell(crate::sim::components::DriveCoord {
-                x: impact.x,
-                y: impact.y,
-                z: impact.z,
-            });
-            let mut candidates = Vec::new();
-            visit_emp_cells(center, radius, |requested| {
-                let (rx, ry, layer) = if let Some(cells) = cells.as_ref() {
-                    //10035B2A..10035B48 indexes the fixed cell array and
-                    // skips null, rather than stamping MapClass's Dummy.
-                    let Some(index) = cells
-                        .terrain()
-                        .native_fixed_cell_index(requested.0, requested.1)
-                    else {
-                        return;
-                    };
-                    let cell = NativeCellIdentity::Real(index);
-                    let (x, y) = cells.coord(cell);
-                    (
-                        x as u16,
-                        y as u16,
-                        if cells.flags(cell) & 0x100 != 0 {
-                            MovementLayer::Bridge
-                        } else {
-                            MovementLayer::Ground
-                        },
-                    )
-                } else {
-                    (
-                        requested.0 as u16,
-                        requested.1 as u16,
-                        MovementLayer::Ground,
-                    )
-                };
-                if let Some(occupancy) = self.substrate.occupancy.get(rx, ry) {
-                    for occupant in occupancy.iter_layer(layer) {
-                        let Some(entity) = self.substrate.entities.get(occupant.entity_id) else {
-                            continue;
-                        };
-                        if entity.category() == EntityCategory::Structure
-                            && self
-                                .interner
-                                .object_type(entity.type_ref(), rules)
-                                .is_some_and(|kind| kind.invisible_in_game)
-                        {
-                            continue;
-                        }
-                        let Some(coord) = ground_pose::target_get_coords(
-                            crate::sim::combat::TargetKind::Entity(occupant.entity_id),
-                            self,
-                            cells.as_ref(),
-                        ) else {
-                            continue;
-                        };
-                        if emp_ground_in_range(impact, [coord.x, coord.y, coord.z], spread) {
-                            candidates.push((entity.native_unique_id(), occupant.entity_id));
-                        }
-                    }
-                }
-            });
-            // Native set comparator10035BA8/100765BA uses signed Abstract+10,
-            // including equality: two references to the same UID deliver once.
-            candidates.sort_by_key(|(uid, _)| *uid);
-            candidates.dedup_by_key(|(uid, _)| *uid);
-            candidates.into_iter().map(|(_, id)| id).collect()
         }
         /// One actual10062320 delivery. Supported victims are human
         /// Drive/Walk and ordinary AI Drive, with no Team/managers/harvester/positive death threshold.

@@ -1661,13 +1661,9 @@ fn validate_fresh_transport_before_effects(
     materialization: FreshMapMaterialization,
     has_mapgen_continuation: bool,
     has_construction_journal: bool,
-    has_external_gameplay: bool,
 ) -> anyhow::Result<()> {
-    // The first SDK binds configuration during the authored load corridor.
-    // Reject the unsupported generated path before it can silently omit code.
-    if has_external_gameplay && materialization == FreshMapMaterialization::AcceptedGenerated {
-        anyhow::bail!("Mod SDK v1 requires an authored map; generated maps are not supported");
-    }
+    // Component admission belongs to the complete Rules/asset boundary below,
+    // independently of the accepted map's physical materialization.
     match materialization {
         FreshMapMaterialization::Authored => {
             if has_mapgen_continuation || has_construction_journal {
@@ -1778,7 +1774,6 @@ mod fresh_transport_tests {
             FreshMapMaterialization::AcceptedGenerated,
             true,
             false,
-            false,
         )
         .expect("missing journal is not an authored-classification signal");
         let err = construction_trace_after_fill(FreshMapMaterialization::AcceptedGenerated, None)
@@ -1793,7 +1788,6 @@ mod fresh_transport_tests {
                 FreshMapMaterialization::Authored,
                 true,
                 false,
-                false,
             )
             .is_err()
         );
@@ -1802,7 +1796,6 @@ mod fresh_transport_tests {
                 FreshMapMaterialization::Authored,
                 false,
                 true,
-                false,
             )
             .is_err()
         );
@@ -1811,44 +1804,8 @@ mod fresh_transport_tests {
                 FreshMapMaterialization::AcceptedGenerated,
                 false,
                 true,
-                false,
             )
             .is_err()
-        );
-    }
-    #[test]
-    fn module_declaration_rejects_generated_materialization_before_effects() {
-        let error = validate_fresh_transport_before_effects(
-            FreshMapMaterialization::AcceptedGenerated,
-            true,
-            true,
-            true,
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Mod SDK v1 requires an authored map")
-        );
-        assert!(
-            validate_fresh_transport_before_effects(
-                FreshMapMaterialization::AcceptedGenerated,
-                true,
-                true,
-                false,
-            )
-            .is_ok(),
-            "vanilla generation remains admitted"
-        );
-        assert!(
-            validate_fresh_transport_before_effects(
-                FreshMapMaterialization::Authored,
-                false,
-                false,
-                true,
-            )
-            .is_ok(),
-            "the authored corridor binds external gameplay"
         );
     }
 }
@@ -2231,6 +2188,14 @@ impl MapLoadInitial {
         );
         rules.bind_animation_sequences(&infantry_sequences);
         drop(variant_draw);
+        crate::sim::runtime::bind_scenario_gameplay_resources(
+            &mut rules,
+            asset_manager,
+            crate::sim::runtime::ScenarioGameplayProgram::Fresh(&mut simulation),
+            theater_ext,
+            &map_data.header.theater,
+        )
+        .expect("generated gameplay admission after final Rules and asset binding");
         // The native-id reservations the match load makes at this point: the
         // `[Tubes]` rows, then the launch branch's post-load particle system.
         simulation
@@ -2870,7 +2835,6 @@ fn load_map_first_step(
         materialization,
         mapgen_rng_continuation.is_some(),
         generated_construction_trace.is_some(),
-        services.asset_manager.contains("vera-mod.json"),
     )?;
     let game_mode_nonzero = campaign.is_none();
     if !game_mode_nonzero {
@@ -3324,6 +3288,21 @@ fn load_map_first_step(
                                     let skirmish_launch_session = match_launch_descriptor
                                         .as_ref()
                                         .map(|launch| launch.session());
+                                    if materialization == FreshMapMaterialization::AcceptedGenerated
+                                    {
+                                        // Final map/TMC Rules and the ordinary asset closure are complete.
+                                        // Bind before replay or population can construct any GameEntity.
+                                        crate::sim::runtime::bind_scenario_gameplay_resources(
+                                            &mut rules,
+                                            services.asset_manager,
+                                            crate::sim::runtime::ScenarioGameplayProgram::Fresh(
+                                                &mut staged_simulation,
+                                            ),
+                                            theater_ext,
+                                            &map_data.header.theater,
+                                        )
+                                        .map_err(anyhow::Error::msg)?;
+                                    }
                                     // `Read_Map_Section_And_IsoMapPacks @ 0x004ACE70` snapshots the fresh
                                     // prefix before theater Tile##Anim resolution, then sets the cursor from
                                     // that snapshot plus 0x2710. Only after that reservation does

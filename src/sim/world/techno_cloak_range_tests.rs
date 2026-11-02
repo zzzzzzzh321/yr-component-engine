@@ -77,9 +77,15 @@ fn retail_sub_in_range_attack_blocks_cloak_before_weapon_rearm() {
     // Inspect the same producer facts before mission AI has an opportunity to
     // fire: this distinguishes the target-range gate from the rearm gate.
     assert!(
-        !super::stock_cloak_tick_facts(&sim, sub, rules, None)
-            .unwrap()
-            .can_auto_cloak
+        !super::stock_cloak_tick_facts(
+            &sim,
+            sub,
+            rules,
+            None,
+            vera_mod_api::CloakRuntimePolicy::default()
+        )
+        .unwrap()
+        .can_auto_cloak
     );
     let grid = sim.path_grid_snapshot().unwrap();
     sim.advance_tick(&[], Some(rules), Some(&grid), None, 67);

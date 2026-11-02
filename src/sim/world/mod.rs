@@ -8874,3 +8874,6 @@ mod radiation_overlap_tests;
 
 #[cfg(test)]
 mod building_occupant_storage_tests;
+
+#[cfg(test)]
+mod sdk_house_survival_tests;

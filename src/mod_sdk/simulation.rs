@@ -18,7 +18,8 @@ fn entity_context(
     rules: &crate::rules::ruleset::RuleSet,
     interner: &crate::sim::intern::StringInterner,
 ) -> api::EntityContext {
-    let object = interner.object_type(entity.type_ref(), rules);
+    let object =
+        interner.object_type_in_category(entity.type_ref(), entity.category().into(), rules);
     api::EntityContext {
         id: entity.stable_id(),
         type_name: interner.resolve(entity.type_ref()).into(),
@@ -41,7 +42,7 @@ fn entity_context(
     }
 }
 
-fn live_entity_context(
+pub(crate) fn live_entity_context(
     sim: &crate::sim::world::Simulation,
     id: u64,
     rules: &crate::rules::ruleset::RuleSet,

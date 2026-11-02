@@ -105,9 +105,12 @@ impl Simulation {
 
         // Ext+9D is IsOperated's no-operator fast-path cache (10045440),
         // not Deactivated or DriverKilled. VERA has no such cache to clear.
-        self.reset_self_attach_effect_for_type_change(id, old_type, rules);
-        if let Some(actor) = self.substrate.entities.get_mut(id) {
-            actor.recompute_ares_attached_stats(rules, &self.interner);
+        self.reset_component_effects_for_type_change(id, old_type, rules);
+        if !rules.external_effects_enabled() {
+            self.reset_self_attach_effect_for_type_change(id, old_type, rules);
+            if let Some(actor) = self.substrate.entities.get_mut(id) {
+                actor.recompute_ares_attached_stats(rules, &self.interner);
+            }
         }
         self.destroy_spotlight_for_parent(
             id,

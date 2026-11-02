@@ -539,6 +539,122 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "requires the actual reference component in VERA_SDK_REFERENCE_WASM"]
+    fn generated_component_admission_uses_final_rules_before_first_constructor() {
+        use crate::assets::asset_manager::AssetManager;
+        use crate::map::construction_trace::{RmgConstructionPhase, RmgConstructionTrace};
+        use crate::map::source::test_support::TestDirectory;
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::process_owner::{NativeRulesProcessOwner, NativeScenarioRulesPrefix};
+        use crate::sim::native_identity::build_noncampaign_fresh_id_prefix;
+
+        let wasm = std::fs::read(std::env::var_os("VERA_SDK_REFERENCE_WASM").unwrap()).unwrap();
+        let directory = TestDirectory::new("generated-component-admission");
+        directory.write("gameplay.wasm", &wasm);
+        directory.write(
+            "vera-mod.json",
+            &serde_json::to_vec(&serde_json::json!({
+                "api_version": vera_mod_api::API_VERSION,
+                "program": "gameplay.wasm",
+                "sha256": crate::util::sha256::sha256_hex(&wasm),
+            }))
+            .unwrap(),
+        );
+        let assets = AssetManager::from_loose_root_for_test(directory.path());
+        let mut owner = NativeRulesProcessOwner::from_cold_start_sources(
+            IniFile::from_str(
+                "[BuildingTypes]\n0=TEST\n[TEST]\nStrength=300\nArmor=none\nShieldType=SDKShield\nNoManualFire=no\n\
+                 [ShieldTypes]\n0=SDKShield\n[SDKShield]\nStrength=100\nArmor=none\n",
+            ),
+            None,
+            IniFile::empty(),
+            Default::default(),
+            Default::default(),
+        ).unwrap();
+        let map = crate::map::map_file::MapFile::from_bytes(
+            b"[Map]\nTheater=TEMPERATE\nSize=0,0,40,40\nLocalSize=2,2,36,32\n\
+              [Structures]\n0=Americans,TEST,256,7,9,0,None\n\
+              [IsoMapPack5]\n1=CAAEABUAAAAAEQAA\n",
+        )
+        .unwrap();
+        let mode = IniFile::from_str("[VeraFeatures]\nShield=no\n");
+        let post_map = IniFile::from_str("[VeraFeatures]\nShield=yes\n[TEST]\nNoManualFire=yes\n");
+        let (loaded, ()) = owner
+            .load_scenario_with_post_map(
+                NativeScenarioRulesPrefix::RandomMap(Some(&mode)),
+                &map.ini,
+                &post_map,
+                |_| (),
+            )
+            .unwrap();
+        let (mut rules, _, art, _) = loaded.into_parts();
+        rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
+        let descriptor = crate::sim::scenario_session::ScenarioDescriptor {
+            map_width: 80,
+            map_height: 80,
+            ..Default::default()
+        };
+        let mut sim = Simulation::from_descriptor(&descriptor);
+        bind_scenario_gameplay_resources(
+            &mut rules,
+            &assets,
+            ScenarioGameplayProgram::Fresh(&mut sim),
+            "tem",
+            "TEMPERATE",
+        )
+        .unwrap();
+        assert!(sim.entities().is_empty());
+        assert!(
+            rules.object("TEST").unwrap().no_manual_fire(),
+            "final post-map Rules own configuration"
+        );
+        sim.native_unique_ids =
+            Some(build_noncampaign_fresh_id_prefix(0, 0, 0, 0, 0, 0, 40, 40).into_cursor());
+        let mut trace = RmgConstructionTrace::default();
+        trace.push_emitted(
+            RmgConstructionPhase::BridgeRepairHut,
+            "TEST".into(),
+            0,
+            (7, 9),
+        );
+        let inits = sim
+            .replay_staged_generated_construction_trace(&trace)
+            .unwrap();
+        let expected_word = inits.entry(0).unwrap().techno_ctor_random_word;
+        populate_staged_scenario_with_generated_inits(
+            &mut sim,
+            &map,
+            &crate::map::resolved_terrain::test_flat_ground_grid(80),
+            "TEMPERATE",
+            &rules,
+            Some(rules.overlay_registry()),
+            None,
+            crate::map::basic::BridgeDestroyabilityMode::CampaignOrEditor,
+            &descriptor,
+            Some(&inits),
+            |sim| {
+                let house = sim.interner.intern("Americans");
+                sim.houses
+                    .register(crate::sim::house_state::HouseState::new(
+                        house, 0, None, true, 0, 10,
+                    ));
+            },
+        )
+        .unwrap();
+        let first = sim
+            .entities()
+            .values()
+            .next()
+            .expect("generated first building");
+        assert_eq!(first.techno_ctor_random_word(), expected_word);
+        assert!(
+            !first.mod_component().is_empty(),
+            "first constructor must attach through the admitted program"
+        );
+        assert_eq!(first.mod_presentation().meters[0].current, 100);
+    }
+
     fn retail_generated_terrain_fixture() -> Option<(Simulation, RuleSet, u32)> {
         use crate::map::construction_trace::{RmgConstructionPhase, RmgConstructionTrace};
         use crate::map::map_file::MapFile;
@@ -1171,6 +1287,41 @@ pub enum AuthoredScenarioLoadError {
     Population(#[from] ScenarioPopulationError),
 }
 
+/// The existing program authority supplied by one scenario lifecycle.
+pub enum ScenarioGameplayProgram<'a> {
+    Fresh(&'a mut Simulation),
+    Saved(&'a Simulation),
+}
+
+/// Bind gameplay against complete scenario Rules, then extend the tolerant
+/// animation closure before constructors or rendering preparation consume it.
+/// Fresh authored/generated loads configure once; saved loads adopt the exact
+/// retained program without reading current INI.
+pub fn bind_scenario_gameplay_resources(
+    rules: &mut RuleSet,
+    assets: &crate::assets::asset_manager::AssetManager,
+    program: ScenarioGameplayProgram<'_>,
+    theater_ext: &str,
+    theater_name: &str,
+) -> Result<(), String> {
+    match program {
+        ScenarioGameplayProgram::Fresh(sim) => {
+            rules.bind_external_mod(assets)?;
+            sim.external_mod = rules.external_mod.as_deref().cloned();
+        }
+        ScenarioGameplayProgram::Saved(sim) => {
+            crate::mod_sdk::adopt_saved_program(rules, sim, assets)?;
+        }
+    }
+    // Configure may publish effect resources after the ordinary closure pass.
+    // Saved loading's later strict pass restores these same roots through the
+    // common tolerant closure; neither route creates AnimClass objects here.
+    let component_anim_roots =
+        crate::rules::effect_asset_catalog::component_effect_anim_roots(rules);
+    rules.bind_anim_class_assets(&component_anim_roots, assets, theater_ext, theater_name);
+    Ok(())
+}
+
 /// Consume the fresh authored map-load corridor on the one staged Simulation.
 /// One `LoadCellRecalcState` and one native-ID cursor span raw Tubes,
 /// OverlayPack + first Recalc, Terrain/queues/Technos/Smudges, scalar deletion,
@@ -1197,10 +1348,14 @@ pub fn finalize_and_populate_staged_authored_scenario<F>(
 where
     F: FnOnce(&mut Simulation, &RuleSet),
 {
-    rules
-        .bind_external_mod(assets)
-        .map_err(AuthoredScenarioLoadError::Gameplay)?;
-    sim.external_mod = rules.external_mod.as_deref().cloned();
+    bind_scenario_gameplay_resources(
+        rules,
+        assets,
+        ScenarioGameplayProgram::Fresh(&mut *sim),
+        theater_ext,
+        theater_name,
+    )
+    .map_err(AuthoredScenarioLoadError::Gameplay)?;
     // ReadMap4AD0C5 materializes Home only after the earlier start-slot pass.
     // The updated map feeds the single Scenario waypoint table, camera and
     // later trigger/Team consumers below. Generated and saved worlds bypass it.

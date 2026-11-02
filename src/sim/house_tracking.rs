@@ -149,7 +149,7 @@ mod phobos;
 pub(crate) use phobos::{PhobosLimboControl, PhobosPlacement};
 
 /// The type facts the counters test, fixed when the Techno is constructed
-/// ([`TrackingFacts::of`]).
+/// or rebound by same-object conversion ([`TrackingFacts::of`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TrackingFacts {
     /// `DontScore=`: the score bookkeeping and the house counts skip the
@@ -188,7 +188,6 @@ pub struct TrackingFacts {
     storage_capacity: i32,
     /// Ares10021F70 resolves TypeExt.KeepAlive before the original score
     /// exclusions. Retained with the other constructor-bound type facts.
-    #[cfg(feature = "ares")]
     keep_alive: bool,
 }
 
@@ -235,10 +234,18 @@ impl TrackingFacts {
             } else {
                 0
             },
-            #[cfg(feature = "ares")]
-            keep_alive: ty.keep_alive().unwrap_or(
-                category == EntityCategory::Structure && !ty.insignificant && !ty.dont_score,
-            ),
+            keep_alive: rules.survival_rule() == vera_mod_api::SurvivalRule::TrackedPresence
+                && (if rules.match_rules_policy().is_some() {
+                    // Unset in a frozen external policy means the canonical
+                    // type default, never today's built-in extension INI.
+                    ty.type_resource_policy()
+                        .and_then(|policy| policy.keep_alive)
+                } else {
+                    ty.keep_alive()
+                })
+                .unwrap_or(
+                    category == EntityCategory::Structure && !ty.insignificant && !ty.dont_score,
+                ),
         }
     }
 
@@ -249,7 +256,6 @@ impl TrackingFacts {
             b"building-storage-capacity-input-v1".hash(hasher);
             self.storage_capacity.hash(hasher);
         }
-        #[cfg(feature = "ares")]
         if self.keep_alive {
             b"ares-keep-alive-input-v1".hash(hasher);
         }
@@ -494,7 +500,6 @@ pub struct HouseTracking {
     storage_capacity: i32,
     /// Ares HouseExt+18, constructor10021050; raw signed event total, not a
     /// projection of active objects. Saved by1001F4D7 and loaded by1001F366.
-    #[cfg(feature = "ares")]
     keep_alive: i32,
 }
 
@@ -515,7 +520,6 @@ impl HouseTracking {
         let facts = entity.tracking_facts;
         // Ares4FF71B/4FF563 ->10021F70 runs before the original early return.
         // Explicit KeepAlive=yes also counts insignificant/DontScore objects.
-        #[cfg(feature = "ares")]
         if facts.keep_alive {
             self.keep_alive = self.keep_alive.wrapping_add(delta);
         }
@@ -719,7 +723,6 @@ impl HouseTracking {
             b"house-storage-capacity-v1".hash(hasher);
             self.storage_capacity.hash(hasher);
         }
-        #[cfg(feature = "ares")]
         if self.keep_alive != 0 {
             b"ares-house-keep-alive-v1".hash(hasher);
             self.keep_alive.hash(hasher);
@@ -892,13 +895,13 @@ impl HouseTracking {
     /// it must test owner and (!InLimbo || ParasiteImUsing), without health gates.
     pub(crate) fn game_alive(
         &self,
+        survival_rule: vera_mod_api::SurvivalRule,
         short_game: bool,
         base_units: impl IntoIterator<Item = Option<InternedId>>,
         _build_refinery_2: Option<InternedId>,
         _foot_present: impl Fn(EntityCategory) -> bool,
     ) -> bool {
-        #[cfg(feature = "ares")]
-        {
+        if survival_rule == vera_mod_api::SurvivalRule::TrackedPresence {
             if self.keep_alive != 0 {
                 return true;
             }
@@ -908,15 +911,14 @@ impl HouseTracking {
                     .flatten()
                     .any(|unit| self.unit_types.get(&unit).copied().unwrap_or(0) != 0);
             }
-            [
+            return [
                 (EntityCategory::Unit, self.active_units()),
                 (EntityCategory::Infantry, self.active_infantry()),
                 (EntityCategory::Aircraft, self.active_aircraft()),
             ]
             .into_iter()
-            .any(|(category, total)| total != 0 && _foot_present(category))
+            .any(|(category, total)| total != 0 && _foot_present(category));
         }
-        #[cfg(not(feature = "ares"))]
         {
             if short_game {
                 let mut units = base_units.into_iter();

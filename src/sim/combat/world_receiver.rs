@@ -2920,7 +2920,6 @@ fn continue_area_damage(
 /// Installed46920B ->100536E0's local extension-effect coordinate. The
 /// original receiver still consumes its unchanged impact argument. Kept here
 /// with the single pre-effect owner, using the shared5F6440 distance port.
-#[cfg(feature = "ares")]
 pub(crate) fn ares_warhead_effect_coordinate(
     world: &Simulation,
     detonation: &ProjectileDetonation,
@@ -3012,8 +3011,7 @@ fn emit_detonation_receivers<'r>(
 
     // Installed Ares46920B ->100536E0/10052870 runs after radiation,
     // before the exclusive special/ordinary damage arms (including Damage=0).
-    #[cfg(feature = "ares")]
-    {
+    if cfg!(feature = "ares") || rules.external_effects_enabled() {
         let coordinate = ares_warhead_effect_coordinate(world, detonation);
         // Parent100536E0 captures OwnerHouse before EMP/tag callbacks.
         let source_house = world
@@ -3021,6 +3019,7 @@ fn emit_detonation_receivers<'r>(
             .entities
             .get(detonation.source_id)
             .map(|source| source.owner());
+        #[cfg(feature = "ares")]
         world.apply_ares_emp_detonation(
             coordinate,
             Some(detonation.source_id),
@@ -3028,7 +3027,11 @@ fn emit_detonation_receivers<'r>(
             rules,
             effects,
         );
-        world.apply_ares_attach_effect_detonation(coordinate, source_house, warhead, rules);
+        world.apply_component_effects_detonation(coordinate, source_house, warhead, rules);
+        #[cfg(feature = "ares")]
+        if !rules.external_effects_enabled() {
+            world.apply_ares_attach_effect_detonation(coordinate, source_house, warhead, rules);
+        }
     }
 
     // `BulletClass::DetonateAtCoord @ 0x0046978e` is the chain's only

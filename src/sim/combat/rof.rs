@@ -134,9 +134,8 @@ pub(crate) struct RofQuery<'a> {
     /// The owner's ROF bias (`House+0x1A8`).
     pub house_rof: NativeF64Bits,
     /// Installed Ares GetROF hooks10047A40/10047A60. None describes the
-    /// unpatched retail kernel for native controls; Ares gameplay supplies
-    /// Some even at identity, including the building-ammo shortcut bypass.
-    #[cfg(feature = "ares")]
+    /// unpatched retail kernel for native controls; the frozen runtime policy
+    /// supplies Some even at identity, including the building-ammo shortcut bypass.
     pub attached_rof: Option<NativeF64Bits>,
     /// The rank holds the ROF ability: a veteran with the type's veteran byte
     /// (`+0x2A0`), or an elite with either byte (`+0x2A0`, `+0x2B2`).
@@ -177,10 +176,9 @@ pub(crate) fn get_rof(query: &RofQuery<'_>, rng: &mut SimRng) -> i32 {
     // returns6FCFC1 unconditionally, past the native Ammo>1 ->1 branch.
     // External components request the same continuation through a generic
     // policy; no timer, ammo value or random stream is duplicated here.
-    let stock_building_shortcut =
-        query.building_ammo.is_some_and(|ammo| ammo > 1) && !query.use_weapon_rof;
-    #[cfg(feature = "ares")]
-    let stock_building_shortcut = stock_building_shortcut && query.attached_rof.is_none();
+    let stock_building_shortcut = query.building_ammo.is_some_and(|ammo| ammo > 1)
+        && !query.use_weapon_rof
+        && query.attached_rof.is_none();
     if stock_building_shortcut {
         return 1;
     }
@@ -210,7 +208,6 @@ pub(crate) fn get_rof(query: &RofQuery<'_>, rng: &mut SimRng) -> i32 {
     // Installed Ares TechnoClass_GetROF_AttachEffect10047A40 hooks6FD0BF,
     // after FILD weaponROF, before House FMUL6FD0C5 and jitter FIADD6FD0CB.
     // Direct particle/sonic and mid-burst returns never reach that hook.
-    #[cfg(feature = "ares")]
     let weapon_rof = query
         .attached_rof
         .map_or(weapon_rof, |factor| X::mul(weapon_rof, X::load_f64(factor)));
@@ -267,7 +264,6 @@ mod tests {
             burst_index: 1,
             unit_burst_delays: None,
             house_rof: NativeF64Bits::ONE,
-            #[cfg(feature = "ares")]
             attached_rof: None,
             rof_ability: false,
             veteran_rof: 1.0,
@@ -287,6 +283,11 @@ mod tests {
         let mut expected_rng = SimRng::new(31);
         expected_rng.next_range_u32_inclusive(0, 2);
         assert_eq!(component_rng.logical_state(), expected_rng.logical_state());
+        query.use_weapon_rof = false;
+        query.attached_rof = Some(NativeF64Bits::ONE);
+        let mut identity_rng = SimRng::new(31);
+        assert_eq!(get_rof(&query, &mut identity_rng), 46);
+        assert_eq!(identity_rng.logical_state(), expected_rng.logical_state());
         query.weapon = None;
         assert_eq!(get_rof(&query, &mut component_rng), 1);
         assert_eq!(component_rng.logical_state(), expected_rng.logical_state());
@@ -299,7 +300,7 @@ mod tests {
         // Only class/weapon/House query boundaries were supplied. These four
         // cases distinguish pre-jitter multiplication, decimal chop and the
         // installed BuildingHack10047A60 bypass; no new native corpus.
-        for (raw_rof, house, _factor, ammo, stock, ares) in [
+        for (raw_rof, house, factor, ammo, stock, ares) in [
             (
                 45,
                 0x3ff0_0000_0000_0000,
@@ -335,7 +336,7 @@ mod tests {
         ] {
             let ini = IniFile::from_str(&format!("[GUN]\nROF={raw_rof}\nBurst=1\n"));
             let weapon = WeaponType::from_ini_section("GUN", ini.section("GUN").unwrap());
-            let query = RofQuery {
+            let mut query = RofQuery {
                 building_ammo: ammo,
                 use_weapon_rof: false,
                 weapon: Some(&weapon),
@@ -343,8 +344,7 @@ mod tests {
                 burst_index: 1,
                 unit_burst_delays: None,
                 house_rof: NativeF64Bits::from_bits(house),
-                #[cfg(feature = "ares")]
-                attached_rof: Some(NativeF64Bits::from_bits(_factor)),
+                attached_rof: Some(NativeF64Bits::from_bits(factor)),
                 rof_ability: false,
                 veteran_rof: 1.0,
                 occupants: None,
@@ -353,12 +353,15 @@ mod tests {
                 bunker_rof_multiplier: 1.0,
             };
             let mut rng = SimRng::new(31);
-            assert_eq!(
-                get_rof(&query, &mut rng),
-                if cfg!(feature = "ares") { ares } else { stock }
-            );
+            assert_eq!(get_rof(&query, &mut rng), ares);
             let mut expected_rng = SimRng::new(31);
-            if cfg!(feature = "ares") || ammo.is_none() {
+            expected_rng.next_range_u32_inclusive(0, 2);
+            assert_eq!(rng.logical_state(), expected_rng.logical_state());
+            query.attached_rof = None;
+            let mut rng = SimRng::new(31);
+            assert_eq!(get_rof(&query, &mut rng), stock);
+            let mut expected_rng = SimRng::new(31);
+            if ammo.is_none() {
                 expected_rng.next_range_u32_inclusive(0, 2);
             }
             assert_eq!(rng.logical_state(), expected_rng.logical_state());
@@ -423,7 +426,6 @@ mod tests {
                 burst_index: int("burst_index", 1),
                 unit_burst_delays: (class == 1).then_some(delays),
                 house_rof: NativeF64Bits::from_bits(hex("house_bits", "3ff0000000000000")),
-                #[cfg(feature = "ares")]
                 attached_rof: None,
                 rof_ability: (veteran && veteran_byte) || (elite && (veteran_byte || elite_byte)),
                 veteran_rof: f64::from_bits(hex("veteran_bits", "3fe3333340000000")),

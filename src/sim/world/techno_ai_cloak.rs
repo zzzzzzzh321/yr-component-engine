@@ -25,6 +25,7 @@ fn stock_cloak_tick_facts(
     id: u64,
     rules: &RuleSet,
     registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+    policy: vera_mod_api::CloakRuntimePolicy,
 ) -> Option<crate::sim::cloak_disguise::CloakTickFacts> {
     let entity = sim.substrate.entities.get(id)?;
     // Foot vtables (Unit7F5C70, Infantry7EB058, Aircraft7E22A4) all
@@ -36,7 +37,9 @@ fn stock_cloak_tick_facts(
     {
         return None;
     }
-    let object = sim.interner.object_type(entity.type_ref(), rules)?;
+    let object =
+        sim.interner
+            .object_type_in_category(entity.type_ref(), entity.category().into(), rules)?;
     let rank_cloak = has_weapon_ability(entity.veterancy.rank_kind(), object, Ability::Cloak);
     let intrinsic_cloak = entity.stealth_ability.active(object.cloakable);
     // vt+0x1D4 / vt+0x1D8 (`0x0070C5B0` / `0x0070C5C0`, reading
@@ -47,7 +50,7 @@ fn stock_cloak_tick_facts(
     // the locomotor's ILocomotion+0x80 at `0x004DBDDD`, asked only under
     // CloakStop.
     let moving_blocks_cloak = if intrinsic_cloak && object.cloak_stop {
-        if crate::rules::ARES_ENABLED {
+        if policy.use_motion_query {
             // FootClass_IsCloakable_CloakStop10048250 dispatches ILocomotion
             // +10, not stock +80. Missing locomotor is an invalid native state.
             crate::sim::movement::motion_query::is_moving(entity)?
@@ -85,22 +88,19 @@ fn stock_cloak_tick_facts(
     let paralyzed = entity.parasite.is_paralyzed(sim.session.binary_frame());
     // Ares ShouldNotCloak10043A40 applies the same blockers to rank cloak
     // and raw ability, and rejects parachutes and deactivated self-cloakers.
-    let active_cloak = if crate::rules::ARES_ENABLED {
-        (is_cloakable || rank_cloak) && !entity.deactivated.is_offline()
-    } else {
-        is_cloakable || intrinsic_cloak || rank_cloak
-    };
-    let ares_admission = !crate::rules::ARES_ENABLED
-        || (object.cloak_allowed()
-            && entity.parachute_animation().is_none()
-            && !emp_active
-            && !paralyzed
-            && !chrono_active);
-    let state_zero_head_allows = if crate::rules::ARES_ENABLED {
-        ares_admission && active_cloak
-    } else {
-        is_cloakable && !emp_active && !paralyzed && !chrono_active || rank_cloak
-    };
+    let blockers_allow = !emp_active && !paralyzed && !chrono_active;
+    let offline_allows = !policy.offline_blocks_ability || !entity.deactivated.is_offline();
+    let motion_admits_intrinsic =
+        is_cloakable || (!policy.motion_blocks_raw_ability && intrinsic_cloak);
+    let active_cloak = (motion_admits_intrinsic || rank_cloak) && offline_allows;
+    // Ares ShouldNotCloak10043A40's optional common gates precede both the
+    // automatic cloak and the sustain test. The retail state-zero head still
+    // tests blockers on intrinsic ability before its rank-CLOAK alternative.
+    let common_admission = (!policy.check_type_permission || object.cloak_allowed())
+        && (!policy.deny_parachuted || entity.parachute_animation().is_none())
+        && (!policy.blockers_apply_to_rank || blockers_allow);
+    let state_zero_head_allows =
+        common_admission && offline_allows && (is_cloakable && blockers_allow || rank_cloak);
 
     // CloakingTick's pre-CanAuto destination exclusion is Contact_With_Whom(0)
     // resolving to a WeaponsFactory building (naval-yard repair contact), not
@@ -130,13 +130,13 @@ fn stock_cloak_tick_facts(
     // the type seed and permanent crate grant share this capability owner.
     // Native also ORs raw +0x3D2 independently of vt+0x288: CloakStop can
     // suppress the moving Foot virtual without removing its retained ability.
-    let can_auto_cloak = ares_admission && (active_cloak || cloaked_by_own_house)
+    let can_auto_cloak = common_admission && (active_cloak || cloaked_by_own_house)
         // 2. already fully cloaked.
         && cloak_state != 2
         // 3. ROF rearm countdown at +0x2EC/+0x2F4. Preserve native lazy order:
         // it rejects before the retained-target weapon/range query.
         // Ares CloakAllowed10043990 asks recloak before weapon rearm.
-        && (!crate::rules::ARES_ENABLED || entity.cloak.as_ref().is_some_and(|cloak| cloak.recloak_delay().expired(current_frame)))
+        && (!policy.check_recloak_before_weapon || entity.cloak.as_ref().is_some_and(|cloak| cloak.recloak_delay().expired(current_frame)))
         && entity.rearm_timer.timer().expired(current_frame)
         // 4. `Target(+0x2B4) != 0 && CanFireAtTarget(vt+0x3AC)`.
         //    6FBEF4..6FBF01 calls the canonical selected-weapon/InRange owner
@@ -159,7 +159,7 @@ fn stock_cloak_tick_facts(
         //    producer admits Foot categories only, so the Foot test holds.
         && !(entity.lift.source().is_some() && entity.lift.swap_active())
         // 8. `GetHeight() < 1`.
-        && ((crate::rules::ARES_ENABLED && active_cloak)
+        && ((policy.allow_active_ability_above_ground && active_cloak)
             || crate::sim::movement::air_movement::current_fly_height(entity, sim.resolved_terrain.as_ref()) < 1);
 
     // `TechnoClass::ShouldUncloak @ 0x006FBC90`:
@@ -173,17 +173,9 @@ fn stock_cloak_tick_facts(
     // nor CloakingTick's head reads the Unit deployment flags.
     // The `|| +0x3D2` disjunct is the raw stealth byte;
     // Type seed and crate grant both survive moving with CloakStop.
-    let should_uncloak = if crate::rules::ARES_ENABLED {
-        !ares_admission || !(active_cloak || cloaked_by_own_house)
-    } else {
-        if ((is_cloakable || intrinsic_cloak) && !emp_active && !paralyzed && !chrono_active)
-            || rank_cloak
-        {
-            false
-        } else {
-            !cloaked_by_own_house
-        }
-    };
+    let sustained_ability =
+        offline_allows && (motion_admits_intrinsic && blockers_allow || rank_cloak);
+    let should_uncloak = !common_admission || !(sustained_ability || cloaked_by_own_house);
     Some(crate::sim::cloak_disguise::CloakTickFacts::new(
         current_frame,
         // CloakingTick6FB7FD..6FB823 applies this contact exclusion before
@@ -314,7 +306,13 @@ pub(crate) fn sensor_reevaluate_stock_cloak(
     if !owner_cloak_field_bit(sim, owner, cell.0, cell.1) {
         return SensorCloakReevaluation::default();
     }
-    let Some(facts) = stock_cloak_tick_facts(sim, id, rules, registry) else {
+    let Some(facts) = stock_cloak_tick_facts(
+        sim,
+        id,
+        rules,
+        registry,
+        rules.effect_runtime_policy().cloak,
+    ) else {
         return SensorCloakReevaluation::default();
     };
     if !facts.can_auto_cloak {
@@ -645,7 +643,14 @@ fn original_health_ratio_corpus_populates_cloak_tick_facts() {
         );
         entity.cloak = Some(crate::sim::cloak_disguise::CloakRuntime::new(0));
         sim.substrate.entities.insert(entity);
-        let facts = stock_cloak_tick_facts(&sim, 1, &rules, None).expect("cloakable unit facts");
+        let facts = stock_cloak_tick_facts(
+            &sim,
+            1,
+            &rules,
+            None,
+            vera_mod_api::CloakRuntimePolicy::default(),
+        )
+        .expect("cloakable unit facts");
         assert_eq!(
             facts.health_above_red, row.output.cloak_above_red,
             "{row:?}"
@@ -701,7 +706,13 @@ pub(super) fn tick_stock_cloak_producer(
         crate::sim::cloak_disguise::CloakRuntime::install_if_absent(&mut entity.cloak, frame);
     }
 
-    let Some(facts) = stock_cloak_tick_facts(sim, id, rules, registry) else {
+    let Some(facts) = stock_cloak_tick_facts(
+        sim,
+        id,
+        rules,
+        registry,
+        rules.effect_runtime_policy().cloak,
+    ) else {
         return;
     };
     let result = sim

@@ -300,6 +300,8 @@ pub(crate) enum CursorFeedbackKind {
     Move,
     AttackMove,
     GuardArea,
+    /// Infantry action27; native Display4AB45A uses row60 (frame384).
+    InfantryHeal,
     FriendlyUnit,
     FriendlyStructure,
     EnemyUnit,

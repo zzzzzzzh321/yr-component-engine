@@ -563,7 +563,6 @@ pub struct FootSpeedState {
     /// TechnoExt+90 crate baseline above. None denotes an unchanged baseline.
     /// The attachment owner updates it synchronously after native mutations;
     /// snapshot restore validates it against that owner's ordered vector.
-    #[cfg(feature = "ares")]
     #[serde(default)]
     attached_speed: Option<crate::util::native_x87::NativeF64Bits>,
     /// Foot+6B5, constructor0 at4D3444. Drive's straight/CrusherAll
@@ -578,7 +577,6 @@ impl Default for FootSpeedState {
         Self {
             applied_fraction: crate::util::native_x87::NativeF64Bits::POSITIVE_ZERO,
             crate_multiplier: crate::util::native_x87::NativeF64Bits::ONE,
-            #[cfg(feature = "ares")]
             attached_speed: None,
             crush_slowdown: false,
         }
@@ -612,16 +610,14 @@ impl FootSpeedState {
     }
 
     /// Live Foot+580. Crate eligibility continues to read the permanent
-    /// baseline; GetCurrentSpeed reads this derived value under Ares.
+    /// baseline; GetCurrentSpeed reads the committed derived value.
     pub fn effective_multiplier(&self) -> crate::util::native_x87::NativeF64Bits {
-        #[cfg(feature = "ares")]
         if let Some(multiplier) = self.attached_speed {
             return multiplier;
         }
         self.crate_multiplier
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn set_attached_speed(
         &mut self,
         multiplier: crate::util::native_x87::NativeF64Bits,
@@ -854,6 +850,51 @@ pub struct BunkerWallAnimEvent {
 mod tests {
     use super::*;
     use crate::sim::movement::DriveLocomotionRuntime;
+
+    #[test]
+    fn attachment_projections_restore_without_consuming_permanent_crate_bonuses() {
+        use crate::sim::{cloak_disguise::StealthAbility, crates::CrateMultipliers};
+        use crate::util::native_x87::NativeF64Bits as Bits;
+        let two = Bits::from_bits(2.0_f64.to_bits());
+        let half = Bits::from_bits(0.5_f64.to_bits());
+        let mut multipliers = CrateMultipliers::default();
+        let mut speed = FootSpeedState::default();
+        let mut stealth = StealthAbility::default();
+        multipliers.set_attached_firepower(two);
+        multipliers.set_attached_armor(half);
+        speed.set_attached_speed(half);
+        stealth.set_attached(true);
+        // A temporary projection must not consume the permanent crate slot.
+        assert!(speed.accept_speed_crate(two));
+        stealth.grant();
+        // RecalculateStats100460A0 commits the new effective product through
+        // these owners; this regression exercises the storage, not its math.
+        speed.set_attached_speed(Bits::ONE);
+        let bytes = crate::util::save_codec::serialize(&(multipliers, speed, stealth)).unwrap();
+        let (mut multipliers, mut speed, mut stealth): (
+            CrateMultipliers,
+            FootSpeedState,
+            StealthAbility,
+        ) = crate::util::save_codec::deserialize(&bytes).unwrap();
+        assert_eq!(multipliers.crate_firepower(), Bits::ONE);
+        assert_eq!(multipliers.crate_armor(), Bits::ONE);
+        assert_eq!(multipliers.firepower(), two);
+        assert_eq!(multipliers.armor(), half);
+        assert_eq!(speed.crate_multiplier(), two);
+        assert_eq!(speed.effective_multiplier(), Bits::ONE);
+        assert!(stealth.attached() && stealth.granted() && stealth.active(false));
+        // Removing only the attachment restores permanent bonuses; it does
+        // not erase the received speed/cloak crate or reopen a used slot.
+        multipliers.set_attached_firepower(multipliers.crate_firepower());
+        multipliers.set_attached_armor(multipliers.crate_armor());
+        speed.set_attached_speed(speed.crate_multiplier());
+        stealth.set_attached(false);
+        assert_eq!(multipliers.firepower(), Bits::ONE);
+        assert_eq!(multipliers.armor(), Bits::ONE);
+        assert_eq!(speed.effective_multiplier(), two);
+        assert!(!speed.accept_speed_crate(two));
+        assert!(!stealth.attached() && stealth.active(false));
+    }
 
     #[test]
     fn test_types_are_send_sync() {

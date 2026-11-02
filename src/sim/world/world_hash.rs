@@ -1836,7 +1836,6 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         b"techno-deactivated-v1".hash(hasher);
     }
     entity.hash_emp_state(hasher);
-    #[cfg(feature = "ares")]
     entity.hash_attach_effects(hasher);
     // Infantry gameplay reads its class-owned Doing/Stage fields.
     // A restored presentation component is not a second state owner.
@@ -1896,7 +1895,6 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     // the MegaMission event's flash read the current player, so lockstep
     // peers hold different values, and no gameplay decision reads it.
     entity.crate_multipliers.crate_armor().bits().hash(hasher);
-    #[cfg(feature = "ares")]
     if entity.crate_multipliers.armor() != entity.crate_multipliers.crate_armor() {
         b"attached-armor-v1".hash(hasher);
         entity.crate_multipliers.armor().bits().hash(hasher);
@@ -1911,7 +1909,6 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
             .bits()
             .hash(hasher);
     }
-    #[cfg(feature = "ares")]
     if entity.crate_multipliers.firepower() != entity.crate_multipliers.crate_firepower() {
         b"attached-firepower-v1".hash(hasher);
         entity.crate_multipliers.firepower().bits().hash(hasher);
@@ -2061,6 +2058,11 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     entity.stealth_ability.granted().hash(hasher);
     #[cfg(feature = "ares")]
     entity.stealth_ability.attached().hash(hasher);
+    #[cfg(not(feature = "ares"))]
+    if entity.stealth_ability.attached() {
+        b"attached-cloak-v1".hash(hasher);
+        true.hash(hasher);
+    }
     if let Some(cloak) = entity.cloak.as_ref() {
         1u8.hash(hasher);
         cloak.state().hash(hasher);

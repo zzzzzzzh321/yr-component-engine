@@ -260,6 +260,7 @@ pub(crate) fn multiplayer_eligible_slot(
     };
     let shore = land == LandType::Water.as_index() || land == LandType::Beach.as_index();
     let object = sim.object_type(actor.type_ref(), rules);
+    let effect_policy = rules.effect_runtime_policy();
     let eligible = match powerup {
         // `0x00481C1E`: too many vehicles, or a shore cell.
         POWERUP_UNIT => house.tracking().vehicles() <= UNIT_CRATE_MAX_VEHICLES && !shore,
@@ -268,8 +269,7 @@ pub(crate) fn multiplayer_eligible_slot(
         // `0x00481D3A`: an already cloakable actor (`Techno+0x3D2`, seeded
         // from the type's `Cloakable=` or permanently granted by a crate).
         POWERUP_CLOAK => {
-            #[cfg(feature = "ares")]
-            {
+            if effect_policy.cloak_crate_uses_cloakability {
                 // Cloak1@1005F8D0 calls builtin type/rank predicate10043450,
                 // then checks permanent Ext+98 and TypeExt+1FA. Temporary
                 // attachment cloak must not hide an unclaimed crate bonus.
@@ -284,9 +284,7 @@ pub(crate) fn multiplayer_eligible_slot(
                 !builtin
                     && !actor.stealth_ability.granted()
                     && object.is_none_or(|kind| kind.cloak_allowed())
-            }
-            #[cfg(not(feature = "ares"))]
-            {
+            } else {
                 !actor
                     .stealth_ability
                     .active(object.is_some_and(|kind| kind.cloakable))
@@ -300,14 +298,15 @@ pub(crate) fn multiplayer_eligible_slot(
             actor.foot_speed.crate_multiplier() == NativeF64Bits::ONE
                 // Ares Speed1@1005F9D0 returns481D52 directly after its
                 // Ext+90 check, bypassing the stock Aircraft(+2C==2) gate.
-                && (crate::rules::ARES_ENABLED || actor.category() != EntityCategory::Aircraft)
+                && (effect_policy.allow_aircraft_speed_crates
+                    || actor.category() != EntityCategory::Aircraft)
         }
         // `0x00481D0B`: an actor already boosted, or unarmed (`Is_Armed`).
         POWERUP_FIREPOWER => {
             actor.crate_multipliers.crate_firepower() == NativeF64Bits::ONE
                 // Installed Firepower1@1005F940 returns481D52 directly,
                 //bypassing stock Is_Armed just as Speed1 bypasses Aircraft.
-                && (crate::rules::ARES_ENABLED || object.is_some_and(|object| {
+                && (effect_policy.allow_unarmed_firepower_crates || object.is_some_and(|object| {
                     crate::sim::combat::combat_weapon::is_armed(actor, object)
                 }))
         }

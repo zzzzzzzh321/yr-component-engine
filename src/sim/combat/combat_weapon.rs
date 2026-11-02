@@ -1416,6 +1416,8 @@ mod tests {
                 threshold: 0,
             }),
             input: None,
+            keep_alive: None,
+            cloak_allowed: None,
         }));
         let target = TargetFacts::Cell {
             land_type: 0,

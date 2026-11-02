@@ -336,7 +336,6 @@ pub enum SnapshotError {
 pub enum SnapshotRestoreError {
     #[error("invalid external gameplay state: {0}")]
     InvalidExternalMod(String),
-    #[cfg(feature = "ares")]
     #[error("object {object_id} has invalid attached stats: {reason}")]
     InvalidAttachedStatsState {
         object_id: u64,
@@ -2140,7 +2139,6 @@ impl Simulation {
                 });
             }
         }
-        #[cfg(feature = "ares")]
         self.validate_attached_stats_after_restore(rules)
             .map_err(
                 |(object_id, reason)| SnapshotRestoreError::InvalidAttachedStatsState {

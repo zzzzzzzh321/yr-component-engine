@@ -1,5 +1,33 @@
 # VERA Mod SDK — external gameplay reference
 
+## Development status
+
+The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
+is the **0.8.0 development candidate**, config version **8**, state version **1**;
+the 0.7.0 descriptions below document the retained package, not a new delivery.
+API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
+a matching host; an older host sharing API v1 is not automatically compatible.
+
+The candidate adds `match_rules`, paired `effect_resource` / `effects`, and
+optional type survival and cloak permissions. `AresKeepAlive` and
+`AresAttachEffect` join the four existing default-enabled Ares modules for new
+matches. Ares effects own configuration and ordered lifecycle decisions in the
+plugin; the original host owns the only instance list, animation references,
+derived factors, permanent crate bonuses and cloak clock. Effects do not
+overwrite the shield's opaque entity state. See [match rules](api/src/match_rules.rs)
+and [effect transactions](api/src/effects.rs).
+
+Fresh authored and generated scenarios bind the same frozen program after final
+Rules processing and before constructors. Saved scenarios adopt the saved exact
+module and configuration without replaying Configure, then bind animation roots
+through the shared resource closure. Generator modification hooks are not
+provided. These source paths are undergoing concentrated acceptance; this is
+not a completed migration of all existing Ares support or a release claim.
+
+New serialized host fields also change the complete-world snapshot layout.
+Retain the corresponding old engine, component and declaration for old saves;
+matching component state version alone does not migrate an old host snapshot.
+
 One work loads one optional portable gameplay component. The same engine runs
 retail YR without a declaration or one reference component whose shields, authored
 overload, Ares weapon ammo costs, reload amounts, low-ammo weapon selection and
@@ -149,8 +177,9 @@ for existing saves, even though those saves also contain component bytes.
 
 ## Scope
 
-SDK v1 admits authored maps. Works declaring external gameplay are explicitly
-rejected at generated-map admission; generator hooks are not part of this version.
+The retained 0.7.0 host admits authored maps and rejects declared gameplay at
+generated-map admission. The development candidate admits both through the
+shared scenario binding described above; it does not add generator hooks.
 
 This is a native desktop prototype for Windows/Linux/macOS. Windows is the local
 validated platform; other platform builds and transport-connected multiplayer

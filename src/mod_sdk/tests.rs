@@ -1,5 +1,6 @@
 use super::{Program, host::NativeHost};
 use crate::rules::ini_parser::IniFile;
+use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
 use std::sync::Arc;
 use vera_mod_api::{self as api, Context};
 use vera_mod_runtime::HostServices;
@@ -31,7 +32,7 @@ fn entity() -> api::EntityContext {
 fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     let host = NativeHost::configuration(
         IniFile::from_str(
-            "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nRate=0.125\nName=none\nYes=  yes\nEmpty=\n",
+            "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nCppClear=<none>\nRate=0.125\nPrecise=0.10000000000000001\nName=none\nYes=  yes\nEmpty=\n",
         ),
         Vec::new(),
     );
@@ -46,6 +47,12 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     assert_eq!(read("Yes", "ares-bool", b"false"), true);
     assert_eq!(read("Bad", "ares-bool", b"true"), true);
     assert_eq!(read("Empty", "ares-bool", b"true"), true);
+    assert_eq!(read("Name", "ares-nullable-bool", b"true"), false);
+    assert_eq!(read("CppClear", "ares-nullable-bool", b"true"), true);
+    assert_eq!(
+        read("Empty", "ares-nullable-bool", b"null"),
+        serde_json::Value::Null
+    );
     assert_eq!(
         read("Clear", "nullable-int", b"12"),
         serde_json::Value::Null
@@ -58,12 +65,93 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
         read("Rate", "nullable-double-bits", b"null"),
         0.125_f64.to_bits()
     );
+    // The SDK must dispatch Ares Valueable<double> to its existing binary64
+    // reader, not stock ReadDouble's intermediate binary32 conversion.
+    let ini = IniFile::from_str("[S]\nPrecise=0.10000000000000001\n");
+    let section = ini.section("S").unwrap();
+    let expected =
+        section.read_ares_double_bits("Precise", crate::util::native_x87::NativeF64Bits::ONE);
+    assert_eq!(read("Precise", "ares-double-bits", b"0"), expected.bits());
+    assert_ne!(
+        expected.bits(),
+        section.read_double("Precise", 1.0).to_bits()
+    );
+    assert_eq!(read("Bad", "ares-double-bits", b"17"), 17);
+}
+
+#[test]
+fn sdk_registered_references_use_each_types_reached_reader_not_the_final_catalog() {
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[BuildingTypes]\n0=EARLY\n[VehicleTypes]\n0=LATE\n[Warheads]\n0=EFFECT\n\
+         [EARLY]\nAttachEffect.Animation=LATE_ANIM\n\
+         [LATE]\nDeployingAnim=LATE_ANIM\n\
+         [EFFECT]\nAttachEffect.Animation=LATE_ANIM\nClear=<none>\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str(
+            "[EARLY]\nAttachEffect.Animation=LATE_ANIM\n\
+             [EFFECT]\nAttachEffect.Animation=UNKNOWN\n",
+        ),
+    );
+    let processed = layers.process().unwrap();
+    let host = |index: usize| {
+        NativeHost::configuration(processed.sdk_passes()[index].clone(), Vec::new())
+            .with_registries(processed.sdk_registries()[index].clone())
+    };
+    let read = |host: &NativeHost, owner, key, scope, old: Option<&str>| {
+        let value = host
+            .config_read(
+                owner,
+                key,
+                &format!("ares-ref:$animations@{scope}"),
+                &serde_json::to_vec(&old).unwrap(),
+            )
+            .unwrap();
+        serde_json::from_slice::<Option<String>>(&value).unwrap()
+    };
+    let root = host(0);
+    assert!(
+        root.registry("$animations")
+            .iter()
+            .any(|id| id == "LATE_ANIM")
+    );
+    // Building's common extension precedes Vehicle's DeployingAnim allocation;
+    // the later Warhead suffix can see that allocation in the SAME pass.
+    assert_eq!(
+        read(&root, "EARLY", "AttachEffect.Animation", "$buildings", None),
+        None
+    );
+    let animation = read(&root, "EFFECT", "AttachEffect.Animation", "$warheads", None);
+    assert_eq!(animation.as_deref(), Some("LATE_ANIM"));
+    assert_eq!(
+        read(&root, "EFFECT", "Clear", "$warheads", Some("LATE_ANIM")),
+        None
+    );
+    let map = host(1);
+    assert_eq!(
+        read(&map, "EARLY", "AttachEffect.Animation", "$buildings", None),
+        animation
+    );
+    assert_eq!(
+        read(
+            &map,
+            "EFFECT",
+            "AttachEffect.Animation",
+            "$warheads",
+            animation.as_deref()
+        ),
+        animation
+    );
+    assert!(
+        map.registry("$vehicles").is_empty(),
+        "missing bodies do not run a suffix"
+    );
 }
 
 #[test]
 #[ignore = "requires the reference component with INI-selected ammo in VERA_SDK_AMMO_WASM"]
 fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
-    use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
     use crate::rules::ruleset::RuleSet;
     let wasm =
         std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
@@ -79,13 +167,14 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
     let processed = layers.process().unwrap();
     let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
     let digest = crate::util::sha256::sha256_hex(&wasm);
-    let program = Program::load_with_types(
+    let program = Program::load_with_registries(
         wasm,
         &digest,
         processed.sdk_passes(),
         &["TANK".into()],
         &[],
         &rules.weapon_names(),
+        processed.sdk_registries(),
     )
     .unwrap();
     // Only the plugin interprets Ammo; the engine has not bound a policy yet.
@@ -200,7 +289,6 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
 #[test]
 #[ignore = "requires VERA_SDK_AMMO_WASM with default Ares installation"]
 fn sdk_ares_opt_out_survives_missing_invalid_layers_and_only_explicit_reenable() {
-    use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
     use crate::rules::ruleset::RuleSet;
     let bytes = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
     let digest = crate::util::sha256::sha256_hex(&bytes);
@@ -218,13 +306,14 @@ fn sdk_ares_opt_out_survives_missing_invalid_layers_and_only_explicit_reenable()
     let load = |layers: &RulesLayerStack| {
         let processed = layers.process().unwrap();
         let rules = RuleSet::from_processed_rules(&processed).unwrap();
-        Program::load_with_types(
+        Program::load_with_registries(
             bytes.clone(),
             &digest,
             processed.sdk_passes(),
             &["TANK".into()],
             &[],
             &rules.weapon_names(),
+            processed.sdk_registries(),
         )
         .unwrap()
     };
@@ -235,7 +324,13 @@ fn sdk_ares_opt_out_survives_missing_invalid_layers_and_only_explicit_reenable()
             .unwrap()
     };
     assert!(disabled.weapon_resource_policy("PAIR").unwrap().is_none());
-    assert!(query(&disabled).is_none());
+    let disabled_policy = query(&disabled).unwrap();
+    assert!(
+        disabled_policy.reload.is_none()
+            && disabled_policy.depleted_weapon.is_none()
+            && disabled_policy.input.is_none()
+    );
+    assert_eq!(disabled_policy.cloak_allowed, Some(true));
     let saved = crate::util::save_codec::serialize(&disabled).unwrap();
     layers.push(
         RulesLayerKind::Scenario,
@@ -251,13 +346,18 @@ fn sdk_ares_opt_out_survives_missing_invalid_layers_and_only_explicit_reenable()
         })
     );
     assert!(policy.reload.is_none() && policy.input.is_none());
+    assert_eq!(policy.cloak_allowed, Some(true));
     assert!(enabled.weapon_resource_policy("PAIR").unwrap().is_none());
     let restored: Program = crate::util::save_codec::deserialize(&saved).unwrap();
     restored.validate_restore().unwrap();
+    let restored_policy = query(&restored).unwrap();
     assert!(
-        query(&restored).is_none(),
+        restored_policy.reload.is_none()
+            && restored_policy.depleted_weapon.is_none()
+            && restored_policy.input.is_none(),
         "current INI cannot reenable a frozen disabled module"
     );
+    assert_eq!(restored_policy.cloak_allowed, Some(true));
 }
 
 /// The actual built component + production native readers, not a second config
@@ -270,17 +370,20 @@ fn sdk_component_layers_and_preview_use_production_host_without_mutation() {
             .unwrap();
     let digest = crate::util::sha256::sha256_hex(&bytes);
     let root = IniFile::from_str(
-        "[VeraFeatures]\nShield=yes\n[ShieldTypes]\n0=TEST\n[TEST]\nStrength=80\nPassPercent=0.5\nInitialStrength=$12\n",
+        "[VeraFeatures]\nShield=yes\n[ShieldTypes]\n0=TEST\n[TEST]\nStrength=80\nPassPercent=0.5\nInitialStrength=$12\n[TANK]\nShieldType=TEST\n",
     );
     let map = IniFile::from_str("[TEST]\nStrength=40\nInitialStrength=bad\n");
-    let final_ini = IniFile::from_str("[TANK]\nShieldType=TEST\n");
-    let program = Program::load_with_types(
+    let mut layers = RulesLayerStack::new(root);
+    layers.push(RulesLayerKind::Scenario, map);
+    let processed = layers.process().unwrap();
+    let program = Program::load_with_registries(
         bytes,
         &digest,
-        &[root, map, final_ini],
+        processed.sdk_passes(),
         &["TANK".into()],
         &["WH".into()],
         &[],
+        processed.sdk_registries(),
     )
     .unwrap();
     let attached = program
@@ -328,16 +431,18 @@ fn sdk_invalid_component_state_stops_real_receiver_and_frame_without_fallback() 
         std::fs::read(std::env::var_os("VERA_SDK_COMPAT_WASM").expect("set VERA_SDK_COMPAT_WASM"))
             .unwrap();
     let digest = crate::util::sha256::sha256_hex(&bytes);
-    let program = Program::load_with_types(
+    let processed = RulesLayerStack::new(ini).process().unwrap();
+    let program = Program::load_with_registries(
         bytes,
         &digest,
-        &[ini.clone(), ini.clone()],
+        processed.sdk_passes(),
         &["TANK".into()],
         &["WH".into()],
         &[],
+        processed.sdk_registries(),
     )
     .unwrap();
-    let mut rules = crate::rules::ruleset::RuleSet::from_ini(&ini).unwrap();
+    let mut rules = crate::rules::ruleset::RuleSet::from_processed_rules(&processed).unwrap();
     rules.external_mod = Some(Arc::new(program.clone()));
     let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 23);
     sim.external_mod = Some(program);
@@ -431,16 +536,18 @@ fn sdk_refactor_preserves_frozen_configuration_and_entity_state_bytes() {
          Respawn=0.5\nRespawn.Rate=0.1\n[TANK]\nShieldType=TEST\n[PAIR]\nAmmo=2\n\
          [VeraOverload]\nHeatLimit=30\nDuration=75\nCooling=1\n",
     );
+    let processed = RulesLayerStack::new(ini).process().unwrap();
     let load = |key| {
         let bytes = std::fs::read(std::env::var_os(key).expect(key)).unwrap();
         let digest = crate::util::sha256::sha256_hex(&bytes);
-        Program::load_with_types(
+        Program::load_with_registries(
             bytes,
             &digest,
-            &[ini.clone(), ini.clone()],
+            processed.sdk_passes(),
             &["TANK".into()],
             &["WH".into()],
             &["PAIR".into()],
+            processed.sdk_registries(),
         )
         .unwrap()
     };
@@ -489,7 +596,6 @@ fn sdk_refactor_preserves_frozen_configuration_and_entity_state_bytes() {
 #[test]
 #[ignore = "requires VERA_SDK_REFERENCE_WASM"]
 fn sdk_ini_selection_is_layered_frozen_and_restored_with_the_program() {
-    use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
     use crate::rules::ruleset::RuleSet;
     let bytes = std::fs::read(
         std::env::var_os("VERA_SDK_REFERENCE_WASM").expect("set VERA_SDK_REFERENCE_WASM"),
@@ -505,13 +611,14 @@ fn sdk_ini_selection_is_layered_frozen_and_restored_with_the_program() {
         layers.push(RulesLayerKind::Scenario, IniFile::from_str(patch));
         let processed = layers.process().unwrap();
         let rules = RuleSet::from_processed_rules(&processed).unwrap();
-        Program::load_with_types(
+        Program::load_with_registries(
             bytes.clone(),
             &digest,
             processed.sdk_passes(),
             &["TANK".into()],
             &[],
             &rules.weapon_names(),
+            processed.sdk_registries(),
         )
         .map(|program| (program, rules))
     };

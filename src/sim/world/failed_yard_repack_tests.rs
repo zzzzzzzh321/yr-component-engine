@@ -308,9 +308,21 @@ fn authored_water_yard_refusal_refunds_keeps_constructor_and_survives_short_game
         .map(|name| runtime.simulation.interner().get(name))
         .collect::<Vec<_>>();
     let tracked = runtime.simulation.houses.get(&owner).unwrap().tracking();
-    assert!(tracked.game_alive(true, base_units.iter().copied(), None, |_| false));
+    assert!(tracked.game_alive(
+        runtime.resources.rules.survival_rule(),
+        true,
+        base_units.iter().copied(),
+        None,
+        |_| false
+    ));
     assert!(
-        !tracked.game_alive(false, base_units.iter().copied(), None, |_| false),
+        !tracked.game_alive(
+            runtime.resources.rules.survival_rule(),
+            false,
+            base_units.iter().copied(),
+            None,
+            |_| false
+        ),
         "normal-game active counters stay empty"
     );
     let saved = GameSnapshot::save_validated(&runtime.simulation, 0, 0, "failed-yard-repack", 0);

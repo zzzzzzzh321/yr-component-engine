@@ -46,6 +46,7 @@ fn asset_program(
 pub(crate) fn load_from_assets(
     assets: &crate::assets::asset_manager::AssetManager,
     passes: &[IniFile],
+    registries: &[crate::rules::native_processing::SdkRegistryPass],
     object_types: &[String],
     warheads: &[String],
     weapons: &[String],
@@ -53,8 +54,16 @@ pub(crate) fn load_from_assets(
     let Some((digest, bytes)) = asset_program(assets)? else {
         return Ok(None);
     };
-    Program::load_with_types(bytes, &digest, passes, object_types, warheads, weapons)
-        .map(|p| Some(Arc::new(p)))
+    Program::load_with_registries(
+        bytes,
+        &digest,
+        passes,
+        object_types,
+        warheads,
+        weapons,
+        registries,
+    )
+    .map(|p| Some(Arc::new(p)))
 }
 
 /// Restore the exact saved configuration after projecting retained Rules.

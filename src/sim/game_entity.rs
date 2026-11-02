@@ -32,7 +32,6 @@ use crate::sim::radio::Contacts;
 use crate::sim::superweapon::invulnerability::InvulnerabilityState;
 use crate::sim::world::ObjectLifecycle;
 
-#[cfg(feature = "ares")]
 mod attach_effect;
 mod distributed_fire;
 mod emp;
@@ -124,8 +123,7 @@ pub struct GameEntity {
     /// constructor remains zero and only the feature-gated EMP producer writes it.
     #[serde(default)]
     emp: emp::EmpState,
-    /// Ares builtin attachments: ordered instance vector, owned by attach_effect.
-    #[cfg(feature = "ares")]
+    /// Ordered effect instances and their derived projection, owned by attach_effect.
     #[serde(default)]
     attach_effects: attach_effect::AttachEffects,
     /// The current gameplay component owns these bounded persistent bytes.
@@ -1819,7 +1817,6 @@ impl GameEntity {
             useless: false,
             production_start_price: 0,
             emp: Default::default(),
-            #[cfg(feature = "ares")]
             attach_effects: Default::default(),
             techno_ctor_random_word,
             secret_lab_fallback: None,

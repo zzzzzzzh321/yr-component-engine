@@ -60,9 +60,34 @@ impl Program {
         warheads: &[String],
         weapons: &[String],
     ) -> Result<Self, String> {
+        Self::load_with_registries(
+            bytes,
+            expected,
+            passes,
+            object_types,
+            warheads,
+            weapons,
+            &[],
+        )
+    }
+
+    pub(crate) fn load_with_registries(
+        bytes: Vec<u8>,
+        expected: &str,
+        passes: &[IniFile],
+        object_types: &[String],
+        warheads: &[String],
+        weapons: &[String],
+        registries: &[crate::rules::native_processing::SdkRegistryPass],
+    ) -> Result<Self, String> {
         let runtime = ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
         let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
         let manifest = module.manifest().clone();
+        if manifest.hooks.contains(&api::HookKind::Effects)
+            && (passes.is_empty() || registries.len() + 1 != passes.len())
+        {
+            return Err("effect runtime requires physical Rules read-point registries".into());
+        }
         if [
             api::HookKind::Configure,
             api::HookKind::Attach,
@@ -104,20 +129,20 @@ impl Program {
                 config: program.config.clone(),
                 state: Vec::new(),
             };
+            let mut host = NativeHost::configuration(
+                ini.clone(),
+                if final_pass {
+                    weapons.to_vec()
+                } else {
+                    Vec::new()
+                },
+            );
+            if let Some(registries) = registries.get(index) {
+                host = host.with_registries(registries.clone());
+            }
             let plan = executor
                 .runtime
-                .evaluate(
-                    &executor.module,
-                    &request,
-                    Arc::new(NativeHost::configuration(
-                        ini.clone(),
-                        if final_pass {
-                            weapons.to_vec()
-                        } else {
-                            Vec::new()
-                        },
-                    )),
-                )
+                .evaluate(&executor.module, &request, Arc::new(host))
                 .map_err(|e| e.to_string())?;
             if !plan.state.is_empty() || plan.damage.is_some() || !plan.operations.is_empty() {
                 return Err("configuration returned simulation writes".into());
@@ -156,6 +181,21 @@ impl Program {
         Ok(plan.weapon_resource)
     }
 
+    pub(crate) fn has_effect_runtime(&self) -> bool {
+        self.manifest.hooks.contains(&api::HookKind::Effects)
+    }
+
+    pub(crate) fn effect_resource_policy(
+        &self,
+        resource: &api::EffectResourceContext,
+    ) -> Result<Option<api::EffectDescriptor>, String> {
+        if !self.has_effect_runtime() {
+            return Ok(None);
+        }
+        let plan = self.evaluate(Context::EffectResource(resource.clone()), &[])?;
+        Ok(plan.effect_resource)
+    }
+
     pub(crate) fn type_resource_policy(
         &self,
         name: &str,
@@ -171,7 +211,23 @@ impl Program {
             }),
             &[],
         )?;
+        if plan
+            .type_resource
+            .is_some_and(|policy| policy.keep_alive.is_some())
+            && !self.manifest.hooks.contains(&api::HookKind::MatchRules)
+        {
+            return Err("survival type policies require the match_rules capability".into());
+        }
         Ok(plan.type_resource)
+    }
+
+    pub(crate) fn match_rules_policy(&self) -> Result<Option<api::MatchRulesPolicy>, String> {
+        if !self.manifest.hooks.contains(&api::HookKind::MatchRules) {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate(Context::MatchRules(api::MatchRulesContext {}), &[])?
+            .match_rules)
     }
 
     fn executor(&self) -> Result<&Arc<Executor>, String> {

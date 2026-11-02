@@ -117,6 +117,22 @@ pub(crate) fn ares_type_index_of_name<'a>(
     ids.position(|id| id.eq_ignore_ascii_case(incoming))
 }
 
+/// Ares registered pointer Parser1000C9C0/Find1000D3E0. Empty or unknown
+/// names retain the old pointer; successful none clears it. No allocation.
+/// The caller supplies the registry at the actual reader boundary.
+pub(crate) fn read_ares_registered_reference<'a>(
+    section: &IniSection,
+    key: &str,
+    mut ids: impl Iterator<Item = &'a str> + Clone,
+) -> Option<Option<String>> {
+    let name = section.read_name(key, 2048)?;
+    if is_native_none_type_name(name) {
+        return Some(None);
+    }
+    let index = ares_type_index_of_name(name, ids.clone())?;
+    Some(Some(ids.nth(index)?.to_owned()))
+}
+
 /// BuildingTypeExt's SuperWeapons IndexLookup1000D4D0: raw stored-ID
 /// comparison, including a registered sentinel-named entry. Unlike the
 /// pointer Find template, the none predicate runs only after a failed lookup.
@@ -346,6 +362,7 @@ impl RulesLayerStack {
         let mut processor = RulesPassProcessor::with_registry_state(registry_state);
         processor.image_theater = theater;
         let mut after_map_result = None;
+        let mut sdk_registries = Vec::new();
         for (index, (kind, ini)) in self.iter_passes().enumerate() {
             if index > 0
                 && kind != RulesLayerKind::LangRule
@@ -365,6 +382,7 @@ impl RulesLayerStack {
                     partial_trace: Box::new(partial_trace),
                 });
             }
+            sdk_registries.push(processor.sdk_registry_pass());
             if index == 0 && reset_color_add_after_root {
                 // Reset668A34..668A56 clears all16 RGB triples AFTER root
                 // Process668A27. It leaves the four selector DWORDs alone.
@@ -376,6 +394,7 @@ impl RulesLayerStack {
             {
                 let (ini, native_type_construction_trace, powerups) = processor.clone().finish();
                 let prefix = ProcessedRulesLayers {
+                    sdk_registries: sdk_registries.clone(),
                     sdk_passes: self
                         .iter_passes()
                         .take(index + 1)
@@ -413,6 +432,7 @@ impl RulesLayerStack {
         let (ini, native_type_construction_trace, powerups) = processor.finish();
         Ok((
             ProcessedRulesLayers {
+                sdk_registries,
                 sdk_passes: self
                     .iter_passes()
                     .map(|(_, ini)| ini.clone())
@@ -669,11 +689,76 @@ const PARADROP_INFANTRY_KEYS: [&str; 4] = [
     "YuriParaDropInf",
 ];
 
+/// Read-only SDK view of a physical Rules pass. Animation identities are stored
+/// once; each reached Type suffix records only its then-current prefix length.
+/// Later body reads can allocate animations and must not make an earlier
+/// registered-pointer read succeed retroactively.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SdkRegistryPass {
+    animations: Vec<String>,
+    reads: Vec<SdkRegistryRead>,
+}
+
+#[derive(Debug, Clone)]
+struct SdkRegistryRead {
+    registry: &'static str,
+    owner: String,
+    animation_count: usize,
+}
+
+impl SdkRegistryPass {
+    pub(crate) fn names(&self, registry: &str) -> Vec<String> {
+        if registry == "$animations" {
+            return self.animations.clone();
+        }
+        let mut seen = HashSet::new();
+        self.reads
+            .iter()
+            .filter(|read| read.registry == registry && seen.insert(read.owner.as_str()))
+            .map(|read| read.owner.clone())
+            .collect()
+    }
+
+    pub(crate) fn read_animation_reference(
+        &self,
+        owner: &str,
+        section: &IniSection,
+        key: &str,
+        registry: &str,
+        mut current: Option<String>,
+    ) -> Result<Option<String>, String> {
+        let mut reached = false;
+        for read in &self.reads {
+            if read.registry != registry || read.owner != owner {
+                continue;
+            }
+            reached = true;
+            let ids = self
+                .animations
+                .get(..read.animation_count)
+                .ok_or("invalid Rules registry read-point prefix")?;
+            if let Some(value) =
+                read_ares_registered_reference(section, key, ids.iter().map(String::as_str))
+            {
+                current = value;
+            }
+        }
+        if !reached {
+            return Err(format!("no Rules reader for {registry} [{owner}]"));
+        }
+        Ok(current)
+    }
+}
+
 /// Result of applying an ordered rules stack.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProcessedRulesLayers {
     ini: IniFile,
     sdk_passes: Vec<IniFile>,
+    // Configure never runs while restoring a saved component. Read-point
+    // indexes are disposable configuration inputs, not saved simulation state.
+    #[serde(skip)]
+    sdk_registries: Vec<SdkRegistryPass>,
     powerups: PowerupTable,
     content_hash: u64,
     native_type_construction_trace: NativeTypeConstructionTrace,
@@ -682,6 +767,10 @@ pub struct ProcessedRulesLayers {
 impl ProcessedRulesLayers {
     pub(crate) fn sdk_passes(&self) -> &[IniFile] {
         &self.sdk_passes
+    }
+
+    pub(crate) fn sdk_registries(&self) -> &[SdkRegistryPass] {
+        &self.sdk_registries
     }
 
     #[cfg(feature = "ares")]
@@ -4570,6 +4659,7 @@ struct RulesPassProcessor {
     families: HashMap<RulesTypeFamily, Vec<ProcessedType>>,
     techno_type_order: Vec<(RulesTypeFamily, usize)>,
     native_type_construction_events: Vec<NativeTypeConstructionEvent>,
+    sdk_type_reads: Vec<SdkRegistryRead>,
     tiberiums: Vec<ProcessedType>,
     colors: Vec<(String, String)>,
     rules_color_add: ColorAddTable,
@@ -4694,6 +4784,7 @@ impl RulesPassProcessor {
             ordinary: None,
             powerups: PowerupsAccumulator::default(),
             native_type_construction_events: Vec::new(),
+            sdk_type_reads: Vec::new(),
         }
     }
 
@@ -4704,6 +4795,7 @@ impl RulesPassProcessor {
         fixed_eva: &EvaRegistry,
         primary_rules: bool,
     ) -> Result<(), RulesError> {
+        self.sdk_type_reads.clear();
         #[cfg(feature = "ares")]
         self.ares_global_controls.read_pass(pass);
         if let Some(ordinary) = self.ordinary.as_mut() {
@@ -5084,18 +5176,15 @@ impl RulesPassProcessor {
         section: &IniSection,
         key: &str,
     ) -> Option<Option<String>> {
-        let name = section.read_name(key, 2048)?;
-        if is_native_none_type_name(name) {
-            return Some(None);
-        }
-        let members = self.families.get(&RulesTypeFamily::Animation)?;
-        let index = ares_type_index_of_name(
-            name,
-            members
-                .iter()
+        read_ares_registered_reference(
+            section,
+            key,
+            self.families
+                .get(&RulesTypeFamily::Animation)
+                .into_iter()
+                .flatten()
                 .map(|member| member.native_stored_id.as_str()),
-        )?;
-        Some(Some(members[index].native_stored_id.clone()))
+        )
     }
 
     /// Shared Ares/Phobos pointer-vector reader: Building specialization
@@ -5532,6 +5621,35 @@ impl RulesPassProcessor {
 
     fn family_len(&self, family: RulesTypeFamily) -> usize {
         self.families.get(&family).map_or(0, Vec::len)
+    }
+
+    fn record_sdk_type_read(&mut self, family: RulesTypeFamily, index: usize) {
+        let registry = match family {
+            RulesTypeFamily::Building => "$buildings",
+            RulesTypeFamily::Aircraft => "$aircraft",
+            RulesTypeFamily::Vehicle => "$vehicles",
+            RulesTypeFamily::Infantry => "$infantry",
+            RulesTypeFamily::Warhead => "$warheads",
+            _ => return,
+        };
+        self.sdk_type_reads.push(SdkRegistryRead {
+            registry,
+            owner: self.families[&family][index].native_stored_id.clone(),
+            animation_count: self.family_len(RulesTypeFamily::Animation),
+        });
+    }
+
+    fn sdk_registry_pass(&self) -> SdkRegistryPass {
+        SdkRegistryPass {
+            animations: self
+                .families
+                .get(&RulesTypeFamily::Animation)
+                .into_iter()
+                .flatten()
+                .map(|member| member.native_stored_id.clone())
+                .collect(),
+            reads: self.sdk_type_reads.clone(),
+        }
     }
 
     fn begin_rules_member_read(
@@ -6280,6 +6398,10 @@ impl RulesPassProcessor {
                 // reach the common TechnoType extension before subclass reads.
                 #[cfg(feature = "ares")]
                 self.process_factory_owners(family, index, &raw);
+                // Common TechnoType suffix716123/716132 ->10040DF0.
+                // Registry-only SDK input is available in bare builds too;
+                // extension fields remain exclusively plugin-configured there.
+                self.record_sdk_type_read(family, index);
                 #[cfg(feature = "ares")]
                 {
                     // Find only: this nullable Anim reader never allocates.
@@ -7005,6 +7127,14 @@ impl RulesPassProcessor {
                     )
                     .map(|value| NativeF64Bits::from_bits(value.to_bits()));
                 }
+            }
+            // WarheadType's extension suffix follows its original body. Only
+            // a reached physical section supplies pointer reads for this type.
+            if pass
+                .section(&self.families[&RulesTypeFamily::Warhead][index].native_stored_id)
+                .is_some()
+            {
+                self.record_sdk_type_read(RulesTypeFamily::Warhead, index);
             }
             #[cfg(feature = "ares")]
             {

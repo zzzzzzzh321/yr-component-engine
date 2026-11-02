@@ -30,16 +30,14 @@ impl Scene {
                 .all_objects()
                 .map(|object| object.id.clone())
                 .collect::<Vec<_>>();
-            let program = crate::mod_sdk::Program::load_with_types(
+            let program = crate::mod_sdk::Program::load_with_registries(
                 bytes.to_vec(),
                 &digest,
-                &[
-                    retail.processed_rules.as_ref().clone(),
-                    retail.processed_rules.as_ref().clone(),
-                ],
+                retail.rules.sdk_configuration_passes(),
                 &names,
                 &[],
                 &retail.rules.weapon_names(),
+                retail.rules.sdk_configuration_registries(),
             )
             .unwrap();
             retail.rules.external_mod = Some(std::sync::Arc::new(program));

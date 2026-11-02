@@ -11,6 +11,11 @@ use crate::sim::house_state::HouseState;
 use crate::sim::snapshot::GameSnapshot;
 use crate::sim::world::Simulation;
 use crate::util::save_codec;
+const BUILT_IN_RULE: vera_mod_api::SurvivalRule = if ARES_ENABLED {
+    vera_mod_api::SurvivalRule::TrackedPresence
+} else {
+    vera_mod_api::SurvivalRule::Retail
+};
 
 fn native_corpus() -> &'static serde_json::Value {
     crate::test_fixture::json("tools/spatial_oracle/ares_house_survival.json")
@@ -161,7 +166,7 @@ fn short_game_gate_matches_executed_full_vector_and_nonzero_controls() {
             .map(|index| Some(ids[index.as_u64().unwrap() as usize]))
             .collect();
         assert_eq!(
-            tracking.game_alive(true, base, None, |_| panic!(
+            tracking.game_alive(BUILT_IN_RULE, true, base, None, |_| panic!(
                 "short game must not inspect Foot arrays"
             )),
             row["events"].as_array().unwrap().is_empty(),
@@ -236,7 +241,8 @@ fn keep_alive_limbo_capture_reload_and_destruction_use_the_tracking_owner() {
     let beacon = sim
         .spawn_object_limbo_at_height("BEACON", "First", 10, 10, 0, 0, &rules)
         .unwrap();
-    let survives = |tracking: &HouseTracking| tracking.game_alive(true, [], None, |_| false);
+    let survives =
+        |tracking: &HouseTracking| tracking.game_alive(BUILT_IN_RULE, true, [], None, |_| false);
     assert_eq!(survives(sim.houses[&first].tracking()), ARES_ENABLED);
     assert_eq!(sim.houses[&first].tracking().units_for_test(), 0);
     #[cfg(feature = "ares")]
@@ -303,7 +309,11 @@ fn keep_alive_counter_and_future_removal_input_are_hashed_independently() {
         stream["restored"]["keep_alive_count"].as_i64().unwrap()
     );
     assert_eq!(hash(&restored), negative);
-    assert!(restored.game_alive(true, [], None, |_| panic!("KeepAlive precedes scans")));
+    assert!(
+        restored.game_alive(BUILT_IN_RULE, true, [], None, |_| panic!(
+            "KeepAlive precedes scans"
+        ))
+    );
 
     let input_hash = |keep_alive| {
         let mut hasher = StateHasher::new();
@@ -333,7 +343,7 @@ fn keep_alive_precedes_normal_class_total_and_presence_queries() {
     };
     tracking.set_active_units_for_test(row["input"]["active_units"].as_i64().unwrap() as i32);
     assert_eq!(
-        tracking.game_alive(false, [], None, |_| panic!(
+        tracking.game_alive(BUILT_IN_RULE, false, [], None, |_| panic!(
             "KeepAlive must precede object scans"
         )),
         row["events"].as_array().unwrap().is_empty()

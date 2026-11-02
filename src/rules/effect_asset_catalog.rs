@@ -226,6 +226,16 @@ pub(crate) const SQUID_GRAPPLE_ANIM: &str = "SQDG";
 /// The list is derived from loaded rules, never hand-written, and retail
 /// authors several names with no art section or sprite, which is why the
 /// binder that consumes it is the tolerant one.
+pub(crate) fn component_effect_anim_roots(rules: &RuleSet) -> Vec<String> {
+    rules
+        .effect_descriptors()
+        .filter_map(|descriptor| descriptor.animation.as_ref())
+        .map(|name| name.to_ascii_uppercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     let mut roots = BTreeSet::new();
     let mut insert = |name: &str| {
@@ -235,6 +245,9 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
             roots.insert(name.to_ascii_uppercase());
         }
     };
+    for name in component_effect_anim_roots(rules) {
+        insert(&name);
+    }
     // Ares common Launch10033068..100330AA constructs SW.Animation through
     // the same AnimClass owner as other effects, even when it is hidden.
     #[cfg(feature = "ares")]
@@ -258,9 +271,10 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
         // flags 0x600 and then attaches it to the victim. It needs physical
         // bounds through this same loader closure before construction.
         #[cfg(feature = "ares")]
-        if let Some(name) = warhead
-            .ares_rules()
-            .and_then(|wh| wh.attach_effect().animation())
+        if !rules.external_effects_enabled()
+            && let Some(name) = warhead
+                .ares_rules()
+                .and_then(|wh| wh.attach_effect().animation())
         {
             insert(name);
         }
@@ -279,9 +293,10 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
             // -> CreateAnim100586E0). Their image
             // bounds are gameplay inputs too: an attached anim may kill its
             // parent through ordinary AnimAI damage and its death weapon.
-            if let Some(name) = object
-                .self_attach_effect()
-                .and_then(|effect| effect.animation())
+            if !rules.external_effects_enabled()
+                && let Some(name) = object
+                    .self_attach_effect()
+                    .and_then(|effect| effect.animation())
             {
                 insert(name);
             }

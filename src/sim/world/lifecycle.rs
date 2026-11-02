@@ -4043,8 +4043,11 @@ impl Simulation {
         }
         self.substrate
             .release_foot_air_tracker_before_limbo(stable_id);
+        self.limbo_component_effects(stable_id, context.rules());
         #[cfg(feature = "ares")]
-        self.limbo_ares_attach_effects(stable_id, context.rules());
+        if !context.rules().external_effects_enabled() {
+            self.limbo_ares_attach_effects(stable_id, context.rules());
+        }
         if self
             .substrate
             .entities
@@ -4676,7 +4679,6 @@ impl Simulation {
         if let Some(anim) = listener.emp_sparkle() {
             name(anim);
         }
-        #[cfg(feature = "ares")]
         listener.attached_effect_anims().for_each(&mut name);
         for target in [
             listener.attack_target.target(),
@@ -5601,7 +5603,6 @@ impl Simulation {
                 // Techno's Anim callback710455 reaches Object5F6DA0.
                 entity.parachute_animation_expired(expired_id);
                 entity.emp_anim_pointer_expired(expired_id);
-                #[cfg(feature = "ares")]
                 entity.attached_effect_anim_expired(expired_id);
             }
             self.substrate
@@ -5764,10 +5765,8 @@ impl Simulation {
 
         // BuildingLight436A00; Ares1004EBC0 preserves a cloaking parent's
         // link on control0, while the target clear remains unconditional.
-        self.substrate.spotlights_pointer_expired(
-            expired_id,
-            control == PointerExpiryControl::Uninit,
-        );
+        self.substrate
+            .spotlights_pointer_expired(expired_id, control == PointerExpiryControl::Uninit);
 
         #[cfg(any(test, feature = "test-support"))]
         if let Some(smudge) = self
@@ -6773,7 +6772,6 @@ impl Simulation {
             stable_id,
             context.rules(),
         );
-        #[cfg(feature = "ares")]
         self.destroy_ares_attach_effects(stable_id, context.rules());
         // Techno destructor6F452C destroys its planning token after the Foot
         // tail, then6F4571 frees any slave manager without a GameState gate.

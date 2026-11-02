@@ -1131,3 +1131,187 @@ fn a_dive_breaks_contact_zero_only_with_a_house_its_owner_is_not_allied_with() {
         );
     }
 }
+
+fn attached_cloak_policy() -> vera_mod_api::CloakRuntimePolicy {
+    vera_mod_api::CloakRuntimePolicy {
+        use_motion_query: true,
+        motion_blocks_raw_ability: true,
+        offline_blocks_ability: true,
+        blockers_apply_to_rank: true,
+        check_type_permission: true,
+        deny_parachuted: true,
+        check_recloak_before_weapon: true,
+        allow_active_ability_above_ground: true,
+    }
+}
+
+#[test]
+fn runtime_cloak_policy_selects_motion_and_frozen_permission_independently() {
+    use crate::sim::components::DriveCoord;
+    use crate::sim::movement::track_process::TrackFamily;
+    let mut rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+        "[VehicleTypes]\n0=MOVER\n[MOVER]\nStrength=100\nSpeed=4\nCloakable=yes\nCloakStop=yes\nCloakingSpeed=1\nLocomotor={4A582741-9839-11d1-B709-00A024DDAFD1}\n",
+    )).unwrap();
+    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 31);
+    let id = sim
+        .spawn_object("MOVER", "Americans", 10, 10, 0, &rules)
+        .unwrap();
+    // A retained destination with no current track head answers Is_Moving,
+    // but not Is_Moving_Now (the existing locomotor owner decides both).
+    let loco = sim
+        .substrate
+        .entities
+        .get_mut(id)
+        .unwrap()
+        .locomotor
+        .as_mut()
+        .unwrap();
+    assert_eq!(
+        loco.active_kind(),
+        crate::rules::locomotor_type::LocomotorKind::Drive
+    );
+    // Drive's retained track block is lazy. The canonical Move_To owner
+    // (navcom::drive_set_destination, 4AFD40) materializes it before storing
+    // a destination; the bounded producer fixture must cross that same gate.
+    assert!(loco.ensure_installed_track_state());
+    assert!(loco.store_track_destination(
+        TrackFamily::Drive,
+        Some(DriveCoord {
+            x: 3200,
+            y: 3200,
+            z: 0
+        })
+    ));
+    let mut policy = vera_mod_api::CloakRuntimePolicy::default();
+    assert!(
+        stock_cloak_tick_facts(&sim, id, &rules, None, policy)
+            .unwrap()
+            .can_auto_cloak
+    );
+    policy.use_motion_query = true;
+    assert!(
+        stock_cloak_tick_facts(&sim, id, &rules, None, policy)
+            .unwrap()
+            .can_auto_cloak,
+        "motion query alone preserves the retail raw-ability alternative"
+    );
+    policy.motion_blocks_raw_ability = true;
+    let facts = stock_cloak_tick_facts(&sim, id, &rules, None, policy).unwrap();
+    assert!(!facts.can_auto_cloak && facts.should_uncloak);
+    let mut clock = sim.substrate.entities.get(id).unwrap().cloak.unwrap();
+    clock.establish_unlimbo_fully_cloaked();
+    clock.tick(facts, &mut sim.scenario_rng);
+    assert_eq!(
+        clock.state(),
+        3,
+        "the same CloakRuntime consumes the selected predicate"
+    );
+
+    sim.substrate
+        .entities
+        .get_mut(id)
+        .unwrap()
+        .locomotor
+        .as_mut()
+        .unwrap()
+        .store_track_destination(TrackFamily::Drive, None);
+    rules.bind_cloak_allowed_for_test("MOVER", false);
+    assert!(
+        stock_cloak_tick_facts(&sim, id, &rules, None, policy)
+            .unwrap()
+            .can_auto_cloak,
+        "a stored permission does not implicitly select its runtime gate"
+    );
+    policy.check_type_permission = true;
+    assert!(
+        !stock_cloak_tick_facts(&sim, id, &rules, None, policy)
+            .unwrap()
+            .can_auto_cloak
+    );
+    assert!(
+        !stock_cloak_tick_facts(&sim, id, &rules, None, attached_cloak_policy())
+            .unwrap()
+            .can_auto_cloak,
+        "the complete existing Ares parameter set reads frozen false permission on bare core too"
+    );
+}
+
+#[test]
+fn temporary_cloak_grant_installs_one_clock_and_offline_policy_preserves_its_retirement() {
+    let (mut sim, rules, sub) = spawned_sub();
+    let (rx, ry) = sim
+        .substrate
+        .entities
+        .get(sub)
+        .map(|entity| (entity.position.rx(), entity.position.ry()))
+        .unwrap();
+    let id = sim
+        .spawn_object_at_height("RANKED", "Soviet", rx, ry, 0, 0, &rules)
+        .unwrap();
+    let actor = sim.substrate.entities.get_mut(id).unwrap();
+    assert!(actor.cloak.is_none());
+    actor.stealth_ability.set_attached(true);
+    tick_stock_cloak_producer(&mut sim, id, &rules, None, FrameEffects::default());
+    assert_eq!(
+        sim.substrate
+            .entities
+            .get(id)
+            .unwrap()
+            .cloak
+            .unwrap()
+            .state(),
+        1,
+        "a temporary grant gets the existing clock in the ordinary producer"
+    );
+    let actor = sim.substrate.entities.get_mut(id).unwrap();
+    actor.deactivated.set_for_test(true);
+    actor
+        .cloak
+        .as_mut()
+        .unwrap()
+        .establish_unlimbo_fully_cloaked();
+    let stock = vera_mod_api::CloakRuntimePolicy::default();
+    assert!(
+        !stock_cloak_tick_facts(&sim, id, &rules, None, stock)
+            .unwrap()
+            .should_uncloak
+    );
+    let offline = vera_mod_api::CloakRuntimePolicy {
+        offline_blocks_ability: true,
+        ..stock
+    };
+    assert!(
+        stock_cloak_tick_facts(&sim, id, &rules, None, offline)
+            .unwrap()
+            .should_uncloak
+    );
+    assert!(
+        stock_cloak_tick_facts(&sim, id, &rules, None, attached_cloak_policy())
+            .unwrap()
+            .should_uncloak
+    );
+    let actor = sim.substrate.entities.get_mut(id).unwrap();
+    actor.deactivated.set_for_test(false);
+    actor.stealth_ability.set_attached(false);
+    sim.session.set_binary_frame_for_test(1);
+    tick_stock_cloak_producer(&mut sim, id, &rules, None, FrameEffects::default());
+    assert_eq!(
+        sim.substrate
+            .entities
+            .get(id)
+            .unwrap()
+            .cloak
+            .unwrap()
+            .state(),
+        3,
+        "losing the temporary capability continues the held clock through uncloaking"
+    );
+    let empty = sim
+        .spawn_object_at_height("RANKED", "Soviet", rx, ry, 0, 0, &rules)
+        .unwrap();
+    tick_stock_cloak_producer(&mut sim, empty, &rules, None, FrameEffects::default());
+    assert!(
+        sim.substrate.entities.get(empty).unwrap().cloak.is_none(),
+        "an unchanged vanilla actor still allocates no cloak clock"
+    );
+}

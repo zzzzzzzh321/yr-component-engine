@@ -433,7 +433,7 @@ pub(crate) fn attack_action(
     // moves to the object or a Cell near it (Foot4D74E0,
     // Simulation::object_move_click). The Infantry tail (51F160..51F179)
     // follows its C4, weapon-cursor and Ivan arms, so it is the last arm of
-    // infantry_attack_action.
+    // infantry_object_action.
     // RESIDUAL: the Unit's Attack reaches 740486 only when vt+0x310
     // (0x00700D10, 74041B..74042E) admits it, and is 0 otherwise. That test
     // refuses a Unit in a tube (Foot +0x684 >= 0) whose vt+0x4E4
@@ -900,6 +900,115 @@ fn unit_repair_branch_orders(
     output
 }
 
+/// Infantry51E6D8..51E7A3 can replace any base action, before deployment
+/// and entry. DetermineAction uses one chosen member;51F190 then asks each
+/// receiver again (Heal27 becomes Attack5, Guard26 remains Guard). Keep the
+/// decision in infantry_object_action rather than a single-self exception.
+fn infantry_class_branch_orders(
+    sim: &crate::sim::world::Simulation,
+    rules: &crate::rules::ruleset::RuleSet,
+    current_objects: &[u64],
+    receivers: &[u64],
+    target: &HoverTargetKindWithId,
+    modifier: OrderModifier,
+    order_mode: OrderMode,
+    force_move_key: bool,
+    overlay_registry: &crate::rules::overlay_types::OverlayTypeRegistry,
+) -> Option<(LeftRelease, AttackDispatch)> {
+    if modifier == OrderModifier::Shift || target.kind == HoverTargetKind::HiddenEnemy {
+        return None;
+    }
+    let action = |id| {
+        let lone_self = current_objects == [target.stable_id] && id == target.stable_id;
+        let base = if lone_self {
+            AttackAction::None
+        } else {
+            attack_action(
+                sim,
+                rules,
+                id,
+                &TargetKind::Entity(target.stable_id),
+                modifier == OrderModifier::ForceFire,
+                Some(overlay_registry),
+            )
+        };
+        let key = if lone_self {
+            None
+        } else {
+            object_key_action(
+                sim,
+                rules,
+                id,
+                Some(target.stable_id),
+                modifier,
+                force_move_key,
+            )
+        };
+        (
+            base,
+            key,
+            infantry_object_action(sim, rules, id, target.stable_id, base, key),
+        )
+    };
+    let resolved: Vec<_> = receivers
+        .iter()
+        .filter_map(|&id| match action(id).2 {
+            Some(
+                class @ (InfantryObjectAction::Heal
+                | InfantryObjectAction::GuardArea
+                | InfantryObjectAction::AttackSupport
+                | InfantryObjectAction::HealerSelect),
+            ) => Some((id, class)),
+            _ => None,
+        })
+        .collect();
+    if resolved.is_empty() {
+        return None;
+    }
+    let release = cursor_owner(sim, rules, current_objects, target.stable_id)
+        .filter(|best| receivers.contains(best))
+        .map_or(LeftRelease::Dispatch, |best| {
+            let (base, key, class) = action(best);
+            let release = match class {
+                Some(InfantryObjectAction::HealerSelect) => ReleaseAction::Select,
+                Some(_) => ReleaseAction::Other,
+                None if key.is_some() => ReleaseAction::Other,
+                None => base.into(),
+            };
+            left_release(sim, rules, release, Some(target.stable_id))
+        });
+    let mut output = AttackDispatch {
+        receivers: Default::default(),
+        commands: Vec::new(),
+        consumed: release == LeftRelease::Dispatch,
+        select_fallback: false,
+    };
+    if release == LeftRelease::Dispatch {
+        for (id, class) in resolved {
+            output.receivers.insert(id);
+            let command = match class {
+                InfantryObjectAction::Heal => object_click_payload(
+                    sim,
+                    rules,
+                    order_mode,
+                    OrderModifier::Normal,
+                    id,
+                    target.stable_id,
+                ),
+                InfantryObjectAction::GuardArea => Some(Command::Guard {
+                    entity_id: id,
+                    target: Some(TargetKind::Entity(target.stable_id)),
+                }),
+                // Action59 follows the default arrow/click path; a member's
+                // Select does not undo the cursor owner's dispatched release.
+                _ => None,
+            };
+            output.commands.extend(command);
+        }
+    }
+    Some((release, output))
+}
+
 fn attack_branch_orders(
     sim: &crate::sim::world::Simulation,
     rules: &crate::rules::ruleset::RuleSet,
@@ -1020,8 +1129,20 @@ fn attack_branch_orders(
                         target_ry,
                     },
                     TargetKind::Entity(target_id) => {
-                        match infantry_attack_action(sim, rules, id, target_id) {
-                            Some(InfantryAttackAction::NoMove) => {
+                        match infantry_object_action(
+                            sim,
+                            rules,
+                            id,
+                            target_id,
+                            AttackAction::Attack,
+                            None,
+                        ) {
+                            Some(InfantryObjectAction::GuardArea) => Command::Guard {
+                                entity_id: id,
+                                target: Some(TargetKind::Entity(target_id)),
+                            },
+                            Some(InfantryObjectAction::AttackSupport) => continue,
+                            Some(InfantryObjectAction::NoMove) => {
                                 let Some(command) = move_near_object(
                                     sim,
                                     rules,
@@ -1034,15 +1155,17 @@ fn attack_branch_orders(
                                 };
                                 command
                             }
-                            Some(InfantryAttackAction::Infiltrate) => Command::CaptureBuilding {
+                            Some(InfantryObjectAction::Infiltrate) => Command::CaptureBuilding {
                                 engineer_id: id,
                                 target_building_id: target_id,
                             },
-                            Some(InfantryAttackAction::Sabotage) => Command::PlantC4 {
+                            Some(InfantryObjectAction::Sabotage) => Command::PlantC4 {
                                 attacker_id: id,
                                 target_building_id: target_id,
                             },
-                            Some(InfantryAttackAction::Select) => {
+                            Some(
+                                InfantryObjectAction::Select | InfantryObjectAction::HealerSelect,
+                            ) => {
                                 select_fallback = true;
                                 continue;
                             }
@@ -1748,6 +1871,70 @@ fn object_attack_click_command(
             destination,
         ))
     };
+    let base = attack_action(
+        sim,
+        rules,
+        attacker_id,
+        &TargetKind::Entity(target_id),
+        modifier == OrderModifier::ForceFire,
+        Some(overlay_registry),
+    );
+    // Infantry51F190 asks its complete class action again for each receiver;
+    // Heal27 is rewritten to Attack5 by51F1A4..51F1C2. It can override the
+    // base Select/NoMove/Guard, so resolve it before those base returns.
+    match infantry_object_action(
+        sim,
+        rules,
+        attacker_id,
+        target_id,
+        base,
+        object_key_action(
+            sim,
+            rules,
+            attacker_id,
+            Some(target_id),
+            modifier,
+            force_move_key,
+        ),
+    ) {
+        Some(InfantryObjectAction::GuardArea) => {
+            return Some(Command::Guard {
+                entity_id: attacker_id,
+                target: Some(TargetKind::Entity(target_id)),
+            });
+        }
+        Some(InfantryObjectAction::Heal) => {
+            return object_click_payload(
+                sim,
+                rules,
+                order_mode,
+                OrderModifier::Normal,
+                attacker_id,
+                target_id,
+            );
+        }
+        Some(
+            InfantryObjectAction::Select
+            | InfantryObjectAction::HealerSelect
+            | InfantryObjectAction::AttackSupport,
+        ) => return None,
+        Some(InfantryObjectAction::NoMove) => {
+            return move_near(crate::sim::world::MoveAction::NoMove);
+        }
+        Some(InfantryObjectAction::Infiltrate) => {
+            return Some(Command::CaptureBuilding {
+                engineer_id: attacker_id,
+                target_building_id: target_id,
+            });
+        }
+        Some(InfantryObjectAction::Sabotage) => {
+            return Some(Command::PlantC4 {
+                attacker_id,
+                target_building_id: target_id,
+            });
+        }
+        _ => {}
+    }
     if modifier == OrderModifier::GuardArea {
         return if guard_area_admitted(sim, rules, attacker_id, Some(target_id)) {
             Some(Command::Guard {
@@ -1760,14 +1947,7 @@ fn object_attack_click_command(
     }
     // Guard was classified above with hover. Every other receiver asks its
     // own action, including Ctrl; forcing does not invent Attack admission.
-    match attack_action(
-        sim,
-        rules,
-        attacker_id,
-        &TargetKind::Entity(target_id),
-        modifier == OrderModifier::ForceFire,
-        Some(overlay_registry),
-    ) {
+    match base {
         // NoIvanBomb (`0x0051EB24`) orders nothing.
         AttackAction::Attack if ivan_cannot_bomb(sim, rules, attacker_id, target_id) => {
             return None;
@@ -1781,25 +1961,6 @@ fn object_attack_click_command(
         | AttackAction::None
         | AttackAction::Rally
         | AttackAction::AttackSupport => return None,
-    }
-    match infantry_attack_action(sim, rules, attacker_id, target_id) {
-        Some(InfantryAttackAction::NoMove) => {
-            return move_near(crate::sim::world::MoveAction::NoMove);
-        }
-        Some(InfantryAttackAction::Select) => return None,
-        Some(InfantryAttackAction::Infiltrate) => {
-            return Some(Command::CaptureBuilding {
-                engineer_id: attacker_id,
-                target_building_id: target_id,
-            });
-        }
-        Some(InfantryAttackAction::Sabotage) => {
-            return Some(Command::PlantC4 {
-                attacker_id,
-                target_building_id: target_id,
-            });
-        }
-        _ => {}
     }
     object_click_payload(sim, rules, order_mode, modifier, attacker_id, target_id)
 }
@@ -1915,7 +2076,24 @@ fn berserk_selection_click(
         }
         EntityCategory::Structure => false,
     };
-    let action = if action_zero {
+    let infantry = hover.and_then(|target| {
+        infantry_object_action(
+            sim,
+            rules,
+            best_id,
+            target.stable_id,
+            AttackAction::None,
+            None,
+        )
+    });
+    let action = if matches!(
+        infantry,
+        Some(InfantryObjectAction::HealerSelect | InfantryObjectAction::Select)
+    ) {
+        ReleaseAction::Select
+    } else if infantry.is_some() {
+        ReleaseAction::Other
+    } else if action_zero {
         ReleaseAction::Zero
     } else if hover.is_some_and(|target| {
         sim.unit_repair_action(best_id, target.stable_id, issuing_house, rules)
@@ -2001,6 +2179,7 @@ pub(crate) fn try_queue_context_order(
     // after the sim borrow below ends.
     let mut rally_announce = false;
     let mut consumed_attack_action = false;
+    let mut infantry_class_dispatched = false;
     let mut planning_cell = None;
     let planning = state.match_state.input.planning.active();
 
@@ -2246,6 +2425,40 @@ pub(crate) fn try_queue_context_order(
                     return finish_order(state, queued, speaker_id, rally_announce, None)
                         || consumed_attack_action;
                 }
+            }
+        }
+
+        if let Some(target) = hover.as_ref()
+            && let Some((release, dispatch)) = infantry_class_branch_orders(
+                sim,
+                &resources.rules,
+                &current_objects,
+                &selected_ids,
+                target,
+                modifier,
+                order_mode,
+                force_move_key,
+                &resources.overlay_registry,
+            )
+        {
+            match release {
+                LeftRelease::Select => return false,
+                LeftRelease::Nothing => return true,
+                LeftRelease::Dispatch => {}
+            }
+            infantry_class_dispatched = true;
+            consumed_attack_action |= dispatch.consumed;
+            queued.extend(
+                dispatch
+                    .commands
+                    .into_iter()
+                    .map(|payload| CommandEnvelope::new(owner_id, execute_tick, payload)),
+            );
+            selected_units.retain(|id| !dispatch.receivers.contains(id));
+            selected_ids.retain(|id| !dispatch.receivers.contains(id));
+            if selected_ids.is_empty() {
+                return finish_order(state, queued, speaker_id, rally_announce, None)
+                    || consumed_attack_action;
             }
         }
 
@@ -2641,6 +2854,7 @@ pub(crate) fn try_queue_context_order(
                         })
                 });
             if select_friendly_clicks
+                && !infantry_class_dispatched
                 && clicked_friendly
                 && context_actions_enabled
                 && (!friendly_unit_action
@@ -2693,6 +2907,7 @@ pub(crate) fn try_queue_context_order(
                 .filter(|target| {
                     !force_move
                         && (force_fire
+                            || infantry_class_dispatched
                             || (select_friendly_clicks
                                 && friendly_unit_action
                                 && matches!(
@@ -3080,8 +3295,8 @@ pub(super) fn self_answers_no_deploy(
 /// Infantry What_Action51E6D8..51E754: a human player's negative-damage
 /// infantryman offers GuardArea over itself before the deploy/planning arms.
 /// Ares hook51E748 ->10049710 skips this return for NoSelfGuardArea=yes.
-/// This shares the existing Guard payload; it does not restrict the Guard key.
-/// The class healer dispatch for mixed/multiple selections remains separate.
+/// This translates the shared class action to the existing Guard payload;
+/// the same owner is queried for mixed-selection cursor and receiver actions.
 pub(super) fn infantry_self_guard_command(
     sim: &crate::sim::world::Simulation,
     rules: &crate::rules::ruleset::RuleSet,
@@ -3093,26 +3308,21 @@ pub(super) fn infantry_self_guard_command(
         return None;
     }
     let actor = sim.entities().get(target.stable_id)?;
-    let object = sim.interner().object_type(actor.type_ref(), rules)?;
-    (actor.category() == EntityCategory::Infantry
-        && actor.owner() == local_owner
-        && sim.house_is_human_player(actor.owner())
+    (actor.owner() == local_owner
         && !actor.berserk.is_active()
         && !actor.is_warped_out()
-        && !object
-            .input_policy()
-            .is_some_and(|input| input.deny_self_guard_area)
-        && crate::sim::combat::combat_weapon::weapon_damage_value(
-            actor,
-            object,
-            sim.entities(),
+        && infantry_object_action(
+            sim,
             rules,
-            sim.interner(),
-        ) < 0)
-        .then_some(Command::Guard {
-            entity_id: target.stable_id,
-            target: Some(TargetKind::Entity(target.stable_id)),
-        })
+            target.stable_id,
+            target.stable_id,
+            AttackAction::None,
+            None,
+        ) == Some(InfantryObjectAction::GuardArea))
+    .then_some(Command::Guard {
+        entity_id: target.stable_id,
+        target: Some(TargetKind::Entity(target.stable_id)),
+    })
 }
 
 fn self_unload_is_hidden(
@@ -3580,11 +3790,19 @@ fn engineer_capture_orders(
     consumed.then_some(orders)
 }
 
-/// Infantry51E9C1..51EB21 post-processes an admitted Attack5. Weapon
-/// cursor actions64/71 remain Attack commands; C4 action16 plants a charge.
+/// Infantry What_Action's healer prefix51E6D8..51E7A3 and later admitted-
+/// Attack suffix51E9C1..51F179. The base/key answers stay explicit so its
+/// Select, Move and Guard continuations apply to every receiver of a group.
+/// Weapon actions64/71 remain Attack commands; C4 action16 plants a charge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum InfantryAttackAction {
+pub(super) enum InfantryObjectAction {
     Attack,
+    Heal,
+    GuardArea,
+    AttackSupport,
+    /// The healer prefix's Select7 precedes entry/deployment; the later
+    /// weapon-cursor Select7 retains its existing suffix ordering.
+    HealerSelect,
     Sabotage,
     WeaponDemolish,
     AirStrike,
@@ -3593,12 +3811,14 @@ pub(super) enum InfantryAttackAction {
     NoMove,
 }
 
-pub(super) fn infantry_attack_action(
+pub(super) fn infantry_object_action(
     sim: &crate::sim::world::Simulation,
     rules: &crate::rules::ruleset::RuleSet,
     actor_id: u64,
     target_id: u64,
-) -> Option<InfantryAttackAction> {
+    base: AttackAction,
+    key: Option<ObjectKeyAction>,
+) -> Option<InfantryObjectAction> {
     use crate::sim::combat::combat_weapon;
     let actor = sim.entities().get(actor_id)?;
     if actor.category() != EntityCategory::Infantry {
@@ -3607,13 +3827,77 @@ pub(super) fn infantry_attack_action(
     let object = sim.interner().object_type(actor.type_ref(), rules)?;
     // Infantry51E6B4..51E6D5 refuses any Attack left after the Engineer
     // building/disarm prefixes. Ctrl cannot turn DefuseKit into a gun.
+    if key == Some(ObjectKeyAction::ToggleSelect) {
+        return None;
+    }
     if object.engineer {
-        return Some(InfantryAttackAction::NoMove);
+        return (key.is_none() && base == AttackAction::Attack)
+            .then_some(InfantryObjectAction::NoMove);
     }
     // The target is a Techno or, under Ctrl, a Terrain object, which the C4
     // and weapon-cursor arms below read as no building and no Unit.
     let target = sim.entities().get(target_id);
     if target.is_none() && sim.terrain_objects().get(target_id).is_none() {
+        return None;
+    }
+    // Original Infantry51E6D8..51E7A3 asks GetWeaponDamageValue(-1),
+    // then human/IsAlly, independently of base Attack or weapon range.
+    // Ares51E748 ->10049710 suppresses only the self Guard26 return.
+    if sim.house_is_human_player(actor.owner())
+        && combat_weapon::weapon_damage_value(actor, object, sim.entities(), rules, sim.interner())
+            < 0
+    {
+        let allied = target.is_some_and(|target| {
+            combat_weapon::is_ally_by_object(
+                Some(sim.house_alliances()),
+                sim.interner(),
+                actor.owner(),
+                target.owner(),
+            )
+        });
+        if !allied {
+            return Some(InfantryObjectAction::AttackSupport);
+        }
+        if let Some(target) = target {
+            if target_id == actor_id {
+                if !object
+                    .input_policy()
+                    .is_some_and(|input| input.deny_self_guard_area)
+                {
+                    return Some(InfantryObjectAction::GuardArea);
+                }
+                // The Ares jump continues at51E7A6, skipping the rest of
+                // the healer prefix even for an Organic=no self type.
+            } else {
+                let target_type = sim.interner().object_type(target.type_ref(), rules)?;
+                if target.category() == EntityCategory::Infantry
+                    && matches!(
+                        target.health.compare_ratio(target_type.strength, 1.0),
+                        crate::util::native_x87::MaskedX87Ordering::Less
+                            | crate::util::native_x87::MaskedX87Ordering::Unordered
+                    )
+                {
+                    return Some(InfantryObjectAction::Heal);
+                }
+                // InfantryClass::What_Action_OnObject51E757..51E774 casts
+                // to Foot, then tests signed Passengers(+5E0) != 0. Otherwise
+                // only Move1/Guard26 survive; every other base becomes Select7.
+                if !(matches!(
+                    target.category(),
+                    EntityCategory::Unit | EntityCategory::Infantry | EntityCategory::Aircraft
+                ) && target_type.passengers != 0)
+                    && !matches!(
+                        key,
+                        Some(ObjectKeyAction::Move | ObjectKeyAction::GuardArea)
+                    )
+                    && base != AttackAction::Move
+                {
+                    return Some(InfantryObjectAction::HealerSelect);
+                }
+            }
+        }
+    }
+    if key.is_some() || base != AttackAction::Attack {
         return None;
     }
     if let Some(target) = target {
@@ -3627,8 +3911,8 @@ pub(super) fn infantry_attack_action(
         };
         if let Some(c4) = infantry_c4_action(sim, rules, actor_id, &hover, true) {
             return Some(match c4 {
-                InfantryC4Action::Sabotage => InfantryAttackAction::Sabotage,
-                InfantryC4Action::Attack => InfantryAttackAction::Attack,
+                InfantryC4Action::Sabotage => InfantryObjectAction::Sabotage,
+                InfantryC4Action::Attack => InfantryObjectAction::Attack,
             });
         }
     }
@@ -3653,9 +3937,9 @@ pub(super) fn infantry_attack_action(
                 target.category() == EntityCategory::Unit
                     && target.bunker.link().installed_in().is_some()
             }) {
-                InfantryAttackAction::Select
+                InfantryObjectAction::Select
             } else {
-                InfantryAttackAction::WeaponDemolish
+                InfantryObjectAction::WeaponDemolish
             },
         );
     }
@@ -3670,15 +3954,15 @@ pub(super) fn infantry_attack_action(
                     .is_some_and(|building| building.can_c4 && !building.invisible_in_game)
         });
         return Some(if air_strike {
-            InfantryAttackAction::AirStrike
+            InfantryObjectAction::AirStrike
         } else {
-            InfantryAttackAction::Attack
+            InfantryObjectAction::Attack
         });
     }
     // Infantry51EE54..51EEEF only rewrites an admitted Attack. The
     // simulation already owns CanInfiltrate and building admission.
     if sim.infiltrator_building_action(actor_id, target_id, rules) {
-        return Some(InfantryAttackAction::Infiltrate);
+        return Some(InfantryObjectAction::Infiltrate);
     }
     // Infantry51F160..51F179: the Attack left is NoMove over an Immune=
     // type. A player's Crazy Ivan has returned at his bomb arm
@@ -3686,7 +3970,7 @@ pub(super) fn infantry_attack_action(
     if !(object.ivan && sim.house_is_human_player(actor.owner()))
         && target_is_immune(sim, rules, &TargetKind::Entity(target_id))
     {
-        return Some(InfantryAttackAction::NoMove);
+        return Some(InfantryObjectAction::NoMove);
     }
     None
 }
@@ -3921,7 +4205,7 @@ fn object_click_release(
     else {
         return LeftRelease::Dispatch;
     };
-    let mut action = attack_action(
+    let action = attack_action(
         sim,
         rules,
         best,
@@ -3929,12 +4213,19 @@ fn object_click_release(
         forced,
         Some(overlay_registry),
     );
-    if action == AttackAction::Attack
-        && infantry_attack_action(sim, rules, best, target_id) == Some(InfantryAttackAction::Select)
-    {
-        action = AttackAction::Select;
-    }
-    left_release(sim, rules, action.into(), Some(target_id))
+    let class = infantry_object_action(sim, rules, best, target_id, action, None);
+    let release = match class {
+        Some(InfantryObjectAction::Select | InfantryObjectAction::HealerSelect) => {
+            ReleaseAction::Select
+        }
+        Some(
+            InfantryObjectAction::Heal
+            | InfantryObjectAction::GuardArea
+            | InfantryObjectAction::AttackSupport,
+        ) => ReleaseAction::Other,
+        _ => action.into(),
+    };
+    left_release(sim, rules, release, Some(target_id))
 }
 
 /// The selected Crazy Ivans whose click on the own or allied `target` plants a
@@ -5716,11 +6007,18 @@ mod tests {
                 (hut, HoverTargetKind::EnemyStructure),
             ] {
                 if actor == gi {
-                    // The Infantry tail is infantry_attack_action's last arm.
+                    // The Infantry tail is infantry_object_action's last arm.
                     assert_eq!(action(target, true), AttackAction::Attack, "{target}");
                     assert_eq!(
-                        infantry_attack_action(&sim, &rules, gi, target),
-                        Some(InfantryAttackAction::NoMove),
+                        infantry_object_action(
+                            &sim,
+                            &rules,
+                            gi,
+                            target,
+                            AttackAction::Attack,
+                            None
+                        ),
+                        Some(InfantryObjectAction::NoMove),
                         "{target}"
                     );
                 } else {
@@ -5748,7 +6046,10 @@ mod tests {
             attack_action(&sim, &rules, ivan, &TargetKind::Entity(hut), false, None),
             AttackAction::Attack
         );
-        assert_eq!(infantry_attack_action(&sim, &rules, ivan, hut), None);
+        assert_eq!(
+            infantry_object_action(&sim, &rules, ivan, hut, AttackAction::Attack, None),
+            None
+        );
         assert_eq!(
             crate::app::input::cursor::capability_cursor_for_hover(
                 &sim,
@@ -5767,8 +6068,8 @@ mod tests {
             CursorFeedbackKind::IvanBomb
         );
         assert_eq!(
-            infantry_attack_action(&sim, &rules, tanya, hut),
-            Some(InfantryAttackAction::Sabotage)
+            infantry_object_action(&sim, &rules, tanya, hut, AttackAction::Attack, None),
+            Some(InfantryObjectAction::Sabotage)
         );
         assert!(matches!(
             object_attack_click_command(

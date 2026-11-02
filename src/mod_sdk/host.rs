@@ -8,6 +8,7 @@ use vera_mod_runtime::HostServices;
 pub(super) struct NativeHost {
     ini: Option<Arc<IniFile>>,
     weapons: Vec<String>,
+    registries: Option<Arc<crate::rules::native_processing::SdkRegistryPass>>,
 }
 
 impl NativeHost {
@@ -15,13 +16,23 @@ impl NativeHost {
         Self {
             ini: Some(Arc::new(ini)),
             weapons,
+            registries: None,
         }
+    }
+
+    pub(super) fn with_registries(
+        mut self,
+        registries: crate::rules::native_processing::SdkRegistryPass,
+    ) -> Self {
+        self.registries = Some(Arc::new(registries));
+        self
     }
 
     pub(super) fn simulation() -> Self {
         Self {
             ini: None,
             weapons: Vec::new(),
+            registries: None,
         }
     }
 }
@@ -45,6 +56,7 @@ impl HostServices for NativeHost {
             .ini
             .as_ref()
             .ok_or("configuration is unavailable during simulation")?;
+        let owner = section;
         let section = ini.section_or_empty(section);
         let value: serde_json::Value =
             serde_json::from_slice(current).map_err(|e| e.to_string())?;
@@ -77,11 +89,25 @@ impl HostServices for NativeHost {
                     .read_double(key, f64::from_bits(value.as_u64().ok_or_else(bad)?))
                     .to_bits()
             ),
+            "ares-double-bits" => serde_json::json!(
+                section
+                    .read_ares_double_bits(
+                        key,
+                        crate::util::native_x87::NativeF64Bits::from_bits(
+                            value.as_u64().ok_or_else(bad)?,
+                        ),
+                    )
+                    .bits()
+            ),
             "nullable-int" => serde_json::json!(section.read_phobos_nullable_int(
                 key,
                 serde_json::from_value(value).map_err(|e| e.to_string())?
             )),
             "nullable-bool" => serde_json::json!(section.read_phobos_nullable_bool(
+                key,
+                serde_json::from_value(value).map_err(|e| e.to_string())?
+            )),
+            "ares-nullable-bool" => serde_json::json!(section.read_ares_nullable_bool(
                 key,
                 serde_json::from_value(value).map_err(|e| e.to_string())?
             )),
@@ -101,6 +127,25 @@ impl HostServices for NativeHost {
             "color-rgb" => {
                 let old: [u8; 3] = serde_json::from_value(value).map_err(|e| e.to_string())?;
                 serde_json::json!(section.read_color_rgb(key, old, None))
+            }
+            _ if reader.starts_with("ares-ref:") => {
+                let (target, scope) = reader["ares-ref:".len()..]
+                    .split_once('@')
+                    .ok_or_else(bad)?;
+                if target != "$animations" {
+                    return Err(bad());
+                }
+                let registries = self
+                    .registries
+                    .as_ref()
+                    .ok_or("registered references require physical Rules read-point data")?;
+                serde_json::json!(registries.read_animation_reference(
+                    owner,
+                    &section,
+                    key,
+                    scope,
+                    serde_json::from_value(value).map_err(|e| e.to_string())?,
+                )?)
             }
             _ => {
                 let (kind, size) = reader.split_once(':').ok_or_else(bad)?;
@@ -147,6 +192,12 @@ impl HostServices for NativeHost {
     fn registry(&self, name: &str) -> Vec<String> {
         if name == "$weapons" {
             return self.weapons.clone();
+        }
+        if name.starts_with('$') {
+            return self
+                .registries
+                .as_ref()
+                .map_or_else(Vec::new, |r| r.names(name));
         }
         self.ini
             .as_ref()

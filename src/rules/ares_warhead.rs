@@ -41,14 +41,14 @@ impl AresWarheadRules {
         affects_allies: bool,
     ) -> bool {
         // Installed WarheadExt10051B70: the source tests the target's bit.
-        !source_exists
-            || if same_owner && self.affects_owner.is_some() {
-                self.affects_owner.expect("present owner override")
-            } else if allied {
-                affects_allies
-            } else {
-                self.affects_enemies
-            }
+        vera_mod_api::relationship::permits_house(
+            source_exists,
+            same_owner,
+            allied,
+            affects_allies,
+            self.affects_enemies,
+            self.affects_owner,
+        )
     }
     pub(crate) fn sparkles(&self) -> Option<&str> {
         self.sparkles.as_deref()

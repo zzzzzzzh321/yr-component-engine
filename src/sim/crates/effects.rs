@@ -53,11 +53,9 @@ pub(crate) struct CrateMultipliers {
     #[serde(default = "one")]
     firepower: NativeF64Bits,
     /// Ares derived Techno+160; None retains the permanent Ext+80 baseline.
-    #[cfg(feature = "ares")]
     #[serde(default)]
     attached_firepower: Option<NativeF64Bits>,
     /// Ares derived Techno+158; None retains the permanent Ext+88 baseline.
-    #[cfg(feature = "ares")]
     #[serde(default)]
     attached_armor: Option<NativeF64Bits>,
 }
@@ -72,9 +70,7 @@ impl Default for CrateMultipliers {
         Self {
             armor: NativeF64Bits::ONE,
             firepower: NativeF64Bits::ONE,
-            #[cfg(feature = "ares")]
             attached_firepower: None,
-            #[cfg(feature = "ares")]
             attached_armor: None,
         }
     }
@@ -83,7 +79,6 @@ impl Default for CrateMultipliers {
 impl CrateMultipliers {
     /// `Techno+0x158`.
     pub(crate) const fn armor(self) -> NativeF64Bits {
-        #[cfg(feature = "ares")]
         if let Some(value) = self.attached_armor {
             return value;
         }
@@ -95,14 +90,12 @@ impl CrateMultipliers {
         self.armor
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn set_attached_armor(&mut self, value: NativeF64Bits) {
         self.attached_armor = (value != self.armor).then_some(value);
     }
 
     /// Effective Techno+160, read by both FireAt and EstimateDamage.
     pub(crate) const fn firepower(self) -> NativeF64Bits {
-        #[cfg(feature = "ares")]
         if let Some(value) = self.attached_firepower {
             return value;
         }
@@ -114,7 +107,6 @@ impl CrateMultipliers {
         self.firepower
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn set_attached_firepower(&mut self, value: NativeF64Bits) {
         self.attached_firepower = (value != self.firepower).then_some(value);
     }
@@ -123,20 +115,14 @@ impl CrateMultipliers {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_armor_multiplier_for_test(&mut self, value: NativeF64Bits) {
         self.armor = value;
-        #[cfg(feature = "ares")]
-        {
-            self.attached_armor = None;
-        }
+        self.attached_armor = None;
     }
 
     /// Install a fixture's firepower multiplier.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_firepower_multiplier_for_test(&mut self, value: NativeF64Bits) {
         self.firepower = value;
-        #[cfg(feature = "ares")]
-        {
-            self.attached_firepower = None;
-        }
+        self.attached_firepower = None;
     }
 }
 
@@ -174,14 +160,13 @@ pub(crate) fn apply_cloak_crate(
     center: DriveCoord,
     radius: i32,
 ) {
-    #[cfg(not(feature = "ares"))]
-    let _ = (rules, interner);
     for id in ground_members_in_radius(substrate, center, radius) {
         if let Some(entity) = substrate.entities.get_mut(id) {
             entity.stealth_ability.grant();
             // Installed Cloak2@1005F920 writes permanent Ext+98 then aggregates.
-            #[cfg(feature = "ares")]
-            entity.recompute_ares_attached_stats(rules, interner);
+            if crate::rules::ARES_ENABLED || rules.external_effects_enabled() {
+                entity.recompute_ares_attached_stats(rules, interner);
+            }
         }
     }
 }
@@ -200,8 +185,6 @@ pub(crate) fn apply_multiplier_crate(
     magnitude: NativeF64Bits,
     which: Multiplier,
 ) -> Vec<InternedId> {
-    #[cfg(not(feature = "ares"))]
-    let _ = (rules, interner);
     let mut changed_owners = Vec::new();
     for id in ground_members_in_radius(substrate, center, radius) {
         let Some(entity) = substrate.entities.get_mut(id) else {
@@ -219,8 +202,9 @@ pub(crate) fn apply_multiplier_crate(
         // Ares Armor2@1005F870 writes Ext+88 then calls RecalculateStats
         // @1005F89D; Firepower2@1005F997 does the same for Ext+80. Both
         // aggregate before the recipient callback/next actor (Ares Crates.cpp).
-        #[cfg(feature = "ares")]
-        entity.recompute_ares_attached_stats(rules, interner);
+        if crate::rules::ARES_ENABLED || rules.external_effects_enabled() {
+            entity.recompute_ares_attached_stats(rules, interner);
+        }
         let owner = entity.owner();
         if !changed_owners.contains(&owner) {
             changed_owners.push(owner);

@@ -7,21 +7,19 @@ use crate::sim::timer::CdTimer;
 /// Permanent instance stealth granted by CellClass::PickupCrate @0048294F.
 /// HasStealthAbility @0070C5A0 reads the same Techno+3D2 byte that the
 /// Unit/Infantry constructors seed from Cloakable= (@007355B4/@00517D86).
-/// Types are immutable for a scenario; retain only the permanent instance
-/// delta from that constructor seed. Keep it separate from cloak progress:
+/// Retain the permanent instance delta separately from the current type's
+/// seed and the attachment projection. Keep it separate from cloak progress:
 /// receiving it starts no timer
 /// or transition, and leaving/re-entering the map cannot remove it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StealthAbility {
     granted: bool,
-    #[cfg(feature = "ares")]
     #[serde(default)]
     attached: bool,
 }
 
 impl StealthAbility {
     pub(crate) fn active(self, type_seed: bool) -> bool {
-        #[cfg(feature = "ares")]
         if self.attached {
             return true;
         }
@@ -35,13 +33,11 @@ impl StealthAbility {
     pub(crate) fn granted(self) -> bool {
         self.granted
     }
-    #[cfg(feature = "ares")]
     pub(crate) fn attached(self) -> bool {
         self.attached
     }
     /// RecalculateStats1004617D/1004613B ORs descriptor+38 into the
     /// raw capability, without replacing permanent crate Ext+98.
-    #[cfg(feature = "ares")]
     pub(crate) fn set_attached(&mut self, value: bool) {
         self.attached = value;
     }

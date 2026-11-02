@@ -709,7 +709,9 @@ fn techno_ai_shell(
     let temporal_frozen =
         sim.temporal_ai_prologue(id, rules, ctx, &mut outcome.bridge_state_changed);
     crate::mod_sdk::tick_entity(sim, id, rules);
-    if sim.external_mod_fault.is_some() { return; }
+    if sim.external_mod_fault.is_some() {
+        return;
+    }
     if temporal_frozen {
         return;
     }
@@ -1467,8 +1469,11 @@ fn techno_common_steps(
     turret_rotate_sample: Option<bool>,
 ) -> bool {
     // Ares1004B434 updates attachments before1004B528 EMP recovery.
+    sim.update_component_effects(id, rules);
     #[cfg(feature = "ares")]
-    sim.update_ares_attach_effects(id, rules);
+    if !rules.external_effects_enabled() {
+        sim.update_ares_attach_effects(id, rules);
+    }
     // Installed6F9E50 ->1004B320 owns delayed Building reactivation before
     //the stock head. EMP expiry itself must not invent a future-power sweep.
     #[cfg(feature = "ares")]

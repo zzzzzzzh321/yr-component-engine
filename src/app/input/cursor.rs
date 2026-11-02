@@ -802,6 +802,39 @@ pub(super) fn capability_cursor_for_hover(
         return CursorFeedbackKind::DisarmBomb;
     }
 
+    // Infantry51E6D8..51E7A3 precedes deployment, entry and the weapon
+    // suffix. DetermineAction asks the group's chosen actor, not any healer.
+    if let (Some(rules), Some(actor_id)) = (rules, best_id) {
+        use super::context_order::{AttackAction, InfantryObjectAction};
+        let lone_self = selected == [hover.stable_id] && actor_id == hover.stable_id;
+        let base = if lone_self {
+            AttackAction::None
+        } else {
+            super::context_order::attack_action(
+                sim,
+                rules,
+                actor_id,
+                &combat::TargetKind::Entity(hover.stable_id),
+                modifier == OrderModifier::ForceFire,
+                overlay_registry,
+            )
+        };
+        match super::context_order::infantry_object_action(
+            sim,
+            rules,
+            actor_id,
+            hover.stable_id,
+            base,
+            if lone_self { None } else { key_action },
+        ) {
+            Some(InfantryObjectAction::Heal) => return CursorFeedbackKind::InfantryHeal,
+            Some(InfantryObjectAction::GuardArea) => return CursorFeedbackKind::GuardArea,
+            Some(InfantryObjectAction::AttackSupport) => return CursorFeedbackKind::Default,
+            Some(InfantryObjectAction::HealerSelect) => return CursorFeedbackKind::Select,
+            _ => {}
+        }
+    }
+
     // Techno7000B9's self action precedes Ctrl/Alt. All self consumers share
     // admission with click/deploy-key, including loaded mobile transports.
     if selected == [hover.stable_id]
@@ -1230,7 +1263,7 @@ fn infantry_weapon_feedback(
     target_id: u64,
     base: CursorFeedbackKind,
 ) -> Option<CursorFeedbackKind> {
-    use super::context_order::InfantryAttackAction;
+    use super::context_order::{AttackAction, InfantryObjectAction};
     if !matches!(
         base,
         CursorFeedbackKind::EnemyUnit
@@ -1240,14 +1273,26 @@ fn infantry_weapon_feedback(
         return None;
     }
     Some(
-        match super::context_order::infantry_attack_action(sim, rules?, actor_id, target_id)? {
-            InfantryAttackAction::Attack => base,
-            InfantryAttackAction::Sabotage => CursorFeedbackKind::Demolish,
-            InfantryAttackAction::WeaponDemolish => CursorFeedbackKind::WeaponDemolish,
-            InfantryAttackAction::AirStrike => CursorFeedbackKind::AirStrike,
-            InfantryAttackAction::Select => CursorFeedbackKind::Select,
-            InfantryAttackAction::Infiltrate => CursorFeedbackKind::Enter,
-            InfantryAttackAction::NoMove => CursorFeedbackKind::Invalid,
+        match super::context_order::infantry_object_action(
+            sim,
+            rules?,
+            actor_id,
+            target_id,
+            AttackAction::Attack,
+            None,
+        )? {
+            InfantryObjectAction::Attack => base,
+            InfantryObjectAction::Heal => CursorFeedbackKind::InfantryHeal,
+            InfantryObjectAction::GuardArea => CursorFeedbackKind::GuardArea,
+            InfantryObjectAction::AttackSupport => CursorFeedbackKind::Default,
+            InfantryObjectAction::Sabotage => CursorFeedbackKind::Demolish,
+            InfantryObjectAction::WeaponDemolish => CursorFeedbackKind::WeaponDemolish,
+            InfantryObjectAction::AirStrike => CursorFeedbackKind::AirStrike,
+            InfantryObjectAction::Select | InfantryObjectAction::HealerSelect => {
+                CursorFeedbackKind::Select
+            }
+            InfantryObjectAction::Infiltrate => CursorFeedbackKind::Enter,
+            InfantryObjectAction::NoMove => CursorFeedbackKind::Invalid,
         },
     )
 }
@@ -1548,6 +1593,8 @@ pub(crate) fn cursor_id_for_feedback(kind: CursorFeedbackKind) -> Option<CursorI
         CursorFeedbackKind::Move => Some(CursorId::Move),
         CursorFeedbackKind::AttackMove => Some(CursorId::AttackMove),
         CursorFeedbackKind::GuardArea => Some(CursorId::GuardArea),
+        // Heal27's row60/frame384 is the same descriptor used by no-power.
+        CursorFeedbackKind::InfantryHeal => Some(CursorId::NoTogglePower),
         CursorFeedbackKind::EnemyUnit | CursorFeedbackKind::EnemyStructure => {
             Some(CursorId::Attack)
         }

@@ -4246,7 +4246,17 @@ pub struct TypeHandle(pub u32);
 #[cfg_attr(any(test, feature = "test-support"), derive(Clone))]
 pub struct RuleSet {
     pub(crate) external_mod: Option<std::sync::Arc<crate::mod_sdk::Program>>,
+    /// Derived from the frozen component, rebuilt with all other projections.
+    /// None retains this build's native compatibility mode; Retail is an
+    /// explicit component-owned choice, not the absence of a choice.
+    match_rules_policy: Option<vera_mod_api::MatchRulesPolicy>,
     sdk_passes: Vec<IniFile>,
+    sdk_registries: Vec<crate::rules::native_processing::SdkRegistryPass>,
+    sdk_animation_names: Vec<String>,
+    effect_resources: std::collections::BTreeMap<
+        vera_mod_api::EffectResourceContext,
+        vera_mod_api::EffectDescriptor,
+    >,
     /// All game objects in registry insertion order, indexed by `TypeHandle`.
     object_list: Vec<ObjectType>,
     /// Uppercase type ID → handle. Uppercase keys give O(1) case-insensitive
@@ -4591,6 +4601,7 @@ impl RuleSet {
         self.external_mod = crate::mod_sdk::load_from_assets(
             assets,
             &self.sdk_passes,
+            &self.sdk_registries,
             &object_types,
             &warheads,
             &self.weapon_names(),
@@ -4605,6 +4616,42 @@ impl RuleSet {
     }
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
+        let mut effect_resources = std::collections::BTreeMap::new();
+        if let Some(program) = self
+            .external_mod
+            .as_deref()
+            .filter(|p| p.has_effect_runtime())
+        {
+            use vera_mod_api::{EffectResourceContext, EffectResourceKind};
+            let objects = self.object_list.iter().map(|object| EffectResourceContext {
+                kind: EffectResourceKind::for_user(object.resource_user())
+                    .expect("Techno category"),
+                name: object.id.clone(),
+            });
+            let warheads = self.warheads.keys().map(|name| EffectResourceContext {
+                kind: EffectResourceKind::Warhead,
+                name: name.clone(),
+            });
+            for resource in objects.chain(warheads) {
+                if let Some(mut descriptor) = program.effect_resource_policy(&resource)? {
+                    if let Some(name) = descriptor.animation.as_ref() {
+                        let canonical = self
+                            .sdk_animation_names
+                            .iter()
+                            .find(|id| id.eq_ignore_ascii_case(name))
+                            .ok_or_else(|| format!("effect animation is not registered: {name}"))?;
+                        descriptor.animation = Some(canonical.clone());
+                    }
+                    effect_resources.insert(resource, descriptor);
+                }
+            }
+        }
+        let match_rules_policy = self
+            .external_mod
+            .as_ref()
+            .map(|program| program.match_rules_policy())
+            .transpose()?
+            .flatten();
         let names = self.weapon_names();
         let policies = names
             .into_iter()
@@ -4631,6 +4678,24 @@ impl RuleSet {
                 Ok(policy)
             })
             .collect::<Result<Vec<_>, String>>()?;
+        if type_policies
+            .iter()
+            .flatten()
+            .any(|policy| policy.keep_alive.is_some())
+            && !matches!(
+                match_rules_policy,
+                Some(vera_mod_api::MatchRulesPolicy {
+                    survival: vera_mod_api::SurvivalRule::TrackedPresence,
+                    ..
+                })
+            )
+        {
+            return Err(
+                "survival contributions require an explicit tracked-presence match rule".into(),
+            );
+        }
+        self.match_rules_policy = match_rules_policy;
+        self.effect_resources = effect_resources;
         for (name, policy) in policies {
             self.weapons
                 .get_mut(&name)
@@ -4642,6 +4707,77 @@ impl RuleSet {
         }
         self.project_resource_reload();
         Ok(())
+    }
+
+    pub(crate) const fn match_rules_policy(&self) -> Option<vera_mod_api::MatchRulesPolicy> {
+        self.match_rules_policy
+    }
+
+    pub(crate) fn external_effects_enabled(&self) -> bool {
+        self.external_mod
+            .as_deref()
+            .is_some_and(|p| p.has_effect_runtime())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn sdk_configuration_passes(&self) -> &[IniFile] {
+        &self.sdk_passes
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn sdk_configuration_registries(
+        &self,
+    ) -> &[crate::rules::native_processing::SdkRegistryPass] {
+        &self.sdk_registries
+    }
+
+    pub(crate) fn effect_runtime_policy(&self) -> vera_mod_api::EffectRuntimePolicy {
+        if let Some(policy) = self.match_rules_policy.and_then(|p| p.effects) {
+            return policy;
+        }
+        if self.external_effects_enabled() {
+            return Default::default();
+        }
+        let enabled = crate::rules::ARES_ENABLED;
+        vera_mod_api::EffectRuntimePolicy {
+            apply_rof: enabled,
+            allow_aircraft_speed_crates: enabled,
+            allow_unarmed_firepower_crates: enabled,
+            cloak_crate_uses_cloakability: enabled,
+            cloak: vera_mod_api::CloakRuntimePolicy {
+                use_motion_query: enabled,
+                motion_blocks_raw_ability: enabled,
+                offline_blocks_ability: enabled,
+                blockers_apply_to_rank: enabled,
+                check_type_permission: enabled,
+                deny_parachuted: enabled,
+                check_recloak_before_weapon: enabled,
+                allow_active_ability_above_ground: enabled,
+            },
+        }
+    }
+
+    pub(crate) fn effect_descriptor(
+        &self,
+        resource: &vera_mod_api::EffectResourceContext,
+    ) -> Option<&vera_mod_api::EffectDescriptor> {
+        self.effect_resources.get(resource)
+    }
+
+    pub(crate) fn effect_descriptors(
+        &self,
+    ) -> impl Iterator<Item = &vera_mod_api::EffectDescriptor> {
+        self.effect_resources.values()
+    }
+
+    pub(crate) fn survival_rule(&self) -> vera_mod_api::SurvivalRule {
+        self.match_rules_policy
+            .map(|policy| policy.survival)
+            .unwrap_or(if crate::rules::ARES_ENABLED {
+                vera_mod_api::SurvivalRule::TrackedPresence
+            } else {
+                vera_mod_api::SurvivalRule::Retail
+            })
     }
 
     fn project_resource_reload(&mut self) {
@@ -6109,7 +6245,14 @@ impl RuleSet {
 
         let mut rules = RuleSet {
             external_mod: None,
+            match_rules_policy: None,
             sdk_passes: processed.sdk_passes().to_vec(),
+            sdk_registries: processed.sdk_registries().to_vec(),
+            sdk_animation_names: processed
+                .anim_type_reference_states()
+                .map(|(name, _)| name.to_owned())
+                .collect(),
+            effect_resources: Default::default(),
             object_list,
             object_index,
             serial: next_rule_set_serial(),
@@ -6349,16 +6492,21 @@ impl RuleSet {
     pub fn bind_input_policy_for_test(&mut self, id: &str, input: vera_mod_api::InputPolicy) {
         let handle = self.type_handle(id).expect("fixture type must exist");
         let object = &mut self.object_list[handle.0 as usize];
-        let mut policy =
-            object
-                .type_resource_policy()
-                .unwrap_or(vera_mod_api::TypeResourcePolicy {
-                    users: object.resource_user(),
-                    reload: None,
-                    depleted_weapon: None,
-                    input: None,
-                });
+        let mut policy = object
+            .type_resource_policy()
+            .unwrap_or_else(|| vera_mod_api::TypeResourcePolicy::empty(object.resource_user()));
         policy.input = Some(input);
+        object.bind_type_resource_policy(Some(policy));
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_cloak_allowed_for_test(&mut self, id: &str, allowed: bool) {
+        let handle = self.type_handle(id).expect("fixture type must exist");
+        let object = &mut self.object_list[handle.0 as usize];
+        let mut policy = object
+            .type_resource_policy()
+            .unwrap_or_else(|| vera_mod_api::TypeResourcePolicy::empty(object.resource_user()));
+        policy.cloak_allowed = Some(allowed);
         object.bind_type_resource_policy(Some(policy));
     }
 

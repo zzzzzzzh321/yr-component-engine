@@ -1,9 +1,11 @@
-//! Builtin Ares WarheadExt+88 effects, with one TechnoExt+20 instance owner.
+//! One ordered effect-instance owner, shared by the component adapter and the
+//! retained builtin Ares adapter. The guest never keeps a second instance list.
 //! Installed10058520/10058E00/100588E0/10042C30; see docs/ares-attach-effect.md.
 use super::GameEntity;
 use crate::sim::intern::InternedId;
 use crate::util::native_x87::NativeF64Bits;
 use std::hash::{Hash, Hasher};
+mod component;
 
 /// Native instance+0 holds the shared descriptor pointer, belonging either
 /// to a Warhead or to a concrete TechnoType (10058ED1 compares its owner).
@@ -14,6 +16,67 @@ enum EffectOrigin {
 }
 
 impl EffectOrigin {
+    fn resource(
+        self,
+        interner: &crate::sim::intern::StringInterner,
+    ) -> Option<vera_mod_api::EffectResourceContext> {
+        use crate::rules::object_type::ObjectCategory;
+        use vera_mod_api::{EffectResourceContext, EffectResourceKind};
+        let (kind, id) = match self {
+            Self::Warhead(id) => (EffectResourceKind::Warhead, id),
+            Self::TechnoType(category, id) => (
+                match category {
+                    ObjectCategory::Building => EffectResourceKind::Building,
+                    ObjectCategory::Aircraft => EffectResourceKind::Aircraft,
+                    ObjectCategory::Vehicle => EffectResourceKind::Unit,
+                    ObjectCategory::Infantry => EffectResourceKind::Infantry,
+                },
+                id,
+            ),
+        };
+        Some(EffectResourceContext {
+            kind,
+            name: interner.try_resolve(id)?.to_owned(),
+        })
+    }
+
+    fn factors(
+        self,
+        rules: &crate::rules::ruleset::RuleSet,
+        interner: &crate::sim::intern::StringInterner,
+    ) -> Option<EffectFactors> {
+        if rules.external_effects_enabled() {
+            return rules
+                .effect_descriptor(&self.resource(interner)?)
+                .map(|d| EffectFactors {
+                    firepower: NativeF64Bits::from_bits(d.firepower_multiplier_bits),
+                    armor: NativeF64Bits::from_bits(d.armor_multiplier_bits),
+                    rof: NativeF64Bits::from_bits(d.rof_multiplier_bits),
+                    speed: NativeF64Bits::from_bits(d.speed_multiplier_bits),
+                    cloak: d.cloakable,
+                });
+        }
+        self.settings(rules, interner).map(|d| EffectFactors {
+            firepower: d.firepower_multiplier(),
+            armor: d.armor_multiplier(),
+            rof: d.rof_multiplier(),
+            speed: d.speed_multiplier(),
+            cloak: d.cloakable(),
+        })
+    }
+
+    fn animation<'a>(
+        self,
+        rules: &'a crate::rules::ruleset::RuleSet,
+        interner: &crate::sim::intern::StringInterner,
+    ) -> Option<&'a str> {
+        if rules.external_effects_enabled() {
+            return rules
+                .effect_descriptor(&self.resource(interner)?)
+                .and_then(|d| d.animation.as_deref());
+        }
+        self.settings(rules, interner).and_then(|d| d.animation())
+    }
     fn settings<'a>(
         self,
         rules: &'a crate::rules::ruleset::RuleSet,
@@ -51,27 +114,27 @@ impl Default for SelfEffectState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "attach_speed_tests.rs"]
 mod speed_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "attach_firepower_tests.rs"]
 mod firepower_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "attach_decloak_tests.rs"]
 mod decloak_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "attach_self_cloak_tests.rs"]
 mod self_cloak_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "attach_armor_tests.rs"]
 mod armor_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "attach_rof_tests.rs"]
 mod rof_tests;
 
@@ -112,6 +175,14 @@ struct AttachedStats {
     rof: NativeF64Bits,
 }
 
+struct EffectFactors {
+    firepower: NativeF64Bits,
+    armor: NativeF64Bits,
+    rof: NativeF64Bits,
+    speed: NativeF64Bits,
+    cloak: bool,
+}
+
 impl GameEntity {
     fn attached_stats_from_entries(
         &self,
@@ -129,32 +200,27 @@ impl GameEntity {
         let mut cloak = false;
         let mut rof = NativeF64Bits::ONE;
         for entry in &self.attach_effects.entries {
-            let settings = entry
+            let factors = entry
                 .origin
-                .settings(rules, interner)
+                .factors(rules, interner)
                 .ok_or("attachment descriptor is absent from restored rules")?;
             firepower = X::store_f64_masked_chop(X::mul(
-                X::load_f64(settings.firepower_multiplier()),
+                X::load_f64(factors.firepower),
                 X::load_f64(firepower),
             ));
             // Ares TechnoExt::RecalculateStats @10046192..10046199:
             // each ordered ArmorMultiplier multiplies Ext+88's aggregate,
             // spilling binary64 before the next entry; final Techno+158
             // is consumed by stock ReceiveDamage @701939 and EstimateDamage.
-            armor = X::store_f64_masked_chop(X::mul(
-                X::load_f64(settings.armor_multiplier()),
-                X::load_f64(armor),
-            ));
+            armor =
+                X::store_f64_masked_chop(X::mul(X::load_f64(factors.armor), X::load_f64(armor)));
             // Installed Ares RecalculateStats10046184..1004618B:
             // descriptor+28, with a binary64 spill after each ordered factor.
-            rof = X::store_f64_masked_chop(X::mul(
-                X::load_f64(settings.rof_multiplier()),
-                X::load_f64(rof),
-            ));
+            rof = X::store_f64_masked_chop(X::mul(X::load_f64(factors.rof), X::load_f64(rof)));
             if self.category().is_foot() {
-                speed = X::mul(speed, X::load_f64(settings.speed_multiplier()));
+                speed = X::mul(speed, X::load_f64(factors.speed));
             }
-            cloak |= settings.cloakable();
+            cloak |= factors.cloak;
         }
         Ok(AttachedStats {
             firepower,
@@ -221,7 +287,7 @@ impl GameEntity {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 mod tests {
     use super::*;
     use crate::rules::{ini_parser::IniFile, ruleset::RuleSet};
@@ -504,7 +570,6 @@ mod tests {
     }
 }
 
-#[cfg(feature = "ares")]
 mod receiver {
     use super::*;
     use crate::rules::{ruleset::RuleSet, warhead_type::WarheadType};
@@ -515,6 +580,7 @@ mod receiver {
     impl Simulation {
         /// Bullet46920B ->100536E0 calls AE10052700 after EMP. Source is the
         /// House captured from the live firer before either effect, not a Techno.
+        #[cfg(feature = "ares")]
         pub(crate) fn apply_ares_attach_effect_detonation(
             &mut self,
             impact: crate::sim::projectile::ProjectileCoord,
@@ -584,6 +650,7 @@ mod receiver {
         /// AttachEffectTypeClass::Attach10058520 is shared by ground WH and
         /// self descriptors. It owns IC admission, refresh, animation creation,
         /// aggregate publication and forced-uncloak ordering for both callers.
+        #[cfg(feature = "ares")]
         fn attach_ares_effect(
             &mut self,
             target: u64,
@@ -647,32 +714,43 @@ mod receiver {
             // StartUncloaking @7036C0; its owner rejects states 0/3 and
             // suppresses the sound without restarting an active transition.
             if settings.force_decloak() {
-                let speed = self
-                    .substrate
-                    .entities
-                    .get(target)
-                    .and_then(|victim| self.interner.object_type(victim.type_ref(), rules))
-                    .map(|kind| kind.cloaking_speed);
-                if let Some(speed) = speed
-                    && let Some(cloak) = self
-                        .substrate
-                        .entities
-                        .get_mut(target)
-                        .and_then(|victim| victim.cloak.as_mut())
-                {
-                    cloak.start_uncloaking(
-                        self.session.binary_frame() as i32,
-                        speed,
-                        rules.general.cloaking_stages,
-                        true,
-                    );
-                }
+                self.decloak_attached_effect(target, rules);
             }
 
             true
         }
 
-        fn create_attached_effect_anim(&mut self, target: u64, index: usize, rules: &RuleSet) {
+        /// Shared100586A4..100586C0 tail; the existing cloak owner rejects
+        /// inactive transitions and preserves the suppress-sound behavior.
+        pub(super) fn decloak_attached_effect(&mut self, target: u64, rules: &RuleSet) {
+            let speed = self
+                .substrate
+                .entities
+                .get(target)
+                .and_then(|victim| self.interner.object_type(victim.type_ref(), rules))
+                .map(|kind| kind.cloaking_speed);
+            if let Some(speed) = speed
+                && let Some(cloak) = self
+                    .substrate
+                    .entities
+                    .get_mut(target)
+                    .and_then(|victim| victim.cloak.as_mut())
+            {
+                cloak.start_uncloaking(
+                    self.session.binary_frame() as i32,
+                    speed,
+                    rules.general.cloaking_stages,
+                    true,
+                );
+            }
+        }
+
+        pub(super) fn create_attached_effect_anim(
+            &mut self,
+            target: u64,
+            index: usize,
+            rules: &RuleSet,
+        ) {
             let Some(victim) = self.substrate.entities.get(target) else {
                 return;
             };
@@ -686,11 +764,7 @@ mod receiver {
                 return;
             };
             let source = entry.source_house;
-            let Some(name) = entry
-                .origin
-                .settings(rules, &self.interner)
-                .and_then(|settings| settings.animation())
-            else {
+            let Some(name) = entry.origin.animation(rules, &self.interner) else {
                 return;
             };
             let coord = crate::sim::movement::ground_pose::position_world_coord(&victim.position);
@@ -727,7 +801,12 @@ mod receiver {
             }
         }
 
-        fn retire_attached_effect_anim(&mut self, target: u64, index: usize, rules: &RuleSet) {
+        pub(super) fn retire_attached_effect_anim(
+            &mut self,
+            target: u64,
+            index: usize,
+            rules: &RuleSet,
+        ) {
             let anim = self
                 .substrate
                 .entities
@@ -741,6 +820,7 @@ mod receiver {
 
         /// Common head1004B434, before delayed EMP/power recovery1004B528.
         /// Actual actor visits own the clock; passenger/chrono/limbo skip it.
+        #[cfg(feature = "ares")]
         pub(crate) fn update_ares_attach_effects(&mut self, target: u64, rules: &RuleSet) {
             let Some(victim) = self.substrate.entities.get(target) else {
                 return;
@@ -888,6 +968,7 @@ mod receiver {
         /// Ares conversion10043792 -> vector RemoveType100589F0 clears the
         /// applied flag without resetting its counter, then erases the first
         /// descriptor owned by the old Type. Warhead-owned effects survive.
+        #[cfg(feature = "ares")]
         pub(crate) fn reset_self_attach_effect_for_type_change(
             &mut self,
             target: u64,
@@ -917,6 +998,7 @@ mod receiver {
 
         /// Remove6F6AC9 ->1004B140 ->100588E0. Ordinary attachments survive
         /// boarding with a paused duration; DiscardOnEntry removes the entry.
+        #[cfg(feature = "ares")]
         pub(crate) fn limbo_ares_attach_effects(&mut self, target: u64, rules: &RuleSet) {
             let Some(victim) = self.substrate.entities.get(target) else {
                 return;

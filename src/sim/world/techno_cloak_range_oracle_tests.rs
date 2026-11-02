@@ -255,7 +255,14 @@ fn original_can_auto_cloak_matches_retail_inputs_and_retained_target_controls() 
         sim.mapgen_rng =
             SimRng::from_native_state_hex_for_test(row["rng_before"]["mapgen"].as_str().unwrap());
         let rng = sim.rng_state();
-        let facts = super::stock_cloak_tick_facts(&sim, source, rules, None).unwrap();
+        let facts = super::stock_cloak_tick_facts(
+            &sim,
+            source,
+            rules,
+            None,
+            vera_mod_api::CloakRuntimePolicy::default(),
+        )
+        .unwrap();
         assert_eq!(
             facts.can_auto_cloak,
             row["can_auto"].as_bool().unwrap(),

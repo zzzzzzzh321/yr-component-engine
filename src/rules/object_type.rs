@@ -2401,6 +2401,12 @@ impl ObjectType {
         }
     }
     pub(crate) fn cloak_allowed(&self) -> bool {
+        if let Some(value) = self
+            .type_resource_policy
+            .and_then(|policy| policy.cloak_allowed)
+        {
+            return value;
+        }
         #[cfg(feature = "ares")]
         {
             self.cloak_allowed

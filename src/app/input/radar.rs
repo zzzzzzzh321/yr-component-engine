@@ -81,11 +81,12 @@ impl RadarAction {
             Kind::Demolish => Self::Sabotage,
             Kind::GuardArea => Self::GuardArea,
             // Action0 and AttackSupport (0x3B), Self (4), Select (7),
-            // ToggleSelect (8), Grind (0xB), Damage (0x1C), GRepair (0x1D),
+            // ToggleSelect (8), Grind (0xB), Heal (0x1B), Damage (0x1C), GRepair (0x1D),
             // NoDeploy (0x1E), NoEnter (0x1F), NoGRepair (0x20), IvanBomb
             // (0x35), NoIvanBomb (0x36), DisarmBomb (0x39), Demolish (0x40)
             // and Airstrike (0x47).
             Kind::Default
+            | Kind::InfantryHeal
             | Kind::Deploy
             | Kind::Select
             | Kind::FriendlyUnit
