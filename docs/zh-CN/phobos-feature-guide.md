@@ -53,7 +53,7 @@ CSV 记录所属节、节类型提示、文档分支、原文表达、原文类�
 
 ## 当前 VERA SDK 能力及边界
 
-当前参考插件源码位于`plugins/vera20k-ares`，发布文件名为`vera20k-ares.wasm`；其中保留Phobos护盾与自定义过载示例，文件名不表示完整Ares兼容。内部组件标识继续为`vera.reference-gameplay` **0.4.0**，配置模式版本4、状态模式版本1。一个作品接纳一个可选WASM组件，由组件内部按固定顺序组合功能；这份目录没有引入多插件冲突合并系统。下文`guest`指外置WASM组件，`host`指提供受控服务的引擎宿主。
+当前参考插件源码位于相邻的`plugin-dev`独立工程的`plugins/vera20k-ares`目录，发布文件名为`vera20k-ares.wasm`；其中保留Phobos护盾与自定义过载示例，文件名不表示完整Ares兼容。内部组件标识继续为`vera.reference-gameplay` **0.4.0**，配置模式版本4、状态模式版本1。一个作品接纳一个可选WASM组件，由组件内部按固定顺序组合功能；这份目录没有引入多插件冲突合并系统。下文`guest`指外置WASM组件，`host`指提供受控服务的引擎宿主。
 
 | 接口或能力 | 当前实际用途 | 不能直接推出的能力 |
 | --- | --- | --- |
@@ -67,7 +67,7 @@ CSV 记录所属节、节类型提示、文档分支、原文表达、原文类�
 
 目前宿主对 `Operation` 仍全部拒绝执行，包括 `AdjustHealth`。所以文中改钱、生成对象、转换类型、发射武器、改变归属、写变量等建议都需要先提供受校验的通用领域接口，不能只往插件 `tick` 里加代码。对象返回空状态会取消后续订阅；需要后续事件重新激活的功能必须另设计生命周期入口。
 
-参考组件已经外置护盾的**配置、吸收伤害、破裂、重生/自愈及相关暂停、进度条和染色**这条有限链；完整支持范围与残余见[护盾参考说明](../../plugins/vera20k-ares/README.md)。它未完成全部Phobos护盾动画/武器、弹头施加/移除/击破、更换类型时的护盾转移、`SelfHealing.EnabledBy`消费及所有替代背景图资源。配置字段存在不等于对应消费者完成。
+参考组件已经外置护盾的**配置、吸收伤害、破裂、重生/自愈及相关暂停、进度条和染色**这条有限链；完整支持范围与残余见[护盾参考说明](../../../plugin-dev/plugins/vera20k-ares/README.md)。它未完成全部Phobos护盾动画/武器、弹头施加/移除/击破、更换类型时的护盾转移、`SelfHealing.EnabledBy`消费及所有替代背景图资源。配置字段存在不等于对应消费者完成。
 
 `[VeraFeatures] Shield/Overload/AresAmmo/AresReload/AresNoAmmoWeapon`是**VERA自己的功能选择**，不是Phobos原生配置，五项默认关闭。三个Ares开关分别控制武器成本、装填数量与低弹量选武器，彼此独立。后两项通过可选第六回调`type_resource`提供静态策略，没有新增Host服务或第二套对象状态；真实弹仓和装填时钟仍由引擎拥有。
 
@@ -1464,7 +1464,7 @@ AttachEffect.Delays=-1
 - 通过正式加载与游戏路径验证一个代表性闭环，保留少量能发现实际回归的测试；联机、存读档和资源表现按功能需要验收。
 - 把仍未完成的触发条件和交互写在功能支持页；“键已解析”“目录已列出”“插件成功加载”均不能替代行为验收。
 
-当前代码入口见 [组件分派](../../plugins/vera20k-ares/src/component.rs)、[护盾配置](../../plugins/vera20k-ares/src/features/defense/shield/config.rs)、[护盾逻辑](../../plugins/vera20k-ares/src/features/defense/shield/logic.rs)、[Ammo示例](../../plugins/vera20k-ares/src/features/weapons/ammo_cost.rs)、[类型化API](../../sdk/api/src/lib.rs)、[宿主服务](../../src/mod_sdk/host.rs)、[模拟接入](../../src/mod_sdk/simulation.rs)和[架构指南](../../sdk/ARCHITECTURE.zh-CN.md)。
+当前代码入口见 [组件分派](../../../plugin-dev/plugins/vera20k-ares/src/component.rs)、[护盾配置](../../../plugin-dev/plugins/vera20k-ares/src/features/defense/shield/config.rs)、[护盾逻辑](../../../plugin-dev/plugins/vera20k-ares/src/features/defense/shield/logic.rs)、[Ammo示例](../../../plugin-dev/plugins/vera20k-ares/src/features/weapons/ammo_cost.rs)、[类型化API](../../sdk/api/src/lib.rs)、[宿主服务](../../src/mod_sdk/host.rs)、[模拟接入](../../src/mod_sdk/simulation.rs)和[架构指南](../../sdk/ARCHITECTURE.zh-CN.md)。
 
 <a id="references"></a>
 ## 官方参考与署名

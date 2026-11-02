@@ -2,19 +2,24 @@
 
 一个作品选择一个可选的 WebAssembly 功能组件，参考组件包含各功能代码，通过作品 INI 选择本局启用项。护盾、武器弹药成本、装填数量和低弹量武器选择都在同一组件内。原版不声明组件，走原有引擎流程。
 
-插件的编译依赖限于SDK API、WIT接口定义和插件自身的Rust依赖；Host具体服务在运行时由引擎提供。可将这些源码与通用打包工具组装为[独立开发包](dev-kit/README.zh-CN.md)，用独立workspace和锁文件构建，无需编译或持有引擎源码。SDK契约扩展时，插件与运行它的引擎仍需匹配版本。
+插件的实现与开发工具在相邻的 [plugin-dev 独立工程](../../plugin-dev/README.md)维护，使用自己的 workspace 和锁文件；[开发指南](../../plugin-dev/sdk/dev-kit/README.zh-CN.md)中的标准 Cargo 命令不依赖引擎源码。编译依赖限于固定版本的 SDK API、WIT 快照和插件自身的 Rust 依赖，Host 具体服务在运行时由引擎提供。引擎仓库的 `sdk/api` 与 `sdk/wit` 是契约的权威定义；扩展协议时先更新它们与引擎接入，再同步独立工程的开发快照。
 
-SDK基础设施与功能插件使用独立顶层目录：
+工作目录中的引擎与插件工程独立维护：
 
 ```text
-sdk/
-├── api/                         # 请求、计划、公共数据
-├── wit/                         # 通信契约
-├── runtime/                     # 插件运行时
-└── package/                     # 通用打包工具
-plugins/
-└── vera20k-ares/
-    └── src/
+工作目录/
+├── engine/
+│   ├── sdk/
+│   │   ├── api/                 # 权威请求、计划与公共类型
+│   │   ├── wit/                 # 权威通信契约
+│   │   └── runtime/             # 宿主运行时
+│   └── src/mod_sdk/             # 资源接纳与模拟接入
+└── plugin-dev/
+    ├── sdk/
+    │   ├── api/                 # 固定版本开发快照
+    │   ├── wit/                 # 固定版本开发快照
+    │   └── package/             # 通用打包工具
+    └── plugins/vera20k-ares/src/
         ├── component.rs         # 入口与组合
         ├── support/             # 共用Host与编码
         └── features/
@@ -34,7 +39,7 @@ plugins/
   → assets.rs：接纳作品或恢复原组件
   → program.rs：冻结配置、准备请求、调用运行时
   → sdk/runtime：创建新实例、限制执行、校验返回计划
-  → plugins/vera20k-ares/src/lib.rs：WIT 导出与消息解码
+  → plugin-dev/plugins/vera20k-ares/src/lib.rs：WIT 导出与消息解码
   → 插件 component.rs：按回调分派
       ├─ features/defense/shield：护盾与过载
       └─ features/weapons/
@@ -65,15 +70,15 @@ plugins/
 
 ## 公共层组织规则
 
-各功能共用一份公共层。插件侧宿主服务统一在 [support/host.rs](../plugins/vera20k-ares/src/support/host.rs) 的 `Host` 中声明，通过 `support` 导入；护盾、弹药及后续功能不各自复制一套 Host。Rust 的 `trait Host` 在这里相当于 C++ 中提供抽象调用契约的接口类，文件后缀为 `.rs`。
+各功能共用一份公共层。插件侧宿主服务统一在 [support/host.rs](../../plugin-dev/plugins/vera20k-ares/src/support/host.rs) 的 `Host` 中声明，通过 `support` 导入；护盾、弹药及后续功能不各自复制一套 Host。Rust 的 `trait Host` 在这里相当于 C++ 中提供抽象调用契约的接口类，文件后缀为 `.rs`。
 
 | 公共内容 | 唯一维护位置 |
 | --- | --- |
 | 插件可调用的宿主服务、WASM调用适配、配置视图与节读取包装 | `support/host.rs`，目前包含 `Host`、`WasmHost`、`ConfigView`、`Section` |
 | 通用数值序列化 | `support/codec.rs` |
-| 引擎与插件共用的请求、计划、版本及基础类型 | `sdk/api`；共用倒计时沿用其中的 `timer` 模块 |
+| 引擎与插件共用的请求、计划、版本及基础类型 | 引擎 `sdk/api` 为权威定义，独立工程使用固定版本快照；共用倒计时沿用其中的 `timer` 模块 |
 | 武器成本、类型装填与低弹量选择的静态策略协议 | `sdk/api/src/resource.rs` |
-| 跨WASM边界的导入与导出契约 | `sdk/wit/gameplay.wit` |
+| 跨WASM边界的导入与导出契约 | 引擎 `sdk/wit/gameplay.wit` 为权威定义，独立工程使用匹配快照 |
 | 宿主服务的引擎端实现 | 引擎 `src/mod_sdk/host.rs`，转交已有读取器和领域算法 |
 
 `Host` 集中声明插件实际需要的通用服务，如配置读取、类型目录和共用伤害计算。具体键名、默认值、护盾吸收算法或弹药成本政策仍放在对应功能模块；通用读取器接收节名和键名，不直接认识 `ShieldType` 等具体玩法。请求上下文与返回计划继续归 `sdk/api`，不因它们也被多处使用就混进 Host 服务接口。
@@ -114,6 +119,6 @@ plugins/
 
 源文件搬动或重新编译可能改变组件的 SHA-256。读档要求作品资源与存档中的组件摘要一致，所以旧存档仍应保留并使用原来的组件文件。相同数据格式不代表可以把旧局组件直接换成新构建；本版没有热替换或状态迁移。
 
-验证入口包括插件行为测试、真实 Wasm 与原生配置读取器的集成测试，以及原版/兼容护盾/过载护盾/弹药/零售地图的正式引擎探针。`sdk_ini_selection_is_layered_frozen_and_restored_with_the_program` 通过真实 INI 读取器检查分层开关、依赖、禁用、保存与恢复。结构迁移时，`sdk_refactor_preserves_` 可比较同一接口与配置版本下的迁移前后制品，包括本次0.4.0目录迁移；需另设baseline/candidate路径，不用于跨配置模式迁移。构建与命令行说明见 [中文 README](README.zh-CN.md) 和 [弹药示例](../plugins/vera20k-ares/AMMO.zh-CN.md)。
+验证入口包括插件行为测试、真实 Wasm 与原生配置读取器的集成测试，以及原版/兼容护盾/过载护盾/弹药/零售地图的正式引擎探针。`sdk_ini_selection_is_layered_frozen_and_restored_with_the_program` 通过真实 INI 读取器检查分层开关、依赖、禁用、保存与恢复。结构迁移时，`sdk_refactor_preserves_` 可比较同一接口与配置版本下的迁移前后制品，包括本次0.4.0目录迁移；需另设baseline/candidate路径，不用于跨配置模式迁移。构建与命令行说明见 [中文 README](README.zh-CN.md) 和 [弹药示例](../../plugin-dev/plugins/vera20k-ares/AMMO.zh-CN.md)。
 
 以上仍是实验版 SDK，不代表完整 Ares/Phobos 兼容，也没有完成大规模性能和各桌面平台的验证。

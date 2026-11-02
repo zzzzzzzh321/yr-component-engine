@@ -36,7 +36,7 @@ other mode, even with identical retail INIs.
 Supported extensions:
 
 - [Custom radiation types](phobos-custom-radiation.md)
-- [External shield reference](../plugins/vera20k-ares/README.md) (damage absorption, shield bar/tint, break, respawn and self-healing); loaded through the [Mod SDK](../sdk/README.md), independently of the compiled `phobos` capability
+- [External shield reference](../../plugin-dev/plugins/vera20k-ares/README.md) (damage absorption, shield bar/tint, break, respawn and self-healing); loaded through the [Mod SDK](../sdk/README.md), independently of the compiled `phobos` capability
 - [Custom ore spawners](phobos-ore-spawners.md)
 - [Custom gather animations](phobos-harvester-gather-animations.md)
 - [Ore-stage animation hiding](phobos-hide-if-no-ore-threshold.md)

@@ -6,17 +6,19 @@ overload, Ares weapon ammo costs, reload amounts and low-ammo weapon selection a
 selected through INI. This prototype migrates the existing supported shield chain;
 it does not migrate every Ares/Phobos feature or claim full upstream parity.
 
-The SDK infrastructure lives in `sdk/`; the first author-editable plugin lives
-separately in `plugins/vera20k-ares/` at the repository root and publishes
-`vera20k-ares.wasm`. Its current features include the retained Phobos-compatible
-shield chain and authored overload example; the Ares filename does not claim
-complete Ares compatibility.
+This engine checkout retains the shared API, WIT contract, Wasmtime runtime and
+engine adapters. Plugin implementation and authoring tools live in the sibling
+[`plugin-dev` workspace](../../plugin-dev/README.md), whose first plugin is
+`plugins/vera20k-ares` and publishes `vera20k-ares.wasm`. Its current features
+include the retained Phobos-compatible shield chain and authored overload
+example; the Ares filename does not claim complete Ares compatibility.
 
-Plugin authors can use an engine-free development kit containing only the API,
-WIT, packager and reference plugin, with its own workspace and lockfile. The
-[standalone build guide](dev-kit/README.zh-CN.md) uses standard Cargo and does
-not require the engine sources, executable, Python build runner or game assets.
-The commands below describe development inside the full engine checkout.
+Plugin authors work in that independent workspace using standard Cargo. The
+[build guide](../../plugin-dev/sdk/dev-kit/README.zh-CN.md) needs no engine
+sources, executable, Python build runner or game assets. The engine's `sdk/api`
+and `sdk/wit` are the authoritative contract; the plugin workspace builds against
+a pinned development snapshot. A contract change updates the engine definition
+and host support before refreshing that SDK snapshot.
 
 ## Boundaries
 
@@ -26,9 +28,11 @@ The commands below describe development inside the full engine checkout.
 - `wit/gameplay.wit`: portable `vera:mod-sdk@0.1.0` component interface.
 - `runtime`: Wasmtime, with only immutable INI and shared numeric-kernel imports.
   No filesystem, clock, random, network or WASI services are linked.
-- `package`: offline `vera-mod-pack` tool; wraps a core Wasm module and emits
-  the component plus its content-hashed declaration, without executing it.
-- [`plugins/vera20k-ares`](../plugins/vera20k-ares/README.md): author-editable Rust reference. One artifact contains the
+- The independent [packager](../../plugin-dev/sdk/package/src/main.rs) wraps a
+  core Wasm module and emits the component plus its content-hashed declaration,
+  without executing it; it is not an engine workspace member.
+- [`plugin-dev/plugins/vera20k-ares`](../../plugin-dev/plugins/vera20k-ares/README.md):
+  author-editable Rust reference. One artifact contains the
   features; `[VeraFeatures] Shield/Overload/AresAmmo/AresReload/AresNoAmmoWeapon`
   selects them through INI. Defense mechanisms live in `features/defense`; weapon
   policies live in `features/weapons`. All use the same `support/host.rs` facade.
@@ -67,8 +71,8 @@ publication filename and Cargo package name. Older components receive only the q
 INI cannot add a feature absent from their original binary. Existing saves still
 require their exact corresponding component bytes.
 
-See the [Ares resource guide](../plugins/vera20k-ares/AMMO.zh-CN.md) and
-[resource-cycle.ini](../plugins/vera20k-ares/examples/resource-cycle.ini) for the combined
+See the [Ares resource guide](../../plugin-dev/plugins/vera20k-ares/AMMO.zh-CN.md) and
+[resource-cycle.ini](../../plugin-dev/plugins/vera20k-ares/examples/resource-cycle.ini) for the combined
 configuration, defaults, category restrictions and documented compatibility
 boundary for unsupported `NoAmmoWeapon` indices.
 
@@ -79,26 +83,28 @@ No live module replacement or saved schema migration is provided.
 
 ## Packaging
 
-Build guests for `wasm32-unknown-unknown`, preserving the embedded WIT metadata
-emitted by `wit-bindgen`. Then wrap the core module using the workspace tool:
+Build and package plugins in the sibling `plugin-dev` workspace. Starting from
+the engine checkout root, these commands enter that workspace; create `dist`
+first and choose a new output subdirectory for each package:
 
 ```sh
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- build -p vera20k-ares --target wasm32-unknown-unknown --release
-python -m tools.cargo_run -- build --locked -p vera-mod-pack --profile fast
-python -m tools.cargo_run --resolve vera-mod-pack --profile fast
-# Invoke the executable path reported above:
-"<reported-packager>" "<reported-target>/wasm32-unknown-unknown/release/vera20k_ares.wasm" "<existing-output-parent>/reference-new" --program vera20k-ares.wasm
+cd ../plugin-dev
+cargo build --locked --release --target wasm32-unknown-unknown -p vera20k-ares
+cargo run --locked --release -p vera-mod-pack -- target/wasm32-unknown-unknown/release/vera20k_ares.wasm dist/reference-new --program vera20k-ares.wasm
 ```
 
-`<reported-target>` is the checkout-owned target directory printed by the build
-runner; it may be outside the checkout. Use that reported path rather than
-assuming `target/`. Install the Rust target with
-`rustup target add wasm32-unknown-unknown` if needed. The output directory must
-not exist and its parent must exist. Inputs and encoded components are bounded
-to 16 MiB. The tool validates the encoded component before creating output and
-never overwrites an existing directory or artifact. It neither executes the
-guest nor supplies WASI adapters. Engine admission still checks the SDK
-manifest, content hash and allowed imports.
+The `target/` path is Cargo's default; adjust the input path when using
+`CARGO_TARGET_DIR`. Install the Rust target with
+`rustup target add wasm32-unknown-unknown` if needed. Plugin commands use standard
+Cargo; engine builds and tests continue to use `python -m tools.cargo_run` from
+the engine checkout. Full authoring instructions are in the
+[independent workspace guide](../../plugin-dev/sdk/dev-kit/README.zh-CN.md).
+
+The output directory must not exist and its parent must exist. Inputs and
+encoded components are bounded to 16 MiB. The tool validates the encoded
+component before creating output and never overwrites an existing directory or
+artifact. It neither executes the guest nor supplies WASI adapters. Engine
+admission still checks the SDK manifest, content hash and allowed imports.
 
 The explicit `--program vera20k-ares.wasm` selects this plugin's publication
 filename; Cargo emits the raw core module as `vera20k_ares.wasm`. For other

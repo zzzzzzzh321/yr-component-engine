@@ -98,6 +98,13 @@ retail INIs. Details: [retail INI reference](src/rules/mod.rs).
 
 ## Architecture and delivery
 
+External gameplay plugins and their authoring tools are maintained in the sibling
+`../plugin-dev` project. This checkout owns the SDK contract (`sdk/api`, `sdk/wit`),
+runtime (`sdk/runtime`) and generic `src/mod_sdk` host integration. Keep plugin
+gameplay and its packager out of the engine workspace. The independent project
+uses a versioned API/WIT development snapshot; update it explicitly when the
+authoritative engine SDK contract changes.
+
 Use the simplest implementation that fully satisfies the required behavior. Avoid
 unnecessary abstractions, duplicated logic and speculative features; prefer clarity
 over minimizing line count. Choose boundaries and abstractions by responsibility and
