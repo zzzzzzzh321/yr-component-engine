@@ -3409,16 +3409,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vera-reference-shield"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "vera-mod-api",
- "wit-bindgen",
-]
-
-[[package]]
 name = "vera20k"
 version = "0.2.2"
 dependencies = [
@@ -3453,6 +3443,16 @@ dependencies = [
  "winit",
  "winresource",
  "zeroize",
+]
+
+[[package]]
+name = "vera20k-ares"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vera-mod-api",
+ "wit-bindgen",
 ]
 
 [[package]]

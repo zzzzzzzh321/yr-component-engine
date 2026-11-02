@@ -1,6 +1,6 @@
 # 外置 Ares 弹药、装填与武器选择
 
-统一参考组件0.4.0通过三个独立INI开关选择Ares弹药链功能，无须构建参数：
+插件源码独立位于 `plugins/vera20k-ares`，发布文件名为 `vera20k-ares.wasm`；SDK基础设施保留在 `sdk`。统一参考组件0.4.0通过三个独立INI开关选择Ares弹药链功能，无须构建参数：
 
 | `[VeraFeatures]`开关 | 配置位置与标签 | 插件提供的策略 |
 | --- | --- | --- |
@@ -101,7 +101,7 @@ NoAmmoAmount=1
 | [features/weapons/reload.rs](src/features/weapons/reload.rs) | 解释普通/空仓装填数量 |
 | [features/weapons/empty_weapon.rs](src/features/weapons/empty_weapon.rs) | 解释低弹量武器槽和阈值 |
 | [features/defense/shield](src/features/defense/shield/mod.rs) | 护盾的配置、持续状态、伤害与恢复 |
-| [SDK resource.rs](../../api/src/resource.rs) | 引擎和插件共用的静态资源查询与策略类型 |
+| [SDK resource.rs](../../sdk/api/src/resource.rs) | 引擎和插件共用的静态资源查询与策略类型 |
 
 实际弹药状态、扣减、装填时钟和最终武器选择继续由引擎已有所有者负责。
 
@@ -120,29 +120,29 @@ Rules接纳时查询各武器与对象类型，绑定只读派生策略，热路
 从引擎仓库根目录执行：
 
 ```powershell
-python -m tools.cargo_run -- build --locked -p vera-reference-shield --target wasm32-unknown-unknown --release
+python -m tools.cargo_run -- build --locked -p vera20k-ares --target wasm32-unknown-unknown --release
 ```
 
-按 [中文 SDK README](../../README.zh-CN.md) 将构建工具报告的 target 目录下 `wasm32-unknown-unknown/release/vera_reference_shield.wasm` 打包到新目录。格式仍是 `gameplay.wasm` 加 `vera-mod.json`。
+按 [中文 SDK README](../../sdk/README.zh-CN.md) 将构建工具报告的 target 目录下 `wasm32-unknown-unknown/release/vera20k_ares.wasm` 打包到新目录，并传入 `--program vera20k-ares.wasm`。发布内容为 `vera20k-ares.wasm` 加 `vera-mod.json`；通用打包器省略该选项时仍使用默认名 `gameplay.wasm`。
 
-需要护盾或过载时，在同一个`[VeraFeatures]`节增加`Shield=yes`、`Overload=yes`。所有组合使用同一`vera.reference-gameplay`组件，版本0.4.0，config_version=4，state_version=1。五个开关默认关闭，过载依赖护盾，选择随存档冻结。目录迁移和重新编译会改变组件摘要，旧存档仍需对应的原组件文件。
+需要护盾或过载时，在同一个`[VeraFeatures]`节增加`Shield=yes`、`Overload=yes`。发布文件名与内部组件标识分别维护。所有组合继续使用同一`vera.reference-gameplay`组件，版本0.4.0，config_version=4，state_version=1。五个开关默认关闭，过载依赖护盾，选择随存档冻结。目录迁移和重新编译会改变组件摘要，旧存档仍需对应的原组件文件。
 
 新引擎验收模式 `ammo` 使用兼容护盾加弹药组件，报告文件必须为新文件，父目录已存在：
 
 ```powershell
-vera20k.exe --mod-sdk-probe --retail-dir "原版游戏目录" --map XMP03T4.MAP --mode ammo --module "组件目录/gameplay.wasm" --output "报告目录/ammo.json"
+vera20k.exe --mod-sdk-probe --retail-dir "原版游戏目录" --map XMP03T4.MAP --mode ammo --module "组件目录/vera20k-ares.wasm" --output "报告目录/ammo.json"
 ```
 
 `ammo`模式通过INI同时开启护盾和武器成本；`ammo-only`只开启武器成本。两者使用同一个组件。该模式检查护盾伤害链、原版地图加载、实际命令与开火产生的5→3→1弹药变化、余量不足停止开火及存档后策略绑定；它本身不代表装填数量和低弹量选择新链已经验收。
 
 ```powershell
-python -m tools.cargo_run -- test --locked -p vera-reference-shield --lib
+python -m tools.cargo_run -- test --locked -p vera20k-ares --lib
 ```
 
 设置组件和原版资源路径后，运行实际 Wasm 集成测试。提取的INI与原版档案资源分别设为必需，避免缺少档案时测试跳过实际对局部分：
 
 ```powershell
-$env:VERA_SDK_AMMO_WASM = "组件目录/gameplay.wasm"
+$env:VERA_SDK_AMMO_WASM = "组件目录/vera20k-ares.wasm"
 $env:RA2_DIR = "原版游戏目录"
 $env:VERA20K_REQUIRE_RETAIL_INI = "1"
 $env:VERA20K_REQUIRE_RETAIL_ASSETS = "1"

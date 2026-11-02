@@ -13,6 +13,7 @@ use wit_component::ComponentEncoder;
 
 const MAX_WASM_BYTES: usize = 16 * 1024 * 1024;
 const CORE_MODULE_HEADER: &[u8; 8] = b"\0asm\x01\0\0\0";
+pub const DEFAULT_PROGRAM: &str = "gameplay.wasm";
 
 fn read_core_module(path: &Path) -> Result<Vec<u8>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -42,6 +43,30 @@ fn read_core_module(path: &Path) -> Result<Vec<u8>> {
 /// Encode a bounded core module into a new publication directory. Returns the
 /// lowercase SHA-256 of `gameplay.wasm`; existing output is never overwritten.
 pub fn package(input: &Path, output: &Path) -> Result<String> {
+    package_with_program(input, output, DEFAULT_PROGRAM)
+}
+
+/// Package with a portable basename used by both the file and declaration.
+/// Paths and Windows device names are refused before creating any output.
+pub fn package_with_program(input: &Path, output: &Path, program: &str) -> Result<String> {
+    let stem = program.split('.').next().unwrap_or_default();
+    let device = stem.to_ascii_uppercase();
+    ensure!(
+        program.len() <= 128
+            && program.ends_with(".wasm")
+            && program
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && program
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            && !matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            && !(device.len() == 4
+                && (device.starts_with("COM") || device.starts_with("LPT"))
+                && matches!(device.as_bytes()[3], b'1'..=b'9')),
+        "program must be a portable .wasm basename (at most 128 ASCII characters)"
+    );
     ensure!(
         output.file_name().is_some(),
         "output must name a new directory"
@@ -70,13 +95,13 @@ pub fn package(input: &Path, output: &Path) -> Result<String> {
     let sha256 = format!("{:x}", Sha256::digest(&component));
     let declaration = serde_json::to_vec_pretty(&serde_json::json!({
         "api_version": vera_mod_api::API_VERSION,
-        "program": "gameplay.wasm",
+        "program": program,
         "sha256": sha256,
     }))?;
     // Failed reads/encoding/validation leave no output directory. create_dir
     // also closes the preflight race without ever accepting existing output.
     fs::create_dir(output).context("create new package directory")?;
-    write_new(&output.join("gameplay.wasm"), &component)?;
+    write_new(&output.join(program), &component)?;
     write_new(&output.join("vera-mod.json"), &declaration)?;
     Ok(sha256)
 }
@@ -116,6 +141,7 @@ mod tests {
                 "input.wasm",
                 "out/marker",
                 "out/gameplay.wasm",
+                "out/vera20k-ares.wasm",
                 "out/vera-mod.json",
             ] {
                 let _ = fs::remove_file(self.0.join(name));
@@ -154,5 +180,34 @@ mod tests {
         drop(file);
         assert!(package(&input, &dir.0.join("out")).is_err());
         assert!(!dir.0.join("out").exists());
+    }
+
+    #[test]
+    fn named_component_matches_its_declaration_and_digest() {
+        let dir = TestDir::new();
+        let input = dir.0.join("input.wasm");
+        fs::write(&input, CORE_MODULE_HEADER).unwrap();
+        let out = dir.0.join("out");
+        let digest = package_with_program(&input, &out, "vera20k-ares.wasm").unwrap();
+        let declaration: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("vera-mod.json")).unwrap()).unwrap();
+        let component = fs::read(out.join("vera20k-ares.wasm")).unwrap();
+        assert_eq!(declaration["program"], "vera20k-ares.wasm");
+        assert_eq!(declaration["sha256"], digest);
+        assert_eq!(digest, format!("{:x}", Sha256::digest(component)));
+        assert!(!out.join(DEFAULT_PROGRAM).exists());
+    }
+
+    #[test]
+    fn invalid_program_paths_are_rejected_before_output_creation() {
+        let dir = TestDir::new();
+        let input = dir.0.join("input.wasm");
+        fs::write(&input, CORE_MODULE_HEADER).unwrap();
+        let out = dir.0.join("out");
+        for name in ["../outside.wasm", "sub\\outside.wasm", "CON.wasm"] {
+            let error = package_with_program(&input, &out, name).unwrap_err();
+            assert!(error.to_string().contains("portable .wasm basename"));
+            assert!(!out.exists());
+        }
     }
 }

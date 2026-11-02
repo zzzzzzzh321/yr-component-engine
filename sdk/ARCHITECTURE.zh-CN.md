@@ -2,6 +2,28 @@
 
 一个作品选择一个可选的 WebAssembly 功能组件，参考组件包含各功能代码，通过作品 INI 选择本局启用项。护盾、武器弹药成本、装填数量和低弹量武器选择都在同一组件内。原版不声明组件，走原有引擎流程。
 
+SDK基础设施与功能插件使用独立顶层目录：
+
+```text
+sdk/
+├── api/                         # 请求、计划、公共数据
+├── wit/                         # 通信契约
+├── runtime/                     # 插件运行时
+└── package/                     # 通用打包工具
+plugins/
+└── vera20k-ares/
+    └── src/
+        ├── component.rs         # 入口与组合
+        ├── support/             # 共用Host与编码
+        └── features/
+            ├── defense/shield/  # 护盾与过载
+            └── weapons/         # 弹药、装填与低弹量选武器
+```
+
+第一份插件发布为 `vera20k-ares.wasm`。Cargo原始core制品为 `vera20k_ares.wasm`；通过打包器的 `--program vera20k-ares.wasm` 指定发布名。内部组件标识继续使用 `vera.reference-gameplay` 0.4.0、配置版本4、状态版本1。文件名不代表完整Ares兼容；已有Phobos护盾与自定义过载示例保留。
+
+超级武器扩展将来归入插件的 `features/superweapons` 领域，当前没有创建该模块，也未提供超武注册或发射回调。
+
 ## 从引擎到功能的调用路径
 
 ```text
@@ -10,7 +32,7 @@
   → assets.rs：接纳作品或恢复原组件
   → program.rs：冻结配置、准备请求、调用运行时
   → sdk/runtime：创建新实例、限制执行、校验返回计划
-  → 插件 lib.rs：WIT 导出与消息解码
+  → plugins/vera20k-ares/src/lib.rs：WIT 导出与消息解码
   → 插件 component.rs：按回调分派
       ├─ features/defense/shield：护盾与过载
       └─ features/weapons/
@@ -41,7 +63,7 @@
 
 ## 公共层组织规则
 
-各功能共用一份公共层。插件侧宿主服务统一在 [support/host.rs](plugins/shield/src/support/host.rs) 的 `Host` 中声明，通过 `support` 导入；护盾、弹药及后续功能不各自复制一套 Host。Rust 的 `trait Host` 在这里相当于 C++ 中提供抽象调用契约的接口类，文件后缀为 `.rs`。
+各功能共用一份公共层。插件侧宿主服务统一在 [support/host.rs](../plugins/vera20k-ares/src/support/host.rs) 的 `Host` 中声明，通过 `support` 导入；护盾、弹药及后续功能不各自复制一套 Host。Rust 的 `trait Host` 在这里相当于 C++ 中提供抽象调用契约的接口类，文件后缀为 `.rs`。
 
 | 公共内容 | 唯一维护位置 |
 | --- | --- |
@@ -90,6 +112,6 @@
 
 源文件搬动或重新编译可能改变组件的 SHA-256。读档要求作品资源与存档中的组件摘要一致，所以旧存档仍应保留并使用原来的组件文件。相同数据格式不代表可以把旧局组件直接换成新构建；本版没有热替换或状态迁移。
 
-验证入口包括插件行为测试、真实 Wasm 与原生配置读取器的集成测试，以及原版/兼容护盾/过载护盾/弹药/零售地图的正式引擎探针。`sdk_ini_selection_is_layered_frozen_and_restored_with_the_program` 通过真实 INI 读取器检查分层开关、依赖、禁用、保存与恢复。保留的 `sdk_refactor_preserves_` 测试仅比较旧 0.1/0.2 制品的字节。构建与命令行说明见 [中文 README](README.zh-CN.md) 和 [弹药示例](plugins/shield/AMMO.zh-CN.md)。
+验证入口包括插件行为测试、真实 Wasm 与原生配置读取器的集成测试，以及原版/兼容护盾/过载护盾/弹药/零售地图的正式引擎探针。`sdk_ini_selection_is_layered_frozen_and_restored_with_the_program` 通过真实 INI 读取器检查分层开关、依赖、禁用、保存与恢复。结构迁移时，`sdk_refactor_preserves_` 可比较同一接口与配置版本下的迁移前后制品，包括本次0.4.0目录迁移；需另设baseline/candidate路径，不用于跨配置模式迁移。构建与命令行说明见 [中文 README](README.zh-CN.md) 和 [弹药示例](../plugins/vera20k-ares/AMMO.zh-CN.md)。
 
 以上仍是实验版 SDK，不代表完整 Ares/Phobos 兼容，也没有完成大规模性能和各桌面平台的验证。

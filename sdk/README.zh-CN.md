@@ -1,6 +1,6 @@
 # VERA Mod SDK：外置功能原型
 
-本目录提供 VERA20K 功能扩展 SDK。一个作品加载一个可选的外置功能组件；当前参考组件0.4.0包含护盾、自定义过载及Ares武器弹药成本、装填数量、低弹量武器选择，通过INI选择功能，无须按组合重新编译。
+本目录仅提供 VERA20K 功能扩展 SDK 基础设施。第一份参考插件独立位于仓库根目录的 [plugins/vera20k-ares](../plugins/vera20k-ares/README.md)，发布文件名为 `vera20k-ares.wasm`。一个作品加载一个可选的外置功能组件；当前参考组件0.4.0包含护盾、自定义过载及Ares武器弹药成本、装填数量、低弹量武器选择，通过INI选择功能，无须按组合重新编译。
 
 护盾的配置解释、状态、伤害处理和恢复逻辑已经移到外置 Rust 插件中。作者可以修改插件源码、重新编译发布，无须为这两种护盾分别修改或编译引擎。INI 仍用于配置，功能实现位于插件代码中。
 
@@ -8,11 +8,13 @@
 
 英文文档保持独立，见 [README.md](README.md)。
 
-[Ares弹药与武器选择说明](plugins/shield/AMMO.zh-CN.md)介绍三个独立开关：`AresAmmo`解释武器成本，`AresReload`解释普通/空仓装填量，`AresNoAmmoWeapon`解释低弹量选用的武器。可选的`weapon_resource`和`type_resource`在加载时提供静态策略，复用引擎已有开火、弹仓、装填时钟与武器选择；原有四个回调仍是基础要求。
+[Ares弹药与武器选择说明](../plugins/vera20k-ares/AMMO.zh-CN.md)介绍三个独立开关：`AresAmmo`解释武器成本，`AresReload`解释普通/空仓装填量，`AresNoAmmoWeapon`解释低弹量选用的武器。可选的`weapon_resource`和`type_resource`在加载时提供静态策略，复用引擎已有开火、弹仓、装填时钟与武器选择；原有四个回调仍是基础要求。
 
 Ares 完整公开功能目录、INI 键索引与后续开发拆分见 [Ares 功能中文开发参考](../docs/zh-CN/ares-feature-guide.md)。其中的 SDK 接入描述为开发建议，当前已外置范围仍以上文为准。
 
 Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 SDK 实现建议见 [Phobos 功能中文开发参考](../docs/zh-CN/phobos-feature-guide.md)。目录还区分了原生 DLL 互操作接口与本 SDK，以及护盾示例的已完成范围和待补能力。
+
+发布文件名和 Cargo 包名为 `vera20k-ares`，内部组件标识仍为 `vera.reference-gameplay` 0.4.0，config_version=4、state_version=1。名称整理不改变已有功能和协议；Phobos兼容护盾与自定义过载仍作为现有示例保留，文件名不表示完整兼容Ares。
 
 ## 同一个引擎，三种运行方式
 
@@ -42,13 +44,13 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 | [wit/gameplay.wit](wit/gameplay.wit) | `vera:mod-sdk@0.1.0` 组件接口 |
 | [runtime](runtime/README.md) | Wasmtime 运行时、组件缓存、执行限制与宿主服务 |
 | [package/src/main.rs](package/src/main.rs) | 离线打包工具 `vera-mod-pack` |
-| [plugins/shield/src/lib.rs](plugins/shield/src/lib.rs) | WIT 导出、消息解码和回调名称核对 |
-| [plugins/shield/src/component.rs](plugins/shield/src/component.rs) | 组件声明、配置封装、固定顺序的功能分派 |
-| [plugins/shield/src/features/defense/shield](plugins/shield/src/features/defense/shield/mod.rs) | 护盾配置绑定、状态、伤害、恢复和过载逻辑 |
-| [plugins/shield/src/features/weapons/ammo_cost.rs](plugins/shield/src/features/weapons/ammo_cost.rs) | 外置 Ares 武器弹药策略 |
-| [plugins/shield/src/features/weapons/reload.rs](plugins/shield/src/features/weapons/reload.rs) | 外置Ares普通/空仓装填数量配置 |
-| [plugins/shield/src/features/weapons/empty_weapon.rs](plugins/shield/src/features/weapons/empty_weapon.rs) | 外置Ares低弹量武器选择配置 |
-| [plugins/shield/src/support](plugins/shield/src/support/mod.rs) | 通用宿主访问与浮点位编码 |
+| [../plugins/vera20k-ares/src/lib.rs](../plugins/vera20k-ares/src/lib.rs) | WIT 导出、消息解码和回调名称核对 |
+| [../plugins/vera20k-ares/src/component.rs](../plugins/vera20k-ares/src/component.rs) | 组件声明、配置封装、固定顺序的功能分派 |
+| [../plugins/vera20k-ares/src/features/defense/shield](../plugins/vera20k-ares/src/features/defense/shield/mod.rs) | 护盾配置绑定、状态、伤害、恢复和过载逻辑 |
+| [../plugins/vera20k-ares/src/features/weapons/ammo_cost.rs](../plugins/vera20k-ares/src/features/weapons/ammo_cost.rs) | 外置 Ares 武器弹药策略 |
+| [../plugins/vera20k-ares/src/features/weapons/reload.rs](../plugins/vera20k-ares/src/features/weapons/reload.rs) | 外置Ares普通/空仓装填数量配置 |
+| [../plugins/vera20k-ares/src/features/weapons/empty_weapon.rs](../plugins/vera20k-ares/src/features/weapons/empty_weapon.rs) | 外置Ares低弹量武器选择配置 |
+| [../plugins/vera20k-ares/src/support](../plugins/vera20k-ares/src/support/mod.rs) | 通用宿主访问与浮点位编码 |
 | [../src/mod_sdk.rs](../src/mod_sdk.rs) | 保持现有调用路径的引擎入口，不承载功能算法 |
 | [../src/mod_sdk/program.rs](../src/mod_sdk/program.rs) | 组件身份、冻结配置、执行缓存和存档校验 |
 | [../src/mod_sdk/assets.rs](../src/mod_sdk/assets.rs) | 作品声明接纳与读档绑定 |
@@ -107,15 +109,15 @@ AresNoAmmoWeapon=yes
 
 `Shield`控制对象护盾订阅，`Overload`控制自定义过载行为。`AresAmmo`控制武器节`Ammo`成本，`AresReload`控制对象类型节`ReloadAmount/EmptyReloadAmount`，`AresNoAmmoWeapon`控制`NoAmmoWeapon/NoAmmoAmount`。关闭某项就不发布该项策略；关闭Shield时不创建护盾状态和护盾条。原版对象类型节中的`Ammo`容量、`InitialAmmo`和装填间隔仍由引擎已有读取器处理。
 
-组合示例见[resource-cycle.ini](plugins/shield/examples/resource-cycle.ini)：每发成本2，普通装填2、空仓装填3，弹量不高于阈值时选副武器。若副武器需要在空仓继续开火，须同时开启AresAmmo并将该武器成本设为0；选择到副武器后仍接受正常开火条件检查。飞机不应用武器成本与装填量扩展，但可以使用低弹量选择策略。完整默认值、原始指令差异及适用边界见[Ares功能说明](plugins/shield/AMMO.zh-CN.md)。
+组合示例见[resource-cycle.ini](../plugins/vera20k-ares/examples/resource-cycle.ini)：每发成本2，普通装填2、空仓装填3，弹量不高于阈值时选副武器。若副武器需要在空仓继续开火，须同时开启AresAmmo并将该武器成本设为0；选择到副武器后仍接受正常开火条件检查。飞机不应用武器成本与装填量扩展，但可以使用低弹量选择策略。完整默认值、原始指令差异及适用边界见[Ares功能说明](../plugins/vera20k-ares/AMMO.zh-CN.md)。
 
 每次实际 Rules 层都读取配置，地图层也能覆盖。最终选择随配置冻结，进入存档和联机校验。对局中不重新读取 INI；读档使用保存的选择，修改磁盘上的开关仅影响新对局。修改算法或增加功能仍需重新编译插件。
 
-完整开关示例见[features.ini](plugins/shield/examples/features.ini)。多个示例合并时，保留一个`[VeraFeatures]`节，统一填写五个开关，避免重复节头。
+完整开关示例见[features.ini](../plugins/vera20k-ares/examples/features.ini)。多个示例合并时，保留一个`[VeraFeatures]`节，统一填写五个开关，避免重复节头。
 
 ## 护盾配置示例
 
-把下面内容作为作品的 Rules 或地图配置层加载；完整示例见 [shield.ini](plugins/shield/examples/shield.ini)。SDK 声明文件本身不负责自动加载额外 INI。
+把下面内容作为作品的 Rules 或地图配置层加载；完整示例见 [shield.ini](../plugins/vera20k-ares/examples/shield.ini)。SDK 声明文件本身不负责自动加载额外 INI。
 
 ```ini
 [VeraFeatures]
@@ -176,12 +178,14 @@ if ($LASTEXITCODE -ne 0) { throw "无法定位打包工具" }
 ### 2. 构建并打包统一参考组件
 
 ```powershell
-python -m tools.cargo_run -- build --locked -p vera-reference-shield --target wasm32-unknown-unknown --release
+python -m tools.cargo_run -- build --locked -p vera20k-ares --target wasm32-unknown-unknown --release
 $outputParent = "已存在的输出父目录"
-& $packer "构建工具报告的target目录/wasm32-unknown-unknown/release/vera_reference_shield.wasm" (Join-Path $outputParent "reference-new")
+& $packer "构建工具报告的target目录/wasm32-unknown-unknown/release/vera20k_ares.wasm" (Join-Path $outputParent "reference-new") --program vera20k-ares.wasm
 ```
 
-不再使用 `--features overload` 或 `--features ares-ammo`。打包工具不覆盖已有输出目录，生成 `gameplay.wasm` 和 `vera-mod.json`，单文件上限 16 MiB。
+Cargo 生成的原始 core Wasm 文件名为 `vera20k_ares.wasm`；`--program vera20k-ares.wasm` 指定发布组件的文件名，并同步写入声明。通用打包工具在省略该参数时仍默认生成 `gameplay.wasm`，供其他插件沿用。
+
+不再使用 `--features overload` 或 `--features ares-ammo`。打包工具不覆盖已有输出目录，生成 `vera20k-ares.wasm` 和 `vera-mod.json`，单文件上限 16 MiB。
 
 请使用 `wasm32-unknown-unknown`。直接使用 `wasm32-wasip2` 可能因标准库隐式引入 WASI 接口而无法加载；宿主没有 WASI 文件、时钟、随机数或网络服务。
 
@@ -206,7 +210,7 @@ if ($LASTEXITCODE -ne 0) { throw "无法定位引擎" }
 ```text
 作品资源根目录/
 ├── vera-mod.json
-├── gameplay.wasm
+├── vera20k-ares.wasm
 └── ……作品自己的规则、地图和美术资源
 ```
 
@@ -215,8 +219,8 @@ if ($LASTEXITCODE -ne 0) { throw "无法定位引擎" }
 ```json
 {
   "api_version": 1,
-  "program": "gameplay.wasm",
-  "sha256": "<gameplay.wasm 的小写 SHA-256 摘要>"
+  "program": "vera20k-ares.wasm",
+  "sha256": "<vera20k-ares.wasm 的小写 SHA-256 摘要>"
 }
 ```
 
@@ -239,8 +243,8 @@ python verify.py --game-dir "D:/steam/steamapps/common/Command & Conquer Red Ale
 ```powershell
 $retail = "D:/steam/steamapps/common/Command & Conquer Red Alert II"
 & $engine --mod-sdk-probe --retail-dir $retail --map XMP03T4.MAP --mode none --output (Join-Path $outputParent "none.json")
-& $engine --mod-sdk-probe --retail-dir $retail --map XMP03T4.MAP --mode compat --module (Join-Path $outputParent "reference-new/gameplay.wasm") --output (Join-Path $outputParent "compat.json")
-& $engine --mod-sdk-probe --retail-dir $retail --map XMP03T4.MAP --mode overload --module (Join-Path $outputParent "reference-new/gameplay.wasm") --output (Join-Path $outputParent "overload.json")
+& $engine --mod-sdk-probe --retail-dir $retail --map XMP03T4.MAP --mode compat --module (Join-Path $outputParent "reference-new/vera20k-ares.wasm") --output (Join-Path $outputParent "compat.json")
+& $engine --mod-sdk-probe --retail-dir $retail --map XMP03T4.MAP --mode overload --module (Join-Path $outputParent "reference-new/vera20k-ares.wasm") --output (Join-Path $outputParent "overload.json")
 & $engine --game-data-checkfast $retail XMP03T4.MAP (Join-Path $outputParent "retail.json")
 ```
 
@@ -249,17 +253,17 @@ $retail = "D:/steam/steamapps/common/Command & Conquer Red Alert II"
 修改插件后，可先运行以下聚焦单元测试，再使用实际 Wasm 和原版资源验收。单元测试通过不能替代真实组件加载测试。
 
 ```powershell
-python -m tools.cargo_run -- test --locked -p vera-reference-shield --lib
+python -m tools.cargo_run -- test --locked -p vera20k-ares --lib
 python -m tools.cargo_run -- test --locked -p vera-mod-pack --lib
 ```
 
-功能选择集成测试使用实际 Wasm：设置 `VERA_SDK_REFERENCE_WASM`、`VERA_SDK_COMPAT_WASM` 和 `VERA_SDK_AMMO_WASM` 为同一 `reference-new/gameplay.wasm` 路径，按仓库要求配置原版 INI、`RA2_DIR`、`VERA20K_REQUIRE_RETAIL_INI=1` 和 `VERA20K_REQUIRE_RETAIL_ASSETS=1` 后执行。后一个开关确保缺少游戏档案时明确失败，避免实际对局测试被跳过：
+功能选择集成测试使用实际 Wasm：设置 `VERA_SDK_REFERENCE_WASM`、`VERA_SDK_COMPAT_WASM` 和 `VERA_SDK_AMMO_WASM` 为同一 `reference-new/vera20k-ares.wasm` 路径，按仓库要求配置原版 INI、`RA2_DIR`、`VERA20K_REQUIRE_RETAIL_INI=1` 和 `VERA20K_REQUIRE_RETAIL_ASSETS=1` 后执行。后一个开关确保缺少游戏档案时明确失败，避免实际对局测试被跳过：
 
 ```powershell
 python -m tools.cargo_run -- test --locked -p vera20k-core --lib sdk_ -- --include-ignored --skip sdk_refactor_preserves_
 ```
 
-`COMPAT`、`AMMO`是历史测试变量名；测试INI须显式开启所需功能。保留的`sdk_refactor_preserves_`测试只比较0.1/0.2制品，需另外设置baseline/candidate。新组件config_version=4、state_version=1，不承诺配置字节与旧构建相同。新增机制的验证应覆盖实际WASM、正式选武器/装填路径与存读档，不能只检查返回的策略字段。
+`COMPAT`、`AMMO`是历史测试变量名；测试INI须显式开启所需功能。目录或包装迁移时，可分别设置`VERA_SDK_BASELINE_WASM`和`VERA_SDK_CANDIDATE_WASM`为迁移前后的组件，再运行`sdk_refactor_preserves_`，比较同一接口与配置版本的manifest、冻结配置和状态字节。本次0.4.0迁移适用；该检查不表示支持跨配置版本迁移。新增机制的验证应覆盖实际WASM、正式选武器/装填路径与存读档，不能只检查返回的策略字段。
 
 ## 状态、存档与联机一致性
 
@@ -289,7 +293,7 @@ fuel 衡量客体指令执行量，不代表固定毫秒，也不限制任意宿
 当前还需要明确以下范围：
 
 - 支持预制地图。声明外置组件的作品进入随机地图生成路径时会明确拒绝；本版没有生成器扩展接口。
-- 护盾保留当前已实现范围。待机、命中、破盾和重生动画及武器效果、弹头附加/移除/破盾操作、类型转换时的护盾转移、`SelfHealing.EnabledBy` 消费逻辑，以及可配置的其他 `Pips.Background` 资源尚未补齐。详见 [参考插件说明](plugins/shield/README.md)。
+- 护盾保留当前已实现范围。待机、命中、破盾和重生动画及武器效果、弹头附加/移除/破盾操作、类型转换时的护盾转移、`SelfHealing.EnabledBy` 消费逻辑，以及可配置的其他 `Pips.Background` 资源尚未补齐。详见 [参考插件说明](../plugins/vera20k-ares/README.md)。
 - 面向 Windows、Linux、macOS 的原生桌面架构；目前本机实际构建与验收平台为 Windows，其他平台仍需构建和运行验证。
 - 已验证实际联机校验算法和存档资源接纳路径；尚未完成真实网络传输对局、完整图形界面读档及常驻资源重新绑定验收。
 - 尚未完成两万单位性能验收。逐次新建实例和重复解码整份配置是第一版隔离原型的实现选择，后续应先测量开销，再设计批量回调及不可变配置驻留。

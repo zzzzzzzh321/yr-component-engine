@@ -6,6 +6,12 @@ overload, Ares weapon ammo costs, reload amounts and low-ammo weapon selection a
 selected through INI. This prototype migrates the existing supported shield chain;
 it does not migrate every Ares/Phobos feature or claim full upstream parity.
 
+The SDK infrastructure lives in `sdk/`; the first author-editable plugin lives
+separately in `plugins/vera20k-ares/` at the repository root and publishes
+`vera20k-ares.wasm`. Its current features include the retained Phobos-compatible
+shield chain and authored overload example; the Ares filename does not claim
+complete Ares compatibility.
+
 ## Boundaries
 
 - `api`: versioned typed messages, bounded opaque state/config, generic meters,
@@ -16,7 +22,7 @@ it does not migrate every Ares/Phobos feature or claim full upstream parity.
   No filesystem, clock, random, network or WASI services are linked.
 - `package`: offline `vera-mod-pack` tool; wraps a core Wasm module and emits
   the component plus its content-hashed declaration, without executing it.
-- `plugins/shield`: author-editable Rust reference. One artifact contains the
+- [`plugins/vera20k-ares`](../plugins/vera20k-ares/README.md): author-editable Rust reference. One artifact contains the
   features; `[VeraFeatures] Shield/Overload/AresAmmo/AresReload/AresNoAmmoWeapon`
   selects them through INI. Defense mechanisms live in `features/defense`; weapon
   policies live in `features/weapons`. All use the same `support/host.rs` facade.
@@ -50,12 +56,13 @@ component state. Both queries use the existing `evaluate` message channel and
 add no Host service or WIT import.
 
 The component identifies as `vera.reference-gameplay` 0.4.0, config_version=4,
-state_version=1. Older components receive only the queries they declare; changing
+state_version=1. This internal manifest identity is retained independently of the
+publication filename and Cargo package name. Older components receive only the queries they declare; changing
 INI cannot add a feature absent from their original binary. Existing saves still
 require their exact corresponding component bytes.
 
-See the [Ares resource guide](plugins/shield/AMMO.zh-CN.md) and
-[resource-cycle.ini](plugins/shield/examples/resource-cycle.ini) for the combined
+See the [Ares resource guide](../plugins/vera20k-ares/AMMO.zh-CN.md) and
+[resource-cycle.ini](../plugins/vera20k-ares/examples/resource-cycle.ini) for the combined
 configuration, defaults, category restrictions and documented compatibility
 boundary for unsupported `NoAmmoWeapon` indices.
 
@@ -70,11 +77,11 @@ Build guests for `wasm32-unknown-unknown`, preserving the embedded WIT metadata
 emitted by `wit-bindgen`. Then wrap the core module using the workspace tool:
 
 ```sh
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- build -p vera-reference-shield --target wasm32-unknown-unknown --release
+python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- build -p vera20k-ares --target wasm32-unknown-unknown --release
 python -m tools.cargo_run -- build --locked -p vera-mod-pack --profile fast
 python -m tools.cargo_run --resolve vera-mod-pack --profile fast
 # Invoke the executable path reported above:
-"<reported-packager>" "<reported-target>/wasm32-unknown-unknown/release/vera_reference_shield.wasm" "<existing-output-parent>/reference-new"
+"<reported-packager>" "<reported-target>/wasm32-unknown-unknown/release/vera20k_ares.wasm" "<existing-output-parent>/reference-new" --program vera20k-ares.wasm
 ```
 
 `<reported-target>` is the checkout-owned target directory printed by the build
@@ -87,11 +94,15 @@ never overwrites an existing directory or artifact. It neither executes the
 guest nor supplies WASI adapters. Engine admission still checks the SDK
 manifest, content hash and allowed imports.
 
-Use the emitted `gameplay.wasm` and `vera-mod.json` as ordinary work assets.
+The explicit `--program vera20k-ares.wasm` selects this plugin's publication
+filename; Cargo emits the raw core module as `vera20k_ares.wasm`. For other
+plugins the generic packager still defaults to `gameplay.wasm` when `--program`
+is omitted. Use the emitted `vera20k-ares.wasm` and `vera-mod.json` as ordinary
+work assets.
 The generated declaration is:
 
 ```json
-{"api_version":1,"program":"gameplay.wasm","sha256":"<lowercase SHA-256 of gameplay.wasm>"}
+{"api_version":1,"program":"vera20k-ares.wasm","sha256":"<lowercase SHA-256 of vera20k-ares.wasm>"}
 ```
 
 These are ordinary work assets and can use the existing community memory-package

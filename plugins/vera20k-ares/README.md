@@ -1,4 +1,4 @@
-# External gameplay reference component
+# vera20k-ares — external gameplay reference component
 
 This component implements the currently ported VERA20K shield chain outside
 the game engine. One reference component uses the
@@ -9,6 +9,14 @@ the same engine binary.
 The code was moved from VERA20K's Rust implementation, retaining its source
 references. It does not include Ares/Phobos C++ code or Mental Omega resources.
 The original VERA20K contribution history and GPL licensing continue to apply.
+
+This plugin lives independently at `plugins/vera20k-ares/`; `sdk/` contains the
+API, WIT, runtime and packager infrastructure. The Cargo package is
+`vera20k-ares`, its raw core artifact is `vera20k_ares.wasm`, and its publication
+filename is `vera20k-ares.wasm`. The internal `vera.reference-gameplay` identity,
+version 0.4.0, config_version=4 and state_version=1 remain unchanged. The filename
+does not claim complete Ares compatibility; the retained Phobos-compatible
+shield and authored overload remain examples in this first plugin.
 
 ## What runs in the component
 
@@ -57,7 +65,7 @@ used; configurable alternative Pips.Background resources are not newly added.
 Install `wasm32-unknown-unknown`, then build from the engine checkout:
 
 ```sh
-python -m tools.cargo_run -- build --locked -p vera-reference-shield --target wasm32-unknown-unknown --release
+python -m tools.cargo_run -- build --locked -p vera20k-ares --target wasm32-unknown-unknown --release
 python -m tools.cargo_run -- build --locked -p vera-mod-pack --profile fast
 python -m tools.cargo_run --resolve vera-mod-pack --profile fast
 ```
@@ -65,11 +73,13 @@ python -m tools.cargo_run --resolve vera-mod-pack --profile fast
 Invoke the executable reported by `--resolve` directly:
 
 ```sh
-"<reported-packager>" "<reported-target>/wasm32-unknown-unknown/release/vera_reference_shield.wasm" "<existing-output-parent>/reference-new"
+"<reported-packager>" "<reported-target>/wasm32-unknown-unknown/release/vera20k_ares.wasm" "<existing-output-parent>/reference-new" --program vera20k-ares.wasm
 ```
 
-The output directory must be new and its parent must exist. Reuse the same
-`gameplay.wasm` and `vera-mod.json` for each work; Cargo feature flags are no
+The output directory must be new and its parent must exist. `--program` sets
+the publication filename and declaration together; the generic packager retains
+its `gameplay.wasm` default for invocations without this option. Reuse the same
+`vera20k-ares.wasm` and `vera-mod.json` for each work; Cargo feature flags are no
 longer used for gameplay selection. Put this in a loaded Rules/map INI:
 
 ```ini
@@ -121,7 +131,7 @@ decisions, while the engine acceptance harness must execute the actual built
 WASM artifacts and production INI/damage owners.
 
 ```sh
-python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- test -p vera-reference-shield --lib
+python -m tools.cargo_run --cache-gib 512 --incremental-gib 512 --min-free-gib 1 -- test -p vera20k-ares --lib
 ```
 
 ## Authored overload behavior

@@ -1,4 +1,4 @@
-//! Reference gameplay component. Shield configuration, state, and decisions live here.
+//! VERA20K external gameplay reference. Features share one component and Host.
 //!
 //! Moved from VERA20K's Rust `sim/shield.rs` and `rules/phobos_shields.rs`.
 //! Native references remain beside their corresponding behavior. No Ares or
@@ -11,7 +11,7 @@ pub use component::manifest;
 
 #[cfg(target_arch = "wasm32")]
 mod bindings {
-    wit_bindgen::generate!({ path: "../../wit", world: "gameplay" });
+    wit_bindgen::generate!({ path: "../../sdk/wit", world: "gameplay" });
 }
 
 #[cfg(target_arch = "wasm32")]
