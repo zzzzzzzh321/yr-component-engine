@@ -4663,7 +4663,9 @@ impl RuleSet {
         .fold(0u8, |mask, user| mask | user);
         for object in &mut self.object_list {
             let user = object.resource_user();
-            let enabled = object.type_resource_policy().is_some_and(|p| p.reload.is_some())
+            let enabled = object
+                .type_resource_policy()
+                .is_some_and(|p| p.reload.is_some())
                 || complete_users & user != 0
                 || object
                     .weapon_list
@@ -6340,6 +6342,24 @@ impl RuleSet {
     /// Look up a game object by ID (case-insensitive, engine parity).
     pub fn object(&self, id: &str) -> Option<&ObjectType> {
         self.type_handle(id).map(|h| self.object_by_handle(h))
+    }
+
+    /// Admit a local input projection to a fixture through the production binder.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_input_policy_for_test(&mut self, id: &str, input: vera_mod_api::InputPolicy) {
+        let handle = self.type_handle(id).expect("fixture type must exist");
+        let object = &mut self.object_list[handle.0 as usize];
+        let mut policy =
+            object
+                .type_resource_policy()
+                .unwrap_or(vera_mod_api::TypeResourcePolicy {
+                    users: object.resource_user(),
+                    reload: None,
+                    depleted_weapon: None,
+                    input: None,
+                });
+        policy.input = Some(input);
+        object.bind_type_resource_policy(Some(policy));
     }
 
     /// `Type == Rules+0x498` (`[General] PrismType=`, `0x0044B2F8`).
@@ -14625,6 +14645,7 @@ mod sdk_resource_projection_tests {
                 cost: 2,
                 reload_after_use: true,
                 users: vera_mod_api::WEAPON_USER_BUILDING,
+                use_weapon_rof: false,
             }));
         rules.project_resource_reload();
         assert!(rules.object("CUSTOM").unwrap().resource_reload_enabled());
@@ -14638,6 +14659,7 @@ mod sdk_resource_projection_tests {
                 cost: 1,
                 reload_after_use: true,
                 users: vera_mod_api::WEAPON_USER_BUILDING,
+                use_weapon_rof: false,
             }));
         rules.project_resource_reload();
         assert!(

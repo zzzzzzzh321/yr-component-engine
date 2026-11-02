@@ -18,7 +18,7 @@ lang: zh-CN
 
 ### 当前 SDK 的实际能力
 
-第一份插件源码维护在相邻的`plugin-dev`独立工程的`plugins/vera20k-ares`目录，发布名为`vera20k-ares.wasm`。内部组件标识继续为`vera.reference-gameplay` 0.4.0，config_version=4、state_version=1。已外置的Ares武器弹药成本`Ammo`使用`weapon_resource`；普通/空仓装填量`ReloadAmount/EmptyReloadAmount`与低弹量武器选择`NoAmmoWeapon/NoAmmoAmount`使用可选`type_resource`。可再生血量护盾示例属于Phobos兼容链，过载为自定义玩法。Ares的ForceShield力场护盾超武另见[超级武器](#超级武器)，与这项血量护盾分开处理。
+第一份插件源码维护在相邻的`plugin-dev`独立工程的`plugins/vera20k-ares`目录，发布名为`vera20k-ares.wasm`。内部组件标识继续为`vera.reference-gameplay` 0.5.0，config_version=5、state_version=1。已外置的Ares武器弹药成本`Ammo`使用`weapon_resource`；普通/空仓装填量`ReloadAmount/EmptyReloadAmount`、低弹量武器选择`NoAmmoWeapon/NoAmmoAmount`与手动操作限制使用可选`type_resource`。可再生血量护盾示例属于Phobos兼容链，过载为自定义玩法。Ares的ForceShield力场护盾超武另见[超级武器](#超级武器)，与这项血量护盾分开处理。
 
 | 现有接口 | 实际用途 |
 | --- | --- |
@@ -27,7 +27,7 @@ lang: zh-CN
 | `damage` | 处理当前接收者的状态和伤害输入 |
 | `tick` | 在对象更新阶段推进自身状态 |
 | `weapon_resource` | 加载时查询武器弹药策略，绑定到引擎已有资源流程 |
-| `type_resource` | 加载时按对象类型和类别查询装填量与低弹量武器策略，读档从冻结配置重建 |
+| `type_resource` | 加载时按对象类型和类别查询装填量、低弹量武器及本地输入策略，读档从冻结配置重建 |
 | `Meter` / `Tint` | 描述通用进度条和染色，由引擎呈现 |
 
 目前 `Operation` 仍全部拒绝执行，不能借它直接改血、改钱、生成单位、控制天气或修改其他对象。本手册中的这些能力需要先扩展受校验的通用接口。对象返回空状态会取消后续订阅；一个作品仍只接纳一个可选组件，内部按明确顺序组合功能。

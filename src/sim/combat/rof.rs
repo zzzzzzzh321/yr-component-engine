@@ -122,6 +122,8 @@ pub(crate) struct LiveParticles {
 pub(crate) struct RofQuery<'a> {
     /// A building's `Ammo` (`+0x2FC`); `None` for every other class.
     pub building_ammo: Option<i32>,
+    /// Immutable component policy; the existing kernel owns every rearm arm.
+    pub use_weapon_rof: bool,
     /// GetWeapon (vt+0x3F8) at the asked index; `None` for an empty slot.
     pub weapon: Option<&'a WeaponType>,
     pub live: LiveParticles,
@@ -171,7 +173,12 @@ pub(crate) struct RofQuery<'a> {
 /// Every draw is Scenario `RandomRanged`; all x87 steps run under the
 /// process control word (53-bit, chop).
 pub(crate) fn get_rof(query: &RofQuery<'_>, rng: &mut SimRng) -> i32 {
-    let stock_building_shortcut = query.building_ammo.is_some_and(|ammo| ammo > 1);
+    // Ares TechnoClass_GetROF_BuildingHack10047A60, installed at6FCFA4,
+    // returns6FCFC1 unconditionally, past the native Ammo>1 ->1 branch.
+    // External components request the same continuation through a generic
+    // policy; no timer, ammo value or random stream is duplicated here.
+    let stock_building_shortcut =
+        query.building_ammo.is_some_and(|ammo| ammo > 1) && !query.use_weapon_rof;
     #[cfg(feature = "ares")]
     let stock_building_shortcut = stock_building_shortcut && query.attached_rof.is_none();
     if stock_building_shortcut {
@@ -249,6 +256,43 @@ mod tests {
     use crate::rules::ini_parser::IniFile;
 
     #[test]
+    fn component_cadence_uses_the_existing_weapon_rof_and_random_stream() {
+        let ini = IniFile::from_str("[GUN]\nROF=45\nBurst=1\n");
+        let weapon = WeaponType::from_ini_section("GUN", ini.section("GUN").unwrap());
+        let mut query = RofQuery {
+            building_ammo: Some(2),
+            use_weapon_rof: false,
+            weapon: Some(&weapon),
+            live: LiveParticles::default(),
+            burst_index: 1,
+            unit_burst_delays: None,
+            house_rof: NativeF64Bits::ONE,
+            #[cfg(feature = "ares")]
+            attached_rof: None,
+            rof_ability: false,
+            veteran_rof: 1.0,
+            occupants: None,
+            bunkered: false,
+            occupy_rof_multiplier: 1.0,
+            bunker_rof_multiplier: 1.0,
+        };
+        let mut stock_rng = SimRng::new(31);
+        assert_eq!(get_rof(&query, &mut stock_rng), 1);
+        assert_eq!(stock_rng.logical_state(), SimRng::new(31).logical_state());
+        query.use_weapon_rof = true;
+        let mut component_rng = SimRng::new(31);
+        // This is the same original ROF45/House1/seed31 result already retained
+        // in the native controls below; the Ares hook only changes the entry arm.
+        assert_eq!(get_rof(&query, &mut component_rng), 46);
+        let mut expected_rng = SimRng::new(31);
+        expected_rng.next_range_u32_inclusive(0, 2);
+        assert_eq!(component_rng.logical_state(), expected_rng.logical_state());
+        query.weapon = None;
+        assert_eq!(get_rof(&query, &mut component_rng), 1);
+        assert_eq!(component_rng.logical_state(), expected_rng.logical_state());
+    }
+
+    #[test]
     fn attached_rof_hook_preserves_native_reload_order_and_rng() {
         // Executed installed Ares10047A40 at retail6FD0BF, with the real
         // reader10058A50, aggregate100460A0, GetROF6FCFA0 and Scenario RNG.
@@ -293,6 +337,7 @@ mod tests {
             let weapon = WeaponType::from_ini_section("GUN", ini.section("GUN").unwrap());
             let query = RofQuery {
                 building_ammo: ammo,
+                use_weapon_rof: false,
                 weapon: Some(&weapon),
                 live: LiveParticles::default(),
                 burst_index: 1,
@@ -368,6 +413,7 @@ mod tests {
             });
             let query = RofQuery {
                 building_ammo: (class == 6).then(|| int("building_ammo", 0)),
+                use_weapon_rof: false,
                 weapon: (!input["no_weapon"].as_bool().unwrap_or(false)).then_some(&weapon),
                 live: LiveParticles {
                     spark: spark_live,

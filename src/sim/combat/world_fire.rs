@@ -1149,6 +1149,9 @@ pub(crate) fn snapshot_get_rof(
                 .filter(|entity| entity.category() == EntityCategory::Structure)
                 .and_then(|entity| entity.ammo())
                 .map(|ammo| ammo.current()),
+            use_weapon_rof: rof_weapon
+                .and_then(|weapon| weapon.resource_policy(vera_mod_api::WEAPON_USER_BUILDING))
+                .is_some_and(|policy| policy.use_weapon_rof),
             weapon: rof_weapon,
             live,
             burst_index,

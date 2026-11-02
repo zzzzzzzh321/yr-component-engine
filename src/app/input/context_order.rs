@@ -356,11 +356,6 @@ pub(crate) fn attack_action(
         // fallback below; a Unit's rejected object attack becomes NoMove,
         // whose click still moves near the object. Do not gate CanFire or
         // received simulation missions: auto-targeting/scripts bypass UI.
-        // RESIDUAL: Infantry's C4 and infiltration arms need this Attack
-        // (`cmp ebp,5` at 0x0051E9F1 and 0x0051EE62), but `infantry_c4_action`
-        // and `infiltrator_capture_orders` decide without it, so a
-        // NoManualFire Tanya or Spy still plants C4 or infiltrates. Only Ares
-        // builds read the key; retail rules never set it.
         && !kind.no_manual_fire()
     {
         AttackAction::Attack
@@ -3017,7 +3012,13 @@ pub(super) fn self_click_command(
     planning: bool,
 ) -> Option<Command> {
     let target = hover?;
-    if planning_refuses_self(sim, local_owner, selected_ids, target, planning)
+    if let Some(command) =
+        infantry_self_guard_command(sim, rules, local_owner, selected_ids, target)
+    {
+        return Some(command);
+    }
+    if self_unload_is_hidden(sim, rules, target)
+        || planning_refuses_self(sim, local_owner, selected_ids, target, planning)
         || self_is_warped_out(sim, target)
     {
         return None;
@@ -3042,6 +3043,7 @@ pub(super) fn self_answers_no_deploy(
     planning: bool,
 ) -> bool {
     !self_is_warped_out(sim, target)
+        && !self_unload_is_hidden(sim, rules, target)
         && (self_deploy_is_refused(
             sim,
             rules,
@@ -3061,6 +3063,58 @@ pub(super) fn self_answers_no_deploy(
                                 || is_simple_deploy_unit(entity, object)
                         })
             })))
+}
+
+/// Infantry What_Action51E6D8..51E754: a human player's negative-damage
+/// infantryman offers GuardArea over itself before the deploy/planning arms.
+/// Ares hook51E748 ->10049710 skips this return for NoSelfGuardArea=yes.
+/// This shares the existing Guard payload; it does not restrict the Guard key.
+/// The class healer dispatch for mixed/multiple selections remains separate.
+pub(super) fn infantry_self_guard_command(
+    sim: &crate::sim::world::Simulation,
+    rules: &crate::rules::ruleset::RuleSet,
+    local_owner: InternedId,
+    selected_ids: &[u64],
+    target: &HoverTargetKindWithId,
+) -> Option<Command> {
+    if selected_ids != [target.stable_id] {
+        return None;
+    }
+    let actor = sim.entities().get(target.stable_id)?;
+    let object = sim.interner().object_type(actor.type_ref(), rules)?;
+    (actor.category() == EntityCategory::Infantry
+        && actor.owner() == local_owner
+        && sim.house_is_human_player(actor.owner())
+        && !actor.berserk.is_active()
+        && !actor.is_warped_out()
+        && !object
+            .input_policy()
+            .is_some_and(|input| input.deny_self_guard_area)
+        && crate::sim::combat::combat_weapon::weapon_damage_value(
+            actor,
+            object,
+            sim.entities(),
+            rules,
+            sim.interner(),
+        ) < 0)
+        .then_some(Command::Guard {
+            entity_id: target.stable_id,
+            target: Some(TargetKind::Entity(target.stable_id)),
+        })
+}
+
+fn self_unload_is_hidden(
+    sim: &crate::sim::world::Simulation,
+    rules: &crate::rules::ruleset::RuleSet,
+    target: &HoverTargetKindWithId,
+) -> bool {
+    sim.entities().get(target.stable_id).is_some_and(|entity| {
+        sim.interner()
+            .object_type(entity.type_ref(), rules)
+            .is_some_and(|object| {
+                super::transport_orders::manual_self_unload_hidden(entity, object)
+            })
+    })
 }
 
 /// Techno's warp arm (`0x006FFF03..0x006FFF8A`) precedes the self rung
@@ -3179,7 +3233,14 @@ fn unit_refuses_deploy(
         .get(id)
         .is_some_and(|entity| entity.category() == EntityCategory::Unit)
         && (sim.unit_self_deploy_site_refused(id, rules, registry)
-            || !sim.can_deploy_slash_unload(id, rules))
+            || !sim.can_deploy_slash_unload(id, rules)
+            || sim.entities().get(id).is_some_and(|entity| {
+                sim.interner()
+                    .object_type(entity.type_ref(), rules)
+                    .is_some_and(|object| {
+                        super::transport_orders::manual_transport_deploy_disabled(entity, object)
+                    })
+            }))
 }
 
 fn self_action(
@@ -3637,7 +3698,19 @@ pub(super) fn infantry_c4_action(
     hover: &HoverTargetKindWithId,
     admitted_attack: bool,
 ) -> Option<InfantryC4Action> {
-    if !admitted_attack && hover.kind != HoverTargetKind::EnemyStructure {
+    // Infantry51E9F1 requires the base Attack5. The shared Techno action
+    // owns NoManualFire too; C4 must not bypass its rejection.
+    if !admitted_attack
+        && (hover.kind != HoverTargetKind::EnemyStructure
+            || attack_action(
+                sim,
+                rules,
+                actor_id,
+                &TargetKind::Entity(hover.stable_id),
+                false,
+                None,
+            ) != AttackAction::Attack)
+    {
         return None;
     }
     let actor = sim.entities().get(actor_id)?;
@@ -3659,6 +3732,26 @@ pub(super) fn infantry_c4_action(
     } else {
         InfantryC4Action::Attack
     })
+}
+
+/// Infantry51EE62 rewrites only the admitted base Attack5 to infiltration.
+/// Keep all manual consumers on that owner while scripted Capture retains the
+/// simulation's independent CanInfiltrate admission.
+pub(super) fn infantry_infiltration_action(
+    sim: &crate::sim::world::Simulation,
+    rules: &crate::rules::ruleset::RuleSet,
+    actor_id: u64,
+    target_id: u64,
+) -> bool {
+    attack_action(
+        sim,
+        rules,
+        actor_id,
+        &TargetKind::Entity(target_id),
+        false,
+        None,
+    ) == AttackAction::Attack
+        && sim.infiltrator_building_action(actor_id, target_id, rules)
 }
 
 /// The selected spies whose action over `hover` is Capture
@@ -3683,7 +3776,7 @@ fn infiltrator_capture_orders(
     selected.retain(|&id| {
         if infantry_c4_action(sim, rules, id, hover, false).is_some()
             || crate::sim::passenger::can_enter_transport(sim, rules, id, hover.stable_id)
-            || !sim.infiltrator_building_action(id, hover.stable_id, rules)
+            || !infantry_infiltration_action(sim, rules, id, hover.stable_id)
         {
             return true;
         }
@@ -7653,3 +7746,7 @@ mod engineer_special_entry_tests;
 #[cfg(test)]
 #[path = "foot_unarmed_ctrl_tests.rs"]
 mod foot_unarmed_ctrl_tests;
+
+#[cfg(test)]
+#[path = "manual_control_tests.rs"]
+mod manual_control_tests;

@@ -810,6 +810,17 @@ pub(super) fn capability_cursor_for_hover(
         && !entity.berserk.is_active()
         && !entity.is_warped_out()
     {
+        if super::context_order::infantry_self_guard_command(
+            sim,
+            rules,
+            entity.owner(),
+            selected,
+            hover,
+        )
+        .is_some()
+        {
+            return CursorFeedbackKind::GuardArea;
+        }
         if super::context_order::self_click_command(
             sim,
             rules,
@@ -842,7 +853,14 @@ pub(super) fn capability_cursor_for_hover(
                 .passenger_role
                 .cargo()
                 .is_none_or(|cargo| cargo.count() == 0);
-        return if entity.category() == EntityCategory::Structure || empty_aircraft {
+        let hidden_aircraft_unload = entity.category() == EntityCategory::Aircraft
+            && hovered_obj.is_some_and(|object| {
+                super::transport_orders::manual_self_unload_hidden(entity, object)
+            });
+        return if entity.category() == EntityCategory::Structure
+            || empty_aircraft
+            || hidden_aircraft_unload
+        {
             CursorFeedbackKind::Default
         } else {
             CursorFeedbackKind::Invalid
@@ -982,7 +1000,12 @@ pub(super) fn capability_cursor_for_hover(
                 HoverTargetKind::FriendlyStructure | HoverTargetKind::EnemyStructure
             )
             && rules.is_some_and(|rules| {
-                sim.infiltrator_building_action(best_id, hover.stable_id, rules)
+                super::context_order::infantry_infiltration_action(
+                    sim,
+                    rules,
+                    best_id,
+                    hover.stable_id,
+                )
             })
         {
             return CursorFeedbackKind::Enter;

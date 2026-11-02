@@ -30,7 +30,9 @@ fn entity() -> api::EntityContext {
 #[test]
 fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     let host = NativeHost::configuration(
-        IniFile::from_str("[S]\nNumber=$12\nBad=garbage\nClear=<default>\nRate=0.125\nName=none\n"),
+        IniFile::from_str(
+            "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nRate=0.125\nName=none\nYes=  yes\nEmpty=\n",
+        ),
         Vec::new(),
     );
     let read = |key, reader, current| {
@@ -41,6 +43,9 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     };
     assert_eq!(read("Number", "nullable-int", b"null"), 12);
     assert_eq!(read("Bad", "nullable-int", b"12"), 12);
+    assert_eq!(read("Yes", "ares-bool", b"false"), true);
+    assert_eq!(read("Bad", "ares-bool", b"true"), true);
+    assert_eq!(read("Empty", "ares-bool", b"true"), true);
     assert_eq!(
         read("Clear", "nullable-int", b"12"),
         serde_json::Value::Null
@@ -64,12 +69,12 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
         std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
             .unwrap();
     let mut layers = RulesLayerStack::new(IniFile::from_str(
-        "[VeraFeatures]\nAresAmmo=yes\nAresReload=yes\nAresNoAmmoWeapon=yes\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\nReloadAmount=2\nNoAmmoWeapon=1\nNoAmmoAmount=1\n\
+        "[VeraFeatures]\nAresAmmo=yes\nAresReload=yes\nAresNoAmmoWeapon=yes\nAresManualControl=yes\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\nReloadAmount=2\nNoAmmoWeapon=1\nNoAmmoAmount=1\nNoManualFire=yes\nNoManualUnload=yes\nNoManualEnter=yes\nNoSelfGuardArea=yes\n\
          [PAIR]\nAmmo=$12\n[FREE]\nAmmo=0\n[pair]\nAmmo=99\n",
     ));
     layers.push(
         RulesLayerKind::Scenario,
-        IniFile::from_str("[PAIR]\nAmmo=invalid\n[TANK]\nReloadAmount=bad\nEmptyReloadAmount=3\nNoAmmoAmount=invalid\n"),
+        IniFile::from_str("[PAIR]\nAmmo=invalid\n[TANK]\nReloadAmount=bad\nEmptyReloadAmount=3\nNoAmmoAmount=invalid\nNoManualFire=invalid\nNoManualUnload=\nNoManualEnter=no\n"),
     );
     let processed = layers.process().unwrap();
     let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
@@ -94,11 +99,29 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
     let saved = crate::util::save_codec::serialize(&program).unwrap();
     rules.external_mod = Some(Arc::new(program));
     rules.bind_resource_policies().unwrap();
+    assert!(
+        rules
+            .weapon("PAIR")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_BUILDING)
+            .unwrap()
+            .use_weapon_rof
+    );
     let expected_type_policy = rules
         .object("TANK")
         .unwrap()
         .type_resource_policy()
         .unwrap();
+    assert_eq!(
+        expected_type_policy.input,
+        Some(api::InputPolicy {
+            deny_manual_attack: true,
+            deny_manual_unload: true,
+            hide_transport_entry: false,
+            deny_self_guard_area: false,
+        })
+    );
+    assert!(rules.object("TANK").unwrap().no_manual_fire());
     assert_eq!(
         expected_type_policy.reload,
         Some(api::ReloadPolicy {
@@ -142,13 +165,22 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
     // read-only projection from the exact saved component configuration.
     layers.push(
         RulesLayerKind::Scenario,
-        IniFile::from_str("[PAIR]\nAmmo=99\n[VeraFeatures]\nAresReload=no\nAresNoAmmoWeapon=no\n[TANK]\nReloadAmount=99\nNoAmmoWeapon=0\n"),
+        IniFile::from_str("[PAIR]\nAmmo=99\n[VeraFeatures]\nAresReload=no\nAresNoAmmoWeapon=no\nAresManualControl=no\n[TANK]\nReloadAmount=99\nNoAmmoWeapon=0\nNoManualFire=no\n"),
     );
     let mut loaded_rules = RuleSet::from_rules_layers(&layers).unwrap();
     loaded_rules.external_mod = Some(Arc::new(
         crate::util::save_codec::deserialize(&saved).unwrap(),
     ));
     loaded_rules.bind_resource_policies().unwrap();
+    assert!(
+        loaded_rules
+            .weapon("PAIR")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_BUILDING)
+            .unwrap()
+            .use_weapon_rof,
+        "saved guest rebuilds the cadence policy"
+    );
     assert_eq!(
         loaded_rules.object("TANK").unwrap().type_resource_policy(),
         Some(expected_type_policy),

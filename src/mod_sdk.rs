@@ -16,7 +16,7 @@ pub use program::Program;
 pub(crate) use simulation::{
     attach_entity, pre_receive_damage, preview_receive_damage, tick_entity, weapon_user,
 };
-pub use vera_mod_api::{Meter, Projection, Tint};
+pub use vera_mod_api::{InputPolicy, Meter, Projection, Tint};
 
 #[path = "mod_sdk/acceptance.rs"]
 pub mod acceptance;

@@ -2476,10 +2476,21 @@ impl ObjectType {
         self.nominal
     }
 
-    /// The optional Ares manual-action restriction, shared by cursor and
-    /// click through the existing action owner. INIs cannot enable it in a
-    /// retail-only build.
+    /// Immutable component projection consumed by local input owners.
+    /// The simulation still accepts AI/script orders through its usual path.
+    pub const fn input_policy(&self) -> Option<vera_mod_api::InputPolicy> {
+        match self.type_resource_policy {
+            Some(policy) => policy.input,
+            None => None,
+        }
+    }
+
+    /// Shared cursor/click restriction. A bound component owns its decision;
+    /// otherwise the optional built-in compatibility reader remains active.
     pub const fn no_manual_fire(&self) -> bool {
+        if let Some(policy) = self.input_policy() {
+            return policy.deny_manual_attack;
+        }
         #[cfg(feature = "ares")]
         {
             self.no_manual_fire

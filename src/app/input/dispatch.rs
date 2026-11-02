@@ -3725,6 +3725,14 @@ fn deploy_key_command(
 ) -> Option<Command> {
     let entity = sim.entities().get(entity_id)?;
     let obj = rules.and_then(|rules| sim.interner().object_type(entity.type_ref(), rules));
+    // Ares CanDeploy700EEC restricts the Unit passenger arm, including an
+    // empty hold, but preserves a tank-bunker escape. Aircraft's D-key arm
+    // (700DB6..700DC8) bypasses that hook and keeps its stock unload order.
+    if obj.is_some_and(|object| {
+        super::transport_orders::manual_transport_deploy_disabled(entity, object)
+    }) {
+        return None;
+    }
     match entity.category() {
         // Absorbers and garrisons share unload admission.
         EntityCategory::Structure => {
@@ -4349,6 +4357,77 @@ mod deploy_key_tests {
                     entity_id: transport
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn manual_unload_policy_preserves_bunker_escape_and_aircraft_deploy_key() {
+        use crate::mod_sdk::InputPolicy;
+        use crate::sim::docking::bunker_link::BunkerLink;
+        let mut rules = RuleSet::from_ini(&IniFile::from_str(
+            "[VehicleTypes]\n0=TRANSPORT\n1=DEPLOYER\n[AircraftTypes]\n0=PLANE\n\
+             [TRANSPORT]\nStrength=200\nPassengers=2\n\
+             [DEPLOYER]\nStrength=200\nIsSimpleDeployer=yes\n\
+             [PLANE]\nStrength=200\nPassengers=2\n",
+        ))
+        .unwrap();
+        let mut sim = player_sim();
+        let mut spawn = |kind| {
+            sim.spawn_object_limbo_at_height(kind, "Americans", 10, 10, 0, 0, &rules)
+                .unwrap()
+        };
+        let transport = spawn("TRANSPORT");
+        let deployer = spawn("DEPLOYER");
+        let plane = spawn("PLANE");
+        let owner = sim.session().current_house();
+        assert_eq!(
+            deploy_key_command(&sim, Some(&rules), transport, owner),
+            Some(Command::DeployMcv {
+                entity_id: transport
+            })
+        );
+        let policy = InputPolicy {
+            deny_manual_unload: true,
+            ..InputPolicy::default()
+        };
+        for kind in ["TRANSPORT", "DEPLOYER", "PLANE"] {
+            rules.bind_input_policy_for_test(kind, policy);
+        }
+        assert_eq!(
+            deploy_key_command(&sim, Some(&rules), transport, owner),
+            None,
+            "the Unit passenger arm is blocked even empty"
+        );
+        assert_eq!(
+            deploy_key_command(&sim, Some(&rules), deployer, owner),
+            Some(Command::DeployMcv {
+                entity_id: deployer
+            }),
+            "a non-transport simple deployer is unaffected"
+        );
+        sim.entities_mut_for_test()
+            .get_mut(transport)
+            .unwrap()
+            .bunker
+            .set_bunker_link_for_test(BunkerLink::Installed(99));
+        assert_eq!(
+            deploy_key_command(&sim, Some(&rules), transport, owner),
+            Some(Command::DeployMcv {
+                entity_id: transport
+            })
+        );
+        let mut cargo = PassengerCargo::new(2, 0.0);
+        cargo.board_forced_chain(&[(999, 1.0)]);
+        sim.entities_mut_for_test()
+            .get_mut(plane)
+            .unwrap()
+            .passenger_role = PassengerRole::transport(cargo);
+        assert_eq!(
+            deploy_key_command(&sim, Some(&rules), plane, owner),
+            Some(Command::UnloadPassengers {
+                transport_id: plane
+            }),
+            "Aircraft700DB6 bypasses the Unit-only Ares hook700EEC"
         );
     }
 

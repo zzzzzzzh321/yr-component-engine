@@ -69,6 +69,9 @@ impl HostServices for NativeHost {
                 )
             ),
             "bool" => serde_json::json!(section.read_bool(key, value.as_bool().ok_or_else(bad)?)),
+            "ares-bool" => {
+                serde_json::json!(section.read_ares_bool(key, value.as_bool().ok_or_else(bad)?))
+            }
             "double-bits" => serde_json::json!(
                 section
                     .read_double(key, f64::from_bits(value.as_u64().ok_or_else(bad)?))

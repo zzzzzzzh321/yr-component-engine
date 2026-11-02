@@ -58,6 +58,9 @@ impl Scene {
             OverlayTypeRegistry::from_ini(&retail.processed_rules, Some(&retail.fixed_art));
         let rules = retail.rules;
         let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xa220);
+        // Match the production authored-scenario admission in runtime.rs:
+        // rules own immutable policies; the world retains saved guest identity.
+        sim.external_mod = rules.external_mod.as_deref().cloned();
         // The supplied clear map still owns its empty overlay cells and saved
         // wall-neighbor plane; full map-authority restore requires both.
         sim.install_overlay_grid_for_load(crate::sim::overlay_grid::OverlayGrid::new(32, 32));
@@ -590,8 +593,73 @@ fn sdk_ammo_vehicle_and_building_keep_partial_magazines_until_reload() {
     }
 }
 
-// This is the stock GetROF6FCFA9 magazine shortcut. Installed Ares hook
-// 10047A60 skips it (continues at6FCFC1), independently of this ammo port.
+#[test]
+#[cfg(not(feature = "ares"))]
+#[ignore = "requires new VERA_SDK_AMMO_WASM and old VERA_SDK_LEGACY_WASM"]
+fn sdk_ammo_building_weapon_rearm_preserves_legacy_and_survives_restore() {
+    let new = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let old = std::fs::read(std::env::var_os("VERA_SDK_LEGACY_WASM").unwrap()).unwrap();
+    let patch = "[VeraFeatures]\nAresAmmo=yes\n[GAPILL]\nAmmo=5\nInitialAmmo=5\nReload=1000\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nCanPassiveAquire=no\n\
+                 [AmmoProbe]\nDamage=1\nROF=45\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\n";
+    for (label, component) in [
+        ("stock", None),
+        ("old guest", Some(old.as_slice())),
+        ("new guest", Some(new.as_slice())),
+    ] {
+        let Some(mut scene) = Scene::with_component(patch, component) else {
+            return;
+        };
+        let target = scene.spawn("GACNST", "Russians", (16, 16));
+        let source = scene.spawn("GAPILL", "Americans", (16, 20));
+        scene.command(
+            "Americans",
+            Command::Attack {
+                attacker_id: source,
+                target_id: target,
+            },
+        );
+        scene.shot(source, target);
+        assert_eq!(scene.count(source), 4, "{label}");
+        let rearm = scene.actor(source).rearm_timer.timer();
+        if label != "new guest" {
+            assert_eq!(
+                rearm.duration(),
+                1,
+                "{label}: keep original magazine cadence"
+            );
+            continue;
+        }
+        assert!(
+            rearm.duration() >= 45,
+            "new policy must reach normal GetROF"
+        );
+        let saved = GameSnapshot::save_validated(
+            &scene.0.simulation,
+            0,
+            scene.0.resources.rules.simulation_config_hash(),
+            "component cadence",
+            0,
+        );
+        let restored = scene.restored(&saved);
+        scene.0.resources.rules.external_mod = Some(std::sync::Arc::new(
+            restored.external_mod.clone().expect("saved component"),
+        ));
+        scene.0.resources.rules.bind_resource_policies().unwrap();
+        scene.0.replace_simulation(restored);
+        assert_eq!(scene.actor(source).rearm_timer.timer(), rearm);
+        while scene.now() < rearm.start_frame() + rearm.duration() {
+            assert!(
+                !fired(&scene.frame(), source),
+                "no extra shot before rearm expires"
+            );
+        }
+        scene.shot(source, target);
+        assert_eq!(scene.count(source), 3);
+    }
+}
+
+// Stock GetROF6FCFA9 keeps its magazine shortcut without a component policy.
+// Installed Ares10047A60 continues at6FCFC1; the test above covers that opt-in.
 #[cfg(not(feature = "ares"))]
 #[test]
 fn finite_building_fires_a_rapid_pair_refills_zero_and_keeps_last_round_rearm() {

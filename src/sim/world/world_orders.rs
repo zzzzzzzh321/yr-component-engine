@@ -469,6 +469,16 @@ impl Simulation {
             EntityCategory::Unit => false,
             _ => return None,
         };
+        // Ares3.0 Unit What_Action hook74031A->1004BEA0 and Infantry
+        // hook51ED8E->100176E0 skip only the ordinary passenger UI arm.
+        // Actual CAN_LOAD/script admission and later entry fallbacks stay intact.
+        let target_type = self.object_type(target.type_ref(), rules)?;
+        if target_type
+            .input_policy()
+            .is_some_and(|p| p.hide_transport_entry)
+        {
+            return None;
+        }
         if !combat::combat_weapon::is_ally_by_object(
             Some(self.house_alliances.as_map()),
             &self.interner,
@@ -478,7 +488,7 @@ impl Simulation {
             || target.is_warped_out()
             || target.is_warping_in()
             || (!infantry && actor_id == target_id)
-            || self.object_type(target.type_ref(), rules)?.passengers <= 0
+            || target_type.passengers <= 0
         {
             return None;
         }

@@ -240,6 +240,7 @@ fn run_probe(
     let has_shield = matches!(mode, "compat" | "overload" | "ammo" | "all");
     let has_overload = matches!(mode, "overload" | "all");
     let has_ammo = matches!(mode, "ammo" | "ammo-only" | "all");
+    let has_manual = mode == "all";
     let tests_ammo = has_ammo || mode == "disabled";
     let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
     ensure!(
@@ -284,16 +285,22 @@ fn run_probe(
     } else {
         PROBE_INI.to_owned()
     };
+    let probe_ini = if has_manual {
+        probe_ini.replacen("ShieldType=SDKShield\r\n", "ShieldType=SDKShield\r\nNoManualFire=yes\r\nNoManualUnload=yes\r\nNoManualEnter=yes\r\nNoSelfGuardArea=yes\r\n", 1)
+    } else {
+        probe_ini
+    };
     bytes.extend_from_slice(probe_ini.as_bytes());
     if tests_ammo {
         bytes.extend_from_slice(AMMO_PROBE_INI.as_bytes());
     }
     bytes.extend_from_slice(
         format!(
-            "\r\n[VeraFeatures]\r\nShield={}\r\nOverload={}\r\nAresAmmo={}\r\n",
+            "\r\n[VeraFeatures]\r\nShield={}\r\nOverload={}\r\nAresAmmo={}\r\nAresManualControl={}\r\n",
             if has_shield { "yes" } else { "no" },
             if has_overload { "yes" } else { "no" },
             if has_ammo { "yes" } else { "no" },
+            if has_manual { "yes" } else { "no" },
         )
         .as_bytes(),
     );
@@ -357,6 +364,22 @@ fn run_probe(
             );
         }
     }
+    let expected_input = has_manual.then_some(vera_mod_api::InputPolicy {
+        deny_manual_attack: true,
+        deny_manual_unload: true,
+        hide_transport_entry: true,
+        deny_self_guard_area: false,
+    });
+    ensure!(
+        scenario
+            .runtime
+            .resources
+            .rules
+            .object("MTNK")
+            .and_then(|t| t.input_policy())
+            == expected_input,
+        "manual input projection did not bind through production retail Rules"
+    );
     let target = spawn_target(&mut scenario)?;
     let initial = scenario
         .sim()
@@ -447,6 +470,16 @@ fn run_probe(
         .simulation
         .compute_retail_multiplayer_checksum()?;
     let snapshot = snapshot_roundtrip(&mut scenario, &owner, &assets, target, output)?;
+    ensure!(
+        scenario
+            .runtime
+            .resources
+            .rules
+            .object("MTNK")
+            .and_then(|t| t.input_policy())
+            == expected_input,
+        "restored frozen manual input projection differs"
+    );
     Ok(
         json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"ammunition":ammunition,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
     )

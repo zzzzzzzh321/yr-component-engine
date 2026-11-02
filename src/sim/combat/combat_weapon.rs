@@ -1414,6 +1414,7 @@ mod tests {
                 weapon_index: 1,
                 threshold: 0,
             }),
+            input: None,
         }));
         let target = TargetFacts::Cell {
             land_type: 0,

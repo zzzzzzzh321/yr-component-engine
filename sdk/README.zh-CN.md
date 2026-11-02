@@ -1,6 +1,6 @@
 # VERA Mod SDK：外置功能原型
 
-本目录保留 VERA20K 外置插件的 API、WIT 契约和运行时；插件实现与开发工具统一迁到相邻的 [plugin-dev 独立工程](../../plugin-dev/README.md)。第一份参考插件位于其中的 `plugins/vera20k-ares`，发布文件名为 `vera20k-ares.wasm`。一个作品加载一个可选的外置功能组件；当前参考组件0.4.0包含护盾、自定义过载及Ares武器弹药成本、装填数量、低弹量武器选择，通过INI选择功能，无须按组合重新编译。
+本目录保留 VERA20K 外置插件的 API、WIT 契约和运行时；插件实现与开发工具统一迁到相邻的 [plugin-dev 独立工程](../../plugin-dev/README.md)。第一份参考插件位于其中的 `plugins/vera20k-ares`，发布文件名为 `vera20k-ares.wasm`。一个作品加载一个可选的外置功能组件；当前参考组件0.5.0包含护盾、自定义过载及Ares武器弹药成本、装填数量、低弹量武器选择，通过INI选择功能，无须按组合重新编译。
 
 护盾的配置解释、状态、伤害处理和恢复逻辑已经移到外置 Rust 插件中。作者可以修改插件源码、重新编译发布，无须为这两种护盾分别修改或编译引擎。INI 仍用于配置，功能实现位于插件代码中。
 
@@ -10,11 +10,13 @@
 
 [Ares弹药与武器选择说明](../../plugin-dev/plugins/vera20k-ares/AMMO.zh-CN.md)介绍三个独立开关：`AresAmmo`解释武器成本，`AresReload`解释普通/空仓装填量，`AresNoAmmoWeapon`解释低弹量选用的武器。可选的`weapon_resource`和`type_resource`在加载时提供静态策略，复用引擎已有开火、弹仓、装填时钟与武器选择；原有四个回调仍是基础要求。
 
+`AresManualControl` 接入 `NoManualFire`、`NoManualUnload`、`NoManualEnter`、`NoSelfGuardArea`，通过类型上的可选 `InputPolicy` 供已有鼠标与按键操作流程消费；不在模拟层过滤 AI、脚本或回放命令。见[手动操作说明](../../plugin-dev/plugins/vera20k-ares/MANUAL.zh-CN.md)。0.5.0 的配置版本为5，状态版本仍为1。
+
 Ares 完整公开功能目录、INI 键索引与后续开发拆分见 [Ares 功能中文开发参考](../docs/zh-CN/ares-feature-guide.md)。其中的 SDK 接入描述为开发建议，当前已外置范围仍以上文为准。
 
 Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 SDK 实现建议见 [Phobos 功能中文开发参考](../docs/zh-CN/phobos-feature-guide.md)。目录还区分了原生 DLL 互操作接口与本 SDK，以及护盾示例的已完成范围和待补能力。
 
-发布文件名和 Cargo 包名为 `vera20k-ares`，内部组件标识仍为 `vera.reference-gameplay` 0.4.0，config_version=4、state_version=1。名称整理不改变已有功能和协议；Phobos兼容护盾与自定义过载仍作为现有示例保留，文件名不表示完整兼容Ares。
+发布文件名和 Cargo 包名为 `vera20k-ares`，内部组件标识仍为 `vera.reference-gameplay` 0.5.0，config_version=4、state_version=1。名称整理不改变已有功能和协议；Phobos兼容护盾与自定义过载仍作为现有示例保留，文件名不表示完整兼容Ares。
 
 后续插件代码在 `plugin-dev` 中维护，按[独立构建指南](../../plugin-dev/sdk/dev-kit/README.zh-CN.md)使用标准 Cargo 完成测试、编译和打包。引擎仓库中的 `sdk/api` 和 `sdk/wit` 是接口权威定义，独立工程使用固定版本的 SDK 开发快照；协议扩展先更新定义及引擎支持，再同步快照。插件构建无需引擎源码、可执行文件、Python 或游戏资源；引擎构建和验收继续在引擎仓库运行 `tools.cargo_run`。
 
@@ -83,7 +85,7 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 
 | 回调 | 查询时机 | 返回策略 |
 | --- | --- | --- |
-| `weapon_resource` | 加载时按实际登记武器查询，读档后从冻结配置重建 | 每次开火成本、是否请求装填、适用类别 |
+| `weapon_resource` | 加载时按实际登记武器查询，读档后从冻结配置重建 | 每次开火成本、是否请求装填、适用类别、建筑是否采用普通武器ROF |
 | `type_resource` | 加载时按对象类型与实际类别查询，读档后从冻结配置重建 | 普通/空仓装填量及低弹量武器选择 |
 
 查询消息和策略统一定义于`api/src/resource.rs`，经已有`evaluate`导出传递，没有增加Host服务。正式模拟路径读取不可变投影；三个Ares功能不占用额外对象插件状态，也不新增一套弹药或计时器。
@@ -244,7 +246,7 @@ $retail = "D:/steam/steamapps/common/Command & Conquer Red Alert II"
 python -m tools.cargo_run -- test --locked -p vera20k-core --lib sdk_ -- --include-ignored --skip sdk_refactor_preserves_
 ```
 
-`COMPAT`、`AMMO`是历史测试变量名；测试INI须显式开启所需功能。目录或包装迁移时，可分别设置`VERA_SDK_BASELINE_WASM`和`VERA_SDK_CANDIDATE_WASM`为迁移前后的组件，再运行`sdk_refactor_preserves_`，比较同一接口与配置版本的manifest、冻结配置和状态字节。本次0.4.0迁移适用；该检查不表示支持跨配置版本迁移。新增机制的验证应覆盖实际WASM、正式选武器/装填路径与存读档，不能只检查返回的策略字段。
+`COMPAT`、`AMMO`是历史测试变量名；测试INI须显式开启所需功能。目录或包装迁移时，可分别设置`VERA_SDK_BASELINE_WASM`和`VERA_SDK_CANDIDATE_WASM`为迁移前后的组件，再运行`sdk_refactor_preserves_`，比较同一接口与配置版本的manifest、冻结配置和状态字节。本次0.5.0迁移适用；该检查不表示支持跨配置版本迁移。新增机制的验证应覆盖实际WASM、正式选武器/装填路径与存读档，不能只检查返回的策略字段。
 
 ## 状态、存档与联机一致性
 
