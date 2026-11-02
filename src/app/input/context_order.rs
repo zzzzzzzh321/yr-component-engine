@@ -289,6 +289,7 @@ pub(crate) fn attack_action(
     forced: bool,
     overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
 ) -> AttackAction {
+    let mut action = techno_attack_action(sim, rules, actor_id, target, forced, overlay_registry);
     let Some(actor) = sim.entities().get(actor_id) else {
         return AttackAction::None;
     };
@@ -298,74 +299,6 @@ pub(crate) fn attack_action(
     let human = sim.house_is_human_player(actor.owner());
     let armed = crate::sim::combat::combat_weapon::is_armed(actor, kind);
     let infiltrator = actor.category() == EntityCategory::Infantry && kind.infiltrate;
-    let admitted = match target {
-        TargetKind::Entity(target_id) => {
-            human
-                && (armed || infiltrator)
-                && (forced
-                    || (friendly_attack_is_admitted(sim, rules, actor_id, *target_id)
-                        && object_target_is_legal(sim, rules, actor_id, *target_id)))
-        }
-        TargetKind::Cell(..) => human,
-    };
-    // TechnoClass::What_Action_OnObject's tail (`0x0070056C..0x007005E6`):
-    // Select over an object the player may select that is not selected,
-    // unless an armed player's object points at another House's, or at its
-    // own loaner. The warp arm (`0x006FFF03..0x006FFF8A`) asks the same
-    // without the target's own warp test (`0x007005CD`).
-    let selects = |target_id: u64, warp_test: bool| {
-        sim.entities().get(target_id).is_some_and(|object| {
-            !(armed && human && object.owner() != actor.owner())
-                && !(actor.is_mission_only() && actor.discovery.owned_by_current_house())
-                && sim.object_is_selectable(target_id, rules)
-                && !object.selection.is_selected()
-                && !(warp_test && object.is_warped_out())
-        })
-    };
-    // An object being warped out (vt+0x1D4) answers before the attack rung:
-    // 0 on a Cell (`0x00700731`; warping in too, `0x00700743`), and over an
-    // object the tail's Select, else 0. A berserk one answers 0 before that
-    // (`0x006FFEC9`). The class tails below still run on the answer; none
-    // turns its 0 into NoMove, as the object is not controllable (vt+0xA0,
-    // `0x00700C40`), but a Building's Cell tail still answers its rally.
-    let warping =
-        actor.is_warped_out() || (actor.is_warping_in() && matches!(target, TargetKind::Cell(..)));
-    let mut action = if warping {
-        match *target {
-            TargetKind::Entity(target_id)
-                if !actor.berserk.is_active() && selects(target_id, false) =>
-            {
-                AttackAction::Select
-            }
-            _ => AttackAction::None,
-        }
-    } else if admitted
-        && (sim.techno_player_controllable(actor_id, rules)
-            || resolved_unit_in_range(
-                sim,
-                actor_id,
-                target,
-                Some(rules),
-                sim.resolved_terrain(),
-                overlay_registry,
-                Some(target),
-            ))
-        && (forced || !shot_is_illegal(sim, rules, actor_id, target, overlay_registry))
-        // Ares3.0 hooks700536/7008D4 ->1004A460/1004A430 leave
-        // this rung for NoManualFire. Keep the original selection/Foot
-        // fallback below; a Unit's rejected object attack becomes NoMove,
-        // whose click still moves near the object. Do not gate CanFire or
-        // received simulation missions: auto-targeting/scripts bypass UI.
-        && !kind.no_manual_fire()
-    {
-        AttackAction::Attack
-    } else if let TargetKind::Entity(target_id) = *target
-        && selects(target_id, true)
-    {
-        AttackAction::Select
-    } else {
-        AttackAction::None
-    };
     let healing_unit = actor.category() == EntityCategory::Unit
         && human
         && crate::sim::combat::combat_weapon::weapon_damage_value(
@@ -562,6 +495,96 @@ pub(crate) fn attack_action(
     action
 }
 
+/// Techno What_Action700536/7008D4 base attack/selection result, before
+/// Infantry C4 (51E9F1), deployment (51EB81), and infiltration (51EE62).
+/// C4 reads this early result; later consumers keep attack_action's class tail.
+fn techno_attack_action(
+    sim: &crate::sim::world::Simulation,
+    rules: &crate::rules::ruleset::RuleSet,
+    actor_id: u64,
+    target: &TargetKind,
+    forced: bool,
+    overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+) -> AttackAction {
+    let Some(actor) = sim.entities().get(actor_id) else {
+        return AttackAction::None;
+    };
+    let Some(kind) = sim.interner().object_type(actor.type_ref(), rules) else {
+        return AttackAction::None;
+    };
+    let human = sim.house_is_human_player(actor.owner());
+    let armed = crate::sim::combat::combat_weapon::is_armed(actor, kind);
+    let infiltrator = actor.category() == EntityCategory::Infantry && kind.infiltrate;
+    let admitted = match target {
+        TargetKind::Entity(target_id) => {
+            human
+                && (armed || infiltrator)
+                && (forced
+                    || (friendly_attack_is_admitted(sim, rules, actor_id, *target_id)
+                        && object_target_is_legal(sim, rules, actor_id, *target_id)))
+        }
+        TargetKind::Cell(..) => human,
+    };
+    // TechnoClass::What_Action_OnObject's tail (`0x0070056C..0x007005E6`):
+    // Select over an object the player may select that is not selected,
+    // unless an armed player's object points at another House's, or at its
+    // own loaner. The warp arm (`0x006FFF03..0x006FFF8A`) asks the same
+    // without the target's own warp test (`0x007005CD`).
+    let selects = |target_id: u64, warp_test: bool| {
+        sim.entities().get(target_id).is_some_and(|object| {
+            !(armed && human && object.owner() != actor.owner())
+                && !(actor.is_mission_only() && actor.discovery.owned_by_current_house())
+                && sim.object_is_selectable(target_id, rules)
+                && !object.selection.is_selected()
+                && !(warp_test && object.is_warped_out())
+        })
+    };
+    // An object being warped out (vt+0x1D4) answers before the attack rung:
+    // 0 on a Cell (`0x00700731`; warping in too, `0x00700743`), and over an
+    // object the tail's Select, else 0. A berserk one answers 0 before that
+    // (`0x006FFEC9`). The class tails below still run on the answer; none
+    // turns its 0 into NoMove, as the object is not controllable (vt+0xA0,
+    // `0x00700C40`), but a Building's Cell tail still answers its rally.
+    let warping =
+        actor.is_warped_out() || (actor.is_warping_in() && matches!(target, TargetKind::Cell(..)));
+    if warping {
+        match *target {
+            TargetKind::Entity(target_id)
+                if !actor.berserk.is_active() && selects(target_id, false) =>
+            {
+                AttackAction::Select
+            }
+            _ => AttackAction::None,
+        }
+    } else if admitted
+        && (sim.techno_player_controllable(actor_id, rules)
+            || resolved_unit_in_range(
+                sim,
+                actor_id,
+                target,
+                Some(rules),
+                sim.resolved_terrain(),
+                overlay_registry,
+                Some(target),
+            ))
+        && (forced || !shot_is_illegal(sim, rules, actor_id, target, overlay_registry))
+        // Ares3.0 hooks700536/7008D4 ->1004A460/1004A430 leave
+        // this rung for NoManualFire. Keep the original selection/Foot
+        // fallback below; a Unit's rejected object attack becomes NoMove,
+        // whose click still moves near the object. Do not gate CanFire or
+        // received simulation missions: auto-targeting/scripts bypass UI.
+        && !kind.no_manual_fire()
+    {
+        AttackAction::Attack
+    } else if let TargetKind::Entity(target_id) = *target
+        && selects(target_id, true)
+    {
+        AttackAction::Select
+    } else {
+        AttackAction::None
+    }
+}
+
 /// Whether an Aircraft's 0 over the object `target_id` becomes Attack. The
 /// Aircraft wrapper asks its own What_Action on the Cell under the object
 /// (`0x00417D7C..0x00417DCB`, [`Simulation::object_coords_cell`]):
@@ -582,6 +605,7 @@ pub(crate) fn attack_action(
 ///
 /// [`Simulation::object_coords_cell`]: crate::sim::world::Simulation::object_coords_cell
 /// [`Simulation::cell_attack_rung_admits`]: crate::sim::world::Simulation::cell_attack_rung_admits
+
 fn aircraft_cell_attack_under_object(
     sim: &crate::sim::world::Simulation,
     rules: &crate::rules::ruleset::RuleSet,
@@ -2501,25 +2525,13 @@ pub(crate) fn try_queue_context_order(
 
             // C4 precedes the late infiltration action (51E9DA before51EE54).
             if context_actions_enabled && let Some(target) = hover.as_ref() {
-                let c4_attackers: Vec<_> = selected_units
-                    .iter()
-                    .copied()
-                    .filter(|&id| {
-                        infantry_c4_action(sim, &resources.rules, id, target, false)
-                            == Some(InfantryC4Action::Sabotage)
-                    })
-                    .collect();
-                if !c4_attackers.is_empty() {
-                    for attacker_id in c4_attackers {
-                        queued.push(CommandEnvelope::new(
-                            owner_id,
-                            execute_tick,
-                            Command::PlantC4 {
-                                attacker_id,
-                                target_building_id: target.stable_id,
-                            },
-                        ));
-                    }
+                let orders = infantry_c4_orders(sim, &resources.rules, &selected_units, target);
+                if !orders.is_empty() {
+                    queued.extend(
+                        orders
+                            .into_iter()
+                            .map(|command| CommandEnvelope::new(owner_id, execute_tick, command)),
+                    );
                     return finish_order(state, queued, speaker_id, rally_announce, None);
                 }
             }
@@ -3702,7 +3714,7 @@ pub(super) fn infantry_c4_action(
     // owns NoManualFire too; C4 must not bypass its rejection.
     if !admitted_attack
         && (hover.kind != HoverTargetKind::EnemyStructure
-            || attack_action(
+            || techno_attack_action(
                 sim,
                 rules,
                 actor_id,
@@ -3732,6 +3744,27 @@ pub(super) fn infantry_c4_action(
     } else {
         InfantryC4Action::Attack
     })
+}
+
+/// Infantry's ordinary C4 object-click payload (51F190 -> Foot4D74E0).
+/// Keep selection order and use the early C4 action, before deployment.
+fn infantry_c4_orders(
+    sim: &crate::sim::world::Simulation,
+    rules: &crate::rules::ruleset::RuleSet,
+    selected: &[u64],
+    hover: &HoverTargetKindWithId,
+) -> Vec<Command> {
+    selected
+        .iter()
+        .copied()
+        .filter(|&id| {
+            infantry_c4_action(sim, rules, id, hover, false) == Some(InfantryC4Action::Sabotage)
+        })
+        .map(|attacker_id| Command::PlantC4 {
+            attacker_id,
+            target_building_id: hover.stable_id,
+        })
+        .collect()
 }
 
 /// Infantry51EE62 rewrites only the admitted base Attack5 to infiltration.

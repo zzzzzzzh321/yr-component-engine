@@ -15,8 +15,8 @@ fn rules() -> RuleSet {
         "[InfantryTypes]\n0=SEAL\n1=SPY\n2=MEDIC\n3=GI\n\
          [VehicleTypes]\n0=TRANSPORT\n[AircraftTypes]\n0=PLANE\n\
          [BuildingTypes]\n0=PLANT\n1=GRINDER\n\
-         [SEAL]\nStrength=100\nC4=yes\nPrimary=RIFLE\n\
-         [SPY]\nStrength=100\nAgent=yes\n\
+         [SEAL]\nStrength=100\nC4=yes\nPrimary=RIFLE\nDeployer=yes\nDeployFire=no\n\
+         [SPY]\nStrength=100\nAgent=yes\nDeployer=yes\nDeployFire=no\n\
          [MEDIC]\nStrength=100\nPrimary=HEAL\nDeployer=yes\nDeployFire=yes\n\
          [GI]\nStrength=100\nSize=1\nPrimary=RIFLE\n\
          [TRANSPORT]\nStrength=200\nPassengers=3\nSizeLimit=2\n\
@@ -68,6 +68,60 @@ fn cursor(
         false,
         false,
     )
+}
+
+#[test]
+fn deployed_c4_uses_early_attack_while_spy_keeps_the_later_deployment_gate() {
+    let mut rules = rules();
+    let mut sim = arena(&rules);
+    let seal = sim
+        .spawn_object("SEAL", "Americans", 5, 5, 0, &rules)
+        .unwrap();
+    let spy = sim
+        .spawn_object("SPY", "Americans", 6, 5, 0, &rules)
+        .unwrap();
+    let plant = sim
+        .spawn_object("PLANT", "Russians", 10, 5, 0, &rules)
+        .unwrap();
+    for id in [seal, spy] {
+        sim.entities_mut_for_test()
+            .get_mut(id)
+            .unwrap()
+            .mission_leaf
+            .set_infantry_doing_verified(28)
+            .unwrap();
+    }
+    let target = hover(plant, HoverTargetKind::EnemyStructure);
+    // Infantry51E9F1 C4 is terminal before51EB81 deployment; infiltration
+    // at51EE62 remains after that deployed-state rejection.
+    assert_eq!(
+        attack_action(&sim, &rules, seal, &TargetKind::Entity(plant), false, None),
+        AttackAction::NoMove
+    );
+    assert_eq!(
+        cursor(&sim, &rules, seal, &target),
+        CursorFeedbackKind::Demolish
+    );
+    assert_eq!(
+        infantry_c4_orders(&sim, &rules, &[seal], &target),
+        vec![Command::PlantC4 {
+            attacker_id: seal,
+            target_building_id: plant
+        }]
+    );
+    assert!(!infantry_infiltration_action(&sim, &rules, spy, plant));
+    rules.bind_input_policy_for_test(
+        "SEAL",
+        InputPolicy {
+            deny_manual_attack: true,
+            ..Default::default()
+        },
+    );
+    assert!(infantry_c4_orders(&sim, &rules, &[seal], &target).is_empty());
+    assert_ne!(
+        cursor(&sim, &rules, seal, &target),
+        CursorFeedbackKind::Demolish
+    );
 }
 
 #[test]
