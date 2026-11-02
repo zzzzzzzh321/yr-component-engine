@@ -157,7 +157,7 @@ impl PendingBuildingFire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DelayedFire {
     /// Mode 1: FireAt the live target with the saved weapon (`+0x708`).
-    Weapon(WeaponSlot),
+    Weapon(#[serde(with = "delayed_weapon_index")] i32),
     /// Mode 2: a Prism support beam (`0x0044ABD0`) to the master's weapon-0
     /// FLH as it stood at recruitment (`+0x708..+0x710`, world leptons).
     SupportBeam {
@@ -171,12 +171,54 @@ impl std::hash::Hash for PendingBuildingFire {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.remaining_ticks.hash(state);
         match self.fire {
-            DelayedFire::Weapon(slot) => slot.hash(state),
+            // Preserve the pre-index hashes for all old primary/secondary
+            // saves. Tag3 distinguishes new full indices from support tag2.
+            DelayedFire::Weapon(0) => WeaponSlot::Primary.hash(state),
+            DelayedFire::Weapon(1) => WeaponSlot::Secondary.hash(state),
+            DelayedFire::Weapon(index) => {
+                3isize.hash(state);
+                index.hash(state);
+            }
             DelayedFire::SupportBeam { to } => {
                 2isize.hash(state);
                 to.hash(state);
             }
         }
+    }
+}
+
+/// Old binary saves stored WeaponSlot's u32 variant0/1 in this exact field;
+/// i32 uses the same four bytes. Human-readable snapshots retain their old
+/// Primary/Secondary spelling, while additional native indices are numbers.
+mod delayed_weapon_index {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(index: &i32, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            match index {
+                0 => return serializer.serialize_str("Primary"),
+                1 => return serializer.serialize_str("Secondary"),
+                _ => {}
+            }
+        }
+        serializer.serialize_i32(*index)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
+        if !deserializer.is_human_readable() {
+            return i32::deserialize(deserializer);
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum SavedIndex {
+            Legacy(super::WeaponSlot),
+            Index(i32),
+        }
+        Ok(match SavedIndex::deserialize(deserializer)? {
+            SavedIndex::Legacy(super::WeaponSlot::Primary) => 0,
+            SavedIndex::Legacy(super::WeaponSlot::Secondary) => 1,
+            SavedIndex::Index(index) => index,
+        })
     }
 }
 
@@ -1209,18 +1251,15 @@ fn fire_arm(
         .filter(|art| art.is_anim_delayed_fire)
     {
         Some(art) => {
-            let slot = if weapon == 1 {
-                WeaponSlot::Secondary
-            } else {
-                WeaponSlot::Primary
-            };
+            // Mission_Attack44B65A stores the full selected EBP at+708.
+            // ProcessDelayedFire450468/450480 reuses it without reselection.
             arm_delayed_fire(
                 sim,
                 id,
                 rules,
                 obj,
                 art.delayed_fire_delay,
-                DelayedFire::Weapon(slot),
+                DelayedFire::Weapon(weapon),
             );
         }
         None => {
@@ -1293,14 +1332,7 @@ fn prism_arm(
         .then(|| prism_supporter(sim, id, rules, obj))
         .flatten();
     let Some(supporter) = supporter else {
-        arm_delayed_fire(
-            sim,
-            id,
-            rules,
-            obj,
-            delay,
-            DelayedFire::Weapon(WeaponSlot::Primary),
-        );
+        arm_delayed_fire(sim, id, rules, obj, delay, DelayedFire::Weapon(0));
         return;
     };
     if let Some(master) = sim.substrate.entities.get_mut(id) {
@@ -1427,13 +1459,9 @@ pub(super) fn process_delayed_fire(
         return;
     };
     match fire {
-        DelayedFire::Weapon(slot) => {
+        DelayedFire::Weapon(weapon) => {
             let Some(target) = entity.attack_target.target() else {
                 return;
-            };
-            let weapon = match slot {
-                WeaponSlot::Primary => 0,
-                WeaponSlot::Secondary => 1,
             };
             if fire_error_at(
                 sim,
@@ -1449,7 +1477,7 @@ pub(super) fn process_delayed_fire(
                     .commit_fire_visit(
                         crate::sim::combat::world_fire::FireVisit::Building {
                             id,
-                            shot: BuildingShot::Delayed { slot, target },
+                            shot: BuildingShot::Delayed { weapon, target },
                         },
                         rules,
                         ctx.overlay_registry,

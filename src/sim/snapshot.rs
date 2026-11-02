@@ -5334,7 +5334,6 @@ mod tests {
     fn gsi_05_10_pending_building_fire_roundtrips_and_changes_hash() {
         use crate::map::entities::EntityCategory;
         use crate::sim::combat::Health;
-        use crate::sim::combat::combat_weapon::WeaponSlot;
         use crate::sim::game_entity::GameEntity;
         use crate::sim::projectile::ProjectileCoord;
         use crate::sim::world::{DelayedFire, PendingBuildingFire};
@@ -5363,7 +5362,7 @@ mod tests {
         // authoritative delayed-fire state on that same post-load cursor.
         sim.scenario_rng = crate::sim::rng::SimRng::new(0);
         let without_latch = sim.state_hash();
-        let shot = PendingBuildingFire::new(17, DelayedFire::Weapon(WeaponSlot::Secondary));
+        let shot = PendingBuildingFire::new(17, DelayedFire::Weapon(1));
         sim.substrate
             .entities
             .get_mut(1)

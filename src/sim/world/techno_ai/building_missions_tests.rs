@@ -96,6 +96,59 @@ fn with_delayed_fire(mut rules: RuleSet, delay: i64) -> RuleSet {
     rules
 }
 
+#[test]
+fn delayed_full_indices_preserve_legacy_save_bytes_json_and_hashes() {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let hash = |value: &dyn Fn(&mut DefaultHasher)| {
+        let mut h = DefaultHasher::new();
+        value(&mut h);
+        h.finish()
+    };
+    for (index, slot, name) in [
+        (0, WeaponSlot::Primary, "Primary"),
+        (1, WeaponSlot::Secondary, "Secondary"),
+    ] {
+        let pending = PendingBuildingFire::new(17, DelayedFire::Weapon(index));
+        // The legacy save-codec layout: i32 countdown, enum tag0, then
+        // WeaponSlot's u32 variant0/1. No envelope/layout change is needed.
+        let old = [
+            17i32.to_le_bytes(),
+            0u32.to_le_bytes(),
+            (index as u32).to_le_bytes(),
+        ]
+        .concat();
+        assert_eq!(crate::util::save_codec::serialize(&pending).unwrap(), old);
+        assert_eq!(
+            crate::util::save_codec::deserialize::<PendingBuildingFire>(&old).unwrap(),
+            pending
+        );
+        let json = serde_json::json!({"remaining_ticks":17,"fire":{"Weapon":name}});
+        assert_eq!(serde_json::to_value(pending).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<PendingBuildingFire>(json).unwrap(),
+            pending
+        );
+        assert_eq!(
+            hash(&|h| pending.hash(h)),
+            hash(&|h| (17i32, slot).hash(h)),
+            "preserve the pre-index state hash input"
+        );
+    }
+    let high = PendingBuildingFire::new(17, DelayedFire::Weapon(2));
+    assert_eq!(serde_json::to_value(high).unwrap()["fire"]["Weapon"], 2);
+    assert_eq!(
+        crate::util::save_codec::deserialize::<PendingBuildingFire>(
+            &crate::util::save_codec::serialize(&high).unwrap()
+        )
+        .unwrap(),
+        high
+    );
+    assert_ne!(
+        hash(&|h| high.hash(h)),
+        hash(&|h| PendingBuildingFire::new(17, DelayedFire::Weapon(0)).hash(h))
+    );
+}
+
 /// A building of `kind` at (5, 5) and an enemy `SHED` at `target_cell`, on a
 /// flat map, at the oracle's frame.
 pub(super) fn fixture(
@@ -401,7 +454,7 @@ fn mission_attack_matches_the_original() {
             entity.pending_building_fire.pending(),
             (delayed[0] == 1).then(|| PendingBuildingFire::new(
                 delayed[2].as_i64().unwrap() as i32,
-                DelayedFire::Weapon(WeaponSlot::Primary)
+                DelayedFire::Weapon(0)
             )),
             "{name} delayed fire"
         );
@@ -1353,6 +1406,7 @@ pub(super) fn retail_dustbowl_defence(
     enemy: &str,
     mcv: &str,
     west: u16,
+    assess_reactors_first: bool,
 ) -> (
     crate::headless_scenario::HeadlessScenario,
     u64,
@@ -1401,8 +1455,8 @@ pub(super) fn retail_dustbowl_defence(
                 rules,
                 &resources.overlay_registry,
             )?;
-            let defence = sim
-                .spawn_object_with_overlay_registry(
+            let defence = (!assess_reactors_first).then(|| {
+                sim.spawn_object_with_overlay_registry(
                     kind,
                     owner,
                     x,
@@ -1411,7 +1465,8 @@ pub(super) fn retail_dustbowl_defence(
                     rules,
                     &resources.overlay_registry,
                 )
-                .expect("the defence stands where the MCV does");
+                .expect("the defence stands where the MCV does")
+            });
             Some((defence, truck, x, y))
         })
         .expect("open level ground for the fight");
@@ -1444,6 +1499,33 @@ pub(super) fn retail_dustbowl_defence(
             .insert(ally.to_string());
     }
     sim.resolve_type_handles(rules);
+    let defence = match defence {
+        Some(defence) => defence,
+        None => {
+            // Tesla's idle-animation check needs the powered-base prior:
+            // placement adds drain immediately, but output waits for House AI.
+            // Keep the alliances above in force during this real setup frame.
+            // Other caller fixtures retain their original cold-start prior.
+            retail_frame(&mut scenario, Vec::new());
+            let crate::sim::runtime::SimRuntime {
+                simulation: sim,
+                resources,
+            } = &mut scenario.runtime;
+            let defence = sim
+                .spawn_object_with_overlay_registry(
+                    kind,
+                    owner,
+                    x,
+                    y,
+                    0,
+                    &resources.rules,
+                    &resources.overlay_registry,
+                )
+                .expect("the defence stands where the MCV does");
+            sim.resolve_type_handles(&resources.rules);
+            defence
+        }
+    };
     (scenario, defence, truck, (x, y))
 }
 
@@ -1529,7 +1611,7 @@ fn retail_defence_guards_attacks_and_returns(
     infantry: &str,
 ) {
     let (mut scenario, defence, truck, (x, y)) =
-        retail_dustbowl_defence(kind, owner, enemy, mcv, 2);
+        retail_dustbowl_defence(kind, owner, enemy, mcv, 2, false);
     let weapon = {
         let rules = &scenario.runtime.resources.rules;
         let weapon = rules
@@ -1676,7 +1758,7 @@ fn retail_dustbowl_sentry_gun_guards_attacks_and_returns_to_guard() {
 #[ignore = "requires a retail RA2/YR install (RA2_DIR or config.toml)"]
 fn retail_dustbowl_tesla_coil_charges_before_each_shot() {
     let (mut scenario, coil, truck, _) =
-        retail_dustbowl_defence("TESLA", "Russians", "Americans", "AMCV", 2);
+        retail_dustbowl_defence("TESLA", "Russians", "Americans", "AMCV", 2, true);
     let slots = |scenario: &crate::headless_scenario::HeadlessScenario| {
         let sim = scenario.sim();
         let entity = sim.substrate.entities.get(coil).unwrap();
@@ -1752,7 +1834,7 @@ fn retail_dustbowl_tesla_coil_charges_before_each_shot() {
 fn retail_dustbowl_prism_towers_forward_their_charge() {
     use crate::sim::world::DelayedFire;
     let (mut scenario, master, mcv, (x, y)) =
-        retail_dustbowl_defence("ATESLA", "Americans", "Russians", "SMCV", 6);
+        retail_dustbowl_defence("ATESLA", "Americans", "Russians", "SMCV", 6, false);
     let near = retail_spawn(&mut scenario, "ATESLA", "Americans", (x - 4, y));
     let far = retail_spawn(&mut scenario, "ATESLA", "Americans", (x - 6, y));
     // A second plant: three towers draw 225 of the first plant's 200.
@@ -1847,7 +1929,7 @@ fn retail_dustbowl_prism_towers_forward_their_charge() {
                 }
                 (None, Some(DelayedFire::Weapon(slot))) => {
                     assert_eq!(id, master);
-                    assert_eq!(slot, WeaponSlot::Primary);
+                    assert_eq!(slot, 0);
                     assert_eq!(special(&scenario, id), (None, Some("GAPRIS_A".into())));
                     arm = Some(frame);
                 }

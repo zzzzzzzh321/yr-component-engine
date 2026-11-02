@@ -18,7 +18,7 @@ lang: zh-CN
 
 ### 当前 SDK 的实际能力
 
-第一份插件源码维护在相邻的`plugin-dev`独立工程的`plugins/vera20k-ares`目录，发布名为`vera20k-ares.wasm`。内部组件标识继续为`vera.reference-gameplay` 0.5.0，config_version=5、state_version=1。已外置的Ares武器弹药成本`Ammo`使用`weapon_resource`；普通/空仓装填量`ReloadAmount/EmptyReloadAmount`、低弹量武器选择`NoAmmoWeapon/NoAmmoAmount`与手动操作限制使用可选`type_resource`。可再生血量护盾示例属于Phobos兼容链，过载为自定义玩法。Ares的ForceShield力场护盾超武另见[超级武器](#超级武器)，与这项血量护盾分开处理。
+第一份插件源码维护在相邻的`plugin-dev`独立工程的`plugins/vera20k-ares`目录，发布名为`vera20k-ares.wasm`。内部组件标识继续为`vera.reference-gameplay` 0.6.0，config_version=5、state_version=1。已外置的Ares武器弹药成本`Ammo`使用`weapon_resource`；普通/空仓装填量`ReloadAmount/EmptyReloadAmount`、低弹量武器选择`NoAmmoWeapon/NoAmmoAmount`与手动操作限制使用可选`type_resource`。可再生血量护盾示例属于Phobos兼容链，过载为自定义玩法。Ares的ForceShield力场护盾超武另见[超级武器](#超级武器)，与这项血量护盾分开处理。
 
 | 现有接口 | 实际用途 |
 | --- | --- |

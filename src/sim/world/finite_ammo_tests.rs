@@ -217,6 +217,162 @@ fn fired(output: &SimFrameOutput, source: u64) -> bool {
 }
 
 #[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with full-index NoAmmoWeapon"]
+fn sdk_resources_high_weapon_slots_use_native_reading_elite_fallback_and_priority() {
+    use crate::sim::combat::combat_weapon::{self, TargetFacts};
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let patch = "[VeraFeatures]\nAresNoAmmoWeapon=yes\n\
+        [HTNK]\nAmmo=6\nInitialAmmo=0\nTurretCount=1\nWeaponCount=18\nIsGattling=yes\nNoAmmoWeapon=2\n\
+        Weapon1=LowP\nWeapon2=LowS\nWeapon3=High\nEliteWeapon3=EliteHigh\nWeapon18=Last\n\
+        [MTNK]\nAmmo=6\nInitialAmmo=0\nTurretCount=1\nWeaponCount=3\nIsGattling=no\nNoAmmoWeapon=2\n\
+        Weapon1=LowP\nWeapon2=LowS\nWeapon3=High\n\
+        [LowP]\nDamage=1\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\n\
+        [LowS]\nDamage=2\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\n\
+        [High]\nDamage=3\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\n\
+        [EliteHigh]\nDamage=4\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\n\
+        [Last]\nDamage=5\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\n";
+    let Some(mut scene) = Scene::with_component(patch, Some(&wasm)) else {
+        return;
+    };
+    let source = scene.spawn("HTNK", "Americans", (16, 20));
+    let gunner = scene.spawn("MTNK", "Americans", (20, 20));
+    let rules = &scene.0.resources.rules;
+    let object = rules.object("HTNK").unwrap();
+    let mut facts = combat_weapon::attacker_facts(scene.actor(source), object);
+    let target = TargetFacts::Cell {
+        land_type: 0,
+        tile_in_water_set: false,
+        bridge_flag: false,
+    };
+    // Ares10047AE0 preserves index2 after the gunner/OpenTransport arms;
+    // GetWeapon70E140/7177E0 uses this same index for its elite fallback.
+    assert_eq!(
+        combat_weapon::what_weapon_should_i_use(rules, object, &facts, Some(&target)),
+        2
+    );
+    assert_eq!(
+        combat_weapon::weapon_for_index(object, 0, 2).unwrap().0,
+        "High"
+    );
+    assert_eq!(
+        combat_weapon::weapon_for_index(object, 200, 2).unwrap().0,
+        "EliteHigh"
+    );
+    assert_eq!(
+        combat_weapon::weapon_for_index(object, 200, 17).unwrap().0,
+        "Last"
+    );
+    assert!(
+        combat_weapon::weapon_for_index(object, 0, 3).is_none(),
+        "empty slot stays empty"
+    );
+    assert!(
+        combat_weapon::weapon_for_index(object, 0, 18).is_none(),
+        "retain bounded lookup"
+    );
+    facts.open_transport_weapon = Some(1);
+    assert_eq!(
+        combat_weapon::what_weapon_should_i_use(rules, object, &facts, Some(&target)),
+        1
+    );
+    let gunner_type = rules.object("MTNK").unwrap();
+    let gunner_facts = combat_weapon::attacker_facts(scene.actor(gunner), gunner_type);
+    assert_eq!(
+        combat_weapon::what_weapon_should_i_use(rules, gunner_type, &gunner_facts, Some(&target)),
+        0,
+        "native non-gattling gunner returns before NoAmmoWeapon"
+    );
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with full-index NoAmmoWeapon"]
+fn sdk_resources_delayed_building_keeps_full_index_after_reload_and_snapshot_restore() {
+    use crate::sim::world::DelayedFire;
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let patch = "[VeraFeatures]\nAresAmmo=yes\nAresReload=yes\nAresNoAmmoWeapon=yes\n\
+        [TESLA]\nAmmo=6\nInitialAmmo=4\nReload=24\nTurretCount=1\nWeaponCount=3\nIsGattling=yes\n\
+        NoAmmoWeapon=2\nNoAmmoAmount=5\nWeapon1=LowP\nWeapon2=LowS\nWeapon3=High\n\
+        CanPassiveAquire=no\nTurret=yes\nROT=32\n\
+        [LowP]\nDamage=1\nROF=90\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=0\n\
+        [LowS]\nDamage=2\nROF=90\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=0\n\
+        [High]\nDamage=3\nROF=90\nRange=9\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=0\n";
+    let Some(mut scene) = Scene::with_component(patch, Some(&wasm)) else {
+        return;
+    };
+    let target = scene.spawn("GACNST", "Russians", (16, 16));
+    let source = scene.spawn("TESLA", "Americans", (16, 20));
+    scene.command(
+        "Americans",
+        Command::Attack {
+            attacker_id: source,
+            target_id: target,
+        },
+    );
+    let mut pending = None;
+    for _ in 0..60 {
+        let output = scene.frame();
+        assert!(
+            !fired(&output, source),
+            "the real NATSLA delayed arm must precede FireAt"
+        );
+        pending = scene.actor(source).pending_building_fire.pending();
+        if pending.is_some() {
+            break;
+        }
+    }
+    let pending = pending.expect("real building mission arms its animated shot");
+    assert_eq!(pending.fire(), DelayedFire::Weapon(2));
+    assert!(scene.count(source) <= 5);
+    let saved = GameSnapshot::save_validated(
+        &scene.0.simulation,
+        0,
+        scene.0.resources.rules.simulation_config_hash(),
+        "full-index delayed shot",
+        0,
+    );
+    let restored = scene.restored(&saved);
+    scene.0.resources.rules.external_mod =
+        Some(std::sync::Arc::new(restored.external_mod.clone().unwrap()));
+    scene.0.resources.rules.bind_resource_policies().unwrap();
+    scene.0.replace_simulation(restored);
+    assert_eq!(
+        scene.actor(source).pending_building_fire.pending(),
+        Some(pending)
+    );
+    let mut launched = false;
+    for _ in 0..60 {
+        let output = scene.frame();
+        if let Some(event) = output
+            .fire_events
+            .iter()
+            .find(|event| event.attacker_id == source)
+        {
+            assert_eq!(
+                scene.count(source),
+                6,
+                "the normal reload owner changed the selection condition while charging"
+            );
+            assert_eq!(
+                scene.0.simulation.interner.resolve(event.weapon_id),
+                "High",
+                "ProcessDelayedFire450468/450480 reuses the saved full index, never reselects or folds to primary"
+            );
+            assert_eq!(event.target, TargetKind::Entity(target));
+            assert!(
+                scene
+                    .actor(source)
+                    .pending_building_fire
+                    .pending()
+                    .is_none()
+            );
+            launched = true;
+            break;
+        }
+    }
+    assert!(launched, "the restored delayed shot must launch");
+}
+
+#[test]
 #[ignore = "requires VERA_SDK_AMMO_WASM with type_resource"]
 fn sdk_resources_reload_only_infantry_and_building_start_the_empty_clock_after_fire() {
     let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();

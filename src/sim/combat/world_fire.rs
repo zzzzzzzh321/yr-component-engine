@@ -127,8 +127,8 @@ fn admit_attacker_fire<'r>(
     effects: FrameEffects<'_>,
 ) -> Option<AdmittedFire<'r>> {
     let sound_enabled = sound_enabled(world);
-    let delayed_building_slot = match snap.building_shot {
-        Some(super::BuildingShot::Delayed { slot, .. }) => Some(slot),
+    let delayed_building_weapon = match snap.building_shot {
+        Some(super::BuildingShot::Delayed { weapon, .. }) => Some(weapon),
         _ => None,
     };
     let mission_building_weapon = match snap.building_shot {
@@ -138,7 +138,7 @@ fn admit_attacker_fire<'r>(
     let obj = match world.interner.object_type(snap.type_id, rules) {
         Some(o) => o,
         None => {
-            if delayed_building_slot.is_none() {
+            if delayed_building_weapon.is_none() {
                 out.remove_attack.push(snap.stable_id);
             }
             return None;
@@ -189,7 +189,7 @@ fn admit_attacker_fire<'r>(
     let (target_rx, target_ry, target_sub_x, target_sub_y, target_type_ref) = match target_data {
         Some((rx, ry, sx, sy, hp, type_ref)) if hp > 0 => (rx, ry, sx, sy, type_ref),
         _ => {
-            if delayed_building_slot.is_some() {
+            if delayed_building_weapon.is_some() {
                 return None;
             }
             // Pointer expiry clears a dead target natively before any fire
@@ -209,11 +209,7 @@ fn admit_attacker_fire<'r>(
     // its firing occupant's weapon (`0x004526F0`).
     let firer = world.substrate.entities.get(snap.stable_id)?;
     let is_garrison = snap.garrison.is_some();
-    let (mut weapon_index, mut selected) = if let Some(saved_slot) = delayed_building_slot {
-        let index = match saved_slot {
-            WeaponSlot::Primary => 0,
-            WeaponSlot::Secondary => 1,
-        };
+    let (mut weapon_index, mut selected) = if let Some(index) = delayed_building_weapon {
         let selected = combat_weapon::resolve_weapon_index(
             rules,
             firer,

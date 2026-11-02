@@ -325,18 +325,11 @@ impl Fixture {
                 0 if countdown == 0 => None,
                 0 => {
                     self.mode_unheld.insert(id);
-                    Some(PendingBuildingFire::new(
-                        countdown,
-                        DelayedFire::Weapon(WeaponSlot::Primary),
-                    ))
+                    Some(PendingBuildingFire::new(countdown, DelayedFire::Weapon(0)))
                 }
                 1 => Some(PendingBuildingFire::new(
                     countdown,
-                    DelayedFire::Weapon(if payload(0) == 1 {
-                        WeaponSlot::Secondary
-                    } else {
-                        WeaponSlot::Primary
-                    }),
+                    DelayedFire::Weapon(payload(0)),
                 )),
                 2 => Some(PendingBuildingFire::new(
                     countdown,
@@ -547,11 +540,7 @@ fn prism_recruitment_matches_the_original() {
             "{name} recruited"
         );
         assert_eq!(
-            armed_now(master)
-                == Some(PendingBuildingFire::new(
-                    DELAY,
-                    DelayedFire::Weapon(WeaponSlot::Primary)
-                )),
+            armed_now(master) == Some(PendingBuildingFire::new(DELAY, DelayedFire::Weapon(0))),
             row["armed"].as_bool().unwrap(),
             "{name} armed"
         );
@@ -707,13 +696,8 @@ fn prism_support_bonus_matches_the_original() {
             .find(|call| call[0] == "fire_at");
         match (requested, fire_at) {
             (None, None) => {}
-            (Some((BuildingShot::Delayed { slot, target }, multiplier)), Some(fire_at)) => {
-                let native_slot = if fire_at[2] == 1 {
-                    WeaponSlot::Secondary
-                } else {
-                    WeaponSlot::Primary
-                };
-                assert_eq!(slot, native_slot, "{name} weapon");
+            (Some((BuildingShot::Delayed { weapon, target }, multiplier)), Some(fire_at)) => {
+                assert_eq!(weapon, fire_at[2].as_i64().unwrap() as i32, "{name} weapon");
                 assert_eq!(
                     Some(target),
                     fixture
@@ -965,10 +949,8 @@ fn prism_cadence_matches_the_original() {
                     native_event("recruit").and_then(|event| event[1].as_str()),
                     "{at} recruit"
                 );
-                let arm = armed.contains(&(
-                    id,
-                    PendingBuildingFire::new(DELAY, DelayedFire::Weapon(WeaponSlot::Primary)),
-                ));
+                let arm =
+                    armed.contains(&(id, PendingBuildingFire::new(DELAY, DelayedFire::Weapon(0))));
                 assert_eq!(arm, native_event("arm").is_some(), "{at} arm");
                 recruits += usize::from(recruit.is_some());
                 arms += usize::from(arm);
@@ -992,16 +974,7 @@ fn prism_cadence_matches_the_original() {
                 match (calls.as_slice(), native_event("shot")) {
                     ([], None) => {}
                     (
-                        [
-                            (
-                                called_id,
-                                BuildingShot::Delayed {
-                                    slot: WeaponSlot::Primary,
-                                    ..
-                                },
-                                multiplier,
-                            ),
-                        ],
+                        [(called_id, BuildingShot::Delayed { weapon: 0, .. }, multiplier)],
                         Some(shot),
                     ) => {
                         assert_eq!(*called_id, id, "{at} firer");

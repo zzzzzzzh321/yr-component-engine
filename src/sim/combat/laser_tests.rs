@@ -3,7 +3,7 @@
 //! these tests do not claim Unit pose or allocator-failure parity.
 
 use super::laser::{self, LaserBirth, LaserColor};
-use super::{TargetKind, WeaponSlot};
+use super::TargetKind;
 use crate::map::entities::EntityCategory;
 use crate::rules::art_data::ArtRegistry;
 use crate::rules::ini_parser::IniFile;
@@ -496,10 +496,7 @@ fn retail_delayed_main_uses_preclear_count_and_failed_admission_emits_no_laser()
             .set_for_test(Some(TargetKind::Entity(target)));
         source
             .pending_building_fire
-            .set_for_test(Some(PendingBuildingFire::new(
-                1,
-                DelayedFire::Weapon(WeaponSlot::Primary),
-            )));
+            .set_for_test(Some(PendingBuildingFire::new(1, DelayedFire::Weapon(0))));
         source.prism_support_count.set_for_test(1);
         source.rearm_timer.set_for_test(CdTimer::started(100, 0));
         source.mission_leaf.set_building_ready_latch(1);

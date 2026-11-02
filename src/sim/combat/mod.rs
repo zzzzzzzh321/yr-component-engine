@@ -25,8 +25,8 @@
 //! - sim/ NEVER depends on render/, ui/, audio/, net/.
 
 pub mod aim_coord;
-mod attack_target;
 mod airburst;
+mod attack_target;
 pub(crate) mod base_defense_response;
 pub mod burst;
 pub(crate) mod cell_spread;
@@ -114,9 +114,9 @@ mod prone_damage_tests;
 #[cfg(test)]
 mod radiation_beam_tests;
 #[cfg(test)]
-mod shrapnel_chain_tests;
-#[cfg(test)]
 mod screen_shake_tests;
+#[cfg(test)]
+mod shrapnel_chain_tests;
 #[cfg(test)]
 mod unit_damage_response_tests;
 #[cfg(test)]
@@ -135,11 +135,11 @@ pub use in_range::can_fire_at_target;
 pub use in_range::{MaplessTarget, can_fire_at_target_in_query, mapless_in_range};
 pub use object_health::{Health, health_category};
 pub(crate) use projectile_delivery::{FiredBullet, admit_fired_bullet};
-pub use receiver_call::{DamageWriteback, TerrainDamageEvent};
 pub(crate) use receiver_call::{
     BaseDefenseResponseCallSite, EntityDamageEvent, RAD_NO_ATTACKER, ReceiverCallFlags,
     receiver_divisors, wave_post_object_damage,
 };
+pub use receiver_call::{DamageWriteback, TerrainDamageEvent};
 pub(crate) use receiver_health::BerserkState;
 pub(crate) use record_kill::{KillCallback, KillRecord, KillSource};
 pub use techno_death::FatalLifecycleStage;
@@ -312,12 +312,9 @@ pub(crate) fn vehicle_like(
 pub enum BuildingShot {
     /// Mission_Attack44B6D0, before its Gattling charge44B6EF.
     Mission { weapon: i32, target: TargetKind },
-    /// ProcessDelayedFire450492 uses the slot saved at admission. A
+    /// ProcessDelayedFire450492 uses the full index saved at admission. A
     /// successfully launched bullet consumes the master's support bonus.
-    Delayed {
-        slot: combat_weapon::WeaponSlot,
-        target: TargetKind,
-    },
+    Delayed { weapon: i32, target: TargetKind },
 }
 
 impl BuildingShot {

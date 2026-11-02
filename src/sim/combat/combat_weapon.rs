@@ -62,7 +62,8 @@ pub struct SelectedWeapon<'a> {
     pub weapon_id: &'a str,
     pub weapon: &'a WeaponType,
     pub warhead: &'a WarheadType,
-    /// FLH slot: index 1 is `Secondary`, every other index is `Primary`.
+    /// Legacy event label: index1 is Secondary, all other indices Primary.
+    /// Native weapon and FLH lookup must use the complete `index` below.
     pub slot: WeaponSlot,
     /// Native weapon-array index returned by the selection ladder.
     pub index: i32,

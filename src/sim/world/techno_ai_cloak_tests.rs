@@ -2,7 +2,6 @@ use super::*;
 use crate::map::playfield::PlayfieldBounds;
 use crate::rules::ini_parser::IniFile;
 use crate::sim::combat::TargetKind;
-use crate::sim::combat::combat_weapon::WeaponSlot;
 use crate::sim::components::NavTargetRef;
 use crate::sim::snapshot::GameSnapshot;
 use crate::sim::world::{DelayedFire, PendingBuildingFire};
@@ -438,10 +437,7 @@ fn already_cloaked_object_is_refused_by_can_auto_cloak_step_two() {
         entity.weapon_burst.complete_shot(4);
         entity
             .pending_building_fire
-            .set_for_test(Some(PendingBuildingFire::new(
-                7,
-                DelayedFire::Weapon(WeaponSlot::Secondary),
-            )));
+            .set_for_test(Some(PendingBuildingFire::new(7, DelayedFire::Weapon(1))));
         entity.attack_target.set_for_test(Some(attack));
         entity
             .passive_scan
@@ -483,10 +479,7 @@ fn already_cloaked_object_is_refused_by_can_auto_cloak_step_two() {
     assert_eq!(entity.weapon_burst.index(), 1);
     assert_eq!(
         entity.pending_building_fire.pending(),
-        Some(PendingBuildingFire::new(
-            7,
-            DelayedFire::Weapon(WeaponSlot::Secondary)
-        ))
+        Some(PendingBuildingFire::new(7, DelayedFire::Weapon(1)))
     );
     assert_eq!(entity.mission, mission_before);
     assert_eq!(

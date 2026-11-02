@@ -924,7 +924,7 @@ fn per_shot_report_matches_the_original() {
 fn retail_dustbowl_gattling_cannon_spins_up_and_winds_down() {
     use super::tests::{retail_distance, retail_dustbowl_defence, retail_frame};
     let (mut scenario, cannon, truck, (x, y)) =
-        retail_dustbowl_defence("YAGGUN", "Russians", "Americans", "AMCV", 2);
+        retail_dustbowl_defence("YAGGUN", "Russians", "Americans", "AMCV", 2, false);
     {
         let rules = &scenario.runtime.resources.rules;
         let obj = rules.object("YAGGUN").unwrap();

@@ -4,7 +4,7 @@
 //! original full constructor/Logic controls in the same corpus.
 
 use super::electric_bolt::{self, ElectricBoltBirth};
-use super::{TargetKind, WeaponSlot};
+use super::TargetKind;
 use crate::rules::ini_parser::IniFile;
 use crate::rules::retail_ini_fixture::{RetailBattleRules, retail_battle_rules_for_map};
 use crate::rules::ruleset::RuleSet;
@@ -555,10 +555,7 @@ fn delayed_building_fire_skips_spark_after_bullet_compaction_until_the_next_pass
     let entity = sim.substrate.entities.get_mut(source).unwrap();
     entity
         .pending_building_fire
-        .set_for_test(Some(PendingBuildingFire::new(
-            1,
-            DelayedFire::Weapon(WeaponSlot::Primary),
-        )));
+        .set_for_test(Some(PendingBuildingFire::new(1, DelayedFire::Weapon(0))));
     entity.rearm_timer.set_for_test(CdTimer::started(100, 0));
     entity.mission_leaf.set_building_ready_latch(1);
     entity.mission.apply_test_fixture(MissionTestFixture {
@@ -873,10 +870,7 @@ fn natural_charge_expiry_preserves_native_bullet_and_spark_visit_order() {
         let entity = sim.substrate.entities.get_mut(source).unwrap();
         entity
             .pending_building_fire
-            .set_for_test(Some(PendingBuildingFire::new(
-                1,
-                DelayedFire::Weapon(WeaponSlot::Primary),
-            )));
+            .set_for_test(Some(PendingBuildingFire::new(1, DelayedFire::Weapon(0))));
         entity
             .rearm_timer
             .set_for_test(CdTimer::started(sim.session.binary_frame() as i32, 0));
