@@ -18,6 +18,13 @@ version 0.4.0, config_version=4 and state_version=1 remain unchanged. The filena
 does not claim complete Ares compatibility; the retained Phobos-compatible
 shield and authored overload remain examples in this first plugin.
 
+For builds without an engine checkout, use the
+[standalone development kit](../../sdk/dev-kit/README.zh-CN.md). It contains
+the SDK API/WIT, this plugin and the packager in a small separate workspace.
+Standard Cargo builds and tests need no engine executable, game assets or
+Python runner. Runtime integration still requires a compatible engine; the
+full-checkout commands later in this document use the engine's build runner.
+
 ## What runs in the component
 
 - Each reached Rules pass reads the `ShieldTypes` catalog through the host's

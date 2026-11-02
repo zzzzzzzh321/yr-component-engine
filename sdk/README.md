@@ -12,6 +12,12 @@ separately in `plugins/vera20k-ares/` at the repository root and publishes
 shield chain and authored overload example; the Ares filename does not claim
 complete Ares compatibility.
 
+Plugin authors can use an engine-free development kit containing only the API,
+WIT, packager and reference plugin, with its own workspace and lockfile. The
+[standalone build guide](dev-kit/README.zh-CN.md) uses standard Cargo and does
+not require the engine sources, executable, Python build runner or game assets.
+The commands below describe development inside the full engine checkout.
+
 ## Boundaries
 
 - `api`: versioned typed messages, bounded opaque state/config, generic meters,

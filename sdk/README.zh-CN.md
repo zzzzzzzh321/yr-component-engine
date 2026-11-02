@@ -16,6 +16,8 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 
 发布文件名和 Cargo 包名为 `vera20k-ares`，内部组件标识仍为 `vera.reference-gameplay` 0.4.0，config_version=4、state_version=1。名称整理不改变已有功能和协议；Phobos兼容护盾与自定义过载仍作为现有示例保留，文件名不表示完整兼容Ares。
 
+作者可使用仅包含API、WIT、打包工具和插件源码的独立开发包，按[独立构建指南](dev-kit/README.zh-CN.md)使用标准Cargo完成测试、编译和打包，无需引擎源码、可执行文件、Python或游戏资源。本页后续使用`tools.cargo_run`的命令适用于完整引擎仓库；独立包有自己的workspace与锁文件。实际游戏运行和验收仍使用接口匹配的引擎。
+
 ## 同一个引擎，三种运行方式
 
 | 方式 | 作品提供的内容 | 行为 |
