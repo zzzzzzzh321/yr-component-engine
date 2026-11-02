@@ -2439,9 +2439,36 @@ impl ObjectType {
         self.spotlight = options;
     }
 
-    #[cfg(feature = "ares")]
+    /// Effective map-presence-bound searchlight capability. The public raw
+    /// field remains the native reader's projection for legacy components.
+    pub fn has_spotlight(&self) -> bool {
+        self.type_resource_policy
+            .and_then(|policy| policy.spotlight)
+            .and_then(|policy| policy.has_spotlight)
+            .unwrap_or(self.has_spotlight)
+    }
+
+    pub(crate) fn uses_type_spotlight_rules(&self) -> bool {
+        self.type_resource_policy
+            .and_then(|policy| policy.spotlight)
+            .map_or(crate::rules::ARES_ENABLED, |policy| policy.use_type_rules)
+    }
+
     pub(crate) fn spotlight_rules(&self) -> crate::rules::ares_spotlight::SpotlightTypeRules {
-        self.spotlight
+        if let Some(policy) = self
+            .type_resource_policy
+            .and_then(|policy| policy.spotlight)
+        {
+            return crate::rules::ares_spotlight::SpotlightTypeRules::from_sdk(policy);
+        }
+        #[cfg(feature = "ares")]
+        {
+            self.spotlight
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            Default::default()
+        }
     }
 
     pub(crate) fn bind_ares_techno_rules(

@@ -309,7 +309,7 @@ impl Simulation {
             return;
         }
         let foot = entity.category().is_foot();
-        #[cfg(feature = "ares")]
+        let use_type_spotlight = self.spotlight_uses_type_rules(entity, rules);
         let was_offline = entity.deactivated.is_offline();
         self.reset_orders_to_guard(id, rules, effects);
         if let Some(entity) = self.substrate.entities.get_mut(id) {
@@ -331,8 +331,7 @@ impl Simulation {
             true,
             rules,
         );
-        #[cfg(feature = "ares")]
-        if !was_offline {
+        if use_type_spotlight && !was_offline {
             // Ares Deactivate1004CE21..1004CE72 removes the owned light
             // only on the transition. The parent and its cargo survive.
             self.destroy_spotlight_for_parent(
@@ -403,12 +402,16 @@ impl Simulation {
                 }
             }
         }
-        #[cfg(feature = "ares")]
-        let was_offline = self
-            .substrate
-            .entities
-            .get(id)
-            .is_some_and(|entity| entity.deactivated.is_offline());
+        let (was_offline, use_type_spotlight) =
+            self.substrate
+                .entities
+                .get(id)
+                .map_or((false, false), |entity| {
+                    (
+                        entity.deactivated.is_offline(),
+                        self.spotlight_uses_type_rules(entity, rules),
+                    )
+                });
         self.reset_orders_to_guard(id, rules, effects);
         if foot
             && let Some(locomotor) = self
@@ -427,8 +430,7 @@ impl Simulation {
             false,
             rules,
         );
-        #[cfg(feature = "ares")]
-        if was_offline {
+        if use_type_spotlight && was_offline {
             // Ares Activate1004CD1E..1004CD85 recreates the light after
             // clearing Deactivated, through the same construction owner.
             self.construct_spotlight(id, rules);

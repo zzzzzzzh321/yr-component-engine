@@ -5761,8 +5761,20 @@ impl Simulation {
 
         // BuildingLight436A00; Ares1004EBC0 preserves a cloaking parent's
         // link on control0, while the target clear remains unconditional.
-        self.substrate
-            .spotlights_pointer_expired(expired_id, control == PointerExpiryControl::Uninit);
+        // Both cloak transitions and FootCrash4DED4F supply the live Rules
+        // here; ruleless compatibility fixtures do not stand for that path.
+        let preserve_spotlight_parent = self
+            .substrate
+            .entities
+            .get(expired_id)
+            .map_or(crate::rules::ARES_ENABLED, |parent| {
+                self.spotlight_uses_type_rules(parent, context.rules())
+            });
+        self.substrate.spotlights_pointer_expired(
+            expired_id,
+            control == PointerExpiryControl::Uninit,
+            preserve_spotlight_parent,
+        );
 
         #[cfg(any(test, feature = "test-support"))]
         if let Some(smudge) = self

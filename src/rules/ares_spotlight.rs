@@ -30,6 +30,22 @@ impl Default for SpotlightTypeRules {
 }
 
 impl SpotlightTypeRules {
+    pub(crate) fn from_sdk(policy: vera_mod_api::SpotlightPolicy) -> Self {
+        Self {
+            start_height: policy.start_height,
+            distance: policy.distance,
+            attached_to: match policy.attached_to {
+                vera_mod_api::SpotlightAttachment::Body => 0,
+                vera_mod_api::SpotlightAttachment::Turret => 1,
+                vera_mod_api::SpotlightAttachment::Barrel => 2,
+            },
+            disable_red: policy.glow_flags & 2 != 0,
+            disable_green: policy.glow_flags & 4 != 0,
+            disable_blue: policy.glow_flags & 8 != 0,
+            disable_color: policy.glow_flags & 1 != 0,
+        }
+    }
+
     pub(crate) fn read_pass(&mut self, section: &IniSection) {
         self.start_height = section.read_ares_int("Spotlight.StartHeight", self.start_height);
         self.distance = section.read_ares_int("Spotlight.Distance", self.distance);

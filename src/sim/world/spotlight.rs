@@ -202,6 +202,19 @@ pub struct BuildingSpotlight {
 }
 
 impl Simulation {
+    /// Resolve the frozen selector through the actual parent type. Ruleless
+    /// native fixtures retain this build's original compatibility boundary.
+    pub(crate) fn spotlight_uses_type_rules(
+        &self,
+        parent: &crate::sim::game_entity::GameEntity,
+        rules: &RuleSet,
+    ) -> bool {
+        self.entity_object_type(parent, rules)
+            .map_or(crate::rules::ARES_ENABLED, |object| {
+                object.uses_type_spotlight_rules()
+            })
+    }
+
     /// BuildingLightDraw435BE0 uses the child's coordinates, the parent's
     /// virtual center/operational state, and the retained rules. No draw query
     /// mutates gameplay, RNG or timers. Native +6E7's represented constructor
@@ -209,34 +222,34 @@ impl Simulation {
     pub fn building_spotlight(&self, id: u64, rules: &RuleSet) -> Option<BuildingSpotlight> {
         let light = self.substrate.spotlights.get(id)?;
         let parent = light.parent.and_then(|p| self.substrate.entities.get(p))?;
+        let use_type_rules = self.spotlight_uses_type_rules(parent, rules);
         if !light.alive
             || light.mode == 0
             || !parent.lifecycle.object_alive()
-            || (parent.category() != EntityCategory::Structure && !cfg!(feature = "ares"))
+            || (parent.category() != EntityCategory::Structure && !use_type_rules)
             || (parent.category() == EntityCategory::Structure
                 && self.building_operational_state(parent.stable_id(), rules) != Some(true))
         {
             return None;
         }
-        #[cfg(feature = "ares")]
-        if parent
-            .cloak
-            .as_ref()
-            .is_some_and(|cloak| cloak.state() >= 2)
-            || parent.deactivated.is_offline()
-            || parent.is_warped_out()
-            || crate::sim::movement::air_movement::current_fly_height(
-                parent,
-                self.resolved_terrain.as_ref(),
-            ) < -10
+        if use_type_rules
+            && (parent
+                .cloak
+                .as_ref()
+                .is_some_and(|cloak| cloak.state() >= 2)
+                || parent.deactivated.is_offline()
+                || parent.is_warped_out()
+                || crate::sim::movement::air_movement::current_fly_height(
+                    parent,
+                    self.resolved_terrain.as_ref(),
+                ) < -10)
         {
             // BuildingLightDraw_Start1004EB42..1004EB96 hides the beam,
             // retaining its child through cloak, EMP and underground travel.
             return None;
         }
         let (start_height, middle_height, edge_height, glow_flags) = (430, 400, 250, 0);
-        #[cfg(feature = "ares")]
-        let (start_height, middle_height, edge_height, glow_flags) =
+        let (start_height, middle_height, edge_height, glow_flags) = if use_type_rules {
             self.entity_object_type(parent, rules).map_or(
                 (start_height, middle_height, edge_height, glow_flags),
                 |object| {
@@ -249,7 +262,10 @@ impl Simulation {
                         options.glow_flags(),
                     )
                 },
-            );
+            )
+        } else {
+            (start_height, middle_height, edge_height, glow_flags)
+        };
         let p = coords(parent, self);
         let coord = light.coord;
         let params = rules.general.spotlight;
@@ -340,10 +356,10 @@ impl Simulation {
     pub(crate) fn construct_spotlight(&mut self, parent_id: u64, rules: &RuleSet) {
         let Some(parent) = self.substrate.entities.get(parent_id).filter(|e| {
             (e.category() == EntityCategory::Structure
-                || (cfg!(feature = "ares") && e.category().is_foot()))
+                || (self.spotlight_uses_type_rules(e, rules) && e.category().is_foot()))
                 && self
                     .entity_object_type(e, rules)
-                    .map_or(e.building_light.spotlight_capable(), |o| o.has_spotlight)
+                    .map_or(e.building_light.spotlight_capable(), |o| o.has_spotlight())
                 && e.building_light.light().is_none()
         }) else {
             return;
@@ -536,6 +552,7 @@ impl Simulation {
         let parent_raw = raw(parent);
         let parent_coord = coords(parent, self);
         let owner = parent.owner();
+        let use_type_rules = self.spotlight_uses_type_rules(parent, rules);
         let params = rules.general.spotlight;
         // Authored exponent overflow can survive the native floating reader.
         // Motion's finite numeric owner cannot represent it: retain the last
@@ -555,8 +572,7 @@ impl Simulation {
         }
         match light.mode {
             1 => {
-                #[cfg(feature = "ares")]
-                let params = if parent.category().is_foot() {
+                let params = if use_type_rules && parent.category().is_foot() {
                     // BuildingLight_AI1004EC10..1004EDD2: both endpoint
                     // and pivot follow the current Foot facing, not its old
                     // construction cell; the native angle bound becomes0.
@@ -636,7 +652,7 @@ impl Simulation {
         let scan = light.mode == 1
             && self.object_has_trigger_tag(parent_id)
             && (self.building_operational_state(parent_id, rules) == Some(true)
-                || (cfg!(feature = "ares") && parent.category().is_foot()));
+                || (use_type_rules && parent.category().is_foot()));
         let coord = light.coord;
         self.substrate.spotlights.objects.insert(id, light);
         if scan {
@@ -662,11 +678,16 @@ impl Simulation {
 }
 
 impl crate::sim::world::ObjectSubstrate {
-    pub(super) fn spotlights_pointer_expired(&mut self, id: u64, removed: bool) {
+    pub(super) fn spotlights_pointer_expired(
+        &mut self,
+        id: u64,
+        removed: bool,
+        preserve_parent_on_detach: bool,
+    ) {
         //436A00 clears the target for either control. Ares1004EBC0 at
         //436A25 skips only the parent clear on DetachAll(false), allowing
         //the beam to reappear after its parent uncloaks. Real removal clears it.
-        let clear_parent = removed || !cfg!(feature = "ares");
+        let clear_parent = removed || !preserve_parent_on_detach;
         for light in self.spotlights.values_mut() {
             if clear_parent && light.parent == Some(id) {
                 light.parent = None;

@@ -1418,6 +1418,7 @@ mod tests {
             input: None,
             keep_alive: None,
             cloak_allowed: None,
+            spotlight: None,
         }));
         let target = TargetFacts::Cell {
             land_type: 0,

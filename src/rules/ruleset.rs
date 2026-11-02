@@ -7924,19 +7924,20 @@ impl RuleSet {
         // These current-default inputs survive a process registry handoff.
         self.general.ion_cannon_damage.hash(&mut hasher);
         self.general.spotlight.hash(&mut hasher);
-        #[cfg(feature = "ares")]
         {
             let extensions: Vec<_> = self
                 .object_list
                 .iter()
                 .filter(|object| {
-                    object.has_spotlight || object.spotlight_rules() != Default::default()
+                    object.uses_type_spotlight_rules()
+                        && (object.has_spotlight()
+                            || object.spotlight_rules() != Default::default())
                 })
                 .map(|object| {
                     (
                         object.category,
                         &object.id,
-                        object.has_spotlight,
+                        object.has_spotlight(),
                         object.spotlight_rules(),
                     )
                 })
@@ -7946,10 +7947,24 @@ impl RuleSet {
                 extensions.hash(&mut hasher);
             }
         }
+        let spotlight_policies = self
+            .object_list
+            .iter()
+            .filter_map(|object| {
+                object
+                    .type_resource_policy()
+                    .and_then(|policy| policy.spotlight)
+                    .map(|policy| (object.category, object.id.to_ascii_uppercase(), policy))
+            })
+            .collect::<Vec<_>>();
+        if !spotlight_policies.is_empty() {
+            b"component-spotlight-types-v1".hash(&mut hasher);
+            spotlight_policies.hash(&mut hasher);
+        }
         self.object_list
             .iter()
             .filter(|o| o.category == ObjectCategory::Building)
-            .map(|o| (&o.id, o.has_spotlight))
+            .map(|o| (&o.id, o.has_spotlight()))
             .collect::<Vec<_>>()
             .hash(&mut hasher);
         self.general.ion_blast_anim.hash(&mut hasher);

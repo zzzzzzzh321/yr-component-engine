@@ -3487,7 +3487,7 @@ impl Simulation {
                         })
                         .filter(|e| {
                             self.object_type(e.type_ref(), rules)
-                                .is_some_and(|o| o.has_spotlight)
+                                .is_some_and(|o| o.has_spotlight())
                         })
                         .and_then(|e| e.building_light.light());
                     if let Some(light) = light

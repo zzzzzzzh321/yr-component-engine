@@ -3,10 +3,17 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.11.0 development candidate**, config version **11**, state version **1**;
+is the **0.12.0 development candidate**, config version **12**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+The spotlight increment extends the existing optional type resource with a
+capability override, type-rule selector, attachment, height/distance and channel
+flags. Original building behavior and extended attached lights share the same host
+light store, lifecycle and rendering. This bounded increment has passed focused
+and legacy behavior tests, application resource loading, existing GPU pixel
+controls and seven real-retail loading modes. Existing rendering residuals remain.
 
 The EMP increment adds optional `emp_resource` declarations for rules, class-qualified
 Techno types and warheads. Nullable resource names distinguish inheritance, explicit

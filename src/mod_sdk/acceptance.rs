@@ -394,11 +394,12 @@ fn run_probe(
     if mode != "ares" {
         bytes.extend_from_slice(
         format!(
-            "\r\n[VeraFeatures]\r\nShield={}\r\nOverload={}\r\nAresAmmo={}\r\nAresManualControl={}\r\nAresReload={}\r\nAresNoAmmoWeapon={}\r\nAresKeepAlive={}\r\nAresAttachEffect={}\r\nAresArmor={}\r\nAresProduction={}\r\nAresEMP={}\r\n",
+            "\r\n[VeraFeatures]\r\nShield={}\r\nOverload={}\r\nAresAmmo={}\r\nAresManualControl={}\r\nAresReload={}\r\nAresNoAmmoWeapon={}\r\nAresKeepAlive={}\r\nAresAttachEffect={}\r\nAresArmor={}\r\nAresProduction={}\r\nAresEMP={}\r\nAresSpotlight={}\r\n",
             if has_shield { "yes" } else { "no" },
             if has_overload { "yes" } else { "no" },
             if has_ammo { "yes" } else { "no" },
             if has_manual { "yes" } else { "no" },
+            if full_ares { "yes" } else { "no" },
             if full_ares { "yes" } else { "no" },
             if full_ares { "yes" } else { "no" },
             if full_ares { "yes" } else { "no" },
