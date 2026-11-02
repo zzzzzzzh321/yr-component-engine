@@ -1,14 +1,14 @@
 # VERA Mod SDK：外置功能原型
 
-本目录提供 VERA20K 功能扩展 SDK。一个作品加载一个可选的外置功能组件；当前参考组件 0.3.0 内置护盾、过载和 Ares 武器弹药，通过 INI 选择功能，无须按组合重新编译。
+本目录提供 VERA20K 功能扩展 SDK。一个作品加载一个可选的外置功能组件；当前参考组件0.4.0包含护盾、自定义过载及Ares武器弹药成本、装填数量、低弹量武器选择，通过INI选择功能，无须按组合重新编译。
 
 护盾的配置解释、状态、伤害处理和恢复逻辑已经移到外置 Rust 插件中。作者可以修改插件源码、重新编译发布，无须为这两种护盾分别修改或编译引擎。INI 仍用于配置，功能实现位于插件代码中。
 
-这是实验版接口，目前已外置原有护盾链，并增加 Ares 武器弹药消耗示例。其他已有的 Ares/Phobos 扩展仍按各自构建开关保留，尚未完成整体外置化，也不代表完整兼容 Ares 或 Phobos。
+这是实验版接口，目前已外置原有护盾链，并增加一组Ares弹药生命周期功能。其他已有的Ares/Phobos扩展仍按各自构建开关保留，尚未完成整体外置化，也不代表完整兼容Ares或Phobos。
 
 英文文档保持独立，见 [README.md](README.md)。
 
-[Ares 武器弹药消耗示例](plugins/shield/AMMO.zh-CN.md) 通过 INI 的 `[VeraFeatures] AresAmmo=yes` 开启，可与护盾组合。可选的 `weapon_resource` 回调提供通用弹药策略，复用引擎已有开火检查、扣弹和装填；原有四个回调仍是基础要求。
+[Ares弹药与武器选择说明](plugins/shield/AMMO.zh-CN.md)介绍三个独立开关：`AresAmmo`解释武器成本，`AresReload`解释普通/空仓装填量，`AresNoAmmoWeapon`解释低弹量选用的武器。可选的`weapon_resource`和`type_resource`在加载时提供静态策略，复用引擎已有开火、弹仓、装填时钟与武器选择；原有四个回调仍是基础要求。
 
 Ares 完整公开功能目录、INI 键索引与后续开发拆分见 [Ares 功能中文开发参考](../docs/zh-CN/ares-feature-guide.md)。其中的 SDK 接入描述为开发建议，当前已外置范围仍以上文为准。
 
@@ -37,14 +37,17 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 | 位置 | 用途 |
 | --- | --- |
 | [api/src/lib.rs](api/src/lib.rs) | 请求、返回计划、版本声明、状态大小限制与通用显示数据 |
+| [api/src/resource.rs](api/src/resource.rs) | 武器成本、类型装填量与低弹量武器选择的公共静态策略 |
 | [api/src/timer.rs](api/src/timer.rs) | 引擎与插件共用的倒计时实现 |
 | [wit/gameplay.wit](wit/gameplay.wit) | `vera:mod-sdk@0.1.0` 组件接口 |
 | [runtime](runtime/README.md) | Wasmtime 运行时、组件缓存、执行限制与宿主服务 |
 | [package/src/main.rs](package/src/main.rs) | 离线打包工具 `vera-mod-pack` |
 | [plugins/shield/src/lib.rs](plugins/shield/src/lib.rs) | WIT 导出、消息解码和回调名称核对 |
 | [plugins/shield/src/component.rs](plugins/shield/src/component.rs) | 组件声明、配置封装、固定顺序的功能分派 |
-| [plugins/shield/src/features/shield](plugins/shield/src/features/shield/mod.rs) | 护盾配置绑定、状态、伤害、恢复和过载逻辑 |
-| [plugins/shield/src/features/ammo.rs](plugins/shield/src/features/ammo.rs) | 外置 Ares 武器弹药策略 |
+| [plugins/shield/src/features/defense/shield](plugins/shield/src/features/defense/shield/mod.rs) | 护盾配置绑定、状态、伤害、恢复和过载逻辑 |
+| [plugins/shield/src/features/weapons/ammo_cost.rs](plugins/shield/src/features/weapons/ammo_cost.rs) | 外置 Ares 武器弹药策略 |
+| [plugins/shield/src/features/weapons/reload.rs](plugins/shield/src/features/weapons/reload.rs) | 外置Ares普通/空仓装填数量配置 |
+| [plugins/shield/src/features/weapons/empty_weapon.rs](plugins/shield/src/features/weapons/empty_weapon.rs) | 外置Ares低弹量武器选择配置 |
 | [plugins/shield/src/support](plugins/shield/src/support/mod.rs) | 通用宿主访问与浮点位编码 |
 | [../src/mod_sdk.rs](../src/mod_sdk.rs) | 保持现有调用路径的引擎入口，不承载功能算法 |
 | [../src/mod_sdk/program.rs](../src/mod_sdk/program.rs) | 组件身份、冻结配置、执行缓存和存档校验 |
@@ -72,6 +75,15 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 | `damage` | 目标进入伤害接收流程时 | 更新自身状态，返回交给引擎继续处理的目标伤害值 |
 | `tick` | 对象进入对应更新阶段时 | 推进恢复、过载等状态，更新通用显示数据 |
 
+参考组件还声明两个可选静态查询：
+
+| 回调 | 查询时机 | 返回策略 |
+| --- | --- | --- |
+| `weapon_resource` | 加载时按实际登记武器查询，读档后从冻结配置重建 | 每次开火成本、是否请求装填、适用类别 |
+| `type_resource` | 加载时按对象类型与实际类别查询，读档后从冻结配置重建 | 普通/空仓装填量及低弹量武器选择 |
+
+查询消息和策略统一定义于`api/src/resource.rs`，经已有`evaluate`导出传递，没有增加Host服务。正式模拟路径读取不可变投影；三个Ares功能不占用额外对象插件状态，也不新增一套弹药或计时器。
+
 规则按实际加载阶段传入，随后执行一次最终合并回调。对局期间配置冻结，不继续修改。护盾配置键由插件解释，引擎不需要认识 `ShieldType` 或 `VeraOverload`。
 
 插件状态由插件序列化成字节并返回，由宿主管理保存。不要依赖 Wasm 全局可变变量跨回调保留状态：每次调用都会创建新的实例。返回空的对象状态表示取消该对象的后续订阅；无状态但需要持续回调的功能可以保留一个字节的标记。
@@ -87,15 +99,19 @@ Phobos 的功能与修复目录、INI 键索引、稳定/开发文档对照及 S
 Shield=yes
 Overload=no
 AresAmmo=yes
+AresReload=yes
+AresNoAmmoWeapon=yes
 ```
 
-三个开关默认都是 `no`；缺失、空值和无效布尔值沿用原有 INI 读取器的保留规则。Overload 必须同时开启 Shield，否则最终加载会明确报错。只在最终阶段检查依赖，允许先定义、后开启。
+五个开关默认都是`no`；缺失、空值和无效布尔值沿用原有INI读取器的保留规则。Overload必须同时开启Shield，否则最终加载会明确报错。只在最终阶段检查依赖，允许先定义、后开启。三个Ares开关彼此独立，开启装填量或低弹量选择不要求同时开启武器成本。
 
-`Shield` 控制对象护盾订阅，`Overload` 控制自定义过载行为，`AresAmmo` 控制外置武器弹药策略。开关是功能选择，原有配置仍按 `ShieldTypes`、`ShieldType`、武器节 `Ammo` 等写法使用。关闭 AresAmmo 时不发布武器策略，保留原版开火/装填路径；关闭 Shield 时不创建护盾状态和护盾条。
+`Shield`控制对象护盾订阅，`Overload`控制自定义过载行为。`AresAmmo`控制武器节`Ammo`成本，`AresReload`控制对象类型节`ReloadAmount/EmptyReloadAmount`，`AresNoAmmoWeapon`控制`NoAmmoWeapon/NoAmmoAmount`。关闭某项就不发布该项策略；关闭Shield时不创建护盾状态和护盾条。原版对象类型节中的`Ammo`容量、`InitialAmmo`和装填间隔仍由引擎已有读取器处理。
+
+组合示例见[resource-cycle.ini](plugins/shield/examples/resource-cycle.ini)：每发成本2，普通装填2、空仓装填3，弹量不高于阈值时选副武器。若副武器需要在空仓继续开火，须同时开启AresAmmo并将该武器成本设为0；选择到副武器后仍接受正常开火条件检查。飞机不应用武器成本与装填量扩展，但可以使用低弹量选择策略。完整默认值、原始指令差异及适用边界见[Ares功能说明](plugins/shield/AMMO.zh-CN.md)。
 
 每次实际 Rules 层都读取配置，地图层也能覆盖。最终选择随配置冻结，进入存档和联机校验。对局中不重新读取 INI；读档使用保存的选择，修改磁盘上的开关仅影响新对局。修改算法或增加功能仍需重新编译插件。
 
-完整开关示例见 [features.ini](plugins/shield/examples/features.ini)。多个示例合并时，保留一个 `[VeraFeatures]` 节，统一填写三个开关，避免重复节头。
+完整开关示例见[features.ini](plugins/shield/examples/features.ini)。多个示例合并时，保留一个`[VeraFeatures]`节，统一填写五个开关，避免重复节头。
 
 ## 护盾配置示例
 
@@ -106,6 +122,8 @@ AresAmmo=yes
 Shield=yes
 Overload=no
 AresAmmo=no
+AresReload=no
+AresNoAmmoWeapon=no
 
 [ShieldTypes]
 0=SDKShield
@@ -136,7 +154,7 @@ Cooling=1
 - 过载期间，恢复、重生及各自战斗延迟共四个倒计时保持暂停。再次命中可以重设倒计时，但不会提前解除暂停。
 - 过载结束后，在符合条件的对象 AI 更新中恢复计时，再应用原有供电等规则；Temporal、Chrono 和 limbo 的暂停或跳过语义继续生效。
 
-这部分是 SDK 作者扩展示例，不属于对上游 Ares/Phobos 功能的兼容承诺。修改玩法时从 `logic.rs` 入手；添加配置时同步调整 `features/shield/config.rs` 或 `features/shield/mod.rs` 中对应读取代码。
+这部分是 SDK 作者扩展示例，不属于对上游 Ares/Phobos 功能的兼容承诺。修改玩法时从 `logic.rs` 入手；添加配置时同步调整 `features/defense/shield/config.rs` 或 `features/defense/shield/mod.rs` 中对应读取代码。
 
 ## 从源码构建与打包
 
@@ -235,13 +253,13 @@ python -m tools.cargo_run -- test --locked -p vera-reference-shield --lib
 python -m tools.cargo_run -- test --locked -p vera-mod-pack --lib
 ```
 
-功能选择集成测试使用实际 Wasm：设置 `VERA_SDK_REFERENCE_WASM`、`VERA_SDK_COMPAT_WASM` 和 `VERA_SDK_AMMO_WASM` 为同一 `reference-new/gameplay.wasm` 路径，按仓库要求配置原版 INI、`RA2_DIR` 和 `VERA20K_REQUIRE_RETAIL_INI=1` 后执行：
+功能选择集成测试使用实际 Wasm：设置 `VERA_SDK_REFERENCE_WASM`、`VERA_SDK_COMPAT_WASM` 和 `VERA_SDK_AMMO_WASM` 为同一 `reference-new/gameplay.wasm` 路径，按仓库要求配置原版 INI、`RA2_DIR`、`VERA20K_REQUIRE_RETAIL_INI=1` 和 `VERA20K_REQUIRE_RETAIL_ASSETS=1` 后执行。后一个开关确保缺少游戏档案时明确失败，避免实际对局测试被跳过：
 
 ```powershell
 python -m tools.cargo_run -- test --locked -p vera20k-core --lib sdk_ -- --include-ignored --skip sdk_refactor_preserves_
 ```
 
-`COMPAT`、`AMMO` 是历史测试变量名；新版测试 INI 已显式开启所需功能。保留的 `sdk_refactor_preserves_` 测试只比较 0.1/0.2 制品，需另外设置 baseline/candidate。新组件 config_version=3，不承诺配置字节与旧构建相同。
+`COMPAT`、`AMMO`是历史测试变量名；测试INI须显式开启所需功能。保留的`sdk_refactor_preserves_`测试只比较0.1/0.2制品，需另外设置baseline/candidate。新组件config_version=4、state_version=1，不承诺配置字节与旧构建相同。新增机制的验证应覆盖实际WASM、正式选武器/装填路径与存读档，不能只检查返回的策略字段。
 
 ## 状态、存档与联机一致性
 
@@ -278,6 +296,6 @@ fuel 衡量客体指令执行量，不代表固定毫秒，也不限制任意宿
 
 ## 继续开发与授权
 
-建议先在外置护盾参考组件上修改玩法，保持宿主只提供通用能力。新增功能如果超出现有四个回调和数据边界，应先设计通用接口及其状态、存档、联机一致性规则，再接入引擎，避免把某一个作品的专用规则写回宿主。
+建议先在统一参考组件的对应功能模块中修改玩法，保持宿主只提供通用能力。新增功能如果超出现有六种回调和数据边界，应先设计通用接口及其状态、存档、联机一致性规则，再接入引擎，避免把某一个作品的专用规则写回宿主。
 
 参考护盾代码迁自 VERA20K 已有 Rust 实现，保留对应来源引用及贡献历史，继续遵循仓库的 [GPL 授权](../LICENSE-GPL)。本示例不包含 Ares/Phobos C++ 源码或心灵终结素材；运行原版资源验收需要自行提供游戏文件。

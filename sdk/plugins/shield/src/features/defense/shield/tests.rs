@@ -2,7 +2,7 @@
 //! readers and the real warhead kernel to the built WASM component.
 use super::config;
 use crate::{
-    component::{Configuration, evaluate, freeze_shield},
+    component::{evaluate, freeze_shield},
     support::Host,
 };
 use vera_mod_api::{API_VERSION, Context, Plan, Request};
@@ -27,33 +27,6 @@ impl Host for HostFixture {
         assert_eq!(input.distance_leptons, 0);
         assert_eq!(input.multiplier_bits, 1.0f64.to_bits());
         Ok(input.damage)
-    }
-}
-
-#[test]
-fn ammunition_uses_frozen_configuration_and_excludes_aircraft() {
-    let mut config = serde_json::to_value(Configuration::default()).unwrap();
-    config["features"]["ares_ammo"] = serde_json::json!(true);
-    config["ammunition"] = serde_json::json!({"costs":{"PAIR":2,"FREE":0,"NEGATIVE":-2}});
-    let frozen = serde_json::to_vec(&config).unwrap();
-    for (name, cost) in [("PAIR", 2), ("FREE", 0), ("NEGATIVE", -2), ("ordinary", 1)] {
-        let request = Request {
-            api_version: API_VERSION,
-            context: Context::WeaponResource(vera_mod_api::WeaponResourceContext {
-                weapon_name: name.into(),
-            }),
-            config: frozen.clone(),
-            state: vec![],
-        };
-        // HostFixture panics on any configuration read: restored policies
-        // must use the frozen bytes, never the current work's INI.
-        let plan = evaluate(&request, &HostFixture).unwrap();
-        plan.validate_for(&request).unwrap();
-        let policy = plan.weapon_resource.unwrap();
-        assert_eq!((policy.cost, policy.reload_after_use), (cost, cost > 0));
-        assert!(policy.applies_to(vera_mod_api::WEAPON_USER_UNIT));
-        assert!(!policy.applies_to(vera_mod_api::WEAPON_USER_AIRCRAFT));
-        assert!(plan.state.is_empty() && plan.projection.is_none());
     }
 }
 

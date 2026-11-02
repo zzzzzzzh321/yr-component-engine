@@ -1963,9 +1963,16 @@ pub(super) fn emit_admitted_fire(
     // StartReloading6FB080 owner. The external policy selects this behavior;
     // no weapon-specific key is interpreted by the engine.
     if snap.category == EntityCategory::Structure
-        && resource_policy.is_some_and(|policy| policy.reload_after_use)
         && let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
         && let Some(live_type) = world.interner.object_type(entity.type_ref(), rules)
+        && resource_policy.map_or_else(
+            || {
+                live_type
+                    .type_resource_policy()
+                    .is_some_and(|policy| policy.reload.is_some())
+            },
+            |policy| policy.reload_after_use,
+        )
         && live_type.ammo > 0
         && entity
             .ammo()
@@ -1996,10 +2003,18 @@ pub(super) fn emit_admitted_fire(
     // LimboLaunch. Infantry's Ares reload hook and Unit's firing counter /
     // Scalable work stay here for ordinary and direct mission FireAt callers.
     if snap.category == EntityCategory::Infantry
-        && resource_policy.map_or(cfg!(feature = "ares"), |policy| policy.reload_after_use)
         && let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
         && !entity.lifecycle.in_limbo()
         && let Some(live_type) = world.interner.object_type(entity.type_ref(), rules)
+        && resource_policy.map_or_else(
+            || {
+                cfg!(feature = "ares")
+                    || live_type
+                        .type_resource_policy()
+                        .is_some_and(|policy| policy.reload.is_some())
+            },
+            |policy| policy.reload_after_use,
+        )
         && live_type.ammo > 0
         && entity
             .ammo()

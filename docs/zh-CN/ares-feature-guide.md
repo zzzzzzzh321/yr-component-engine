@@ -18,7 +18,7 @@ lang: zh-CN
 
 ### 当前 SDK 的实际能力
 
-当前统一参考组件为 `vera.reference-gameplay` 0.3.0。已外置的 **Ares 武器弹药成本 `Ammo`** 使用 `weapon_resource`；可再生血量护盾示例属于 Phobos 兼容链，过载为自定义玩法。Ares 的 ForceShield 力场护盾超武另见[超级武器](#超级武器)，与这项血量护盾分开处理。
+当前统一参考组件为`vera.reference-gameplay` 0.4.0，config_version=4、state_version=1。已外置的Ares武器弹药成本`Ammo`使用`weapon_resource`；普通/空仓装填量`ReloadAmount/EmptyReloadAmount`与低弹量武器选择`NoAmmoWeapon/NoAmmoAmount`使用可选`type_resource`。可再生血量护盾示例属于Phobos兼容链，过载为自定义玩法。Ares的ForceShield力场护盾超武另见[超级武器](#超级武器)，与这项血量护盾分开处理。
 
 | 现有接口 | 实际用途 |
 | --- | --- |
@@ -27,6 +27,7 @@ lang: zh-CN
 | `damage` | 处理当前接收者的状态和伤害输入 |
 | `tick` | 在对象更新阶段推进自身状态 |
 | `weapon_resource` | 加载时查询武器弹药策略，绑定到引擎已有资源流程 |
+| `type_resource` | 加载时按对象类型和类别查询装填量与低弹量武器策略，读档从冻结配置重建 |
 | `Meter` / `Tint` | 描述通用进度条和染色，由引擎呈现 |
 
 目前 `Operation` 仍全部拒绝执行，不能借它直接改血、改钱、生成单位、控制天气或修改其他对象。本手册中的这些能力需要先扩展受校验的通用接口。对象返回空状态会取消后续订阅；一个作品仍只接纳一个可选组件，内部按明确顺序组合功能。
@@ -62,9 +63,11 @@ lang: zh-CN
 Shield=yes
 Overload=no
 AresAmmo=yes
+AresReload=yes
+AresNoAmmoWeapon=yes
 ```
 
-它用于选择统一参考组件中已经实现的功能。AresAmmo 开启后，武器仍按原有 `Ammo` 写法配置。尚未实现的 Ares 项目不会因为增加一个 INI 开关就自动可用。选择在对局加载时冻结，读档沿用保存的配置。
+它用于选择统一参考组件中已经实现的功能。三个Ares开关默认关闭且彼此独立，仍使用对应的原生INI写法；`NoAmmoWeapon`在本组件中仅接纳-1/0/1，超范围明确报错。尚未实现的Ares项目不会因为增加一个INI开关就自动可用。选择在对局加载时冻结，读档沿用保存的配置；静态资源策略不再拥有一份对象弹药或装填时钟。
 
 ## 功能目录
 
@@ -667,11 +670,14 @@ Ammo=2
 
 弹仓初始五发，两次开火后为三发、一发，随后等待装填；把武器成本设为零可以不消耗弹药，且不因开火重置装填。飞机不在这项官方功能范围内；自动切换备用武器另见 [NoAmmoWeapon](https://ares-developers.github.io/Ares-docs/new/noammoweapon.html)。Ares 原生含义见 [武器 Ammo](https://ares-developers.github.io/Ares-docs/new/weapons/ammo.html)。VERA 参考组件另需在已加载的 `[VeraFeatures]` 节开启 `AresAmmo=yes`。
 
-已有代码路径：[`component.rs`](../../sdk/plugins/shield/src/component.rs) 在最终配置阶段分派 → [`features/ammo.rs`](../../sdk/plugins/shield/src/features/ammo.rs) 冻结成本并返回策略 → [Rules 策略绑定](../../src/rules/ruleset.rs) → 引擎原有开火、扣弹和装填。完整示例见 [ammo.ini](../../sdk/plugins/shield/examples/ammo.ini)。
+已有代码路径：[`component.rs`](../../sdk/plugins/shield/src/component.rs) 在最终配置阶段分派 → [`features/weapons/ammo_cost.rs`](../../sdk/plugins/shield/src/features/weapons/ammo_cost.rs) 冻结成本并返回策略 → [Rules 策略绑定](../../src/rules/ruleset.rs) → 引擎原有开火、扣弹和装填。完整示例见 [ammo.ini](../../sdk/plugins/shield/examples/ammo.ini)。
 
 ### 每次恢复多发弹药
 
 ```ini
+[VeraFeatures]
+AresReload=yes
+
 [MTNK]
 Ammo=6
 InitialAmmo=6
@@ -681,9 +687,27 @@ ReloadAmount=2
 EmptyReloadAmount=3
 ```
 
-这定义有剩余弹药和空弹仓时每次恢复的数量；不是提高射击消耗。官方允许普通恢复量为负数，而空弹仓恢复量不大于零会停止恢复。这段表达 [Ares 装填数量功能](https://ares-developers.github.io/Ares-docs/new/reload.html)，当前 SDK 的 `WeaponResourcePolicy` 尚无装填数量字段。
+这定义有剩余弹药和空弹仓时每次恢复的数量；不是提高射击消耗。普通恢复量默认1，空仓量未设时回退普通量；官方允许普通恢复量为负数，而空弹仓恢复量不大于零会停止恢复。只有当前弹量恰为0才用空仓数量，不要求设置单独的EmptyReload间隔。[Ares装填数量功能](https://ares-developers.github.io/Ares-docs/new/reload.html)已由外置[reload.rs](../../sdk/plugins/shield/src/features/weapons/reload.rs)解释，装填策略放在`TypeResourcePolicy.reload`中。
 
-后续实现应在现有弹药所有者完成装填时查询恢复量，继续复用最大容量、计时器和读档状态。回归至少区分非空弹仓、空弹仓和暂停后恢复；不能让插件另维护一份当前弹数。
+引擎在现有装填到期路径消费冻结策略，执行32位回绕加法：和为负则归0，否则夹到容量，继续复用原弹仓、时钟和读档状态。飞机排除，步兵与普通建筑可用，保留Hospital/Armory建筑例外。具体适用范围及验证入口见[Ares资源说明](../../sdk/plugins/shield/AMMO.zh-CN.md)。
+
+### 低弹量切换备用武器
+
+下面是与[完整组合示例](../../sdk/plugins/shield/examples/resource-cycle.ini)配合使用的类型配置片段，Primary/Secondary须引用已登记武器：
+
+```ini
+[VeraFeatures]
+AresAmmo=yes
+AresNoAmmoWeapon=yes
+
+[LTNK]
+NoAmmoWeapon=1
+NoAmmoAmount=1
+```
+
+类型容量`Ammo>=0`且当前有符号弹量不高于1时，选择副武器；阈值不是主武器成本判定。副武器仍走普通CanFire；要在空仓开火，须在副武器节设置`Ammo=0`并开启AresAmmo。已有DeployFire、敞篷指定武器等较早分支仍优先。
+
+外置[empty_weapon.rs](../../sdk/plugins/shield/src/features/weapons/empty_weapon.rs)通过`TypeResourcePolicy.depleted_weapon`提供槽号与阈值。`NoAmmoWeapon`默认-1关闭，0/1为主/副，`NoAmmoAmount`默认0。本组件对-1/0/1外的值明确拒绝；上游DLL实际可把其他非负槽传向后续流程，而官方文档仅支持主副武器。这是显式的配置范围限制，不是默默把非法槽夹到有效槽。飞机可以使用这项选择策略，但不应用武器成本/装填量扩展，不能靠武器`Ammo=0`获得免费发射；飞机释放、返航与停靠补弹仍按原机制。
 
 ### 限时减速附加效果
 
@@ -697,15 +721,15 @@ AttachEffect.Cumulative=no
 
 这是 [Ares AttachEffect](https://ares-developers.github.io/Ares-docs/new/attacheffect.html) 的效果片段，还需要由武器实际引用该弹头。当前外置 SDK 尚未提供直接修改移动能力的通用返回值。迁移这项机制时，应让共享效果实例参与移动查询，并处理重施、运输、时空暂停、删除和读档；仓库已有内置实现参考见 [附加效果记录](../ares-attach-effect.md)。
 
-## 建议的后续开发顺序
+## 已有链与后续开发顺序
 
-以下顺序依据现有接口和机制依赖给出，优先级属于开发建议。
+前三项为当前已外置的资源策略链，其余按现有接口和机制依赖给出推进建议。代码接入不等于所有Ares交互或平台都已验收。
 
 | 顺序 | 目标 | 接入前需要完成的公共能力 | 重点回归 |
 | --- | --- | --- | --- |
-| 1 | 保持现有武器 Ammo 示例 | 已有资源策略与弹药所有者 | 零成本、余量不足、飞机排除、读档 |
-| 2 | ReloadAmount / EmptyReloadAmount | 装填完成时的数值策略 | 空与非空分支、容量、暂停、计时 |
-| 3 | NoAmmoWeapon | 武器选择阶段的通用查询 | 门槛边界、部署固定武器、弹药许可 |
+| 1 | 已外置：武器 Ammo | `weapon_resource`与原弹药所有者 | 零成本、余量不足、飞机排除、读档 |
+| 2 | 已外置：ReloadAmount / EmptyReloadAmount | `type_resource`的装填数量策略 | 恰零分支、回绕与容量、暂停、计时 |
+| 3 | 已外置：NoAmmoWeapon / NoAmmoAmount | `type_resource`与原武器选择器 | 有符号门槛、部署/敞篷优先级、CanFire、拒绝非法槽 |
 | 4 | 手动操作限制与建造资格 | 同步命令准入、建造资格查询 | 手动与AI区别、条件组合、失败原因 |
 | 5 | EMP、禁武器、声纳、属性倍率 | 共享状态效果、能力查询、确定性计时 | 叠加、免疫、暂停、移除和效果顺序 |
 | 6 | 运输、驾驶员与类型转换 | 跨对象引用、所有权、乘员与替换命令 | 当前任务、目标、等级、载荷及清理 |

@@ -1066,7 +1066,8 @@ impl GameEntity {
 
     /// UnitClass::Reload736CA0, reached at UnitAI736689 only. MobileFire=no
     /// uses ILocomotion+10; a moving positive clock is re-anchored, not paused.
-    /// The inherited Techno Reload6FB010 then adds at most one round.
+    /// The inherited Techno Reload6FB010 then applies its resource policy,
+    /// or the original one-round increment when no policy is bound.
     pub(crate) fn reload_unit_ammo(
         &mut self,
         object: &crate::rules::object_type::ObjectType,
@@ -1096,7 +1097,20 @@ impl GameEntity {
             && self.ammo().is_some_and(|ammo| ammo.current() < object.ammo)
             && self.ammo_reload_timer.remaining(now) == 0
         {
-            self.ammo_mut().unwrap().reload_round();
+            if let Some(policy) = object.type_resource_policy().and_then(|p| p.reload) {
+                // Ares Reload_ReloadAmount10047A70, installed6FB05B:
+                // only exactly zero uses the empty amount, independently of
+                // EmptyReload's interval. Existing count/clock remain owners.
+                let ammo = self.ammo_mut().unwrap();
+                let amount = if ammo.current() == 0 {
+                    policy.empty_amount
+                } else {
+                    policy.normal_amount
+                };
+                ammo.reload_by(amount, object.ammo);
+            } else {
+                self.ammo_mut().unwrap().reload_round();
+            }
             // Foot/Unit Mark(2)4D3780 returns immediately, before any
             // callback or spatial write. No redraw event is synthesized.
             self.start_reloading_ammo(object, now);

@@ -43,7 +43,7 @@ impl Scene {
             )
             .unwrap();
             retail.rules.external_mod = Some(std::sync::Arc::new(program));
-            retail.rules.bind_weapon_resource_policies().unwrap();
+            retail.rules.bind_resource_policies().unwrap();
         }
         let (_, mut assets) = crate::rules::retail_ini_fixture::retail_assets()?;
         let theater = crate::map::theater::load_theater(&mut assets, "TEMPERATE").unwrap();
@@ -211,6 +211,228 @@ fn fired(output: &SimFrameOutput, source: u64) -> bool {
         .fire_events
         .iter()
         .any(|shot| shot.attacker_id == source)
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with type_resource"]
+fn sdk_resources_reload_only_infantry_and_building_start_the_empty_clock_after_fire() {
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    for kind in ["E1", "GAPILL"] {
+        let patch = format!(
+            "[VeraFeatures]\nAresReload=yes\nAresAmmo=no\n[{kind}]\nAmmo=1\nInitialAmmo=1\nReload=8\nEmptyReload=24\nReloadAmount=1\nEmptyReloadAmount=1\nPrimary=ReloadProbe\nElitePrimary=ReloadProbe\nCanPassiveAquire=no\n\
+             [ReloadProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\n"
+        );
+        let Some(mut scene) = Scene::with_component(&patch, Some(&wasm)) else {
+            return;
+        };
+        let target = scene.spawn("GACNST", "Russians", (16, 16));
+        let source = scene.spawn(kind, "Americans", (16, 20));
+        scene.command(
+            "Americans",
+            Command::Attack {
+                attacker_id: source,
+                target_id: target,
+            },
+        );
+        let first = scene.shot(source, target);
+        assert_eq!(
+            scene.count(source),
+            0,
+            "{kind}: no immediate refill after a real shot"
+        );
+        assert_eq!(
+            (
+                scene.reload(source).start_frame(),
+                scene.reload(source).duration()
+            ),
+            (first, 24)
+        );
+        while scene.now() < first + 24 {
+            assert!(!fired(&scene.frame(), source));
+            assert_eq!(
+                scene.count(source),
+                0,
+                "{kind}: configured empty interval must elapse"
+            );
+        }
+        let output = scene.frame();
+        assert!(
+            scene.count(source) == 1 || fired(&output, source),
+            "{kind}: reloaded at the deadline"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with type_resource"]
+fn sdk_resources_free_shots_do_not_restart_an_active_type_reload_clock() {
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let Some(mut scene) = Scene::with_component(
+        "[VeraFeatures]\nAresReload=yes\nAresAmmo=yes\n[E1]\nAmmo=2\nInitialAmmo=1\nReload=1000\nReloadAmount=0\nPrimary=FreeProbe\nElitePrimary=FreeProbe\nCanPassiveAquire=no\n\
+         [FreeProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=0\n",
+        Some(&wasm),
+    ) else {
+        return;
+    };
+    let target = scene.spawn("GACNST", "Russians", (16, 16));
+    let source = scene.spawn("E1", "Americans", (16, 20));
+    scene.frame();
+    let clock = scene.reload(source);
+    assert_eq!(clock.duration(), 1000);
+    scene.command(
+        "Americans",
+        Command::Attack {
+            attacker_id: source,
+            target_id: target,
+        },
+    );
+    scene.shot(source, target);
+    assert_eq!(scene.count(source), 1);
+    assert_eq!(
+        (
+            scene.reload(source).start_frame(),
+            scene.reload(source).duration()
+        ),
+        (clock.start_frame(), clock.duration())
+    );
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with type_resource"]
+fn sdk_resources_reload_empty_then_partial_amounts_survive_snapshot() {
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let Some(mut scene) = Scene::with_component(
+        "[VeraFeatures]\nAresReload=yes\n[LTNK]\nAmmo=6\nInitialAmmo=0\nReload=8\nEmptyReload=12\nReloadAmount=2\nEmptyReloadAmount=3\nCanPassiveAquire=no\n",
+        Some(&wasm),
+    ) else {
+        return;
+    };
+    let source = scene.spawn("LTNK", "Americans", (16, 20));
+    let first = scene.now();
+    scene.frame();
+    assert_eq!(
+        scene.count(source),
+        3,
+        "exactly zero chooses the empty amount"
+    );
+    assert_eq!(
+        scene.reload(source).duration(),
+        8,
+        "next interval uses the newly partial count"
+    );
+    let saved = GameSnapshot::save_validated(
+        &scene.0.simulation,
+        0,
+        scene.0.resources.rules.simulation_config_hash(),
+        "type reload",
+        0,
+    );
+    let restored = scene.restored(&saved);
+    scene.0.replace_simulation(restored);
+    while scene.now() < first + 8 {
+        scene.frame();
+        assert_eq!(scene.count(source), 3);
+    }
+    scene.frame();
+    assert_eq!(scene.count(source), 5, "partial reload adds two");
+    while scene.now() < first + 16 {
+        scene.frame();
+    }
+    scene.frame();
+    assert_eq!(scene.count(source), 6, "normal amount caps at capacity");
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with type_resource"]
+fn sdk_resources_negative_normal_reload_and_zero_empty_reload() {
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let Some(mut scene) = Scene::with_component(
+        "[VeraFeatures]\nAresReload=yes\n[LTNK]\nAmmo=6\nInitialAmmo=3\nReload=4\nReloadAmount=-2\nEmptyReloadAmount=0\nCanPassiveAquire=no\n",
+        Some(&wasm),
+    ) else {
+        return;
+    };
+    let source = scene.spawn("LTNK", "Americans", (16, 20));
+    let first = scene.now();
+    scene.frame();
+    assert_eq!(scene.count(source), 1);
+    while scene.now() <= first + 4 {
+        scene.frame();
+    }
+    assert_eq!(scene.count(source), 0, "negative result clamps to zero");
+    for _ in 0..12 {
+        scene.frame();
+        assert_eq!(
+            scene.count(source),
+            0,
+            "zero empty amount never restores a round"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with type_resource"]
+fn sdk_resources_threshold_switches_to_free_secondary_through_real_fire() {
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let Some(mut scene) = Scene::with_component(
+        "[VeraFeatures]\nAresAmmo=yes\nAresNoAmmoWeapon=yes\n[LTNK]\nAmmo=4\nInitialAmmo=4\nReload=1000\nNoAmmoWeapon=1\nNoAmmoAmount=2\nPrimary=AmmoProbe\nElitePrimary=AmmoProbe\nSecondary=FreeProbe\nEliteSecondary=FreeProbe\nCanPassiveAquire=no\n\
+         [AmmoProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=2\n\
+         [FreeProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=0\n",
+        Some(&wasm),
+    ) else {
+        return;
+    };
+    let target = scene.spawn("GACNST", "Russians", (16, 16));
+    let source = scene.spawn("LTNK", "Americans", (16, 20));
+    scene.command(
+        "Americans",
+        Command::Attack {
+            attacker_id: source,
+            target_id: target,
+        },
+    );
+    scene.shot(source, target);
+    assert_eq!(
+        scene.count(source),
+        2,
+        "primary consumes two above the threshold"
+    );
+    scene.shot(source, target);
+    assert_eq!(
+        scene.count(source),
+        2,
+        "equality forces the zero-cost secondary"
+    );
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_AMMO_WASM with type_resource"]
+fn sdk_resources_forced_secondary_still_checks_its_ammo_cost() {
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").unwrap()).unwrap();
+    let Some(mut scene) = Scene::with_component(
+        "[VeraFeatures]\nAresAmmo=yes\nAresNoAmmoWeapon=yes\n[LTNK]\nAmmo=1\nInitialAmmo=1\nNoAmmoWeapon=1\nNoAmmoAmount=1\nPrimary=FreeProbe\nElitePrimary=FreeProbe\nSecondary=CostlyProbe\nEliteSecondary=CostlyProbe\nCanPassiveAquire=no\n\
+         [FreeProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=0\n\
+         [CostlyProbe]\nDamage=1\nROF=15\nRange=6\nProjectile=InvisibleLow\nWarhead=SA\nAmmo=2\n",
+        Some(&wasm),
+    ) else {
+        return;
+    };
+    let target = scene.spawn("GACNST", "Russians", (16, 16));
+    let source = scene.spawn("LTNK", "Americans", (16, 20));
+    scene.command(
+        "Americans",
+        Command::Attack {
+            attacker_id: source,
+            target_id: target,
+        },
+    );
+    for _ in 0..60 {
+        assert!(
+            !fired(&scene.frame(), source),
+            "must not fall back to the free primary"
+        );
+    }
+    assert_eq!(scene.count(source), 1);
 }
 
 #[test]

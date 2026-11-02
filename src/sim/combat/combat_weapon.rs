@@ -94,6 +94,8 @@ impl TechnoKind {
 pub struct AttackerFacts {
     pub kind: TechnoKind,
     pub veterancy: u16,
+    /// Live authoritative Techno ammo; no second resource counter is created.
+    pub ammo: Option<i32>,
     /// `TechnoClass+0x138 CurrentWeaponNumber` — the gunner slot. Constructor
     /// state 0; `SetGunnerWeapon` writes the passenger's `IFVMode`.
     pub current_weapon_number: i32,
@@ -739,6 +741,15 @@ fn techno_what_weapon_should_i_use(
     if let Some(slot) = attacker.open_transport_weapon {
         return slot;
     }
+    // Ares SelectWeapon_NoAmmoWeapon10047AE0 at gamemd6F3410: after
+    // DeployFire/class, gunner, occupied, dual-slot, NeverUse, null target
+    // and OpenTransport early returns, but before the gattling ladder.
+    if obj.ammo >= 0
+        && let Some(policy) = obj.type_resource_policy().and_then(|p| p.depleted_weapon)
+        && attacker.ammo.is_some_and(|count| count <= policy.threshold)
+    {
+        return policy.weapon_index;
+    }
     let techno = target.techno();
     let secondary_aa = projectile_aa(rules, secondary);
     let secondary_warhead = warhead_of(rules, secondary);
@@ -967,6 +978,7 @@ pub fn attacker_facts(entity: &GameEntity, obj: &ObjectType) -> AttackerFacts {
     AttackerFacts {
         kind,
         veterancy: entity.veterancy.rank(),
+        ammo: entity.ammo().map(|ammo| ammo.current()),
         current_weapon_number: entity.current_weapon_number(),
         open_transport_weapon: open_transport_weapon(
             entity.passenger_role.in_open_transport(),
@@ -1373,6 +1385,7 @@ mod tests {
     fn facts(kind: TechnoKind) -> AttackerFacts {
         AttackerFacts {
             kind,
+            ammo: None,
             veterancy: 0,
             current_weapon_number: 0,
             open_transport_weapon: None,
@@ -1384,6 +1397,62 @@ mod tests {
             is_overpowered_building: false,
             aircraft_spawn_collision: false,
         }
+    }
+
+    #[test]
+    fn resource_fallback_keeps_open_transport_and_deploy_fire_priority() {
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[VehicleTypes]\n0=TANK\n[TANK]\nAmmo=3\nPrimary=P\nSecondary=S\n\
+             [WeaponTypes]\n0=P\n1=S\n[P]\nDamage=1\nProjectile=B\nWarhead=W\n\
+             [S]\nDamage=1\nProjectile=B\nWarhead=W\n[B]\nAG=yes\n[W]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n"
+        )).unwrap();
+        let mut obj = rules.object("TANK").unwrap().clone();
+        obj.bind_type_resource_policy(Some(vera_mod_api::TypeResourcePolicy {
+            users: vera_mod_api::WEAPON_USER_UNIT,
+            reload: None,
+            depleted_weapon: Some(vera_mod_api::DepletedWeaponPolicy {
+                weapon_index: 1,
+                threshold: 0,
+            }),
+        }));
+        let target = TargetFacts::Cell {
+            land_type: 0,
+            tile_in_water_set: false,
+            bridge_flag: false,
+        };
+        let mut attacker = facts(TechnoKind::Unit);
+        attacker.ammo = Some(0);
+        assert_eq!(
+            what_weapon_should_i_use(&rules, &obj, &attacker, Some(&target)),
+            1
+        );
+        attacker.ammo = Some(-1);
+        assert_eq!(
+            what_weapon_should_i_use(&rules, &obj, &attacker, Some(&target)),
+            1,
+            "a finite type still compares a negative instance count as signed"
+        );
+        attacker.ammo = Some(0);
+        attacker.open_transport_weapon = Some(0);
+        assert_eq!(
+            what_weapon_should_i_use(&rules, &obj, &attacker, Some(&target)),
+            0
+        );
+        attacker.open_transport_weapon = None;
+        attacker.deploy_fire_active = true;
+        obj.deploy_fire = true;
+        obj.deploy_fire_weapon = 0;
+        assert_eq!(
+            what_weapon_should_i_use(&rules, &obj, &attacker, Some(&target)),
+            0
+        );
+        obj.deploy_fire = false;
+        obj.ammo = -1;
+        assert_eq!(
+            what_weapon_should_i_use(&rules, &obj, &attacker, Some(&target)),
+            0,
+            "unlimited types ignore depletion policy"
+        );
     }
 
     fn techno<'a>(obj: &'a ObjectType, kind: TechnoKind) -> TargetFacts<'a> {

@@ -1,9 +1,10 @@
-# External shield reference component
+# External gameplay reference component
 
 This component implements the currently ported VERA20K shield chain outside
 the game engine. One reference component uses the
 `vera:mod-sdk@0.1.0` interface; INI selects compatible shields, authored overload
-and Ares weapon ammo under the same engine binary.
+and Ares weapon ammo costs, reload amounts and low-ammo weapon selection under
+the same engine binary.
 
 The code was moved from VERA20K's Rust implementation, retaining its source
 references. It does not include Ares/Phobos C++ code or Mental Omega resources.
@@ -19,6 +20,26 @@ The original VERA20K contribution history and GPL licensing continue to apply.
   host's shared warhead numeric kernel rather than copying that algorithm.
 - `tick` owns recovery, powered/temporal pause behavior and cleanup.
 - Each plan also returns generic meter/tint presentation data.
+- `weapon_resource` returns immutable weapon-cost decisions;
+  `type_resource` returns immutable per-type reload and low-ammo weapon policies.
+  Both queries run at admission and are rebuilt from saved frozen configuration.
+  The original ammo owner, reload clock and canonical weapon selector consume
+  these policies; the component does not hold duplicate ammo state.
+
+Code is grouped by domain and complete mechanism:
+
+```text
+src/features/
+├─ defense/shield/           # configuration, state, damage and recovery
+└─ weapons/
+   ├─ ammo_cost.rs           # weapon Ammo cost
+   ├─ reload.rs              # ReloadAmount / EmptyReloadAmount
+   └─ empty_weapon.rs        # NoAmmoWeapon / NoAmmoAmount
+```
+
+Every feature uses the same `src/support/host.rs` facade and configuration
+readers. Shared static query/policy types live in `sdk/api/src/resource.rs`;
+`type_resource` adds no Host service or WIT import.
 
 Persistent state and configuration are opaque, bounded host-managed bytes.
 Every floating-point configuration value is encoded as its IEEE-754 bits.
@@ -56,14 +77,40 @@ longer used for gameplay selection. Put this in a loaded Rules/map INI:
 Shield=yes
 Overload=no
 AresAmmo=yes
+AresReload=yes
+AresNoAmmoWeapon=yes
 ```
 
-All switches default to no. Overload requires Shield. Existing `ShieldTypes`,
-`ShieldType` and weapon `Ammo` settings retain their syntax. Layered selection
+All switches default to no. Overload requires Shield; the three Ares switches
+are independent. Existing `ShieldTypes`, `ShieldType`, weapon `Ammo` and
+per-type `ReloadAmount`, `EmptyReloadAmount`, `NoAmmoWeapon`, `NoAmmoAmount`
+settings retain their syntax. Layered selection
 is frozen with the configuration and saved/checksummed; it cannot change during
 a match. `examples/features.ini` shows the combined selection. The component
-identity is `vera.reference-gameplay` 0.3.0, config_version=3, state_version=1.
+identity is `vera.reference-gameplay` 0.4.0, config_version=4, state_version=1.
 Retained older component files keep their original behavior and identity.
+
+`ReloadAmount` defaults to 1 and `EmptyReloadAmount` defaults to the normal
+amount. The empty amount is selected only at current ammo exactly zero, even
+without an `EmptyReload` interval. Its existing completion path applies signed
+32-bit wrapping addition, stores zero for a negative sum, otherwise caps the
+result at the type's capacity. Aircraft dock/radio reload is excluded; ordinary
+infantry/buildings use the shared reload owner with Hospital/Armory exceptions.
+
+`NoAmmoWeapon` defaults to -1 (disabled); 0/1 selects primary/secondary when type
+capacity is nonnegative and current signed ammo is at or below `NoAmmoAmount`
+(default 0). This threshold is not a weapon-cost test. Earlier DeployFire and
+open-transport selection branches retain priority, and the selected weapon still
+passes normal CanFire checks. Aircraft may use this selection policy. To fire a
+free backup at zero ammo for a supported ground category, also enable AresAmmo
+and give that weapon `Ammo=0`. Aircraft still use their own release, return and
+dock-reload mechanisms; weapon Ammo=0 does not make aircraft shots free.
+
+This reference rejects NoAmmoWeapon values outside -1/0/1 during configuration.
+The upstream DLL can pass other nonnegative indices onward, but its documented
+contract supports only primary/secondary; the reference reports this restricted
+configuration boundary instead of silently clamping. See the
+[Ares resource guide](AMMO.zh-CN.md) and [combined example](examples/resource-cycle.ini).
 
 The packager uses the embedded WIT metadata to encode and validate a standalone
 component; it never executes the guest or adds WASI adapters. A direct

@@ -4595,7 +4595,7 @@ impl RuleSet {
             &warheads,
             &self.weapon_names(),
         )?;
-        self.bind_weapon_resource_policies()
+        self.bind_resource_policies()
     }
 
     pub(crate) fn weapon_names(&self) -> Vec<String> {
@@ -4604,7 +4604,7 @@ impl RuleSet {
         names
     }
 
-    pub(crate) fn bind_weapon_resource_policies(&mut self) -> Result<(), String> {
+    pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
         let names = self.weapon_names();
         let policies = names
             .into_iter()
@@ -4618,17 +4618,33 @@ impl RuleSet {
                 Ok((name, policy))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let type_policies = self
+            .object_list
+            .iter()
+            .map(|object| {
+                let policy = self
+                    .external_mod
+                    .as_ref()
+                    .map(|program| program.type_resource_policy(&object.id, object.resource_user()))
+                    .transpose()?
+                    .flatten();
+                Ok(policy)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         for (name, policy) in policies {
             self.weapons
                 .get_mut(&name)
                 .expect("retained weapon")
                 .bind_resource_policy(policy);
         }
-        self.project_weapon_resource_reload();
+        for (object, policy) in self.object_list.iter_mut().zip(type_policies) {
+            object.bind_type_resource_policy(policy);
+        }
+        self.project_resource_reload();
         Ok(())
     }
 
-    fn project_weapon_resource_reload(&mut self) {
+    fn project_resource_reload(&mut self) {
         // Complete class coverage also admits unarmed/script-driven objects.
         // Partial policies only opt in types actually binding an affected gun.
         let complete_users = [
@@ -4646,13 +4662,9 @@ impl RuleSet {
         })
         .fold(0u8, |mask, user| mask | user);
         for object in &mut self.object_list {
-            let user = match object.category {
-                ObjectCategory::Vehicle => vera_mod_api::WEAPON_USER_UNIT,
-                ObjectCategory::Infantry => vera_mod_api::WEAPON_USER_INFANTRY,
-                ObjectCategory::Building => vera_mod_api::WEAPON_USER_BUILDING,
-                ObjectCategory::Aircraft => vera_mod_api::WEAPON_USER_AIRCRAFT,
-            };
-            let enabled = complete_users & user != 0
+            let user = object.resource_user();
+            let enabled = object.type_resource_policy().is_some_and(|p| p.reload.is_some())
+                || complete_users & user != 0
                 || object
                     .weapon_list
                     .iter()
@@ -14614,7 +14626,7 @@ mod sdk_resource_projection_tests {
                 reload_after_use: true,
                 users: vera_mod_api::WEAPON_USER_BUILDING,
             }));
-        rules.project_weapon_resource_reload();
+        rules.project_resource_reload();
         assert!(rules.object("CUSTOM").unwrap().resource_reload_enabled());
         assert!(!rules.object("STOCK").unwrap().resource_reload_enabled());
         assert!(!rules.object("UNARMED").unwrap().resource_reload_enabled());
@@ -14627,7 +14639,7 @@ mod sdk_resource_projection_tests {
                 reload_after_use: true,
                 users: vera_mod_api::WEAPON_USER_BUILDING,
             }));
-        rules.project_weapon_resource_reload();
+        rules.project_resource_reload();
         assert!(
             rules.object("UNARMED").unwrap().resource_reload_enabled(),
             "complete class coverage includes script-driven objects"
@@ -14637,7 +14649,7 @@ mod sdk_resource_projection_tests {
             .get_mut("PAIR")
             .unwrap()
             .bind_resource_policy(None);
-        rules.project_weapon_resource_reload();
+        rules.project_resource_reload();
         assert!(!rules.object("CUSTOM").unwrap().resource_reload_enabled());
     }
 }

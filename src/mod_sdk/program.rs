@@ -156,6 +156,24 @@ impl Program {
         Ok(plan.weapon_resource)
     }
 
+    pub(crate) fn type_resource_policy(
+        &self,
+        name: &str,
+        user: u8,
+    ) -> Result<Option<api::TypeResourcePolicy>, String> {
+        if !self.manifest.hooks.contains(&api::HookKind::TypeResource) {
+            return Ok(None);
+        }
+        let plan = self.evaluate(
+            Context::TypeResource(api::TypeResourceContext {
+                type_name: name.to_owned(),
+                user,
+            }),
+            &[],
+        )?;
+        Ok(plan.type_resource)
+    }
+
     fn executor(&self) -> Result<&Arc<Executor>, String> {
         self.compiled
             .get_or_init(|| {

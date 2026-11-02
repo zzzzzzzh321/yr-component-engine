@@ -127,6 +127,14 @@ impl TechnoAmmo {
         self.current = self.current.wrapping_add(1);
     }
 
+    /// Ares TechnoClass_Reload_ReloadAmount10047AA8..10047AD8 replaces
+    /// Techno Reload6FB05B's increment. LEA wraps; a negative sum writes zero
+    /// immediately, otherwise CMOVL caps to the signed live type capacity.
+    pub(crate) fn reload_by(&mut self, amount: i32, capacity: i32) {
+        let sum = self.current.wrapping_add(amount);
+        self.current = if sum < 0 { 0 } else { sum.min(capacity) };
+    }
+
     /// The SpawnManager's case-6 rearm (`0x006B788F..0x006B78AA`): Ammo from
     /// the type's `Ammo=`.
     pub(crate) fn refill(&mut self) {

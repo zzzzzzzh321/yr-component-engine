@@ -1829,9 +1829,12 @@ pub struct ObjectType {
     /// addresses live); RuleSet publishes the retained array. Resolution
     /// (elite tier, index) lives in `sim::combat::combat_weapon::weapon_for_index`.
     pub weapon_list: Vec<Option<String>>,
-    /// Derived from applicable external policies on this type's weapon slots.
+    /// Derived from applicable external weapon and type resource policies.
     /// Rebuilt with Rules; not a second configuration or saved instance state.
     resource_reload: bool,
+    /// Immutable policy rebuilt from the admitted component's frozen config.
+    /// The live ammunition count and reload clock remain on GameEntity.
+    type_resource_policy: Option<vera_mod_api::TypeResourcePolicy>,
 
     /// The native elite weapon array (`TechnoTypeClass+0xA94`, stride `0x1C`).
     /// Same shape and same storage relationship: slot 0 is
@@ -3011,6 +3014,26 @@ impl ObjectType {
         self.resource_reload = enabled;
     }
 
+    pub(crate) fn resource_user(&self) -> u8 {
+        match self.category {
+            ObjectCategory::Vehicle => vera_mod_api::WEAPON_USER_UNIT,
+            ObjectCategory::Infantry => vera_mod_api::WEAPON_USER_INFANTRY,
+            ObjectCategory::Building => vera_mod_api::WEAPON_USER_BUILDING,
+            ObjectCategory::Aircraft => vera_mod_api::WEAPON_USER_AIRCRAFT,
+        }
+    }
+
+    pub(crate) fn bind_type_resource_policy(
+        &mut self,
+        policy: Option<vera_mod_api::TypeResourcePolicy>,
+    ) {
+        self.type_resource_policy = policy.filter(|p| p.applies_to(self.resource_user()));
+    }
+
+    pub(crate) fn type_resource_policy(&self) -> Option<vera_mod_api::TypeResourcePolicy> {
+        self.type_resource_policy
+    }
+
     /// `EliteWeapon[index]` (`TechnoTypeClass+0xA94 + index*0x1C`).
     pub fn elite_weapon_at(&self, index: usize) -> Option<&str> {
         self.elite_weapon_list
@@ -3987,6 +4010,7 @@ impl ObjectType {
             // per-pass weapon block and RuleSet publishes its arrays.
             weapon_list: vec![None; WEAPON_SLOT_COUNT],
             resource_reload: false,
+            type_resource_policy: None,
             elite_weapon_list: vec![None; WEAPON_SLOT_COUNT],
             weapon_count: 0,
             naval_targeting: section.read_int("NavalTargeting", 0),

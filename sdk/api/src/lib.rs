@@ -3,7 +3,14 @@
 
 pub mod native_string;
 pub mod relationship;
+mod resource;
 pub mod timer;
+
+pub use resource::{
+    DepletedWeaponPolicy, ReloadPolicy, TypeResourceContext, TypeResourcePolicy,
+    WEAPON_USER_AIRCRAFT, WEAPON_USER_BUILDING, WEAPON_USER_INFANTRY, WEAPON_USER_UNIT,
+    WeaponResourceContext, WeaponResourcePolicy,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +39,7 @@ pub enum HookKind {
     Damage,
     Tick,
     WeaponResource,
+    TypeResource,
 }
 
 impl HookKind {
@@ -42,6 +50,7 @@ impl HookKind {
             Self::Damage => "damage",
             Self::Tick => "tick",
             Self::WeaponResource => "weapon_resource",
+            Self::TypeResource => "type_resource",
         }
     }
 }
@@ -130,34 +139,6 @@ pub struct TickContext {
     pub entity: EntityContext,
 }
 
-/// Immutable query evaluated at Rules admission, then rebuilt from frozen
-/// component configuration after load. It has no live entity or INI access.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WeaponResourceContext {
-    pub weapon_name: String,
-}
-
-pub const WEAPON_USER_UNIT: u8 = 1;
-pub const WEAPON_USER_INFANTRY: u8 = 2;
-pub const WEAPON_USER_BUILDING: u8 = 4;
-pub const WEAPON_USER_AIRCRAFT: u8 = 8;
-
-/// Consumed by the existing ammunition admission/debit/reload owners.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WeaponResourcePolicy {
-    pub cost: i32,
-    pub reload_after_use: bool,
-    pub users: u8,
-}
-
-impl WeaponResourcePolicy {
-    pub fn applies_to(self, user: u8) -> bool {
-        self.users & user != 0
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum Context {
@@ -166,6 +147,7 @@ pub enum Context {
     Damage(DamageContext),
     Tick(TickContext),
     WeaponResource(WeaponResourceContext),
+    TypeResource(TypeResourceContext),
 }
 
 impl Context {
@@ -176,6 +158,7 @@ impl Context {
             Self::Damage(_) => HookKind::Damage,
             Self::Tick(_) => HookKind::Tick,
             Self::WeaponResource(_) => HookKind::WeaponResource,
+            Self::TypeResource(_) => HookKind::TypeResource,
         }
     }
 }
@@ -207,6 +190,9 @@ pub struct Plan {
     /// Additive SDK v1 hook; omitted on the wire for older four-hook guests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weapon_resource: Option<WeaponResourcePolicy>,
+    /// Optional immutable type policy; older guests omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_resource: Option<TypeResourcePolicy>,
 }
 
 impl Plan {
@@ -219,6 +205,7 @@ impl Plan {
             operations: Vec::new(),
             projection: None,
             weapon_resource: None,
+            type_resource: None,
         }
     }
 }
@@ -292,6 +279,17 @@ impl Request {
         if self.state.len() > MAX_STATE_BYTES || self.config.len() > MAX_CONFIG_BYTES {
             return Err("component input state/config exceeds its limit".into());
         }
+        if let Context::TypeResource(context) = &self.context
+            && !matches!(
+                context.user,
+                WEAPON_USER_UNIT
+                    | WEAPON_USER_INFANTRY
+                    | WEAPON_USER_BUILDING
+                    | WEAPON_USER_AIRCRAFT
+            )
+        {
+            return Err("invalid resource user category".into());
+        }
         Ok(())
     }
     pub fn entity_id(&self) -> Option<u64> {
@@ -301,6 +299,7 @@ impl Request {
             Context::Damage(c) => Some(c.entity.id),
             Context::Tick(c) => Some(c.entity.id),
             Context::WeaponResource(_) => None,
+            Context::TypeResource(_) => None,
         }
     }
 }
@@ -335,10 +334,27 @@ impl Plan {
                 return Err("invalid weapon resource policy or hook".into());
             }
         }
-        if request.context.kind() == HookKind::WeaponResource
-            && (!self.state.is_empty() || self.projection.is_some() || !self.operations.is_empty())
+        if let Some(policy) = self.type_resource {
+            let supported_users = WEAPON_USER_UNIT
+                | WEAPON_USER_INFANTRY
+                | WEAPON_USER_BUILDING
+                | WEAPON_USER_AIRCRAFT;
+            if request.context.kind() != HookKind::TypeResource
+                || policy.users == 0
+                || policy.users & !supported_users != 0
+                || policy.reload.is_some() && policy.users & WEAPON_USER_AIRCRAFT != 0
+                || policy.reload.is_none() && policy.depleted_weapon.is_none()
+                || policy.depleted_weapon.is_some_and(|p| p.weapon_index < 0)
+            {
+                return Err("invalid type resource policy or hook".into());
+            }
+        }
+        if matches!(
+            request.context.kind(),
+            HookKind::WeaponResource | HookKind::TypeResource
+        ) && (!self.state.is_empty() || self.projection.is_some() || !self.operations.is_empty())
         {
-            return Err("weapon resource queries cannot write entity state or presentation".into());
+            return Err("resource queries cannot write entity state or presentation".into());
         }
         if self.operations.len() > MAX_OPERATIONS {
             return Err("component operation count exceeds its limit".into());
@@ -385,6 +401,50 @@ pub struct DamageKernelInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_resource_queries_limit_aircraft_reload_and_reject_state_writes() {
+        let mut request = Request {
+            api_version: API_VERSION,
+            context: Context::TypeResource(TypeResourceContext {
+                type_name: "TANK".into(),
+                user: WEAPON_USER_UNIT,
+            }),
+            config: vec![],
+            state: vec![],
+        };
+        let mut plan = Plan::unchanged(&request);
+        plan.type_resource = Some(TypeResourcePolicy {
+            users: WEAPON_USER_UNIT,
+            reload: Some(ReloadPolicy {
+                normal_amount: -2,
+                empty_amount: 0,
+            }),
+            depleted_weapon: Some(DepletedWeaponPolicy {
+                weapon_index: 1,
+                threshold: 2,
+            }),
+        });
+        plan.validate_for(&request).unwrap();
+        plan.type_resource.as_mut().unwrap().users = WEAPON_USER_AIRCRAFT;
+        assert!(
+            plan.validate_for(&request).is_err(),
+            "automatic type reload excludes aircraft"
+        );
+        plan.type_resource.as_mut().unwrap().reload = None;
+        request.context = Context::TypeResource(TypeResourceContext {
+            type_name: "PLANE".into(),
+            user: WEAPON_USER_AIRCRAFT,
+        });
+        plan.validate_for(&request).unwrap();
+        plan.state.push(1);
+        assert!(plan.validate_for(&request).is_err());
+        plan.state.clear();
+        request.context = Context::WeaponResource(WeaponResourceContext {
+            weapon_name: "GUN".into(),
+        });
+        assert!(plan.validate_for(&request).is_err());
+    }
 
     #[test]
     fn resource_queries_reject_entity_writes_and_foreign_hook_policies() {

@@ -633,7 +633,7 @@ fn snapshot_roundtrip(
         .runtime
         .resources
         .rules
-        .bind_weapon_resource_policies()
+        .bind_resource_policies()
         .map_err(anyhow::Error::msg)?;
     super::adopt_saved_program(&mut scenario.runtime.resources.rules, &loaded.sim, assets)
         .map_err(anyhow::Error::msg)?;

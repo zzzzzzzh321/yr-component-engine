@@ -227,7 +227,9 @@ pub(crate) fn evaluate<H: Host>(
             (next, &context.entity, context.frame)
         }
         Context::Configure(_) => return Err("configuration must use the configuration hook".into()),
-        Context::WeaponResource(_) => return Err("resource policy must use its own hook".into()),
+        Context::WeaponResource(_) | Context::TypeResource(_) => {
+            return Err("resource policy must use its own hook".into());
+        }
     };
     plan.projection = Some(next.as_ref().map_or_else(Projection::default, |state| {
         projection(state, config, entity, frame)

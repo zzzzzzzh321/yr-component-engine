@@ -64,12 +64,12 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
         std::fs::read(std::env::var_os("VERA_SDK_AMMO_WASM").expect("set VERA_SDK_AMMO_WASM"))
             .unwrap();
     let mut layers = RulesLayerStack::new(IniFile::from_str(
-        "[VeraFeatures]\nAresAmmo=yes\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\n\
+        "[VeraFeatures]\nAresAmmo=yes\nAresReload=yes\nAresNoAmmoWeapon=yes\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=300\nPrimary=PAIR\nSecondary=FREE\nReloadAmount=2\nNoAmmoWeapon=1\nNoAmmoAmount=1\n\
          [PAIR]\nAmmo=$12\n[FREE]\nAmmo=0\n[pair]\nAmmo=99\n",
     ));
     layers.push(
         RulesLayerKind::Scenario,
-        IniFile::from_str("[PAIR]\nAmmo=invalid\n"),
+        IniFile::from_str("[PAIR]\nAmmo=invalid\n[TANK]\nReloadAmount=bad\nEmptyReloadAmount=3\nNoAmmoAmount=invalid\n"),
     );
     let processed = layers.process().unwrap();
     let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
@@ -93,7 +93,26 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
     );
     let saved = crate::util::save_codec::serialize(&program).unwrap();
     rules.external_mod = Some(Arc::new(program));
-    rules.bind_weapon_resource_policies().unwrap();
+    rules.bind_resource_policies().unwrap();
+    let expected_type_policy = rules
+        .object("TANK")
+        .unwrap()
+        .type_resource_policy()
+        .unwrap();
+    assert_eq!(
+        expected_type_policy.reload,
+        Some(api::ReloadPolicy {
+            normal_amount: 2,
+            empty_amount: 3
+        })
+    );
+    assert_eq!(
+        expected_type_policy.depleted_weapon,
+        Some(api::DepletedWeaponPolicy {
+            weapon_index: 1,
+            threshold: 1
+        })
+    );
     assert_eq!(
         rules
             .weapon("PAIR")
@@ -123,13 +142,18 @@ fn sdk_resource_policy_replays_native_layers_and_rebinds_frozen_saved_config() {
     // read-only projection from the exact saved component configuration.
     layers.push(
         RulesLayerKind::Scenario,
-        IniFile::from_str("[PAIR]\nAmmo=99\n"),
+        IniFile::from_str("[PAIR]\nAmmo=99\n[VeraFeatures]\nAresReload=no\nAresNoAmmoWeapon=no\n[TANK]\nReloadAmount=99\nNoAmmoWeapon=0\n"),
     );
     let mut loaded_rules = RuleSet::from_rules_layers(&layers).unwrap();
     loaded_rules.external_mod = Some(Arc::new(
         crate::util::save_codec::deserialize(&saved).unwrap(),
     ));
-    loaded_rules.bind_weapon_resource_policies().unwrap();
+    loaded_rules.bind_resource_policies().unwrap();
+    assert_eq!(
+        loaded_rules.object("TANK").unwrap().type_resource_policy(),
+        Some(expected_type_policy),
+        "saved config owns type policies, not current INI"
+    );
     assert_eq!(
         loaded_rules
             .weapon("PAIR")
@@ -427,7 +451,7 @@ fn sdk_ini_selection_is_layered_frozen_and_restored_with_the_program() {
     let restored: Program = crate::util::save_codec::deserialize(&saved).unwrap();
     restored.validate_restore().unwrap();
     current_rules.external_mod = Some(Arc::new(restored));
-    current_rules.bind_weapon_resource_policies().unwrap();
+    current_rules.bind_resource_policies().unwrap();
     assert_eq!(
         current_rules
             .weapon("PAIR")

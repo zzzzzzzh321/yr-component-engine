@@ -75,5 +75,5 @@ pub fn adopt_saved_program(
         }
         _ => return Err("saved/current work disagree about external gameplay identity".into()),
     }
-    rules.bind_weapon_resource_policies()
+    rules.bind_resource_policies()
 }

@@ -1,21 +1,25 @@
-# VERA Mod SDK — first shield prototype
+# VERA Mod SDK — external gameplay reference
 
 One work loads one optional portable gameplay component. The same engine runs
 retail YR without a declaration or one reference component whose shields, authored
-overload and Ares weapon ammo are selected through INI. This prototype migrates the existing supported shield chain;
+overload, Ares weapon ammo costs, reload amounts and low-ammo weapon selection are
+selected through INI. This prototype migrates the existing supported shield chain;
 it does not migrate every Ares/Phobos feature or claim full upstream parity.
 
 ## Boundaries
 
 - `api`: versioned typed messages, bounded opaque state/config, generic meters,
-  relationship flags and the shared native countdown timer.
+  relationship flags and the shared native countdown timer. `api/src/resource.rs`
+  owns the shared immutable weapon/type resource policies.
 - `wit/gameplay.wit`: portable `vera:mod-sdk@0.1.0` component interface.
 - `runtime`: Wasmtime, with only immutable INI and shared numeric-kernel imports.
   No filesystem, clock, random, network or WASI services are linked.
 - `package`: offline `vera-mod-pack` tool; wraps a core Wasm module and emits
   the component plus its content-hashed declaration, without executing it.
 - `plugins/shield`: author-editable Rust reference. One artifact contains the
-  features; `[VeraFeatures] Shield/Overload/AresAmmo` selects them through INI.
+  features; `[VeraFeatures] Shield/Overload/AresAmmo/AresReload/AresNoAmmoWeapon`
+  selects them through INI. Defense mechanisms live in `features/defense`; weapon
+  policies live in `features/weapons`. All use the same `support/host.rs` facade.
   All default to no; Overload requires Shield. Selection is frozen per match.
 - `src/mod_sdk.rs`: production asset admission, entity/combat/tick adapter,
   bounded change-plan validation and frozen saved-program admission.
@@ -26,15 +30,34 @@ are presentation data; authoritative component bytes plus module/config identity
 enter both state hashes and the actual multiplayer FRAMEINFO checksum. The
 original two Scenario RNG draws in checksum collection are preserved.
 
-The experimental engine SDK v1 requires all four hooks (an unused hook returns
+The experimental engine SDK v1 requires four base hooks (an unused hook returns
 an unchanged plan). An empty returned entity state unsubscribes that entity; a
 stateless behavior can retain a one-byte marker to remain subscribed.
 
-Hooks are `configure`, `attach`, `damage` and `tick`. An ordered Configure callback
+Base hooks are `configure`, `attach`, `damage` and `tick`. An ordered Configure callback
 runs for each reached Rules layer. One final merged callback carries complete
 object and warhead registries for bindings. During gameplay configuration is
 immutable. `damage` can replace receiver input and its own state, but cannot write
 health or another entity. Reserved operations are rejected in this prototype.
+
+The reference component also declares two optional immutable queries:
+`weapon_resource` returns a weapon's cost policy; `type_resource` returns reload
+amounts and low-ammo weapon selection for an object type and actual category.
+Admission queries them once and save restoration rebuilds them from frozen
+configuration. Hot paths use the resulting read-only projections. These features
+do not own a second ammo count or reload clock, and need no additional per-entity
+component state. Both queries use the existing `evaluate` message channel and
+add no Host service or WIT import.
+
+The component identifies as `vera.reference-gameplay` 0.4.0, config_version=4,
+state_version=1. Older components receive only the queries they declare; changing
+INI cannot add a feature absent from their original binary. Existing saves still
+require their exact corresponding component bytes.
+
+See the [Ares resource guide](plugins/shield/AMMO.zh-CN.md) and
+[resource-cycle.ini](plugins/shield/examples/resource-cycle.ini) for the combined
+configuration, defaults, category restrictions and documented compatibility
+boundary for unsupported `NoAmmoWeapon` indices.
 
 Every call creates a fresh guest instance with fuel/memory/call limits. Preview
 and commit use the same guest leaf; preview publishes nothing. A fault rejects
