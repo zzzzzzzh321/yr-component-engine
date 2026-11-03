@@ -154,9 +154,16 @@ pub(crate) fn open_result(state: &mut AppState, victory: bool) {
         .match_state
         .scenario_elapsed_clock
         .stop_buckets(crate::app::match_runtime::frame_pacer::wall_clock_ms());
-    let Some(model) = build_model(state, can_continue, elapsed) else {
+    let Some(mut model) = build_model(state, can_continue, elapsed) else {
         App::leave_mission_result_screen(state);
         return;
+    };
+    model.side_presentation = match state.process_assets.side_presentation(model.side) {
+        Ok(presentation) => presentation,
+        Err(error) => {
+            App::report_score_preparation_error(state, error.to_string());
+            return;
+        }
     };
     // GameExit__Victory's tail saves the carry-over record (0x004C6180)
     // before Start_Scenario; the defeat path saves none.
@@ -177,7 +184,7 @@ pub(crate) fn open_result(state: &mut AppState, victory: bool) {
         .map(|record| record.file_name.clone());
     let rows = model.rows.len();
     let campaign_end = victory
-        .then(|| build_campaign_end(state, model.side))
+        .then(|| build_campaign_end(state, model.side, model.side_presentation.clone()))
         .flatten();
     // BC6 keeps the match's route; the shared teardown then finds no match
     // transport to return.
@@ -227,7 +234,11 @@ pub(crate) fn open_result(state: &mut AppState, victory: bool) {
             assets,
             model.side,
             crate::app::frontend::shell_layout::art_key_screen_width(state),
-            state.process_assets.side_score_art(model.side),
+            model
+                .side_presentation
+                .as_ref()
+                .map(crate::rules::AresSideExtension::score_art)
+                .unwrap_or_default(),
         )
     });
     state.frontend.score_page = None;
@@ -329,6 +340,7 @@ fn build_model(state: &AppState, can_continue: bool, elapsed: i32) -> Option<Coo
         map_label: map_name,
         description,
         side,
+        side_presentation: None,
         map_index,
         can_continue,
     })
@@ -346,6 +358,7 @@ fn build_model(state: &AppState, can_continue: bool, elapsed: i32) -> Option<Coo
 fn build_campaign_end(
     state: &AppState,
     side: i32,
+    side_presentation: Option<crate::rules::AresSideExtension>,
 ) -> Option<crate::ui::campaign_score_shell::CampaignEndModel> {
     use crate::app::frontend::shell_pass::resolve_csf;
     use crate::assets::csf_file::{CsfArg, format_csf};
@@ -427,6 +440,7 @@ fn build_campaign_end(
         .unwrap_or_default();
     Some(crate::ui::campaign_score_shell::CampaignEndModel {
         side,
+        side_presentation,
         campaign_name,
         campaign_number: format_csf(
             &resolve_csf(state, "GUI:CampaignLabel"),

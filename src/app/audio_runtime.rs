@@ -832,7 +832,7 @@ mod tests {
             ScenarioExitDestination::Score {
                 title: String::new(),
                 detail: String::new(),
-                model: crate::ui::score_shell::ScoreScreenModel::default(),
+                model: Ok(crate::ui::score_shell::ScoreScreenModel::default()),
             },
         );
         runtime.apply_scenario_exit_tick(&score.tick(3_000, false, false), Some(&assets), 3_000);

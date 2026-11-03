@@ -20,7 +20,7 @@ use crate::assets::mix_archive::{MixArchive, SharedBytes};
 use crate::assets::mix_hash::mix_hash;
 use crate::assets::startup_resources::{AudioCatalogPolicy, AudioPair, StartupResources};
 
-#[cfg(all(test, feature = "ares"))]
+#[cfg(test)]
 #[path = "asset_manager_ares_sidebar_tests.rs"]
 mod ares_sidebar_tests;
 
@@ -293,7 +293,6 @@ pub struct AssetManager {
     /// Currently registered theater identity and its archive names.
     active_theater: Option<String>,
     active_theater_archives: Vec<String>,
-    #[cfg(feature = "ares")]
     active_sidebar_archives: Vec<String>,
     /// Path to the RA2 installation directory.
     ra2_dir: PathBuf,
@@ -323,7 +322,6 @@ impl Clone for AssetManager {
             ini_roots: self.ini_roots.clone(),
             active_theater: self.active_theater.clone(),
             active_theater_archives: self.active_theater_archives.clone(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: self.active_sidebar_archives.clone(),
             ra2_dir: self.ra2_dir.clone(),
         }
@@ -336,11 +334,9 @@ struct SavedLoadLookupAuthority {
     archives: Vec<NamedArchive>,
     active_theater: Option<String>,
     active_theater_archives: Vec<String>,
-    #[cfg(feature = "ares")]
     active_sidebar_archives: Vec<String>,
 }
 
-#[cfg(feature = "ares")]
 const SIDEBAR_RETIRED_PALETTES: [&str; 5] = [
     "YRII.PAL",
     "OBSERVER.PAL",
@@ -505,7 +501,6 @@ impl AssetManager {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: ra2_dir.to_path_buf(),
         })
@@ -1058,7 +1053,6 @@ impl AssetManager {
     /// On failure the native caller aborts loading; partial MD registration is
     /// retained until the next attempt. VERA's saved-load transaction may roll
     /// registrations back, but this method does not invent a native rollback.
-    #[cfg(feature = "ares")]
     pub fn activate_sidebar_archives(&mut self, mix_index: i32) -> Result<bool, AssetError> {
         let adjusted = mix_index.wrapping_sub(1);
         if adjusted < 0 {
@@ -1081,6 +1075,23 @@ impl AssetManager {
                 return Ok(false);
             }
         }
+        self.clear_sidebar_palette_cache();
+        Ok(true)
+    }
+
+    /// Return to the ordinary sidebar route without leaving the previous
+    /// registered group in global resource lookup. An untouched retail route
+    /// has no active group and keeps its original process-sticky palette cache.
+    pub fn retire_active_sidebar_archives(&mut self) {
+        if self.active_sidebar_archives.is_empty() {
+            return;
+        }
+        let old = std::mem::take(&mut self.active_sidebar_archives);
+        self.retire_registered_archives(&old);
+        self.clear_sidebar_palette_cache();
+    }
+
+    fn clear_sidebar_palette_cache(&self) {
         //5352E3 ->72F350 ->730400 ->5B4270. The duplicate SIDEBAR
         // removal is native order, not a second independent cache owner.
         let mut cache = self
@@ -1090,7 +1101,6 @@ impl AssetManager {
         for name in SIDEBAR_RETIRED_PALETTES {
             cache.remove(&mix_hash(name));
         }
-        Ok(true)
     }
 
     fn retire_registered_archives(&mut self, names: &[String]) {
@@ -1161,10 +1171,8 @@ impl AssetManager {
             archives: self.archives.clone(),
             active_theater: self.active_theater.clone(),
             active_theater_archives: self.active_theater_archives.clone(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: self.active_sidebar_archives.clone(),
         };
-        #[cfg(feature = "ares")]
         let previous_sidebar_cache: Vec<_> = {
             let cache = self
                 .mix_file_cache
@@ -1195,12 +1203,14 @@ impl AssetManager {
             }
             self.archive_catalog
                 .retain(|cached| !previous.archives.iter().any(|old| old.name == cached.name));
+            let restore_sidebar_palettes = cfg!(feature = "ares")
+                || !previous.active_sidebar_archives.is_empty()
+                || !self.active_sidebar_archives.is_empty();
             self.archives = previous.archives;
             self.active_theater = previous.active_theater;
             self.active_theater_archives = previous.active_theater_archives;
-            #[cfg(feature = "ares")]
-            {
-                self.active_sidebar_archives = previous.active_sidebar_archives;
+            self.active_sidebar_archives = previous.active_sidebar_archives;
+            if restore_sidebar_palettes {
                 let mut cache = self
                     .mix_file_cache
                     .lock()
@@ -2050,7 +2060,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: ra2_dir.to_path_buf(),
         }
@@ -2548,7 +2557,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };
@@ -2633,7 +2641,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };
@@ -2708,7 +2715,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };
@@ -2751,7 +2757,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };
@@ -2792,7 +2797,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };
@@ -2834,7 +2838,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };
@@ -2871,7 +2874,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };
@@ -2929,7 +2931,6 @@ mod tests {
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
         };

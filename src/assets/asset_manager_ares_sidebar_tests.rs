@@ -73,6 +73,18 @@ fn ares_sidebar_failure_preserves_native_partial_mount_and_save_candidate_rollba
         &prior.bytes,
         &assets.load_file_from_mix("SIDEBAR.PAL").unwrap().bytes
     ));
+    let rejected: Result<(), ()> = assets.prepare_saved_load(|candidate| {
+        candidate.retire_active_sidebar_archives();
+        assert!(candidate.active_sidebar_archives.is_empty());
+        assert!(candidate.load_file_from_mix("SIDEBAR.PAL").is_none());
+        Err(())
+    });
+    assert!(rejected.is_err());
+    assert_eq!(assets.active_sidebar_archives, ["sidec03.mix"]);
+    assert!(Arc::ptr_eq(
+        &prior.bytes,
+        &assets.load_file_from_mix("SIDEBAR.PAL").unwrap().bytes
+    ));
     // Outside the explicit save transaction, failure is not rolled back.
     assert!(!assets.activate_sidebar_archives(5).unwrap());
     assert_eq!(assets.active_sidebar_archives, ["sidec05md.mix"]);
@@ -103,4 +115,24 @@ fn ares_sidebar_signed_selector_preserves_native_int_min_wraparound() {
         b"wrapped"
     );
     assert!(!assets.activate_sidebar_archives(-1).unwrap());
+}
+
+#[cfg(not(feature = "ares"))]
+#[test]
+fn stock_failed_candidate_without_sidebar_activation_keeps_sticky_palette() {
+    let dir = TestDirectory::new("stock-sidebar-palette-sticky");
+    dir.write_mix("fixture.mix", "SIDEBAR.PAL", b"stock-palette");
+    let mut assets = AssetManager::from_loose_root_for_test(dir.path());
+    assets.load_nested("fixture.mix").unwrap();
+    let mut loaded = None;
+    let rejected: Result<(), ()> = assets.prepare_saved_load(|candidate| {
+        loaded = Some(candidate.load_file_from_mix("SIDEBAR.PAL").unwrap().bytes);
+        candidate.retire_active_sidebar_archives(); // No active group is a no-op.
+        Err(())
+    });
+    assert!(rejected.is_err());
+    assert!(Arc::ptr_eq(
+        &loaded.unwrap(),
+        &assets.load_file_from_mix("SIDEBAR.PAL").unwrap().bytes
+    ));
 }

@@ -651,56 +651,58 @@ impl NativeRulesProcessOwner {
         self.country_menu_rows()
     }
 
-    /// The live registry's SideExt for a side index: `None` for a negative or
-    /// unallocated side, where the native hooks skip (`Scenario+0x34B8` < 0).
-    /// The score shells read it before any match Rules projection exists.
-    #[cfg(feature = "ares")]
-    fn side_extension(
+    /// One owned snapshot for the existing score/presentation preparation.
+    /// Ares1002F3A0/1002F430 skip negative or unallocated Sides. The installed
+    /// dispatch mode comes from this same accepted component checkpoint, never
+    /// a missing per-Side response or an isolated RuleSet projection.
+    pub fn side_presentation(
         &self,
         side: i32,
-    ) -> Option<&crate::rules::ares_side_extension::AresSideExtension> {
-        self.registry
+    ) -> Result<Option<crate::rules::ares_side_extension::AresSideExtension>, RulesError> {
+        let state = self
+            .registry
             .as_ref()
             .expect("Rules transition reentered")
-            .registry_state()
-            .side_projection()
-            .nth(usize::try_from(side).ok()?)?
-            .1
-    }
-
-    /// The side's score theme, or `None` where gamemd pushes its literal
-    /// `SCORE` name (`0x0082FEBC`): a stock build or a side with no SideExt.
-    pub fn side_score_theme(
-        &self,
-        side: i32,
-        theme: crate::rules::ruleset::ScoreTheme,
-    ) -> Option<&str> {
-        #[cfg(feature = "ares")]
-        {
-            return self.side_extension(side)?.score_theme(theme);
+            .registry_state();
+        let Some(index) = usize::try_from(side).ok() else {
+            return Ok(None);
+        };
+        let Some((_, legacy)) = state.side_projection().nth(index) else {
+            return Ok(None);
+        };
+        let enabled = if let Some(program) = state.sdk_configuration_seed() {
+            let error = |value| RulesError::InvalidValue {
+                section: "vera-mod".into(),
+                key: "registered_side_ui".into(),
+                expected: "valid UI mode at an accepted live configuration checkpoint".into(),
+                value,
+            };
+            if !state.sdk_configuration_steps().is_empty() {
+                return Err(error(format!(
+                    "{} completed configuration steps remain unaccepted",
+                    state.sdk_configuration_steps().len()
+                )));
+            }
+            program
+                .match_rules_policy()
+                .map_err(error)?
+                .and_then(|policy| policy.registered_side_ui)
+                .unwrap_or(crate::rules::ARES_ENABLED)
+        } else {
+            crate::rules::ARES_ENABLED
+        };
+        if !enabled {
+            return Ok(None);
         }
+        if let Some(policy) = state.live_faction_side(index as u32)? {
+            return Ok(policy);
+        }
+        #[cfg(feature = "ares")]
+        return Ok(legacy.cloned());
         #[cfg(not(feature = "ares"))]
         {
-            let _ = (side, theme);
-            None
-        }
-    }
-
-    /// The side's seven score-screen file names (SideExt `+0x98..+0x158`). A
-    /// stock build and a negative or unallocated side leave every field
-    /// `None`, so the callers keep their fixed tables.
-    pub fn side_score_art(&self, side: i32) -> crate::rules::ruleset::SideScoreArt<'_> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .side_extension(side)
-                .map(|extension| extension.score_art())
-                .unwrap_or_default();
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            Default::default()
+            let _ = legacy;
+            Ok(None)
         }
     }
 

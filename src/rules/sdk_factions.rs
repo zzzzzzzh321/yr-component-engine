@@ -167,6 +167,15 @@ impl RuleSet {
         None
     }
 
+    /// Global UI dispatch installed by InitSideMixFiles534FA0, EVA1002FB00
+    /// and MessageColor1002FA80. It cannot be inferred from a missing Side
+    /// declaration: older components retain their original build profile.
+    pub fn registered_side_ui_enabled(&self) -> bool {
+        self.match_rules_policy
+            .and_then(|policy| policy.registered_side_ui)
+            .unwrap_or(crate::rules::ARES_ENABLED)
+    }
+
     /// Ares1002F2D0 selector; the AI owner still owns House state and evaluation.
     pub(crate) fn ai_side_token_admits(&self, trigger_side: i32, house_side: i32) -> bool {
         let extended = self
@@ -254,6 +263,7 @@ mod tests {
             effects: None,
             script_type_conversion: None,
             extended_ai_side_tokens: Some(true),
+            registered_side_ui: None,
         });
         assert!(rules.ai_side_token_admits(4, 3));
         assert!(!rules.ai_side_token_admits(4, 0));

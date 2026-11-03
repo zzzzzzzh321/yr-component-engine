@@ -140,6 +140,7 @@ pub(crate) mod ares_emp;
 pub(crate) mod ares_country_paradrop;
 pub(crate) mod ares_country_presentation;
 pub(crate) mod ares_side_extension;
+pub use ares_side_extension::AresSideExtension;
 pub(crate) mod faction_resource_bindings;
 pub(crate) mod ares_warhead;
 pub(crate) mod ares_spotlight;

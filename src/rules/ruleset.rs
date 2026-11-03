@@ -9366,6 +9366,14 @@ impl RuleSet {
         self.side_ids.get(index.0 as usize).map(String::as_str)
     }
 
+    /// The real registered Side array, independent of an extension policy.
+    /// Constructor-only entries count; negative and out-of-array indices do not.
+    pub fn side_is_allocated(&self, side: i32) -> bool {
+        usize::try_from(side)
+            .ok()
+            .is_some_and(|index| index < self.side_ids.len())
+    }
+
     /// The already-allocated Side array, including constructor-only entries;
     /// querying it never rereads an INI or creates a missing side.
     pub fn allocated_sides(&self) -> impl Iterator<Item = (SideIdx, &str)> {
@@ -9379,7 +9387,7 @@ impl RuleSet {
 
     /// Signed SideExt+88. Zero and negative values are intentional native
     /// selector inputs, not missing values or an instruction to clamp to one.
-    /// An ordinary retail build has no SideExt configuration.
+    /// A declared stock choice keeps the caller's retail resource route.
     pub fn side_sidebar_mix_file_index(&self, index: SideIdx) -> Option<i32> {
         self.side_extension(i32::from(index.0))
             .map(|p| p.sidebar_mix_file_index)

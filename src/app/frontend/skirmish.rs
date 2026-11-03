@@ -1907,8 +1907,10 @@ mod tests {
             let side = crate::app::presentation::sidebar_render::project_sidebar_side(
                 Some(&sim),
                 Some(owner),
+                cfg!(feature = "ares"),
             );
-            let actual = crate::render::sidebar_chrome::sidebar_theme_for_side(side);
+            let actual =
+                crate::render::sidebar_chrome::sidebar_theme_for_side(side, cfg!(feature = "ares"));
             assert_eq!(
                 actual, expected_theme,
                 "{country:?} launch owner must reach its live side theme"
@@ -1928,6 +1930,7 @@ mod tests {
             let selected = crate::app::presentation::sidebar_render::project_sidebar_side(
                 Some(&sim),
                 Some(owner),
+                cfg!(feature = "ares"),
             );
             assert_eq!(
                 selected,

@@ -516,6 +516,8 @@ pub struct CoopScoreModel {
     pub description: String,
     /// Scenario `+0x34B8`, which picks the score palette (`0x0072D300`).
     pub side: i32,
+    /// Resource names from the finished mission, not the next shell's Side.
+    pub side_presentation: Option<crate::rules::AresSideExtension>,
     /// The next mission's shell map, for the preview `0x468`.
     pub map_index: Option<usize>,
     pub can_continue: bool,

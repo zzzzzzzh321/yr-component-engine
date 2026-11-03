@@ -159,7 +159,10 @@ pub(crate) fn drive_local_player_outcome_exit(state: &mut AppState, wall_ms: u64
 fn build_campaign_score_screen_model(
     state: &AppState,
     elapsed_score_ticks: i32,
-) -> crate::ui::campaign_score_shell::CampaignScoreScreenModel {
+) -> Result<
+    crate::ui::campaign_score_shell::CampaignScoreScreenModel,
+    crate::rules::error::RulesError,
+> {
     let difficulty = state
         .match_state
         .sim_runtime
@@ -196,36 +199,30 @@ fn build_campaign_score_screen_model(
                 .map(|house| house.side_index())
         })
         .unwrap_or(0);
-    let mut model = build_campaign_score_screen_model_from_sources(
+    let side_presentation = state.process_assets.side_presentation(side)?;
+    Ok(build_campaign_score_screen_model_from_sources(
         elapsed_score_ticks,
         difficulty,
         &state.match_state.map_ranking,
         houses.unwrap_or_default(),
         side,
+        side_presentation,
         |key| resolve_campaign_score_label(state, key),
-    );
-    model.theme = state
-        .process_assets
-        .side_score_theme(
-            side,
-            crate::rules::ruleset::ScoreTheme::Campaign {
-                over_par: model.over_par,
-            },
-        )
-        .map(str::to_owned);
-    model
+    ))
 }
 
-fn build_campaign_score_screen_model_from_sources(
+pub(crate) fn build_campaign_score_screen_model_from_sources(
     elapsed_score_ticks: i32,
     difficulty: i32,
     ranking: &crate::map::ranking::RankingSection,
     houses: impl IntoIterator<Item = (bool, u32)>,
     side: i32,
+    side_presentation: Option<crate::rules::AresSideExtension>,
     mut resolve_label: impl FnMut(&str) -> String,
 ) -> crate::ui::campaign_score_shell::CampaignScoreScreenModel {
     let mut model = crate::ui::campaign_score_shell::CampaignScoreScreenModel {
         side,
+        side_presentation,
         ..Default::default()
     };
     let elapsed_score_seconds = elapsed_score_ticks / 60;
@@ -236,6 +233,12 @@ fn build_campaign_score_screen_model_from_sources(
     // Native `0x6C9231..33` divides both Scenario+0x61C and ParTime by 60,
     // then selects the over-par strings only when elapsed is strictly greater.
     model.over_par = elapsed_score_seconds > par_score_seconds;
+    model.theme = model.side_presentation.as_ref().and_then(|side| {
+        side.score_theme(crate::rules::ruleset::ScoreTheme::Campaign {
+            over_par: model.over_par,
+        })
+        .map(str::to_owned)
+    });
     let (rank_key, commendation_key) = if elapsed_score_seconds <= par_score_seconds {
         (&ranking.under_par_title, &ranking.under_par_message)
     } else {
@@ -303,18 +306,24 @@ mod campaign_score_model_tests {
 
         // Scenario+0x60C raw 2 selects ParTimeHard. Elapsed=959 and Par=900
         // both divide to the same native 60-tick bucket, so this is UnderPar.
-        let equal_bucket =
-            build_campaign_score_screen_model_from_sources(959, 2, &ranking, houses, 0, resolve);
+        let equal_bucket = build_campaign_score_screen_model_from_sources(
+            959, 2, &ranking, houses, 0, None, resolve,
+        );
         assert_eq!(equal_bucket.par_time, "00:00:15");
         assert_eq!(equal_bucket.your_time, "00:00:15");
         assert_eq!(equal_bucket.rank, "Gold");
         assert_eq!(equal_bucket.commendation, "Under par");
         assert_eq!(equal_bucket.enemies_destroyed, "10");
 
-        let over_bucket =
-            build_campaign_score_screen_model_from_sources(960, 2, &ranking, houses, 0, |key| {
-                csf.text(key).into_owned()
-            });
+        let over_bucket = build_campaign_score_screen_model_from_sources(
+            960,
+            2,
+            &ranking,
+            houses,
+            0,
+            None,
+            |key| csf.text(key).into_owned(),
+        );
         assert_eq!(over_bucket.your_time, "00:00:16");
         assert_eq!(over_bucket.rank, "Silver");
         assert_eq!(over_bucket.commendation, "Over par");
@@ -364,7 +373,7 @@ fn score_title_key(mode: SessionMode) -> &'static str {
 fn build_score_screen_model(
     state: &AppState,
     elapsed_seconds: i32,
-) -> crate::ui::score_shell::ScoreScreenModel {
+) -> Result<crate::ui::score_shell::ScoreScreenModel, crate::rules::error::RulesError> {
     use crate::ui::score_shell::ScoreScreenModel;
 
     let Some(sim) = state
@@ -373,11 +382,11 @@ fn build_score_screen_model(
         .as_ref()
         .map(|rt| &rt.simulation)
     else {
-        return ScoreScreenModel::default();
+        return Ok(ScoreScreenModel::default());
     };
     let Some(raw_snapshot) = sim.terminal_score_snapshot() else {
         log::error!("Natural match exit reached the score screen without a sim snapshot");
-        return ScoreScreenModel::default();
+        return Ok(ScoreScreenModel::default());
     };
     let computer = crate::app::frontend::shell_pass::resolve_csf(state, "TXT_COMPUTER");
     let rows = resolve_score_rows(
@@ -400,19 +409,19 @@ fn build_score_screen_model(
     // Observer house (`Player [0xA83D4C] == Observer [0xAC1198]`,
     // 0x1002F4B8..0x1002F4C7).
     let observing = local_owner.is_some() && local_owner == sim.session().observer_house();
+    let side_presentation = state.process_assets.side_presentation(side)?;
     let theme = (!observing)
         .then(|| {
-            state.process_assets.side_score_theme(
-                side,
-                crate::rules::ruleset::ScoreTheme::Multiplayer {
+            side_presentation.as_ref().and_then(|side| {
+                side.score_theme(crate::rules::ruleset::ScoreTheme::Multiplayer {
                     defeated: local_house.is_some_and(|house| house.is_defeated()),
-                },
-            )
+                })
+            })
         })
         .flatten()
         .map(str::to_owned);
 
-    ScoreScreenModel {
+    Ok(ScoreScreenModel {
         title_key: score_title_key(state.match_state.session_mode()),
         game_number: state.frontend.finished_game_count,
         // The clock performs native's signed division first. The existing UI
@@ -420,9 +429,10 @@ fn build_score_screen_model(
         // the pathological rollover representation local to this boundary.
         elapsed_seconds: elapsed_seconds as u32,
         side,
+        side_presentation,
         theme,
         rows,
-    }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

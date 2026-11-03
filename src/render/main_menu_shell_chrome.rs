@@ -563,16 +563,18 @@ pub fn score_art_names(side: i32, screen_w: u32) -> (&'static str, &'static str)
     (if screen_w == 640 { small } else { large }, palette)
 }
 
-/// Each score name is substituted on its own, the way the hook copies every
-/// SideExt field over its stock buffer (`0x1002F270`).
+/// Preserve the existing per-name stock fallback. This differs from Ares's
+/// explicit cleared filename:1002F3A0/1002F430 load the SideExt buffers through
+/// the LoadFileFromMIX4A38D0 trampoline1002F270, even when that buffer is empty.
 fn score_name<'a>(name: Option<&'a str>, stock: &'a str) -> &'a str {
     name.unwrap_or(stock)
 }
 
 /// Band `band`'s bar: the side's `MultiplayerScore.Bars=` pattern with the first
 /// `~~` replaced by the two-digit band number (`Game_GetMultiplayerScoreScreenBar`
-/// `0x1002F300`), else the stock name by side (tables `0x00844B24`, `0x00844B4C`,
-/// `0x00844B74`); any other side has none.
+/// `0x1002F300`), else the existing stock name by side (tables `0x00844B24`,
+/// `0x00844B4C`, `0x00844B74`); any other side has none. As above, a cleared
+/// Ares filename currently shares this baseline fallback.
 pub fn score_bar_name(bars: Option<&str>, side: i32, band: usize) -> Option<String> {
     if let Some(pattern) = bars {
         return Some(pattern.replacen("~~", &format!("{:02}", band + 1), 1));

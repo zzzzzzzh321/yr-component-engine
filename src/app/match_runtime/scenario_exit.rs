@@ -138,13 +138,13 @@ pub(crate) enum ScenarioExitDestination {
     Score {
         title: String,
         detail: String,
-        model: ScoreScreenModel,
+        model: Result<ScoreScreenModel, String>,
     },
     /// Campaign victory's distinct retail dialog `0x103`.
     CampaignScore {
         title: String,
         detail: String,
-        model: crate::ui::campaign_score_shell::CampaignScoreScreenModel,
+        model: Result<crate::ui::campaign_score_shell::CampaignScoreScreenModel, String>,
     },
     /// Campaign victory with `[Basic] SkipScore=yes` continues directly.
     CampaignVictoryContinue,
@@ -200,14 +200,17 @@ pub(crate) fn scenario_exit_destination(
     cooperative: bool,
     title: String,
     detail: String,
-    campaign_score: impl FnOnce() -> crate::ui::campaign_score_shell::CampaignScoreScreenModel,
-    skirmish_score: impl FnOnce() -> ScoreScreenModel,
+    campaign_score: impl FnOnce() -> Result<
+        crate::ui::campaign_score_shell::CampaignScoreScreenModel,
+        crate::rules::error::RulesError,
+    >,
+    skirmish_score: impl FnOnce() -> Result<ScoreScreenModel, crate::rules::error::RulesError>,
 ) -> ScenarioExitDestination {
     match campaign_outcome_route(mode, outcome, skip_score) {
         Some(CampaignOutcomeRoute::VictoryScore) => ScenarioExitDestination::CampaignScore {
             title,
             detail,
-            model: campaign_score(),
+            model: campaign_score().map_err(|error| error.to_string()),
         },
         Some(CampaignOutcomeRoute::VictoryContinue) => {
             ScenarioExitDestination::CampaignVictoryContinue
@@ -219,7 +222,7 @@ pub(crate) fn scenario_exit_destination(
         None => ScenarioExitDestination::Score {
             title,
             detail,
-            model: skirmish_score(),
+            model: skirmish_score().map_err(|error| error.to_string()),
         },
     }
 }
@@ -352,11 +355,11 @@ impl ScenarioExitCascade {
             ScenarioExitTick {
                 clear_sounds: true,
                 after_cleanup: match self.destination.as_ref() {
-                    Some(ScenarioExitDestination::Score { model, .. }) => {
-                        Some(ScenarioExitAudioAction::PlayTheme(
-                            model.theme.clone().unwrap_or_else(|| SCORE_THEME.into()),
-                        ))
-                    }
+                    Some(ScenarioExitDestination::Score {
+                        model: Ok(model), ..
+                    }) => Some(ScenarioExitAudioAction::PlayTheme(
+                        model.theme.clone().unwrap_or_else(|| SCORE_THEME.into()),
+                    )),
                     _ => None,
                 },
                 finished: true,
@@ -393,7 +396,7 @@ mod tests {
         ScenarioExitDestination::Score {
             title: "won".to_string(),
             detail: "done".to_string(),
-            model: ScoreScreenModel::default(),
+            model: Ok(ScoreScreenModel::default()),
         }
     }
 
@@ -407,10 +410,10 @@ mod tests {
             ScenarioExitDestination::Score {
                 title: "won".to_string(),
                 detail: "done".to_string(),
-                model: ScoreScreenModel {
+                model: Ok(ScoreScreenModel {
                     theme: Some("MYLOSE".to_owned()),
                     ..Default::default()
-                },
+                }),
             },
         );
         exit.tick(515, true, false);
@@ -443,7 +446,7 @@ mod tests {
             false,
             "victory".into(),
             "detail".into(),
-            || campaign_model.clone(),
+            || Ok(campaign_model.clone()),
             || panic!("campaign victory must not build multiplayer score"),
         );
         let mut exit = ScenarioExitCascade::start(0, victory.clone());
@@ -456,7 +459,7 @@ mod tests {
         );
         assert!(matches!(
             victory,
-            ScenarioExitDestination::CampaignScore { model, .. }
+            ScenarioExitDestination::CampaignScore { model: Ok(model), .. }
                 if model == campaign_model
         ));
 
@@ -495,14 +498,16 @@ mod tests {
             "victory".into(),
             "detail".into(),
             || panic!("skirmish must not build campaign score"),
-            || ScoreScreenModel {
-                side: 3,
-                ..ScoreScreenModel::default()
+            || {
+                Ok(ScoreScreenModel {
+                    side: 3,
+                    ..ScoreScreenModel::default()
+                })
             },
         );
         assert!(matches!(
             skirmish,
-            ScenarioExitDestination::Score { model, .. } if model.side == 3
+            ScenarioExitDestination::Score { model: Ok(model), .. } if model.side == 3
         ));
 
         let cooperative = scenario_exit_destination(
@@ -519,6 +524,36 @@ mod tests {
             cooperative,
             ScenarioExitDestination::CooperativeResult { victory: false }
         ));
+
+        let failed = scenario_exit_destination(
+            SessionMode::Skirmish,
+            Victory,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            || panic!("skirmish must not prepare campaign resources"),
+            || {
+                Err(crate::rules::error::RulesError::InvalidValue {
+                    section: "vera-mod".into(),
+                    key: "faction_resource".into(),
+                    expected: "accepted score snapshot".into(),
+                    value: "failed component".into(),
+                })
+            },
+        );
+        assert!(
+            matches!(&failed, ScenarioExitDestination::Score { model: Err(error), .. }
+            if error.contains("failed component"))
+        );
+        let mut exit = ScenarioExitCascade::start(0, failed);
+        exit.tick(0, true, false);
+        let finished = exit.tick(1_000, false, false);
+        assert!(finished.finished);
+        assert_eq!(
+            finished.after_cleanup, None,
+            "failed preparation must not request stock SCORE"
+        );
     }
 
     /// `0x0055CFD0` routes victory/defeat before restart and restart before

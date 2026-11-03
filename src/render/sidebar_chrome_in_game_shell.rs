@@ -17,14 +17,20 @@ pub(super) fn load_backgrounds(
     mix_name: &str,
     names: (&str, &str, &str),
     palette_name: &str,
+    registered_group: bool,
 ) -> Option<(
     [Option<RenderedChromeEntry>; 3],
     super::SidebarChromeAssetIdentity,
 )> {
-    let (palette, source_archive) =
-        super::resolve_theme_palette_with_source(assets, mix, mix_name, palette_name)?;
-    let entries =
-        [names.0, names.1, names.2].map(|name| super::render_entry(assets, mix, name, &palette, 0));
+    let (palette, source_archive) = super::resolve_theme_palette_with_source(
+        assets,
+        mix,
+        mix_name,
+        palette_name,
+        registered_group,
+    )?;
+    let entries = [names.0, names.1, names.2]
+        .map(|name| super::render_entry(assets, mix, name, &palette, 0, registered_group));
     Some((
         entries,
         super::SidebarChromeAssetIdentity {

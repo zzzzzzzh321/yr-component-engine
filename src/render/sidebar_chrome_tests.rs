@@ -329,6 +329,7 @@ fn retail_modal_backgrounds_use_ui_palette_for_every_theme_and_size() {
             archive_name,
             names,
             super::SidebarArtNames::for_yuri(theme == SidebarTheme::Yuri).background_palette,
+            cfg!(feature = "ares"),
         )
         .unwrap();
         assert_eq!(identity.logical_name, palette_name);

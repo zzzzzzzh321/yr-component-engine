@@ -471,26 +471,16 @@ impl ProcessAssets {
         )
     }
 
-    /// The score dialog's theme name for a side, or `None` for gamemd's
-    /// literal `SCORE`.
-    pub(crate) fn side_score_theme(
+    /// Freeze the currently accepted Side presentation before its scenario
+    /// retires. Consumers retain this value, never a second live rules owner.
+    pub(crate) fn side_presentation(
         &self,
         side: i32,
-        theme: crate::rules::ruleset::ScoreTheme,
-    ) -> Option<&str> {
+    ) -> Result<Option<crate::rules::AresSideExtension>, crate::rules::error::RulesError> {
         self.native_rules
             .as_ref()
-            .and_then(|rules| rules.side_score_theme(side, theme))
-    }
-
-    /// The shell side's `Game_LoadCampaignScoreAssets` /
-    /// `Game_LoadMultiplayerScoreAssets` file names. Every field `None` keeps
-    /// that name's fixed stock table entry.
-    pub(crate) fn side_score_art(&self, side: i32) -> crate::rules::ruleset::SideScoreArt<'_> {
-        self.native_rules
-            .as_ref()
-            .map(|rules| rules.side_score_art(side))
-            .unwrap_or_default()
+            .map(|rules| rules.side_presentation(side))
+            .unwrap_or(Ok(None))
     }
 
     /// `Game_GetFlagSurface @ 0x1001DCE0` country insignia by HouseType index,

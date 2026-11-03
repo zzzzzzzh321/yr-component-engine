@@ -47,22 +47,24 @@ pub(crate) fn post_trigger_message(state: &mut AppState, csf_key: &str) {
     // independent of the current House remains a separate retained-field gap.
     // Ares `TActionClass_Execute_MessageColor @ 0x1002FA80` reads the saved
     // Scenario.PlayerSideIndex instead.
-    #[cfg(feature = "ares")]
-    let side = runtime.simulation.session().scenario_side();
-    #[cfg(not(feature = "ares"))]
-    let side = runtime
-        .simulation
-        .session()
-        .current_house()
-        .and_then(|owner| runtime.simulation.houses().get(&owner))
-        .map_or(0, |house| i32::from(house.side_index()));
     let rules = &runtime.resources.rules;
-    #[cfg(feature = "ares")]
-    let rgb = ares_message_text_rgb(rules, side).unwrap_or_else(|| {
-        trigger_message_rgb(&rules.color_schemes, side, rules.skirmish_colors())
-    });
-    #[cfg(not(feature = "ares"))]
-    let rgb = trigger_message_rgb(&rules.color_schemes, side, rules.skirmish_colors());
+    let registered_side_ui = rules.registered_side_ui_enabled();
+    let side = if registered_side_ui {
+        runtime.simulation.session().scenario_side()
+    } else {
+        runtime
+            .simulation
+            .session()
+            .current_house()
+            .and_then(|owner| runtime.simulation.houses().get(&owner))
+            .map_or(0, |house| i32::from(house.side_index()))
+    };
+    let rgb = registered_side_ui
+        .then(|| ares_message_text_rgb(rules, side))
+        .flatten()
+        .unwrap_or_else(|| {
+            trigger_message_rgb(&rules.color_schemes, side, rules.skirmish_colors())
+        });
     let timeout = message_delay_timeout_ms(rules.general.message_delay_minutes);
     post_localized_message(
         state,
@@ -92,7 +94,6 @@ fn message_delay_buckets(delay: crate::util::native_x87::NativeF64Bits) -> i32 {
 /// Ares `[Side] MessageTextColor=`: the stored runtime ColorScheme index (two
 /// schemes per `[Colors]` entry) resolves to that entry. `-1`/an
 /// out-of-range entry leaves the stock side-priority path unchanged.
-#[cfg(feature = "ares")]
 fn ares_message_text_rgb(rules: &crate::rules::ruleset::RuleSet, side: i32) -> Option<[f32; 3]> {
     let index = rules.side_message_text_color_index(side)?;
     if index < 0 {

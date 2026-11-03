@@ -90,9 +90,11 @@ impl AresSideExtension {
     /// The seven score-screen names, as `Game_LoadCampaignScoreAssets`
     /// (`0x1002F3A0`, patch site `0x72D300`), `Game_LoadMultiplayerScoreAssets`
     /// (`0x1002F430`, `0x72D730`) and `Game_GetMultiplayerScoreScreenBar`
-    /// (`0x1002F300`, `0x5CA110`) copy them over gamemd's own name buffers:
-    /// each name is substituted on its own, so `None` keeps the caller's fixed
-    /// table entry for that name alone.
+    /// (`0x1002F300`, `0x5CA110`) consume the retained Side buffers.
+    /// The existing renderer treats each `None` as its stock name. Residual:
+    /// an explicit `none` clears the native buffer and attempts an empty load,
+    /// while this baseline adapter falls back to stock. `0x1002F270` is the
+    /// LoadFileFromMIX4A38D0 trampoline, not a filename-copy helper.
     pub fn score_art(&self) -> crate::rules::ruleset::SideScoreArt<'_> {
         crate::rules::ruleset::SideScoreArt {
             campaign_background: self.campaign_score_background.as_deref(),

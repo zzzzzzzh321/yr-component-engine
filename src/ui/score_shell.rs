@@ -119,6 +119,8 @@ pub struct ScoreScreenModel {
     /// session player 0's country (`0x0068779A..0x0068782D`). It picks the
     /// art (`0x0072D730`) and the bars (`0x005CA110`).
     pub side: i32,
+    /// The accepted Side resource snapshot, retained through scenario retirement.
+    pub side_presentation: Option<crate::rules::AresSideExtension>,
     /// The theme this dialog starts: the side's `MultiplayerScore.WinTheme` /
     /// `.LoseTheme` under Ares, selected on the local player's
     /// `HouseClass+0x1F5` defeated flag. `None` keeps gamemd's literal `SCORE`.
@@ -763,6 +765,7 @@ mod tests {
             game_number: 1,
             elapsed_seconds: 79,
             side: 0,
+            side_presentation: None,
             theme: None,
             rows: vec![
                 ScoreRow {

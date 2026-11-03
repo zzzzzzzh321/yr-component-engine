@@ -98,17 +98,19 @@ impl VoxQueue {
     /// and ares_eva.json. Missing Side retains the Ares cache; negative
     /// Scenario.Side clears it. Reading EVA.Tag never calls this binding.
     pub fn set_side(&mut self, side: i32, rules: &crate::rules::ruleset::RuleSet) {
-        #[cfg(feature = "ares")]
-        {
+        if rules.registered_side_ui_enabled() {
             if side < 0 {
                 self.selected_voice = -1;
             } else if let Some(voice) = rules.side_eva_voice_index(side) {
+                // A declared -1 is a real selection, not a missing value.
                 self.selected_voice = voice;
+            } else if rules.side_is_allocated(side) {
+                // Registered dispatch is global; this allocated Side explicitly
+                // selected stock resources, so only its voice uses the retail route.
+                self.selected_voice = if side == -1 { 0 } else { side };
             }
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = rules;
+            // A missing Side retains the current process selection.
+        } else {
             self.selected_voice = if side == -1 { 0 } else { side };
         }
     }
@@ -128,6 +130,15 @@ impl VoxQueue {
         registry
             .entry(&node.event)?
             .column_by_voice(self.selected_voice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sample_for_test<'a>(
+        &self,
+        node: &VoxNode,
+        registry: &'a EvaRegistry,
+    ) -> Option<&'a str> {
+        self.sample_for(node, registry)
     }
 
     /// `VoxClass::QueueVoice @ 0x00752480`.

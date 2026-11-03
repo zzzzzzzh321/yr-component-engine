@@ -415,6 +415,8 @@ pub struct CampaignScoreScreenModel {
     /// It selects the `0x72B` art window's 220- or 230-pixel height, the
     /// `0x00608500` x by one pixel, and the small/large asset tables.
     pub side: i32,
+    /// Resource names frozen with this result, before the live Side is retired.
+    pub side_presentation: Option<crate::rules::AresSideExtension>,
     /// Whether the elapsed time exceeded the par time at `0x6C9231`, the same
     /// comparison that selects the over-par rank strings and that
     /// `ScoreDialog_Handle_ScoreThemeA` uses to pick the theme.
@@ -451,6 +453,8 @@ pub struct CampaignScoreTexts {
 pub struct CampaignEndModel {
     /// Scenario `+0x34B8`, which picks the score art (`0x0072D300`).
     pub side: i32,
+    /// The finished mission's snapshot, also used after the co-op round closes.
+    pub side_presentation: Option<crate::rules::AresSideExtension>,
     pub campaign_name: String,
     pub campaign_number: String,
     pub difficulty: String,
@@ -1364,6 +1368,7 @@ mod tests {
         };
         let model = CampaignEndModel {
             side: 1,
+            side_presentation: None,
             campaign_name: "Soviet Campaign".into(),
             campaign_number: "Campaign 2".into(),
             difficulty: "Difficulty: Medium".into(),

@@ -475,7 +475,11 @@ impl App {
                 assets,
                 model.side,
                 crate::app::frontend::shell_layout::art_key_screen_width(state),
-                state.process_assets.side_score_art(model.side),
+                model
+                    .side_presentation
+                    .as_ref()
+                    .map(crate::rules::AresSideExtension::score_art)
+                    .unwrap_or_default(),
             )
         });
         state.frontend.campaign_score_page = None;
@@ -512,7 +516,11 @@ impl App {
                 assets,
                 side,
                 crate::app::frontend::shell_layout::art_key_screen_width(state),
-                state.process_assets.side_score_art(side),
+                model
+                    .side_presentation
+                    .as_ref()
+                    .map(crate::rules::AresSideExtension::score_art)
+                    .unwrap_or_default(),
             )
         });
         if state.frontend.campaign_score_art.is_none() {
@@ -566,7 +574,11 @@ impl App {
                 assets,
                 model.side,
                 crate::app::frontend::shell_layout::art_key_screen_width(state),
-                state.process_assets.side_score_art(model.side),
+                model
+                    .side_presentation
+                    .as_ref()
+                    .map(crate::rules::AresSideExtension::score_art)
+                    .unwrap_or_default(),
             )
         });
         if state.frontend.campaign_score_art.is_none() {
@@ -587,6 +599,22 @@ impl App {
             .frontend
             .shell_controller
             .reset_to(CAMPAIGN_END_DIALOG, false);
+    }
+
+    /// Failed component queries are visible errors, never a successful stock
+    /// score. Keep the finished world until the existing Continue path captures
+    /// campaign carry-over and retires it in its original order.
+    pub(crate) fn report_score_preparation_error(state: &mut AppState, error: String) {
+        log::error!("Could not prepare score presentation: {error}");
+        state.frontend.score_page = None;
+        state.frontend.score_art = None;
+        state.frontend.campaign_score_page = None;
+        state.frontend.campaign_score_art = None;
+        state.frontend.coop_score_page = None;
+        state.frontend.screen = GameScreen::MissionResult {
+            title: "Could not prepare score presentation".into(),
+            detail: error,
+        };
     }
 
     fn score_layout(state: &AppState) -> crate::ui::score_shell::ScoreLayout {

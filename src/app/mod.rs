@@ -75,6 +75,8 @@ pub(crate) mod process_stats;
 pub(crate) mod radar_movie;
 #[cfg(test)]
 mod random_map_lifecycle_tests;
+#[cfg(test)]
+mod sdk_side_presentation_tests;
 pub(crate) mod renderer_state;
 pub(crate) mod scenario_catalog;
 mod shell_campaign;

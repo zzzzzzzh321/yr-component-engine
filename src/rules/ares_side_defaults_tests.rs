@@ -244,21 +244,27 @@ fn ares_side_score_files_follow_the_side_buffers_the_hooks_copy() {
          MultiplayerScore.Bars=MyBars~~.pcx\n\
          MultiplayerScore.Palette=\n"
     ));
-    // Side 0 keeps `SideExt::initialize`'s Allied row: the hooks copy these
-    // buffers over gamemd's own, so a fourth side takes the Yuri row it is
-    // initialized with, not the stock fallback.
+    // Side 0 keeps SideExt::initialize's Allied row. This adapter exposes the
+    // retained fourth-side Yuri names rather than the stock width table.
+    // Explicit cleared-name fallback remains the documented baseline residual.
     assert_eq!(
-        owner.side_score_art(0).campaign_background,
+        owner
+            .side_presentation(0)
+            .unwrap()
+            .unwrap()
+            .score_art()
+            .campaign_background,
         Some("ASCRBKMD.SHP")
     );
-    let fourth = owner.side_score_art(3);
+    let presentation = owner.side_presentation(3).unwrap().unwrap();
+    let fourth = presentation.score_art();
     assert_eq!(fourth.campaign_background, Some("SYCRBKMD.SHP"));
     assert_eq!(fourth.multiplayer_bars, Some("MyBars~~.pcx"));
     // An empty value retains the initialized name (AresFixedString read).
     assert_eq!(fourth.multiplayer_palette, Some("MPYSCRN.PAL"));
     // No SideExt: every name keeps its caller's fixed table.
-    assert_eq!(owner.side_score_art(9), Default::default());
-    assert_eq!(owner.side_score_art(-1), Default::default());
+    assert_eq!(owner.side_presentation(9).unwrap(), None);
+    assert_eq!(owner.side_presentation(-1).unwrap(), None);
 }
 
 #[test]
@@ -274,28 +280,27 @@ fn ares_side_score_themes_follow_the_two_native_branch_sites() {
     // 0x1002F4B0 keeps +0x1B8 while HouseClass+0x1F5 is clear; the untouched
     // fields stay on SideExt::initialize's literal SCORE.
     use crate::rules::ruleset::ScoreTheme;
+    let fourth = owner.side_presentation(3).unwrap().unwrap();
+    let allied = owner.side_presentation(0).unwrap().unwrap();
     assert_eq!(
-        owner.side_score_theme(3, ScoreTheme::Campaign { over_par: false }),
+        fourth.score_theme(ScoreTheme::Campaign { over_par: false }),
         Some("MYUND")
     );
     assert_eq!(
-        owner.side_score_theme(3, ScoreTheme::Campaign { over_par: true }),
+        fourth.score_theme(ScoreTheme::Campaign { over_par: true }),
         Some("SCORE")
     );
     assert_eq!(
-        owner.side_score_theme(3, ScoreTheme::Multiplayer { defeated: false }),
+        fourth.score_theme(ScoreTheme::Multiplayer { defeated: false }),
         Some("SCORE")
     );
     assert_eq!(
-        owner.side_score_theme(3, ScoreTheme::Multiplayer { defeated: true }),
+        fourth.score_theme(ScoreTheme::Multiplayer { defeated: true }),
         Some("MYLOSE")
     );
     assert_eq!(
-        owner.side_score_theme(0, ScoreTheme::Multiplayer { defeated: true }),
+        allied.score_theme(ScoreTheme::Multiplayer { defeated: true }),
         Some("SCORE")
     );
-    assert_eq!(
-        owner.side_score_theme(9, ScoreTheme::Multiplayer { defeated: true }),
-        None
-    );
+    assert_eq!(owner.side_presentation(9).unwrap(), None);
 }

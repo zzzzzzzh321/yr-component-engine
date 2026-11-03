@@ -717,33 +717,49 @@ pub(crate) fn active_minimap_screen_rect(state: &AppState) -> crate::ui::sidebar
 pub(crate) fn current_sidebar_theme(
     state: &AppState,
 ) -> crate::render::sidebar_chrome::SidebarTheme {
-    crate::render::sidebar_chrome::sidebar_theme_for_side(current_sidebar_side(state))
+    let side = current_sidebar_side(state);
+    // The prepared set retains per-Side stock/registered art provenance. The
+    // global dispatch still chooses Scenario.Side independently of that route.
+    current_sidebar_resolution(state)
+        .map(|resolved| resolved.requested_theme)
+        .unwrap_or_else(|| {
+            crate::render::sidebar_chrome::sidebar_theme_for_side(
+                side,
+                state
+                    .rules()
+                    .is_some_and(|rules| rules.registered_side_ui_enabled()),
+            )
+        })
 }
 
-/// The active native Scenario.Side owns Ares MIX selection. The retail sandbox
-/// retains its development owner switch. Neither path rewrites House identity.
+/// Registered dispatch uses native Scenario.Side. The retail sandbox retains
+/// its existing development owner switch. Neither rewrites House identity.
 pub(crate) fn current_sidebar_side(state: &AppState) -> i32 {
     let sim = state
         .match_state
         .sim_runtime
         .as_ref()
         .map(|rt| &rt.simulation);
-    #[cfg(feature = "ares")]
-    let owner = None::<String>;
-    #[cfg(not(feature = "ares"))]
-    let owner = preferred_local_owner_name(state);
-    project_sidebar_side(sim, owner.as_deref())
+    let registered_side_ui = state
+        .rules()
+        .is_some_and(|rules| rules.registered_side_ui_enabled());
+    let owner = if registered_side_ui {
+        None
+    } else {
+        preferred_local_owner_name(state)
+    };
+    project_sidebar_side(sim, owner.as_deref(), registered_side_ui)
 }
 
-/// The production chrome and radar adapters share this side-index decision.
+/// The production chrome and radar adapters share this source decision.
 /// Original68781F/534FA0 and Ares1002FA00 consume the installed Scenario.Side;
 /// the ordinary sandbox retains its existing live-owner development switch.
 pub(crate) fn project_sidebar_side(
     simulation: Option<&crate::sim::world::Simulation>,
     owner: Option<&str>,
+    registered_side_ui: bool,
 ) -> i32 {
-    #[cfg(feature = "ares")]
-    if let Some(sim) = simulation {
+    if registered_side_ui && let Some(sim) = simulation {
         return sim.session().scenario_side();
     }
     owner

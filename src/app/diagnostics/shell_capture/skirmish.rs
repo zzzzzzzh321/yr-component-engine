@@ -61,6 +61,10 @@ enum Phase {
     Defeating,
     /// The score page `0x108` is up after the defeat.
     Scoring,
+    /// The synthetic campaign page consumes the real score model's snapshot.
+    CampaignScoring,
+    /// That page has actually presented with its original reveals complete.
+    CampaignScoreReady,
     /// Tab opened Diplomacy `0x73` over the running game.
     Diplomacy,
     /// Continue was pressed on the settled score page.
@@ -80,6 +84,9 @@ pub(super) enum LoadingTarget {
     /// A real defeat: the local MCV deploys and its Construction Yard is sold
     /// through the production commands; the score page settled.
     DefeatScore,
+    /// The real defeat's Side snapshot passed into the synthetic campaign
+    /// display through App::open_campaign_score_page.
+    DefeatCampaignScore,
     /// The same, then Continue: the new `0x102` settled.
     DefeatContinue,
     /// The game runs [`QUIT_AFTER_FRAMES`] frames, then Tab opens the
@@ -430,6 +437,8 @@ impl SkirmishCapture {
                     | Phase::Quitting
                     | Phase::Defeating
                     | Phase::Scoring
+                    | Phase::CampaignScoring
+                    | Phase::CampaignScoreReady
                     | Phase::Continuing
                     | Phase::Diplomacy
             ),
@@ -489,7 +498,11 @@ impl SkirmishCapture {
     fn defeat_route(&self) -> bool {
         matches!(
             self.loading,
-            Some(LoadingTarget::DefeatScore | LoadingTarget::DefeatContinue)
+            Some(
+                LoadingTarget::DefeatScore
+                    | LoadingTarget::DefeatCampaignScore
+                    | LoadingTarget::DefeatContinue
+            )
         )
     }
 
@@ -536,10 +549,24 @@ impl SkirmishCapture {
                         "losses": row.losses, "built": row.built, "score": row.score})
                 })
                 .collect();
+            let presentation = &state.match_state.match_presentation;
+            let sidebar = presentation
+                .sidebar_chrome
+                .as_ref()
+                .and_then(|chrome| chrome.resolve_side(page.model.side))
+                .map(|resolved| resolved.identity());
             self.route.push(
                 json!({"dialog": 0x108, "frame": frame, "action": "score page",
                 "title_key": page.model.title_key, "game": page.model.game_number,
-                "seconds": page.model.elapsed_seconds, "side": page.model.side, "rows": rows}),
+                "seconds": page.model.elapsed_seconds, "side": page.model.side, "rows": rows,
+                "side_presentation": page.model.side_presentation,
+                "sidebar_atlas": sidebar.as_ref().map(|identity| json!({
+                    "archive": identity.atlas.parent_archive,
+                    "palette": identity.atlas.theme_palette.source_archive,
+                    "radar": identity.atlas.radar.source_archive})),
+                "outcome_banner_side_art_loaded": presentation.outcome_banner_side_art.is_some(),
+                "score_background_loaded": state.frontend.score_art.as_ref()
+                    .is_some_and(|art| art.background.is_some())}),
             );
             self.phase = Phase::Scoring;
             return Ok(());
@@ -585,6 +612,59 @@ impl SkirmishCapture {
                 .is_some_and(|page| page.reveals_terminal())
     }
 
+    fn campaign_score_settled(state: &AppState) -> bool {
+        App::campaign_score_shell_active(state)
+            && state.frontend.shell_controller.top_id()
+                == Some(crate::ui::campaign_score_shell::CAMPAIGN_SCORE_DIALOG)
+            && state.frontend.shell_first_paint_slide.is_none()
+            && state.frontend.shell_exit.is_none()
+            && state
+                .frontend
+                .campaign_score_page
+                .as_ref()
+                .is_some_and(|page| page.reveals_terminal())
+    }
+
+    /// This is a display fixture after real gameplay, not a campaign outcome.
+    /// The already-owned 0x108 snapshot is the only resource input: no fresh
+    /// process query or Rules processing is permitted on this diagnostic edge.
+    fn open_campaign_score_from_defeat(&mut self, state: &mut AppState, frame: u32) -> Result<()> {
+        let source = &state
+            .frontend
+            .score_page
+            .as_ref()
+            .context("real defeat score page missing")?
+            .model;
+        let side = source.side;
+        let side_presentation = source.side_presentation.clone();
+        let model = super::score::synthetic_campaign_score_model(side, side_presentation);
+        App::open_campaign_score_page(
+            state,
+            model,
+            "Synthetic campaign score after skirmish defeat".into(),
+            "Synthetic campaign display; no campaign gameplay or native parity.".into(),
+        );
+        let page = state
+            .frontend
+            .campaign_score_page
+            .as_ref()
+            .context("campaign display page missing")?;
+        self.route.push(json!({
+            "dialog": 0x103, "frame": frame,
+            "action": "open through App::open_campaign_score_page",
+            "fixture_kind": "synthetic campaign display via completed skirmish",
+            "parity_certification": "NONE",
+            "side_presentation_source": "retained real 0x108 ScoreScreenModel; cloned once",
+            "side": page.model.side,
+            "side_presentation": page.model.side_presentation,
+            "campaign_score_art_loaded": state.frontend.campaign_score_art.is_some(),
+            "campaign_scra_frame_count": state.frontend.campaign_score_art.as_ref()
+                .and_then(|art| art.scra.as_ref()).map_or(0, |strip| strip.frames.len()),
+        }));
+        self.phase = Phase::CampaignScoring;
+        Ok(())
+    }
+
     /// The route's time budget: the quit and defeat routes load and play a
     /// game.
     pub(super) fn timeout(&self) -> std::time::Duration {
@@ -593,6 +673,7 @@ impl SkirmishCapture {
             Some(
                 LoadingTarget::AfterQuit
                     | LoadingTarget::DefeatScore
+                    | LoadingTarget::DefeatCampaignScore
                     | LoadingTarget::DefeatContinue
                     | LoadingTarget::Diplomacy
             )
@@ -1353,7 +1434,9 @@ impl SkirmishCapture {
             }
             (Phase::Defeating, _) => self.lose_the_game(state, frame)?,
             (Phase::Scoring, PresentedShell::Score) if Self::score_settled(state) => {
-                if self.loading == Some(LoadingTarget::DefeatContinue) {
+                if self.loading == Some(LoadingTarget::DefeatCampaignScore) {
+                    self.open_campaign_score_from_defeat(state, frame)?;
+                } else if self.loading == Some(LoadingTarget::DefeatContinue) {
                     // Continue through the page's production handlers.
                     state.match_state.input.cursor_x = 720.0;
                     state.match_state.input.cursor_y = 556.0;
@@ -1369,6 +1452,27 @@ impl SkirmishCapture {
                     self.route
                         .push(json!({"dialog": 0x108, "frame": frame, "action": "Continue"}));
                     self.phase = Phase::Continuing;
+                }
+            }
+            (Phase::CampaignScoring, PresentedShell::Score) => {
+                ensure!(
+                    App::campaign_score_shell_active(state),
+                    "campaign display left the 0x103 page"
+                );
+                if Self::campaign_score_settled(state) {
+                    let page = state
+                        .frontend
+                        .campaign_score_page
+                        .as_ref()
+                        .expect("active campaign score page");
+                    self.route.push(json!({
+                        "dialog": 0x103, "frame": frame, "action": "campaign page reveals terminal",
+                        "side": page.model.side, "side_presentation": page.model.side_presentation,
+                        "campaign_score_art_loaded": state.frontend.campaign_score_art.is_some(),
+                        "campaign_scra_frame_count": state.frontend.campaign_score_art.as_ref()
+                            .and_then(|art| art.scra.as_ref()).map_or(0, |strip| strip.frames.len()),
+                    }));
+                    self.phase = Phase::CampaignScoreReady;
                 }
             }
             (Phase::SlideOut, PresentedShell::Skirmish) => {
@@ -1531,6 +1635,11 @@ impl SkirmishCapture {
                 && App::score_shell_active(state)
                 && Self::score_settled(state));
         }
+        if self.loading == Some(LoadingTarget::DefeatCampaignScore) {
+            return Ok(self.phase == Phase::CampaignScoreReady
+                && self.last_presented == Some(PresentedShell::Score)
+                && Self::campaign_score_settled(state));
+        }
         if self.loading == Some(LoadingTarget::DefeatContinue) {
             return Ok(self.phase == Phase::Continuing
                 && state.frontend.screen == GameScreen::MainMenu
@@ -1556,6 +1665,7 @@ impl SkirmishCapture {
                 LoadingTarget::FirstFrame
                 | LoadingTarget::AfterQuit
                 | LoadingTarget::DefeatScore
+                | LoadingTarget::DefeatCampaignScore
                 | LoadingTarget::DefeatContinue
                 | LoadingTarget::Diplomacy => crate::app::loading::pump::NextLoadingFrame::First,
             };
@@ -1629,6 +1739,7 @@ impl SkirmishCapture {
                     _,
                 ) => Some(0x102),
                 (Some(ChooserTarget::RandomMap(_)), _) => Some(0x105),
+                (_, Some(LoadingTarget::DefeatCampaignScore)) => Some(0x103),
                 (_, Some(_)) => None,
                 _ => Some(0x102),
             },
@@ -1639,6 +1750,12 @@ impl SkirmishCapture {
             "frame": {"path": FRAME_FILE_NAME, "byte_length": pixels.len(),
                 "sha256": crate::util::sha256::sha256_hex(pixels)}
         });
+        if self.loading == Some(LoadingTarget::DefeatCampaignScore) {
+            manifest["ordinary_skirmish_frame"] = json!(false);
+            manifest["fixture_kind"] = json!("synthetic campaign display via completed skirmish");
+            manifest["side_presentation_source"] =
+                json!("retained real 0x108 ScoreScreenModel; cloned once");
+        }
         // Only loading checkpoints carry the key; the validator
         // (`tools/shell_certification/skirmish.py`) pins the others' key set.
         if let Some(target) = self.loading {

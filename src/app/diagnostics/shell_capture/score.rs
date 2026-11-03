@@ -116,10 +116,15 @@ struct CampaignAnimationSequence {
 
 /// A synthetic, asset-independent fixture for visually reviewing the real
 /// campaign victory page through the production app renderer. These values
-/// are display examples only and establish no native parity.
-fn synthetic_campaign_score_model() -> CampaignScoreScreenModel {
+/// are display examples only and establish no native parity. Main-menu
+/// diagnostics pass 0/None; the defeat bridge supplies its already-owned Side.
+pub(super) fn synthetic_campaign_score_model(
+    side: i32,
+    side_presentation: Option<crate::rules::AresSideExtension>,
+) -> CampaignScoreScreenModel {
     CampaignScoreScreenModel {
-        side: 0,
+        side,
+        side_presentation,
         par_time: "00:10:00".into(),
         your_time: "00:08:31".into(),
         enemies_destroyed: "17".into(),
@@ -170,9 +175,10 @@ impl CampaignScoreCapture {
             if rendered == PresentedShell::MainMenu
                 && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(state))?
             {
+                let model = synthetic_campaign_score_model(0, None);
                 App::open_campaign_score_page(
                     state,
-                    synthetic_campaign_score_model(),
+                    model,
                     "Synthetic campaign score capture".into(),
                     "Synthetic UI fixture; not native-parity evidence.".into(),
                 );
@@ -181,6 +187,8 @@ impl CampaignScoreCapture {
                     "frame": frame,
                     "action": "open through App::open_campaign_score_page",
                     "fixture": "synthetic UI example",
+                    "side_presentation": state.frontend.campaign_score_page.as_ref()
+                        .and_then(|page| page.model.side_presentation.as_ref()),
                 }));
                 self.phase = CampaignScorePhase::CampaignScore;
             }
@@ -224,9 +232,10 @@ impl CampaignScoreCapture {
                 if rendered == PresentedShell::MainMenu
                     && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(state))?
                 {
+                    let model = synthetic_campaign_score_model(0, None);
                     App::open_campaign_score_page(
                         state,
-                        synthetic_campaign_score_model(),
+                        model,
                         "Synthetic campaign score animation capture".into(),
                         "Synthetic UI fixture; not native-parity evidence.".into(),
                     );
@@ -302,9 +311,10 @@ impl CampaignScoreCapture {
                             && state.frontend.campaign_score_art.is_none(),
                         "campaign score page or art survived the Continue close"
                     );
+                    let model = synthetic_campaign_score_model(0, None);
                     App::open_campaign_score_page(
                         state,
-                        synthetic_campaign_score_model(),
+                        model,
                         "Synthetic campaign score animation reopen".into(),
                         "Synthetic UI fixture; not native-parity evidence.".into(),
                     );
@@ -600,7 +610,7 @@ impl CampaignScoreCapture {
         pixels: &[u8],
         frame: u32,
     ) -> Value {
-        let fixture = synthetic_campaign_score_model();
+        let fixture = synthetic_campaign_score_model(0, None);
         json!({
             "schema_version": "vera20k.campaign-score-shell-capture.v1",
             "checkpoint": request.checkpoint.as_str(),
@@ -719,6 +729,7 @@ fn comparison_model(state: &AppState) -> Result<ScoreScreenModel> {
         game_number: 1,
         elapsed_seconds: 79,
         side: 0,
+        side_presentation: None,
         theme: None,
         rows: vec![
             ScoreRow {

@@ -746,16 +746,18 @@ impl App {
                 title,
                 detail,
                 model,
-            } => {
-                Self::open_score_page(state, model, title, detail);
-            }
+            } => match model {
+                Ok(model) => Self::open_score_page(state, model, title, detail),
+                Err(error) => Self::report_score_preparation_error(state, error),
+            },
             ScenarioExitDestination::CampaignScore {
                 title,
                 detail,
                 model,
-            } => {
-                Self::open_campaign_score_page(state, model, title, detail);
-            }
+            } => match model {
+                Ok(model) => Self::open_campaign_score_page(state, model, title, detail),
+                Err(error) => Self::report_score_preparation_error(state, error),
+            },
             ScenarioExitDestination::CampaignVictoryContinue => {
                 Self::leave_mission_result_screen(state)
             }

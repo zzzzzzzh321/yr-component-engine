@@ -1,7 +1,13 @@
 # Ares fourth-side defaults
 
-Build with `--features ares`. The stock build and INIs without Ares Side
-sections keep their existing three-side behavior.
+An ordinary build with the 0.18 reference component selects the existing Side
+UI through `AresFaction` and the frozen `registered_side_ui` match policy.
+Explicit `AresFaction=no` selects retail; an absent policy preserves the older
+component/build profile. `--features ares` remains the legacy comparison path.
+The resource declarations are bound by actual Side ordinal, independently of
+that global dispatch choice. Menu, loading, audio and score state keep their
+original host owners. Score models retain the accepted resource snapshot before
+scenario retirement; render and playback consume that snapshot afterwards.
 
 `[Sides]` already registers any number of Side identities; a Country's
 `Side=` selects one. Ares 3.0 attaches a `SideExt` to every allocated Side.
@@ -32,9 +38,14 @@ while a side's own section can replace them:
 | `Sidebar.YuriFileNames` | no | sidebar filenames |
 | `EVA.Tag` | index 0 (Allied) | EVA queue |
 
-Each score name is substituted on its own, the way `0x1002F270` copies every
-SideExt field over gamemd's buffer, so an Ares build never selects the 640-wide
-`*SM.SHP` shapes: `SideExt::initialize` always holds a medium name. The SideExt
+The Ares score hooks load SideExt buffers through the `LoadFileFromMIX4A38D0`
+trampoline `0x1002F270`; they do not copy filenames over stock buffers.
+`SideExt::initialize` supplies medium names rather than the 640-wide `*SM.SHP`
+names. VERA preserves its existing per-name stock fallback when the retained
+name is `None`. **Residual:** explicit `none` clears the native filename and
+attempts an empty load, whereas this fallback reopens stock art. The migration
+retains that fixed-baseline behavior; it does not establish equivalence for this
+case. The SideExt
 reader also retains `HunterSeeker` and `DialogBackground.*`; those have no
 consumer in this chain yet. `GraphicalText.*` is consumed by the
 victory/defeat banner: `Game_LoadUI_LoadSideData` (`0x1002F4A0`) loads the

@@ -178,6 +178,7 @@ const CHECKPOINT_SKIRMISH_LOADING_FIRST_FRAME: &str = "skirmish-loading-first-fr
 const CHECKPOINT_SKIRMISH_0X6B_EJECT_BOX: &str = "skirmish-0x6b-eject-box";
 const CHECKPOINT_SKIRMISH_AFTER_QUIT: &str = "skirmish-after-quit";
 const CHECKPOINT_SKIRMISH_DEFEAT_SCORE: &str = "skirmish-defeat-score";
+const CHECKPOINT_SKIRMISH_DEFEAT_CAMPAIGN_SCORE: &str = "skirmish-defeat-campaign-score";
 const CHECKPOINT_SKIRMISH_DEFEAT_CONTINUE: &str = "skirmish-defeat-continue";
 const CHECKPOINT_SKIRMISH_DIPLOMACY: &str = "skirmish-diplomacy";
 const CHECKPOINT_SCORE_0X108_STEADY: &str = "score-0x108-steady";
@@ -356,6 +357,9 @@ pub enum ShellCaptureCheckpoint {
     /// Start Game, deploy the MCV and sell the Construction Yard (Short
     /// Game): the score page after the real defeat, settled.
     SkirmishDefeatScore,
+    /// The real defeat's retained Side snapshot displayed by the synthetic
+    /// campaign score fixture; no campaign gameplay or native parity claim.
+    SkirmishDefeatCampaignScore,
     /// The same, then Continue: the new `0x102`, settled.
     SkirmishDefeatContinue,
     SkirmishDiplomacy,
@@ -576,6 +580,7 @@ impl ShellCaptureCheckpoint {
             CHECKPOINT_SKIRMISH_0X6B_EJECT_BOX => Ok(Self::Skirmish0x6BEjectBox),
             CHECKPOINT_SKIRMISH_AFTER_QUIT => Ok(Self::SkirmishAfterQuit),
             CHECKPOINT_SKIRMISH_DEFEAT_SCORE => Ok(Self::SkirmishDefeatScore),
+            CHECKPOINT_SKIRMISH_DEFEAT_CAMPAIGN_SCORE => Ok(Self::SkirmishDefeatCampaignScore),
             CHECKPOINT_SKIRMISH_DEFEAT_CONTINUE => Ok(Self::SkirmishDefeatContinue),
             CHECKPOINT_SKIRMISH_DIPLOMACY => Ok(Self::SkirmishDiplomacy),
             CHECKPOINT_SCORE_0X108_STEADY => Ok(Self::Score0x108Steady),
@@ -977,6 +982,7 @@ impl ShellCaptureCheckpoint {
             Self::Skirmish0x6BEjectBox => CHECKPOINT_SKIRMISH_0X6B_EJECT_BOX,
             Self::SkirmishAfterQuit => CHECKPOINT_SKIRMISH_AFTER_QUIT,
             Self::SkirmishDefeatScore => CHECKPOINT_SKIRMISH_DEFEAT_SCORE,
+            Self::SkirmishDefeatCampaignScore => CHECKPOINT_SKIRMISH_DEFEAT_CAMPAIGN_SCORE,
             Self::SkirmishDefeatContinue => CHECKPOINT_SKIRMISH_DEFEAT_CONTINUE,
             Self::SkirmishDiplomacy => CHECKPOINT_SKIRMISH_DIPLOMACY,
             Self::Score0x108Steady => CHECKPOINT_SCORE_0X108_STEADY,
@@ -2290,6 +2296,9 @@ impl ShellCaptureSession {
             )),
             ShellCaptureCheckpoint::SkirmishDefeatScore => Some(
                 skirmish::SkirmishCapture::loading(skirmish::LoadingTarget::DefeatScore),
+            ),
+            ShellCaptureCheckpoint::SkirmishDefeatCampaignScore => Some(
+                skirmish::SkirmishCapture::loading(skirmish::LoadingTarget::DefeatCampaignScore),
             ),
             ShellCaptureCheckpoint::SkirmishDefeatContinue => Some(
                 skirmish::SkirmishCapture::loading(skirmish::LoadingTarget::DefeatContinue),
@@ -4441,6 +4450,29 @@ mod tests {
         assert_eq!(session.timeout(), Duration::from_secs(60));
         assert!(!session.is_entry_sequence());
         assert!(session.skirmish.is_some());
+
+        let mut values = valid_args(&output);
+        values[1] = OsString::from(CHECKPOINT_SKIRMISH_DEFEAT_CAMPAIGN_SCORE);
+        let AppLaunchMode::ShellCapture(request) = parse_launch_args(values).expect("parse bridge")
+        else {
+            panic!("expected capture");
+        };
+        assert_eq!(
+            request.checkpoint(),
+            ShellCaptureCheckpoint::SkirmishDefeatCampaignScore
+        );
+        assert_eq!(
+            request.checkpoint().as_str(),
+            CHECKPOINT_SKIRMISH_DEFEAT_CAMPAIGN_SCORE
+        );
+        let session = ShellCaptureSession::new(request);
+        assert_eq!(session.timeout(), Duration::from_secs(180));
+        assert!(session.skirmish.is_some());
+        assert!(
+            session.campaign_score.is_none(),
+            "must enter through the actual defeat route"
+        );
+        assert!(!session.is_entry_sequence());
     }
 
     #[test]

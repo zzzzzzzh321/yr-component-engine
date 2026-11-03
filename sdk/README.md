@@ -3,7 +3,7 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.17.0 development candidate**, config version **15**, state version **1**;
+is the **0.18.0 development candidate**, config version **15**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
@@ -23,8 +23,9 @@ projections finalize their own receipt without replacing the live process histor
 catalog layout remains frozen separately. This bounded shared-configuration/gameplay
 increment passed actual-Wasm/save, direct-consumer, formal application and legacy
 controls, seven retail loading modes and previous-.15 loading. The 0.17 candidate also connects live Country menus/flags, early/late
-loading presentation and LoadingTheme. EVA SetSide, sidebar and score consumption
-remain later increments. These results do not establish full Ares, GUI/device,
+loading presentation and LoadingTheme. Version 0.18 connects EVA SetSide, sidebar,
+message colors, GraphicalText and score resources through the same accepted Side
+declarations. These bounded results do not establish full Ares, complete GUI/device,
 networking or performance equivalence. See [faction contracts](api/src/faction.rs).
 
 The Country presentation chain uses one accepted live Program and the existing
