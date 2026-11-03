@@ -4405,6 +4405,8 @@ pub struct RuleSet {
     /// Read-only startup-selected ART, shared with the native Process owner.
     /// Rebound after saved-source admission; never part of guest config bytes.
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
+    /// Same immutable SOUNDMD registry selected by the process audio owner.
+    fixed_sound_source: Option<std::sync::Arc<crate::rules::sound_ini::SoundRegistry>>,
     /// Read-only projection of the startup-selected list buffer contract.
     long_list_readers: Option<bool>,
     sdk_animation_names: Vec<String>,
@@ -4830,6 +4832,7 @@ impl RuleSet {
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
         let foundations = self.collect_foundation_resource_bindings()?;
         let cameos = self.collect_cameo_resource_bindings()?;
+        let type_sounds = self.collect_type_sound_bindings()?;
         let armor = self.collect_armor_resource_bindings()?;
         let emp = self.collect_emp_resource_bindings()?;
         let factions = self.collect_faction_resource_bindings()?;
@@ -4973,6 +4976,9 @@ impl RuleSet {
         self.rebuild_production_alternates();
         self.effect_resources = effect_resources;
         self.cameo_resources = cameos;
+        for (object, sounds) in self.object_list.iter_mut().zip(type_sounds) {
+            object.bind_external_promotion_sounds(sounds);
+        }
         for (name, policy) in policies {
             self.weapons
                 .get_mut(&name)
@@ -5011,6 +5017,79 @@ impl RuleSet {
     /// hash before this point; no resource lookup may reselect ART from assets.
     pub(crate) fn bind_fixed_art_source(&mut self, source: std::sync::Arc<IniFile>) {
         self.fixed_art_source = Some(source);
+    }
+
+    pub(crate) fn bind_fixed_sound_source(
+        &mut self,
+        source: std::sync::Arc<crate::rules::sound_ini::SoundRegistry>,
+    ) {
+        self.fixed_sound_source = Some(source);
+    }
+
+    fn collect_type_sound_bindings(
+        &self,
+    ) -> Result<Vec<Option<crate::rules::object_type::PromotionSoundBindings>>, String> {
+        let Some(policy) = self
+            .external_mod
+            .as_deref()
+            .map(|program| program.type_sound_resource_policy())
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(vec![None; self.object_list.len()]);
+        };
+        policy.validate()?;
+        let sounds = self.fixed_sound_source.as_deref();
+        if let Some(expected) = policy.source_hash {
+            if sounds.is_none_or(|sounds| sounds.source_hash() != expected) {
+                return Err(
+                    "promotion sounds differ from the process-selected sound catalog".into(),
+                );
+            }
+        }
+        let resolve = |selection: vera_mod_api::NullableResourceName|
+         -> Result<Option<Option<String>>, String> {
+            match selection {
+                vera_mod_api::NullableResourceName::Inherit => Ok(None),
+                vera_mod_api::NullableResourceName::Clear => Ok(Some(None)),
+                vera_mod_api::NullableResourceName::Named(name) => {
+                    let entry = sounds
+                        .and_then(|sounds| sounds.get(&name))
+                        .ok_or_else(|| format!("unregistered promotion sound: {name}"))?;
+                    Ok(Some(Some(entry.id.clone())))
+                }
+            }
+        };
+        let mut declarations = BTreeMap::new();
+        for entry in policy.promotions {
+            let category = crate::rules::prerequisite::production_category(entry.object.category);
+            if self
+                .type_array_ids(category)
+                .get(entry.object.ordinal as usize)
+                .is_none()
+            {
+                return Err("promotion sound Type identity is outside its native array".into());
+            }
+            declarations.insert(
+                (category, entry.object.ordinal),
+                [resolve(entry.veteran)?, resolve(entry.elite)?],
+            );
+        }
+        // Ares promotion10046AF0 only chooses immutable inputs. The same
+        // ObjectType getter and promotion AI retain the live state and clocks.
+        Ok(self
+            .object_list
+            .iter()
+            .map(|object| {
+                let declaration = self
+                    .type_array_index(object.category, &object.id)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .and_then(|index| declarations.get(&(object.category, index)))
+                    .cloned()
+                    .unwrap_or_default();
+                Some(declaration)
+            })
+            .collect())
     }
 
     fn collect_cameo_resource_bindings(&self) -> Result<Option<FrozenCameoResources>, String> {
@@ -7192,6 +7271,7 @@ impl RuleSet {
             sdk_passes: processed.sdk_passes().to_vec(),
             sdk_registries: processed.sdk_registries().to_vec(),
             fixed_art_source: processed.fixed_art_source().cloned(),
+            fixed_sound_source: processed.fixed_sound_source().cloned(),
             long_list_readers: processed.long_list_readers(),
             sdk_animation_names: processed
                 .anim_type_reference_states()
@@ -8904,7 +8984,6 @@ impl RuleSet {
         // draws; list order/duplicates select the sound. Hash effective lists
         // in canonical type order, independently of registry insertion order.
         b"resolved-type-sound-lists-v4".hash(&mut hasher);
-        #[cfg(feature = "ares")]
         {
             let promotion_sounds = self
                 .object_list

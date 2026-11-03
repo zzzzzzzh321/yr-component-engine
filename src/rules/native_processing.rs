@@ -19,7 +19,7 @@ use crate::rules::gunner_turrets::GunnerTurrets;
 use crate::rules::ini_parser::{IniFile, IniSection, is_native_none_type_name};
 use crate::rules::locomotor_type::SpeedType;
 use crate::rules::phobos_radiation::RadiationTypeCatalog;
-use crate::rules::sound_ini::EvaRegistry;
+use crate::rules::sound_ini::{EvaRegistry, SoundRegistry};
 
 use crate::rules::missile_spawn::{MissileFamily, MissileSpawnRules};
 use crate::rules::object_image::{ImageTheater, ObjectImageKind, ObjectImageState};
@@ -742,6 +742,7 @@ pub(crate) struct SdkRegistryPass {
     foundation: vera_mod_api::FoundationRegistryView,
     cameo: vera_mod_api::CameoRegistryView,
     fixed_art: Option<std::sync::Arc<IniFile>>,
+    fixed_sound_source: Option<std::sync::Arc<SoundRegistry>>,
     fixed_art_hash: u64,
     faction: vera_mod_api::FactionRegistryView,
     faction_colors: Vec<String>,
@@ -787,6 +788,10 @@ impl SdkRegistryPass {
 
     pub(crate) fn fixed_art_source(&self) -> Option<&IniFile> {
         self.fixed_art.as_deref()
+    }
+
+    pub(crate) fn fixed_sound_source(&self) -> Option<&std::sync::Arc<SoundRegistry>> {
+        self.fixed_sound_source.as_ref()
     }
 
     pub(crate) fn production_view(&self) -> &vera_mod_api::ProductionRegistryView {
@@ -943,6 +948,18 @@ impl ProcessedRulesLayers {
     /// after the existing fixed-ART digest check; it is not saved state.
     pub(crate) fn fixed_art_source(&self) -> Option<&std::sync::Arc<IniFile>> {
         self.native_registry_state().fixed_art_source.as_ref()
+    }
+
+    pub(crate) fn bind_fixed_sound_source(&mut self, source: std::sync::Arc<SoundRegistry>) {
+        self.native_type_construction_trace
+            .registry_state
+            .bind_fixed_sound_source(source);
+    }
+
+    /// Transient access to the same process Voc catalog used by playback.
+    /// Saved loading rebinds the process source instead of serializing it.
+    pub(crate) fn fixed_sound_source(&self) -> Option<&std::sync::Arc<SoundRegistry>> {
+        self.native_registry_state().fixed_sound_source()
     }
 
     pub(crate) fn sdk_configuration_seed(
@@ -3394,6 +3411,8 @@ pub(crate) struct NativeRulesRegistryState {
     #[serde(skip)]
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
     #[serde(skip)]
+    fixed_sound_source: Option<std::sync::Arc<SoundRegistry>>,
+    #[serde(skip)]
     sdk_configuration_steps: Vec<SdkConfigurationStep>,
     #[serde(skip)]
     sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
@@ -3496,6 +3515,7 @@ impl Default for NativeRulesRegistryState {
             sdk_configuration_steps: Vec::new(),
             sdk_configuration_seed: None,
             fixed_art_source: None,
+            fixed_sound_source: None,
             compatibility: RulesCompatibility::default(),
             long_list_readers: None,
             ares_prerequisites: crate::rules::ARES_ENABLED.then(GenericPrerequisites::default),
@@ -3582,6 +3602,14 @@ impl NativeRulesRegistryState {
 
     pub(crate) fn bind_fixed_art_source(&mut self, source: std::sync::Arc<IniFile>) {
         self.fixed_art_source = Some(source);
+    }
+
+    pub(crate) fn bind_fixed_sound_source(&mut self, source: std::sync::Arc<SoundRegistry>) {
+        self.fixed_sound_source = Some(source);
+    }
+
+    pub(crate) fn fixed_sound_source(&self) -> Option<&std::sync::Arc<SoundRegistry>> {
+        self.fixed_sound_source.as_ref()
     }
 
     fn freeze_fixed_art_source(&mut self, source: &IniFile) -> std::sync::Arc<IniFile> {
@@ -3977,6 +4005,7 @@ impl NativeRulesRegistryState {
             sdk_configuration_steps: self.sdk_configuration_steps,
             sdk_configuration_seed: self.sdk_configuration_seed,
             fixed_art_source: self.fixed_art_source,
+            fixed_sound_source: self.fixed_sound_source,
             long_list_readers: self.long_list_readers,
             //6686C0..668BF0 has no RulesExt reconstruction. Early-map Process
             //686D35 precedes this TypeReset6876AC and its flags/phase survive.
@@ -4969,6 +4998,7 @@ struct RulesPassProcessor {
     sdk_faction_reads: Vec<vera_mod_api::FactionReadPoint>,
     sdk_fixed_eva: Option<std::sync::Arc<EvaRegistry>>,
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
+    fixed_sound_source: Option<std::sync::Arc<SoundRegistry>>,
     fixed_art_hash: u64,
     image_theater: ImageTheater,
     compatibility: RulesCompatibility,
@@ -5063,6 +5093,7 @@ impl RulesPassProcessor {
             sdk_faction_reads: Vec::new(),
             sdk_fixed_eva: None,
             fixed_art_source: registry_state.fixed_art_source,
+            fixed_sound_source: registry_state.fixed_sound_source,
             fixed_art_hash,
             image_theater: ImageTheater::Uninitialized,
             compatibility: registry_state.compatibility,
@@ -6053,6 +6084,7 @@ impl RulesPassProcessor {
                 reads: self.sdk_cameo_reads.clone(),
             },
             fixed_art: self.fixed_art_source.clone(),
+            fixed_sound_source: self.fixed_sound_source.clone(),
             fixed_art_hash: self.fixed_art_hash,
             animations: self
                 .families
@@ -8207,6 +8239,7 @@ impl RulesPassProcessor {
                     sdk_configuration_steps: self.sdk_configuration_steps,
                     sdk_configuration_seed: self.sdk_configuration_seed,
                     fixed_art_source: self.fixed_art_source,
+                    fixed_sound_source: self.fixed_sound_source,
                     compatibility: self.compatibility,
                     long_list_readers: self.long_list_readers,
                     ares_prerequisites: self.ares_prerequisites,

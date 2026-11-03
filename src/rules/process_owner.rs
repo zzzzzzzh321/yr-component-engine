@@ -489,6 +489,7 @@ impl NativeRulesProcessOwner {
             NativeRulesRegistryState::with_long_list_readers(long_list_readers);
         registry_state.retain_sdk_configuration_program(configuration_seed);
         registry_state.bind_fixed_art_source(Arc::clone(&fixed_art));
+        registry_state.bind_fixed_sound_source(Arc::clone(&fixed_sounds));
         let mut cold_trace = process_native_rules_cold_start(
             registry_state,
             &selected_rules_root,
@@ -930,6 +931,7 @@ impl NativeRulesProcessOwner {
         processed.validate_saved_state()?;
         let mut rules = RuleSet::from_processed_rules(processed)?;
         rules.bind_fixed_art_source(Arc::clone(&self.sources.fixed_art));
+        rules.bind_fixed_sound_source(Arc::clone(&self.sources.fixed_sounds));
         self.bind_type_audio_references(&mut rules, processed);
         Ok(rules)
     }
@@ -943,6 +945,7 @@ impl NativeRulesProcessOwner {
     ) {
         self.assert_no_prepared_prefix();
         processed.bind_fixed_art_source(Arc::clone(&self.sources.fixed_art));
+        processed.bind_fixed_sound_source(Arc::clone(&self.sources.fixed_sounds));
         // Saved loading has already validated and rebound this exact program;
         // its skipped continuation inputs must not replay Configure on restore.
         processed.retain_sdk_configuration_program(
@@ -1017,6 +1020,7 @@ impl NativeRulesProcessOwner {
                 .registry_state()
                 .long_list_readers(),
         );
+        state.bind_fixed_sound_source(Arc::clone(&self.sources.fixed_sounds));
         if let Some(program) = self
             .sdk_configuration_program()
             .filter(|p| p.has_early_configuration())
@@ -1499,6 +1503,94 @@ mod tests {
     use crate::map::source::test_support::TestDirectory;
     use crate::rules::native_processing::RulesLayerStack;
     use crate::rules::retail_sources::RetailRulesSources;
+
+    #[test]
+    fn fixed_sound_source_is_shared_across_process_rules_and_saved_projection() {
+        use crate::rules::native_processing::{ProcessedRulesLayers, SdkConfigurationStep};
+        let directory = TestDirectory::new("process-fixed-sound-source");
+        directory.write(
+            "rulesmd.ini",
+            b"[BuildingTypes]\n0=POWER\n[POWER]\nStrength=100\n",
+        );
+        directory.write("artmd.ini", b"[POWER]\nFoundation=1x1\n");
+        let soundmd = b"[SoundList]\n0=PromotionCue\n[PromotionCue]\nSounds=cue.wav\n";
+        directory.write("soundmd.ini", soundmd);
+        let assets = AssetManager::from_loose_root_for_test(directory.path());
+        let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
+        let sounds = Arc::clone(audio.sounds());
+        assert_eq!(
+            sounds.source_hash(),
+            IniFile::from_bytes(soundmd).unwrap().content_hash()
+        );
+        assert_eq!(SoundRegistry::default().source_hash(), 0);
+        let mut owner = RetailRulesSources::select(&assets)
+            .unwrap()
+            .into_owner(Arc::clone(&sounds), Arc::clone(audio.eva()))
+            .unwrap();
+        let assert_state = |owner: &NativeRulesProcessOwner| {
+            let state = owner.registry.as_ref().unwrap().registry_state();
+            assert!(Arc::ptr_eq(state.fixed_sound_source().unwrap(), &sounds));
+            for step in state.sdk_configuration_steps() {
+                let registry = match step {
+                    SdkConfigurationStep::RulesPass { registry, .. }
+                    | SdkConfigurationStep::CountryPass { registry, .. } => registry,
+                    SdkConfigurationStep::Boundary(_) => continue,
+                };
+                assert!(Arc::ptr_eq(registry.fixed_sound_source().unwrap(), &sounds));
+            }
+        };
+        assert_state(&owner); // Bound before the cold reader's first Process.
+        let isolated = owner.startup_compatibility_projection().unwrap();
+        assert!(Arc::ptr_eq(isolated.fixed_sound_source().unwrap(), &sounds));
+        assert!(
+            isolated
+                .sdk_registries()
+                .iter()
+                .all(|pass| Arc::ptr_eq(pass.fixed_sound_source().unwrap(), &sounds))
+        );
+        owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::NonCampaign(None),
+                &IniFile::empty(),
+            )
+            .unwrap();
+        assert_state(&owner); // Includes the actual destructive TypeReset.
+        let saved: ProcessedRulesLayers = crate::util::save_codec::deserialize(
+            &crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            saved.fixed_sound_source().is_none(),
+            "process catalogs are not saved state"
+        );
+        let projected = owner.project_saved_scenario_rules(&saved).unwrap();
+        owner.install_saved_scenario_rules(saved, Some(&projected));
+        assert_state(&owner);
+        assert!(Arc::ptr_eq(
+            owner
+                .saved_scenario_rules()
+                .unwrap()
+                .fixed_sound_source()
+                .unwrap(),
+            &sounds
+        ));
+        assert!(
+            owner
+                .load_scenario(
+                    NativeScenarioRulesPrefix::Campaign(None),
+                    &IniFile::from_str("[Sides]\nGDI=<random>\n")
+                )
+                .is_err()
+        );
+        assert_state(&owner); // Partial failure retains the same immutable input.
+        owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::RandomMap(None),
+                &IniFile::empty(),
+            )
+            .unwrap();
+        assert_state(&owner);
+    }
 
     #[test]
     fn sdk_configuration_history_follows_real_scenario_clear_and_type_reset() {

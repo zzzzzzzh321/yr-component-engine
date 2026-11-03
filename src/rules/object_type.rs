@@ -36,6 +36,9 @@ use crate::rules::terrain_rules::LandType;
 use crate::util::fixed_math::SimFixed;
 use crate::util::native_x87::NativeF64Bits;
 
+/// Each slot is unset/global, explicit silence, or one fixed-catalog cue.
+pub(crate) type PromotionSoundBindings = [Option<Option<String>>; 2];
+
 /// The pi/180 double multiplied by `TechnoTypeClass::ReadINI @ 0x00712170`
 /// when storing RollAngle at `+0x3A0` (`FMUL [0x007F4FB8] @ 0x007123BC`).
 const TECHNOTYPE_DEGREES_TO_RADIANS: f64 = f64::from_bits(0x3f91_df46_a252_9d39);
@@ -817,6 +820,9 @@ pub struct ObjectType {
     /// Unset, explicit silence and a resolved Voc ID remain distinct.
     #[cfg(feature = "ares")]
     promotion_sounds: [Option<Option<String>>; 2],
+    /// Validated immutable projection of an external catalog. Some with unset
+    /// slots explicitly selects global sounds and suppresses legacy fallback.
+    external_promotion_sounds: Option<PromotionSoundBindings>,
     /// Ordered MoveSound vector, TechnoType+4F4. Constructor710E7B..710EAC
     /// creates an empty list; ReadINI713459..7134D9 uses ReadSoundList525430.
     /// The fixed SOUNDMD binder resolves each token, retaining duplicates.
@@ -3128,11 +3134,29 @@ impl ObjectType {
         }
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn promotion_sound_override(&self, elite: bool) -> Option<Option<&str>> {
-        self.promotion_sounds[usize::from(elite)]
+        let sounds = if let Some(sounds) = &self.external_promotion_sounds {
+            sounds
+        } else {
+            #[cfg(feature = "ares")]
+            {
+                &self.promotion_sounds
+            }
+            #[cfg(not(feature = "ares"))]
+            {
+                return None;
+            }
+        };
+        sounds[usize::from(elite)]
             .as_ref()
             .map(|cue| cue.as_deref())
+    }
+
+    pub(crate) fn bind_external_promotion_sounds(
+        &mut self,
+        sounds: Option<PromotionSoundBindings>,
+    ) {
+        self.external_promotion_sounds = sounds;
     }
 
     /// `Weapon[index]` (`TechnoTypeClass+0x898 + index*0x1C`): the weapon in
@@ -3733,6 +3757,7 @@ impl ObjectType {
             damage_sound: None,
             #[cfg(feature = "ares")]
             promotion_sounds: [None, None],
+            external_promotion_sounds: None,
             move_sound: Vec::new(),
             crashing_sound: section.read_name("CrashingSound", 0x80).map(str::to_owned),
             voice_crashing: section.read_name("VoiceCrashing", 0x80).map(str::to_owned),

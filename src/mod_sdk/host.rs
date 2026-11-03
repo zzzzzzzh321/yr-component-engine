@@ -85,6 +85,7 @@ pub(super) struct NativeHost {
     fixed_art_message: OnceLock<Result<Vec<u8>, String>>,
     cameo_inputs: bool,
     cameo_message: OnceLock<Result<Vec<u8>, String>>,
+    type_sound_inputs: bool,
     faction_inputs: bool,
     faction_message: OnceLock<Result<Vec<u8>, String>>,
 }
@@ -100,6 +101,7 @@ impl NativeHost {
             fixed_art_message: OnceLock::new(),
             cameo_inputs: false,
             cameo_message: OnceLock::new(),
+            type_sound_inputs: false,
             faction_inputs: false,
             faction_message: OnceLock::new(),
         }
@@ -127,6 +129,11 @@ impl NativeHost {
         self
     }
 
+    pub(super) fn enable_type_sound_inputs(mut self) -> Self {
+        self.type_sound_inputs = true;
+        self
+    }
+
     pub(super) fn enable_faction_inputs(mut self) -> Self {
         self.faction_inputs = true;
         self
@@ -142,9 +149,21 @@ impl NativeHost {
             fixed_art_message: OnceLock::new(),
             cameo_inputs: false,
             cameo_message: OnceLock::new(),
+            type_sound_inputs: false,
             faction_inputs: false,
             faction_message: OnceLock::new(),
         }
+    }
+
+    fn fixed_sounds(&self) -> Result<&crate::rules::sound_ini::SoundRegistry, String> {
+        if !self.type_sound_inputs || self.ini.is_none() {
+            return Err("fixed sound configuration is unavailable".into());
+        }
+        self.registries
+            .as_ref()
+            .and_then(|registry| registry.fixed_sound_source())
+            .map(std::sync::Arc::as_ref)
+            .ok_or_else(|| "missing process-selected sound catalog".into())
     }
 
     fn registry_view_bytes(&self) -> Result<&[u8], String> {
@@ -257,6 +276,27 @@ impl HostServices for NativeHost {
         reader: &str,
         current: &[u8],
     ) -> Result<Vec<u8>, String> {
+        if reader == "sound-source-hash" {
+            return serde_json::to_vec(&self.fixed_sounds()?.source_hash())
+                .map_err(|e| e.to_string());
+        }
+        if reader == "sound-reference" {
+            let sounds = self.fixed_sounds()?;
+            let current: api::NullableResourceName =
+                serde_json::from_slice(current).map_err(|e| e.to_string())?;
+            let ini = self
+                .ini
+                .as_ref()
+                .expect("fixed_sounds checks configuration");
+            // NullableIdx<Voc>1000E9D0 remains the unique native reader;
+            // unknown/missing retains the previous three-state declaration.
+            let value = match sounds.read_ares_reference(ini.section_or_empty(section), key) {
+                None => current,
+                Some(None) => api::NullableResourceName::Clear,
+                Some(Some(name)) => api::NullableResourceName::Named(name),
+            };
+            return serde_json::to_vec(&value).map_err(|e| e.to_string());
+        }
         if reader == "rules-registry-view" {
             return self.registry_view_bytes().map(<[u8]>::to_vec);
         }
@@ -529,6 +569,13 @@ impl HostServices for NativeHost {
     }
 
     fn registry(&self, name: &str) -> Vec<String> {
+        if name == "$sounds" {
+            return if self.fixed_sounds().is_ok() {
+                vec!["FixedSounds".into()]
+            } else {
+                Vec::new()
+            };
+        }
         if name == "$cameos" {
             return if self.cameo_inputs && self.ini.is_some() && self.registries.is_some() {
                 vec!["Cameos".into()]

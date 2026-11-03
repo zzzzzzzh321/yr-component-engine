@@ -57,7 +57,8 @@ impl AdmittedComponent {
             || manifest
                 .hooks
                 .contains(&api::HookKind::LoadingThemeResource)
-            || manifest.hooks.contains(&api::HookKind::CameoResource))
+            || manifest.hooks.contains(&api::HookKind::CameoResource)
+            || manifest.hooks.contains(&api::HookKind::TypeSoundResource))
             && !manifest.hooks.contains(&api::HookKind::ConfigureBoundary)
         {
             return Err(
@@ -270,7 +271,10 @@ impl Program {
     }
 
     pub(crate) fn has_early_configuration(&self) -> bool {
-        self.has_country_read() || self.has_loading_theme_resource() || self.has_cameo_resource()
+        self.has_country_read()
+            || self.has_loading_theme_resource()
+            || self.has_cameo_resource()
+            || self.has_type_sound_resource()
     }
 
     /// Query the selected physical source using the accepted configuration.
@@ -561,6 +565,9 @@ impl Program {
         if self.has_cameo_resource() {
             host = host.enable_cameo_inputs();
         }
+        if self.has_type_sound_resource() {
+            host = host.enable_type_sound_inputs();
+        }
         if self.has_faction_resource() {
             host = host.enable_faction_inputs();
         }
@@ -636,6 +643,26 @@ impl Program {
         self.manifest
             .hooks
             .contains(&api::HookKind::FoundationResource)
+    }
+
+    pub(crate) fn has_type_sound_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::TypeSoundResource)
+    }
+
+    pub(crate) fn type_sound_resource_policy(
+        &self,
+    ) -> Result<Option<api::TypeSoundResourcePolicy>, String> {
+        if !self.has_type_sound_resource() {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate(
+                Context::TypeSoundResource(api::TypeSoundResourceContext {}),
+                &[],
+            )?
+            .type_sound_resource)
     }
 
     pub(crate) fn has_cameo_resource(&self) -> bool {

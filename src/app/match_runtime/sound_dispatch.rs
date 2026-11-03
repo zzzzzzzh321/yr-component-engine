@@ -25,6 +25,10 @@ mod sound_boundary_tests;
 #[path = "building_death_sound_tests.rs"]
 mod building_death_sound_tests;
 
+#[cfg(test)]
+#[path = "promotion_sound_sdk_tests.rs"]
+mod promotion_sound_sdk_tests;
+
 /// Adapt the Simulation-owned normal Select voice request to the existing
 /// audio event queue. Its Main RNG admission and draw belong to Simulation;
 /// device playback and pending voice replacement remain in audio.

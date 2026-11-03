@@ -323,6 +323,8 @@ impl SoundEntry {
 /// Registry of all sound definitions, keyed by uppercase sound ID.
 #[derive(Debug, Clone, Default)]
 pub struct SoundRegistry {
+    /// Identity of the selected immutable SOUNDMD input, before sample admission.
+    source_hash: u64,
     entries: HashMap<String, SoundEntry>,
     /// First registration order in the native Voc array. Entries owns each
     ///definition; duplicate reads update it without moving this retained ID.
@@ -362,6 +364,7 @@ impl SoundRegistry {
     /// index, as `AddSample @ 0x004064A0` does: startup builds the index
     /// (`52BBC7 -> 406CE8`) before Init_Game reads SOUNDMD (`52C796`).
     pub fn from_ini_admitting(ini: &IniFile, index: Option<&AudioIndex>) -> Self {
+        let source_hash = ini.content_hash();
         let mut entries: HashMap<String, SoundEntry> = HashMap::new();
         let mut native_order = Vec::new();
         let defaults = SoundDefaults::read(ini.section("Defaults"));
@@ -371,6 +374,7 @@ impl SoundRegistry {
         let Some(list) = ini.section("SoundList") else {
             log::info!("SoundRegistry: no [SoundList] section, 0 sound definitions");
             return Self {
+                source_hash,
                 entries,
                 native_order,
                 defaults,
@@ -405,10 +409,17 @@ impl SoundRegistry {
 
         log::info!("SoundRegistry: loaded {} sound definitions", entries.len());
         Self {
+            source_hash,
             entries,
             native_order,
             defaults,
         }
+    }
+
+    /// Parsed identity of the process-selected SOUNDMD source; a synthetic
+    /// default catalog has no selected source and reports zero.
+    pub fn source_hash(&self) -> u64 {
+        self.source_hash
     }
 
     /// Look up a sound entry by ID (case-insensitive).
@@ -438,7 +449,6 @@ impl SoundRegistry {
     /// Ares NullableIdx<Voc>1000E9D0: ReadString2048, FindIndex7514D0
     /// through1000D520, then none only if lookup failed. A registered name
     /// spelled `none` is still a cue. Unset and explicit -1 stay distinct.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_reference(
         &self,
         section: &IniSection,

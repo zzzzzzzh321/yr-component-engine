@@ -189,7 +189,7 @@ impl Simulation {
     /// AI-counter increment and queued-mission promotion at the verified
     /// per-category AI position (see `Simulation::mission_host_promote`).
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn object_ai_stage(&mut self, rules: Option<&RuleSet>) {
+    pub fn object_ai_stage(&mut self, rules: Option<&RuleSet>) {
         self.object_ai_stage_with(rules, ObjectAiCtx::default());
     }
 
@@ -1067,7 +1067,6 @@ fn veterancy_promotion_step(
     // elite10046C12..10046C2D choose the TypeExt NullableIdx<Voc> before
     // the same ordered sound/EVA dispatch10046D2F..10046D56. Unset uses
     // Rules+228/+22C; an explicit -1 suppresses sound, not the EVA.
-    #[cfg(feature = "ares")]
     let sound = interner
         .object_type_in_category(entity.type_ref(), entity.category().into(), rules)
         .and_then(|object| {
