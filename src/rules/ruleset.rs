@@ -9078,7 +9078,12 @@ impl RuleSet {
     }
 
     /// `File.Taunt=` for a HouseType country index (the taunt byte's field).
+    /// Ares PlayTaunt1001CAD0/1001CB07..1E selects CountryExt+6C by the
+    /// actual array ordinal, including duplicate truncated stored IDs.
     pub fn country_taunt_pattern_by_index(&self, index: u16) -> Option<&str> {
+        if let Some(policy) = self.external_country_faction_by_index(CountryIdx(index)) {
+            return policy.and_then(|policy| policy.presentation.taunt.as_deref());
+        }
         let id = self.country_name(CountryIdx(index))?;
         self.country_taunt_pattern(id)
     }

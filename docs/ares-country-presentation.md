@@ -1,7 +1,9 @@
 # Ares country presentation
 
-Build with `--features ares`. This covers the Ares 3.0 country keys that the
-shell, loading screen and taunt stream consume. The ten stock Country IDs
+Ordinary builds consume these Ares 3.0 country keys through the matching
+`vera20k-ares.wasm` faction policy. The retained `--features ares` profile
+also supplies the legacy reader. The shell, loading screen and taunt stream
+use their existing resource and presentation owners. The ten stock Country IDs
 (`Americans` … `YuriCountry`) keep their stock presentation wherever they sit
 in `[Countries]`; any other ID takes the installed DLL's unknown-country
 defaults.
@@ -59,10 +61,21 @@ describes.
   `obsi.pcx`.
 - `app::input::taunt` and `SfxPlayer::play_taunt` substitute the taunt
   number into the country pattern; a missing custom pattern falls back to the
-  stock byte mapping only for indices 0..9.
+  stock byte mapping only for indices 0..9. The received country ordinal
+  selects the frozen policy directly, so repeated truncated Country IDs do
+  not redirect it to the first matching name (`PlayTaunt1001CAD0`,
+  `1001CB07..1E`). The SFX owner checks the loose install file first and
+  otherwise the existing MIX lookup, then uses the common WAV decoder.
+  A present but invalid loose WAV does not retry the MIX file
+  (`StreamPlayer::PlayFile407BB1..407C58`).
 
 ## Residuals
 
+- Explicitly cleared `File.Taunt` currently falls back to the stock byte
+  mapping; Ares passes the empty filename to PlayFile instead. The existing
+  1..8 taunt-number guard and replacement of every `~~` (or `%02i`) are also
+  retained; Ares accepts 0..9 and has different complex-template behavior.
+  Normal single-placeholder templates remain supported.
 - **Observer art** (`File.ObserverFlag`, `File.ObserverBackground`,
   `File.ObserverFlagAltPalette`) is parsed, defaulted and inherited, but no
   renderer consumes it. The installed DLL hooks the two drawing sites inside
@@ -95,6 +108,7 @@ describes.
 - A negative `RandomSelectionWeight`/`AIRandomSelectionWeight` is treated as
   ineligible. Ares casts the signed field to unsigned in its distribution,
   which is an authoring error rather than a usable exclusion (use 0).
-- Country presentation state is process/GUI state, not part of the simulation
-  CRC. It is retained by the live Rules owner and rebuilt from the same
-  Country reader on a new start.
+- Country presentation uses the live Rules owner's accepted configuration.
+  The component identity and frozen configuration participate in the existing
+  Program hash and save validation; restoring a save requires the same
+  component. UI and audio playback keep their original live state owners.

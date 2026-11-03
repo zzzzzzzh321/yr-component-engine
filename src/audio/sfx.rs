@@ -1987,29 +1987,13 @@ impl SfxPlayer {
     /// RESIDUAL: the suppress counter `[0x00B1D480]` is taken as 0; its
     /// writers `0x00753520`/`0x00753540` have no direct caller.
     pub(crate) fn play_taunt(&mut self, byte: u8, assets: &AssetManager, pattern: Option<&str>) {
-        const COUNTRIES: [&str; 10] = ["am", "ko", "fr", "ge", "br", "li", "ir", "cu", "ru", "yu"];
-        let number = byte & 0xF;
-        if !(1..=8).contains(&number) {
+        let Some(name) = select_taunt_filename(byte, pattern) else {
             return;
-        }
-        let name = match pattern {
-            Some(pattern) => taunt_filename(pattern, number),
-            None => {
-                let Some(country) = COUNTRIES.get(usize::from(byte >> 4)) else {
-                    return;
-                };
-                format!("taunts\\tau{country}{number:02}.wav")
-            }
         };
         if let Some(output) = self.taunt_player.take() {
             output.player.stop();
         }
-        let decoded = match assets.read_install_file(&name) {
-            Some(bytes) => decode_wav(&bytes, &name),
-            None => assets
-                .get_ref(&name)
-                .and_then(|bytes| decode_wav(bytes, &name)),
-        };
+        let decoded = load_taunt_audio(assets, &name);
         let Some(decoded) = decoded else {
             log::debug!("Taunt {name} is missing");
             return;
@@ -3000,6 +2984,35 @@ pub(crate) fn decode_wav(data: &[u8], filename: &str) -> Option<DecodedAudio> {
     })
 }
 
+/// SpeechSystem::PlayTaunt752B70 validates the low nibble before stopping
+/// the old stream. A supplied extension pattern keeps the original country
+/// byte behavior; the stock table remains restricted to its ten countries.
+pub(crate) fn select_taunt_filename(byte: u8, pattern: Option<&str>) -> Option<String> {
+    const COUNTRIES: [&str; 10] = ["am", "ko", "fr", "ge", "br", "li", "ir", "cu", "ru", "yu"];
+    let number = byte & 0xF;
+    if !(1..=8).contains(&number) {
+        return None;
+    }
+    Some(match pattern {
+        Some(pattern) => taunt_filename(pattern, number),
+        None => {
+            let country = COUNTRIES.get(usize::from(byte >> 4))?;
+            format!("taunts\\tau{country}{number:02}.wav")
+        }
+    })
+}
+
+/// PlayFile407BB1..407C58 tries CCFile only when RawFile is unavailable.
+/// An available but invalid loose WAV fails decoding without retrying MIX.
+pub(crate) fn load_taunt_audio(assets: &AssetManager, name: &str) -> Option<DecodedAudio> {
+    match assets.read_install_file(name) {
+        Some(bytes) => decode_wav(&bytes, name),
+        None => assets
+            .get_ref(name)
+            .and_then(|bytes| decode_wav(bytes, name)),
+    }
+}
+
 /// Ares `File.Taunt=` uses the literal `~~` marker; the stock defaults use
 /// `%02i`. Either placeholder receives the two-digit taunt number.
 fn taunt_filename(pattern: &str, number: u8) -> String {
@@ -3010,6 +3023,9 @@ fn taunt_filename(pattern: &str, number: u8) -> String {
         pattern.replace("%02i", &number)
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::build_test_wav;
 
 #[cfg(test)]
 mod tests {
@@ -4700,7 +4716,7 @@ mod tests {
         assert!(player.arbiter.live_event_count() == 0);
     }
 
-    pub(super) fn build_test_wav(
+    pub(crate) fn build_test_wav(
         sample_rate: u32,
         bits: u16,
         channels: u16,

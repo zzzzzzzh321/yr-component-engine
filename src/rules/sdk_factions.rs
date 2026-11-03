@@ -94,9 +94,16 @@ impl RuleSet {
     }
 
     pub(super) fn external_country_faction(&self, country: &str) -> Option<Option<&FrozenCountry>> {
+        self.external_country_faction_by_index(self.country_index(country)?)
+    }
+
+    pub(super) fn external_country_faction_by_index(
+        &self,
+        country: super::CountryIdx,
+    ) -> Option<Option<&FrozenCountry>> {
         self.external_factions
             .countries
-            .get(self.country_index(country)?.0 as usize)?
+            .get(usize::from(country.0))?
             .as_ref()
             .map(|policy| policy.as_ref())
     }

@@ -1,4 +1,4 @@
-//! Real component source/consumer joins. No window, device or second Side state.
+//! Real Side/Country component source/consumer joins. No window or audio device.
 #![cfg(not(feature = "ares"))]
 use crate::app::process_assets::ProcessAssets;
 use crate::assets::asset_manager::{
@@ -34,7 +34,11 @@ fn fixture(
     .into_iter()
     .chain(files.iter().copied())
     {
-        std::fs::write(directory.path().join(name), bytes).unwrap();
+        let path = directory.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
     }
     if let Some(module) = module {
         std::fs::write(directory.path().join("gameplay.wasm"), module).unwrap();
@@ -382,4 +386,117 @@ fn sdk_side_score_model_keeps_one_live_snapshot_through_type_reset_and_theme_pla
         .as_i64()
         .unwrap() as i32;
     assert_eq!(theme.slots().retained, expected);
+}
+
+#[test]
+#[ignore = "requires the real .18 component in VERA_SDK_SIDE_PRESENTATION_WASM"]
+fn sdk_country_taunt_uses_the_received_ordinal_through_file_decode() {
+    use crate::audio::sfx::{build_test_wav, load_taunt_audio, select_taunt_filename};
+    use crate::rules::ruleset::CountryIdx;
+    let wasm = component("VERA_SDK_SIDE_PRESENTATION_WASM");
+    // Full-input Find misses the stored24-byte ID twice; the children visit
+    // their parent before and after its first body, as in the live menu case.
+    let root = "[Countries]\n0=ABCDEFGHIJKLMNOPQRSTUVWXY\n1=PARENT\n2=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+        [Sides]\nGDI=PARENT\n[ABCDEFGHIJKLMNOPQRSTUVWX]\nSide=GDI\nParentCountry=PARENT\n\
+        [PARENT]\nSide=GDI\nFile.Taunt=parent~~.wav\n";
+    let parent = build_test_wav(22050, 16, 1, &[0; 8]);
+    let stock = build_test_wav(11025, 16, 1, &[0; 8]);
+    for (label, module, root, extended) in [
+        (
+            "taunt-ordinal",
+            Some(wasm.as_slice()),
+            root.to_owned(),
+            true,
+        ),
+        ("taunt-no-module", None, root.to_owned(), false),
+        (
+            "taunt-stock",
+            Some(wasm.as_slice()),
+            format!("{root}[VeraFeatures]\nAresFaction=no\n"),
+            false,
+        ),
+    ] {
+        let (_directory, mut process) = fixture(
+            label,
+            &root,
+            module,
+            &[("parent03.wav", &parent), ("taunts/taufr03.wav", &stock)],
+        );
+        let (rules, _) = load(&mut process, "");
+        assert_eq!(
+            rules.country_name(CountryIdx(0)),
+            rules.country_name(CountryIdx(2))
+        );
+        let pattern = rules.country_taunt_pattern_by_index(2);
+        if extended {
+            assert_eq!(
+                rules.country_taunt_pattern_by_index(0),
+                Some("taunts\\tauam%02i.wav")
+            );
+            assert_eq!(pattern, Some("parent~~.wav"));
+        } else {
+            assert_eq!(pattern, None);
+        }
+        // The same packed byte used by app::input::taunt::receive.
+        let name = select_taunt_filename(0x23, pattern).unwrap();
+        assert_eq!(
+            name,
+            if extended {
+                "parent03.wav"
+            } else {
+                "taunts\\taufr03.wav"
+            }
+        );
+        let decoded = load_taunt_audio(process.manager().unwrap(), &name).unwrap();
+        assert_eq!(decoded.sample_rate, if extended { 22050 } else { 11025 });
+        assert!(!decoded.samples.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "requires the real .18 component in VERA_SDK_SIDE_PRESENTATION_WASM"]
+fn sdk_country_taunt_keeps_loose_mix_and_decode_failure_precedence() {
+    use crate::audio::sfx::{build_test_wav, load_taunt_audio, select_taunt_filename};
+    let wasm = component("VERA_SDK_SIDE_PRESENTATION_WASM");
+    let loose = build_test_wav(44100, 16, 1, &[0; 8]);
+    let archived = build_test_wav(32000, 16, 1, &[0; 8]);
+    let mix = make_new_format_mix_bytes(&[
+        ("Taunts\\sound01.wav", &archived),
+        ("Taunts\\sound02.wav", &archived),
+        ("Taunts\\sound03.wav", &archived),
+    ]);
+    // Repeated physical sections are retained rather than merged: put the
+    // key into the same Country body that owns its primary read.
+    let root = ROOT.replace(
+        "[FourthCountry]\nSide=FourthSynthetic\n",
+        "[FourthCountry]\nSide=FourthSynthetic\nFile.Taunt=Taunts\\sound~~.wav\n",
+    );
+    let (_directory, mut process) = fixture(
+        "taunt-files",
+        &root,
+        Some(&wasm),
+        &[
+            ("expandmd99.mix", &mix),
+            ("Taunts/sound01.wav", &loose),
+            ("Taunts/sound03.wav", b"invalid WAV"),
+        ],
+    );
+    let (rules, _) = load(&mut process, "");
+    let pattern = rules.country_taunt_pattern_by_index(3);
+    assert_eq!(pattern, Some("Taunts\\sound~~.wav"));
+    let assets = process.manager().unwrap();
+    // Nested loose files are outside the startup top-level catalog. The
+    // fallback really contains valid bytes even for the corrupt loose winner.
+    assert_eq!(
+        assets.get_ref("Taunts\\sound03.wav"),
+        Some(archived.as_slice())
+    );
+    for (byte, rate) in [(0x31, Some(44100)), (0x32, Some(32000)), (0x33, None)] {
+        let name = select_taunt_filename(byte, pattern).unwrap();
+        assert_eq!(
+            load_taunt_audio(assets, &name).map(|audio| audio.sample_rate),
+            rate,
+            "{name}"
+        );
+    }
 }
