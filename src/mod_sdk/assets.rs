@@ -2,45 +2,58 @@
 //! never replayed against current assets when restoring a saved match.
 use super::Program;
 use crate::rules::ini_parser::IniFile;
-use serde::Deserialize;
 use std::sync::Arc;
 use vera_mod_api as api;
 
-/// Resource-owned declaration; paths remain logical asset names.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Declaration {
-    api_version: u32,
-    program: String,
-    sha256: String,
+use super::program::AdmittedComponent;
+use crate::assets::startup_resources::StartupComponentIdentity;
+
+/// One declaration parser for both the early frontier and the original binder.
+pub(super) fn read_declaration(
+    assets: &crate::assets::asset_manager::AssetManager,
+) -> Result<Option<StartupComponentIdentity>, String> {
+    let Some(bytes) = assets.get_ref("vera-mod.json") else {
+        return Ok(None);
+    };
+    if bytes.len() > 16 * 1024 {
+        return Err("mod declaration too large".into());
+    }
+    let identity: StartupComponentIdentity =
+        serde_json::from_slice(&bytes).map_err(|e| format!("mod declaration: {e}"))?;
+    if identity.api_version != api::API_VERSION
+        || !crate::assets::community::valid_package_name(&identity.program)
+    {
+        return Err("invalid mod declaration".into());
+    }
+    Ok(Some(identity))
+}
+
+pub(super) fn read_program_bytes(
+    assets: &crate::assets::asset_manager::AssetManager,
+    identity: &StartupComponentIdentity,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(bytes) = assets.get_ref(&identity.program) else {
+        return Ok(None);
+    };
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("gameplay component too large".into());
+    }
+    if crate::util::sha256::sha256_hex(&bytes) != identity.sha256 {
+        return Err("component content digest mismatch".into());
+    }
+    Ok(Some(bytes.to_vec()))
 }
 
 fn asset_program(
     assets: &crate::assets::asset_manager::AssetManager,
-) -> Result<Option<(String, Vec<u8>)>, String> {
-    let Some(declaration) = assets.get_ref("vera-mod.json") else {
+) -> Result<Option<AdmittedComponent>, String> {
+    let Some((identity, bytes, early)) = super::startup::resolve_program_bytes(assets, false)?
+    else {
         return Ok(None);
     };
-    if declaration.len() > 16 * 1024 {
-        return Err("mod declaration too large".into());
-    }
-    let declaration: Declaration =
-        serde_json::from_slice(&declaration).map_err(|e| format!("mod declaration: {e}"))?;
-    if declaration.api_version != api::API_VERSION
-        || !crate::assets::community::valid_package_name(&declaration.program)
-    {
-        return Err("invalid mod declaration".into());
-    }
-    let bytes = assets
-        .get_ref(&declaration.program)
-        .ok_or_else(|| format!("missing gameplay component {}", declaration.program))?;
-    if bytes.len() > 16 * 1024 * 1024 {
-        return Err("gameplay component too large".into());
-    }
-    if crate::util::sha256::sha256_hex(&bytes) != declaration.sha256 {
-        return Err("component content digest mismatch".into());
-    }
-    Ok(Some((declaration.sha256, bytes.to_vec())))
+    let admitted = AdmittedComponent::load(bytes, &identity.sha256)?;
+    super::startup::require_startup_frontier(&admitted, early)?;
+    Ok(Some(admitted))
 }
 
 pub(crate) fn load_from_assets(
@@ -73,21 +86,20 @@ pub(crate) fn load_from_assets_for_process(
     seed: Option<&Program>,
     steps: &[crate::rules::native_processing::SdkConfigurationStep],
 ) -> Result<Option<Arc<Program>>, String> {
-    let Some((digest, bytes)) = asset_program(assets)? else {
+    let Some(admitted) = asset_program(assets)? else {
         return Ok(None);
     };
-    Program::load_with_process_context(
-        bytes,
-        &digest,
-        passes,
-        object_types,
-        warheads,
-        weapons,
-        registries,
-        seed,
-        steps,
-    )
-    .map(|p| Some(Arc::new(p)))
+    admitted
+        .configure(
+            passes,
+            object_types,
+            warheads,
+            weapons,
+            registries,
+            seed,
+            steps,
+        )
+        .map(|p| Some(Arc::new(p)))
 }
 
 /// Restore the exact saved configuration after projecting retained Rules.
@@ -102,7 +114,7 @@ pub fn adopt_saved_program(
         (None, None) => {
             rules.external_mod = None;
         }
-        (Some(saved), Some((digest, _))) if saved.sha256() == digest => {
+        (Some(saved), Some(admitted)) if saved.sha256() == admitted.digest() => {
             saved.validate_restore()?;
             rules.external_mod = Some(Arc::new(saved.clone()));
         }

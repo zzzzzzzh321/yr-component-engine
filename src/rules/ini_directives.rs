@@ -111,6 +111,25 @@ impl DirectiveOptions {
         }
     }
 
+    /// Asset-backed readers share one startup choice. Phobos's independent
+    /// dialect and the traversal/inheritance options retain their own policy.
+    pub fn production_for(assets: &crate::assets::asset_manager::AssetManager) -> Self {
+        Self {
+            ares: assets
+                .hash_include_override()
+                .unwrap_or(crate::rules::ARES_ENABLED),
+            ..Self::production()
+        }
+    }
+
+    /// Disabling one include dialect does not disable the existing section
+    /// inheritance adapter. An untouched bare provider keeps its raw path.
+    pub fn production_is_active(assets: &crate::assets::asset_manager::AssetManager) -> bool {
+        crate::rules::ARES_ENABLED
+            || crate::rules::PHOBOS_ENABLED
+            || assets.hash_include_override().is_some()
+    }
+
     /// Whether these options expand any include list `ini` carries.
     pub(crate) fn expands_includes(self, ini: &IniFile) -> bool {
         select_include_dialect(ini, self).is_some()

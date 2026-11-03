@@ -19,6 +19,7 @@ use crate::app::shell_network_setup::maps::{self as shared, GeneratedMapManifest
 use crate::app::shell_network_setup::{self as setup, NetworkSetupRequest};
 use crate::map::source::{LoadedTransferAsset, TransferMapSource, TransferResource};
 use crate::net::lan_messages::SessionScope;
+use crate::rules::ini_parser::directives::DirectiveOptions;
 
 pub(super) const MAGIC: &[u8; 4] = b"VLMP";
 // 4 magic + kind + epoch16 + options revision8 + identity32 + resource + offset4.
@@ -309,6 +310,7 @@ struct Job {
     generation: u64,
     asset: Asset,
     action: JobAction,
+    directives: DirectiveOptions,
 }
 enum IoValue {
     Bytes(Vec<u8>),
@@ -339,21 +341,23 @@ impl Worker {
                             .map(IoValue::Bytes)
                             .map_err(|_| ()),
                         JobAction::Cached(directory) => Ok(IoValue::Cached(
-                            crate::map::source::load_received_asset(
+                            crate::map::source::load_received_asset_with_options(
                                 &directory,
                                 &asset.digest,
                                 asset.total,
                                 asset.resource,
+                                job.directives,
                             )
                             .ok(),
                         )),
                         JobAction::Install(directory, bytes) => {
-                            crate::map::source::install_received_asset(
+                            crate::map::source::install_received_asset_with_options(
                                 &directory,
                                 bytes,
                                 &asset.digest,
                                 asset.total,
                                 asset.resource,
+                                job.directives,
                             )
                             .map(IoValue::Installed)
                             .map_err(|_| ())
@@ -396,6 +400,9 @@ enum Flow {
 pub(super) struct Transfers {
     generation: u64,
     key: Option<Key>,
+    /// Copied from the work's real asset owner while selecting this scope.
+    /// The worker cannot reconstruct these choices from compile-time flags.
+    directives: Option<DirectiveOptions>,
     resource: usize,
     flow: Flow,
     worker: Option<Worker>,
@@ -443,6 +450,7 @@ impl Transfers {
     pub(super) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.key = None;
+        self.directives = None;
         self.resource = 0;
         self.flow = Flow::Idle;
         self.pending_job = None;
@@ -462,6 +470,12 @@ impl Transfers {
         if self.key.as_ref() == Some(&key) {
             return Ok(());
         }
+        let directives = DirectiveOptions::production_for(
+            state
+                .process_assets
+                .manager()
+                .ok_or_else(|| anyhow!("assets missing"))?,
+        );
         shared::accept_generated_manifest(
             state,
             self.key.as_ref().and_then(|key| key.generated.as_ref()),
@@ -473,6 +487,7 @@ impl Transfers {
             .ok_or_else(|| anyhow!("LAN asset generation exhausted"))?;
         self.resource = 0;
         self.flow = Flow::Inspect;
+        self.directives = Some(directives);
         self.pending_job = None;
         self.deadline = Some(Instant::now() + TRANSFER_TIMEOUT);
         self.host_bytes.clear();
@@ -490,6 +505,9 @@ impl Transfers {
     }
 
     fn queue_job(&mut self, asset: Asset, action: JobAction) -> Result<()> {
+        let directives = self
+            .directives
+            .ok_or_else(|| anyhow!("LAN asset scope has no source policy"))?;
         if self.worker.is_none() {
             self.worker = Some(Worker::new()?);
         }
@@ -497,6 +515,7 @@ impl Transfers {
             generation: self.generation,
             asset,
             action,
+            directives,
         });
         Ok(())
     }
@@ -1104,6 +1123,83 @@ mod tests {
                 Instant::now() < deadline,
                 "LAN asset datagram did not arrive"
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires VERA_SDK_STARTUP_WASM"]
+    fn startup_component_lan_worker_installs_and_reuses_include_root() {
+        use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
+        use crate::map::source::{self, LoadedMapIni, TransferContent};
+        use crate::util::sha256::sha256_hex;
+
+        assert!(!crate::rules::ARES_ENABLED, "exercise the ordinary engine");
+        let root = audio_test_install("sdk-lan-include");
+        let wasm = std::fs::read(std::env::var_os("VERA_SDK_STARTUP_WASM").unwrap()).unwrap();
+        std::fs::write(root.path().join("gameplay.wasm"), &wasm).unwrap();
+        std::fs::write(
+            root.path().join("vera-mod.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": 1,
+                "program": "gameplay.wasm",
+                "sha256": sha256_hex(&wasm),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("child.ini"),
+            source::test_support::SOURCE_TEST_MAP,
+        )
+        .unwrap();
+        let assets =
+            crate::mod_sdk::open_active_assets(root.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .unwrap();
+        let mut transfers = Transfers {
+            directives: Some(DirectiveOptions::production_for(&assets)),
+            ..Default::default()
+        };
+        let bytes = b"[#include]\n0=child.ini\n";
+        let asset = key(TransferResource::Map, bytes).assets.remove(0);
+        let cache = root.path().join("cache");
+        for action in [
+            JobAction::Install(cache.clone(), bytes.to_vec()),
+            JobAction::Cached(cache),
+        ] {
+            transfers.queue_job(asset.clone(), action).unwrap();
+            let worker = transfers.worker.as_ref().unwrap();
+            assert!(
+                worker
+                    .requests
+                    .send(transfers.pending_job.take().unwrap())
+                    .is_ok()
+            );
+            let completion = worker
+                .responses
+                .recv_timeout(Duration::from_secs(15))
+                .unwrap();
+            let loaded = match completion.result.unwrap() {
+                IoValue::Installed(loaded) | IoValue::Cached(Some(loaded)) => loaded,
+                _ => panic!("LAN worker must admit both downloaded and cached include roots"),
+            };
+            assert_eq!(
+                loaded.source.physical_identity(),
+                Some((bytes.len(), asset.digest.as_str()))
+            );
+            let TransferContent::Scenario(ini) = loaded.content else {
+                panic!("authored map");
+            };
+            let loaded = source::resolve_network_map_ini(
+                LoadedMapIni {
+                    ini,
+                    source: loaded.source,
+                },
+                &assets,
+                false,
+                "included.map",
+            )
+            .unwrap();
+            source::validate_network_map_content(&loaded.ini, false).unwrap();
         }
     }
 

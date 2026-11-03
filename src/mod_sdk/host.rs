@@ -5,6 +5,25 @@ use std::sync::{Arc, OnceLock};
 use vera_mod_api as api;
 use vera_mod_runtime::HostServices;
 
+/// Early recipes have no source, configuration, numeric or simulation services.
+/// Their only input is the closed stage context supplied in the request.
+pub(super) struct StartupHost;
+
+impl HostServices for StartupHost {
+    fn config(&self, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    fn config_read(&self, _: &str, _: &str, _: &str, _: &[u8]) -> Result<Vec<u8>, String> {
+        Err("configuration is unavailable to startup recipes".into())
+    }
+    fn registry(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn damage_kernel(&self, _: &api::DamageKernelInput) -> Result<i32, String> {
+        Err("numeric services are unavailable to startup recipes".into())
+    }
+}
+
 pub(super) struct NativeHost {
     ini: Option<Arc<IniFile>>,
     weapons: Vec<String>,

@@ -18,6 +18,7 @@ use crate::assets::audio_bag::AudioIndex;
 use crate::assets::error::AssetError;
 use crate::assets::mix_archive::{MixArchive, SharedBytes};
 use crate::assets::mix_hash::mix_hash;
+use crate::assets::startup_resources::{AudioCatalogPolicy, AudioPair, StartupResources};
 
 #[cfg(all(test, feature = "ares"))]
 #[path = "asset_manager_ares_sidebar_tests.rs"]
@@ -168,7 +169,6 @@ pub struct LoadedAudioIndex {
     pub index: AudioIndex,
     pub sources: AudioIndexSources,
     /// Further admitted pairs in append order. The first remains `sources`.
-    #[cfg(feature = "ares")]
     pub additional_sources: Vec<AudioIndexSources>,
 }
 
@@ -188,7 +188,6 @@ pub fn load_audio_index_pair(
     Ok(LoadedAudioIndex {
         index,
         sources,
-        #[cfg(feature = "ares")]
         additional_sources: Vec::new(),
     })
 }
@@ -287,6 +286,8 @@ pub struct AssetManager {
     loose_files: HashMap<String, LooseAsset>,
     /// Selected at AudioSystem::Init, before later bulk/theater mounts.
     audio_pairs: Vec<SelectedAudioPair>,
+    /// Frozen plain choices, admitted at the same early provider prefix as audio.
+    startup_resources: StartupResources,
     /// Frozen root-file policy shared by Rules, Art, AI and tooling.
     ini_roots: crate::util::ini_roots::IniRoots,
     /// Currently registered theater identity and its archive names.
@@ -318,6 +319,7 @@ impl Clone for AssetManager {
             ),
             loose_files: self.loose_files.clone(),
             audio_pairs: self.audio_pairs.clone(),
+            startup_resources: self.startup_resources.clone(),
             ini_roots: self.ini_roots.clone(),
             active_theater: self.active_theater.clone(),
             active_theater_archives: self.active_theater_archives.clone(),
@@ -462,6 +464,32 @@ impl AssetManager {
         &self.ini_roots
     }
 
+    pub fn startup_resources(&self) -> &StartupResources {
+        &self.startup_resources
+    }
+
+    pub fn hash_include_override(&self) -> Option<bool> {
+        self.startup_resources.hash_include
+    }
+
+    pub fn load_active_csf(&self) -> Result<crate::assets::csf_file::CsfFile, AssetError> {
+        self.load_active_csf_with_sources().map(|(table, _)| table)
+    }
+
+    /// App and default diagnostics consume the same table and candidate receipt.
+    /// The provider runs only after the required base CSF parsed successfully.
+    pub fn load_active_csf_with_sources(
+        &self,
+    ) -> Result<(crate::assets::csf_file::CsfFile, Vec<String>), AssetError> {
+        crate::assets::csf_file::CsfFile::load_active_with_policy(
+            |name| self.get_ref(name),
+            |language| match &self.startup_resources.strings {
+                Some(provider) => provider(language),
+                None => Ok(None),
+            },
+        )
+    }
+
     /// Read-only INI tooling without a complete retail installation. No game
     /// archives are implicitly registered; the probe may explicitly use the
     /// existing load_all_disk_mixes widening. Not a gameplay constructor.
@@ -473,6 +501,7 @@ impl AssetManager {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: Self::open_loose_root(ra2_dir)?,
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -491,7 +520,27 @@ impl AssetManager {
 
     /// Load the core runtime archive stack for one native media-selection mode.
     pub fn new(ra2_dir: &Path, media_mode: MediaArchiveMode) -> Result<Self, AssetError> {
-        Self::open_startup_archives(ra2_dir, media_mode, StartupArchivePolicy::OptionalWarnings)
+        Self::open_startup_archives(
+            ra2_dir,
+            media_mode,
+            StartupArchivePolicy::OptionalWarnings,
+            |_| Ok(StartupResources::default()),
+        )
+    }
+
+    /// Admit plain startup choices before AudioIndex selects its providers.
+    /// The callback sees only archives registered at that original boundary.
+    pub fn new_with_startup_admission(
+        ra2_dir: &Path,
+        media_mode: MediaArchiveMode,
+        admit: impl FnOnce(&Self) -> Result<StartupResources, AssetError>,
+    ) -> Result<Self, AssetError> {
+        Self::open_startup_archives(
+            ra2_dir,
+            media_mode,
+            StartupArchivePolicy::OptionalWarnings,
+            admit,
+        )
     }
 
     /// Inspect the ordinary startup stack while retaining readable archives for
@@ -507,6 +556,7 @@ impl AssetManager {
             ra2_dir,
             media_mode,
             StartupArchivePolicy::Inspect(&mut issues),
+            |_| Ok(StartupResources::default()),
         )?;
         Ok((manager, issues))
     }
@@ -515,6 +565,7 @@ impl AssetManager {
         ra2_dir: &Path,
         media_mode: MediaArchiveMode,
         mut policy: StartupArchivePolicy<'_>,
+        admit: impl FnOnce(&Self) -> Result<StartupResources, AssetError>,
     ) -> Result<Self, AssetError> {
         let mut manager = Self::from_ini_probe_root(ra2_dir)?;
 
@@ -545,6 +596,7 @@ impl AssetManager {
             manager.mount_startup_archive("audio.mix", false, &mut policy)?;
         }
 
+        manager.startup_resources = admit(&manager)?;
         manager.select_audio_pair();
 
         // Init_Mix_Files constructs only these named core archives. Optional
@@ -590,6 +642,25 @@ impl AssetManager {
         Ok(manager)
     }
 
+    fn effective_audio_policy(&self) -> AudioCatalogPolicy {
+        self.startup_resources.audio.clone().unwrap_or_else(|| {
+            if cfg!(feature = "ares") {
+                // Installed Audio_Load1005ADD0: audio, ares, audio01..99.
+                let pairs = ["audio".to_owned(), "ares".to_owned()]
+                    .into_iter()
+                    .chain((1..100).map(|i| format!("audio{i:02}")))
+                    .map(|stem| AudioPair {
+                        index: format!("{stem}.idx"),
+                        bag: format!("{stem}.bag"),
+                    })
+                    .collect();
+                AudioCatalogPolicy::OrderedPairs { pairs }
+            } else {
+                AudioCatalogPolicy::Retail
+            }
+        })
+    }
+
     /// Freeze the independent CCFile winners at native AudioIndex construction.
     /// `Init_Game @ 0x0052BBC7 -> AudioInit @ 0x00406B10 -> AudioIndex @ 0x004011C0` precedes bulk
     /// mounts at 0x0052C59C. `CCFile::Open @ 0x00473D10` chooses loose before registered
@@ -611,21 +682,18 @@ impl AssetManager {
                 },
             })
         };
-        #[cfg(not(feature = "ares"))]
-        let stems = vec!["audio".to_owned()];
-        // Installed hook4011C0 -> Audio_Load1005ADD0: audio, ares, audio01..99.
-        // Selection stays before bulk mounts. Executed native loop and merge:
-        // tools/rules_oracle/ares_audio_bags.{py,json,md}.
-        #[cfg(feature = "ares")]
-        let stems = ["audio".to_owned(), "ares".to_owned()]
+        let pairs = match self.effective_audio_policy() {
+            AudioCatalogPolicy::Retail => vec![AudioPair {
+                index: "audio.idx".into(),
+                bag: "audio.bag".into(),
+            }],
+            AudioCatalogPolicy::OrderedPairs { pairs } => pairs,
+        };
+        self.audio_pairs = pairs
             .into_iter()
-            .chain((1..100).map(|i| format!("audio{i:02}")))
-            .collect::<Vec<_>>();
-        self.audio_pairs = stems
-            .into_iter()
-            .map(|stem| SelectedAudioPair {
-                idx: select(&format!("{stem}.idx")),
-                bag: select(&format!("{stem}.bag")),
+            .map(|pair| SelectedAudioPair {
+                idx: select(&pair.index),
+                bag: select(&pair.bag),
             })
             .collect();
     }
@@ -667,8 +735,7 @@ impl AssetManager {
                 source.entry_id, source.source_archive
             ),
         };
-        #[cfg(not(feature = "ares"))]
-        {
+        if matches!(self.effective_audio_policy(), AudioCatalogPolicy::Retail) {
             let Some(pair) = self.audio_pairs.first() else {
                 return Ok(None);
             };
@@ -678,9 +745,7 @@ impl AssetManager {
             let idx_bytes = self.selected_audio_ref(idx).ok_or_else(|| missing(idx))?;
             let bag_bytes = self.selected_audio_ref(bag).ok_or_else(|| missing(bag))?;
             load_audio_index_pair(idx_bytes, bag_bytes).map(Some)
-        }
-        #[cfg(feature = "ares")]
-        {
+        } else {
             let mut indexes = Vec::new();
             let mut sources = Vec::new();
             for pair in &self.audio_pairs {
@@ -1981,6 +2046,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: AssetManager::open_loose_root(ra2_dir).expect("open loose test root"),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2019,6 +2085,37 @@ mod tests {
             manager.load_audio_index().unwrap().is_none(),
             "startup pair stays absent"
         );
+    }
+
+    #[test]
+    fn startup_admission_sees_the_original_audio_provider_prefix_once() {
+        let dir = audio_test_install("startup-audio-prefix");
+        let idx = crate::assets::audio_bag::test_support::build_idx(&[("late", 0, 2, 22050, 4)]);
+        write_audio_archive(&dir, "conqmd.mix", &idx, &[1, 2]);
+        let calls = std::cell::Cell::new(0);
+        let manager = AssetManager::new_with_startup_admission(
+            dir.path(),
+            MediaArchiveMode::STOCK_DIGITAL,
+            |prefix| {
+                calls.set(calls.get() + 1);
+                assert!(prefix.resolve_ref("audio.idx").is_none());
+                Ok(StartupResources {
+                    hash_include: Some(false),
+                    audio: Some(AudioCatalogPolicy::OrderedPairs {
+                        pairs: vec![AudioPair {
+                            index: "audio.idx".into(),
+                            bag: "audio.bag".into(),
+                        }],
+                    }),
+                    ..Default::default()
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(manager.hash_include_override(), Some(false));
+        assert!(manager.resolve_ref("audio.idx").is_some());
+        assert!(manager.load_audio_index().unwrap().is_none());
     }
 
     #[test]
@@ -2447,6 +2544,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: HashMap::new(),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2531,6 +2629,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: HashMap::new(),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2605,6 +2704,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: HashMap::new(),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2647,6 +2747,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: HashMap::new(),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2687,6 +2788,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: HashMap::new(),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2728,6 +2830,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: HashMap::new(),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2764,6 +2867,7 @@ mod tests {
                 },
             )]),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),
@@ -2821,6 +2925,7 @@ mod tests {
             mix_file_cache: Mutex::new(HashMap::new()),
             loose_files: HashMap::new(),
             audio_pairs: Vec::new(),
+            startup_resources: StartupResources::default(),
             ini_roots: Default::default(),
             active_theater: None,
             active_theater_archives: Vec::new(),

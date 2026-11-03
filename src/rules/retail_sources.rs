@@ -50,8 +50,9 @@ enum OptionalIniSelection {
 }
 
 pub fn select_ini(assets: &AssetManager, name: &str) -> Result<SelectedIni, String> {
-    if crate::rules::ARES_ENABLED || crate::rules::PHOBOS_ENABLED {
-        select_ini_with_options(assets, name, DirectiveOptions::production())
+    let options = DirectiveOptions::production_for(assets);
+    if DirectiveOptions::production_is_active(assets) {
+        select_ini_with_options(assets, name, options)
     } else {
         select_physical_ini(assets, name)
     }

@@ -5,7 +5,8 @@
 //! by tests — into one resolution order.
 //!
 //! ## Dependency rules
-//! - Depends on `assets/` and `util/config`. No render, sim, or app types.
+//! - Depends on `assets/`, `util/config` and the pure SDK startup bridge.
+//!   No render, sim or app types enter resource admission.
 
 use std::path::{Path, PathBuf};
 
@@ -62,8 +63,8 @@ fn check(dir: PathBuf, source: RootSource) -> Result<(PathBuf, RootSource), Stri
 /// tooling-only widening of the search set, so results found only that way are
 /// not what the game would resolve.
 pub fn open_manager(ra2_dir: &Path, all_mixes: bool) -> Result<AssetManager, String> {
-    let mut manager =
-        AssetManager::new(ra2_dir, MediaArchiveMode::STOCK_DIGITAL).map_err(|err| {
+    let mut manager = crate::mod_sdk::open_active_assets(ra2_dir, MediaArchiveMode::STOCK_DIGITAL)
+        .map_err(|err| {
             format!(
                 "could not mount archives under {}: {err}",
                 ra2_dir.display()

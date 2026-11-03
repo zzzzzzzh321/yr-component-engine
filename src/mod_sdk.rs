@@ -9,6 +9,8 @@ mod host;
 mod program;
 #[path = "mod_sdk/simulation.rs"]
 mod simulation;
+#[path = "mod_sdk/startup.rs"]
+mod startup;
 
 pub use assets::adopt_saved_program;
 pub(crate) use assets::{load_from_assets, load_from_assets_for_process};
@@ -17,6 +19,7 @@ pub(crate) use simulation::{
     attach_entity, live_entity_context, pre_receive_damage, preview_receive_damage, tick_entity,
     weapon_user,
 };
+pub use startup::{open_active_assets, reopen_active_assets};
 pub use vera_mod_api::{InputPolicy, Meter, Projection, Tint};
 
 #[path = "mod_sdk/acceptance.rs"]
@@ -24,3 +27,7 @@ pub mod acceptance;
 #[cfg(test)]
 #[path = "mod_sdk/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mod_sdk/startup_tests.rs"]
+mod startup_tests;

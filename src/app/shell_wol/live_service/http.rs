@@ -56,6 +56,7 @@ pub(super) enum Request {
         directory: PathBuf,
         digest: String,
         total: usize,
+        directive_options: crate::rules::ini_parser::directives::DirectiveOptions,
     },
     InstallMap {
         transfer: u64,
@@ -64,6 +65,7 @@ pub(super) enum Request {
         digest: String,
         total: usize,
         bytes: Vec<u8>,
+        directive_options: crate::rules::ini_parser::directives::DirectiveOptions,
     },
     OpenSession {
         attempt: u64,
@@ -556,10 +558,16 @@ pub(super) fn run(
                 directory,
                 digest,
                 total,
+                directive_options,
             }) => {
-                let loaded =
-                    crate::map::source::load_received_asset(&directory, &digest, total, resource)
-                        .ok();
+                let loaded = crate::map::source::load_received_asset_with_options(
+                    &directory,
+                    &digest,
+                    total,
+                    resource,
+                    directive_options,
+                )
+                .ok();
                 let _ = output.send(Response::CachedMap { transfer, loaded });
             }
             Some(Request::InstallMap {
@@ -569,9 +577,15 @@ pub(super) fn run(
                 digest,
                 total,
                 bytes,
+                directive_options,
             }) => {
-                let result = crate::map::source::install_received_asset(
-                    &directory, bytes, &digest, total, resource,
+                let result = crate::map::source::install_received_asset_with_options(
+                    &directory,
+                    bytes,
+                    &digest,
+                    total,
+                    resource,
+                    directive_options,
                 );
                 let response = match result {
                     Ok(loaded) => Response::MapInstalled { transfer, loaded },

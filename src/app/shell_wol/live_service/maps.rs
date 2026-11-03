@@ -258,6 +258,8 @@ impl Transfers {
             .process_assets
             .manager()
             .ok_or_else(|| anyhow!("assets missing"))?;
+        let directive_options =
+            crate::rules::ini_parser::directives::DirectiveOptions::production_for(assets);
         let metadata = state
             .match_state
             .session
@@ -322,6 +324,7 @@ impl Transfers {
                 directory,
                 digest: digest.to_owned(),
                 total,
+                directive_options,
             })?;
         }
         Ok(())
@@ -460,6 +463,13 @@ impl Transfers {
                         digest: digest.to_owned(),
                         total,
                         bytes: std::mem::take(&mut transfer.bytes),
+                        directive_options:
+                            crate::rules::ini_parser::directives::DirectiveOptions::production_for(
+                                state
+                                    .process_assets
+                                    .manager()
+                                    .ok_or_else(|| anyhow!("assets missing"))?,
+                            ),
                     })?;
                     transfer.in_flight = true;
                 }

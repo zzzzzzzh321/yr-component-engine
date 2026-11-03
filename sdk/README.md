@@ -3,12 +3,28 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.14.0 development candidate**, config version **14**, state version **1**;
+is the **0.15.0 development candidate**, config version **14**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
 
-The Foundation candidate adds `foundation_resource` for class-qualified Building
+The startup increment adds optional `startup_resources`: source composition,
+audio pairs and string supplements are selected before their original resource
+frontiers, separately from gameplay Configure. The component supplies bounded,
+ordered recipes; the existing host owns VFS resolution, Include expansion, audio
+index/BAG merging and CSF parsing. The admitted identity and bytes remain frozen
+across Rules binding and process-asset recovery. Old components without this hook
+keep the original profile fallback. A component needing startup resources must be
+visible before audio selection; a module found only in later archives is refused
+if it missed that frontier. Raw inspection remains separate from active admission.
+This bounded increment passed actual-component core and application checks,
+LAN worker install/cache and existing network controls, original PCM/text controls,
+legacy Ares resource tests, seven retail loading modes and previous-component
+loading. It does not establish full network, GUI/device output or performance parity.
+The opaque configuration remains version 14 and entity state version 1; retain
+matching old engine/component pairs for old full saves. See [startup recipes](api/src/startup.rs).
+
+The Foundation increment adds `foundation_resource` for class-qualified Building
 identities. A component selects a stock selector or a small immutable section
 reference into the process-selected fixed ART. The host validates its source hash,
 section and geometry, then publishes through the original Foundation owner before

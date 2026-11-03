@@ -186,8 +186,9 @@ fn query_report(
     }
     // Same owner/candidate admission as app/loading/init::load_csf; --source
     // deliberately bypasses composition so individual files remain inspectable.
-    let (csf, admitted) =
-        CsfFile::load_active(|name| asset_manager.get_ref(name)).map_err(|error| ErrorReport {
+    let (csf, admitted) = asset_manager
+        .load_active_csf_with_sources()
+        .map_err(|error| ErrorReport {
             error: error.to_string(),
             hint: None,
         })?;

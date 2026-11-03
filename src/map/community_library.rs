@@ -256,10 +256,18 @@ pub fn run(request: Request) -> Result<Value> {
             }
         }
     }
-    let mut assets = AssetManager::new(&retail, MediaArchiveMode::STOCK_DIGITAL)?;
-    let csf = assets
+    let mut assets = crate::mod_sdk::open_active_assets(&retail, MediaArchiveMode::STOCK_DIGITAL)?;
+    // Preserve this library's optional bad/missing-base fallback. Once its
+    // original base parser admits the table, component recipe failures are
+    // actual source errors and must not silently discard supplements.
+    let csf = if assets
         .get_ref("ra2md.csf")
-        .and_then(|b| CsfFile::from_bytes(b).ok());
+        .is_some_and(|b| CsfFile::from_bytes(b).is_ok())
+    {
+        Some(assets.load_active_csf()?)
+    } else {
+        None
+    };
     let records = crate::map::scenario_sources::list_skirmish_scenario_records_with_assets(
         &retail,
         &mut assets,

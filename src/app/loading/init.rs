@@ -2405,8 +2405,9 @@ pub(crate) fn load_csf(
     asset_manager: &AssetManager,
 ) -> anyhow::Result<crate::assets::csf_file::CsfFile> {
     let (csf, supplements) =
-        crate::assets::csf_file::CsfFile::load_active(|name| asset_manager.get_ref(name)).map_err(
-            |err| match err {
+        asset_manager
+            .load_active_csf_with_sources()
+            .map_err(|err| match err {
                 crate::assets::error::AssetError::AssetNotFound { .. } => {
                     anyhow::anyhow!("required retail string table ra2md.csf is missing")
                 }

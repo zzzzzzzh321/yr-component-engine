@@ -25,6 +25,9 @@ pub(crate) struct ProcessAssets {
     /// Launch request and its first resolved names survive a lost asset lease.
     ini_config: crate::util::ini_roots::IniRootConfig,
     selected_ini_roots: Option<crate::util::ini_roots::IniRoots>,
+    /// Immutable resource recipes survive a lost MIX-manager lease. They are
+    /// derived from one admitted module, not another gameplay configuration.
+    startup_resources: Option<crate::assets::startup_resources::StartupResources>,
     /// Personal rules are frozen at startup, like the selected game sources.
     personal_rules: crate::rules::personal_rules::PersonalRules,
     manager: Option<AssetManager>,
@@ -83,6 +86,7 @@ impl ProcessAssets {
             media_archive_mode,
             ini_config: Default::default(),
             selected_ini_roots: None,
+            startup_resources: None,
             personal_rules: Default::default(),
             manager: None,
             leased: false,
@@ -121,7 +125,11 @@ impl ProcessAssets {
         &self,
         root: &std::path::Path,
     ) -> anyhow::Result<AssetManager> {
-        let assets = AssetManager::new(root, self.media_archive_mode)?;
+        let assets = if let Some(frozen) = &self.startup_resources {
+            crate::mod_sdk::reopen_active_assets(root, self.media_archive_mode, frozen)?
+        } else {
+            crate::mod_sdk::open_active_assets(root, self.media_archive_mode)?
+        };
         Ok(if let Some(roots) = &self.selected_ini_roots {
             assets.with_selected_ini_roots(roots.clone())
         } else {
@@ -145,6 +153,8 @@ impl ProcessAssets {
         ),
         String,
     > {
+        self.startup_resources
+            .get_or_insert_with(|| assets.startup_resources().clone());
         if self
             .selected_ini_roots
             .as_ref()
@@ -179,7 +189,6 @@ impl ProcessAssets {
                 "sound_count": definitions.sounds().len(),
                 "eva_count": definitions.eva().len(),
             });
-            #[cfg(feature = "ares")]
             let source_receipt = {
                 let mut receipt = source_receipt;
                 receipt["additional_indexes"] =
@@ -561,6 +570,8 @@ impl ProcessAssets {
             );
             return;
         }
+        self.startup_resources
+            .get_or_insert_with(|| manager.startup_resources().clone());
         self.manager = Some(manager);
     }
 
@@ -576,6 +587,104 @@ impl ProcessAssets {
 mod tests {
     use super::{MediaArchiveMode, ProcessAssets};
     use crate::assets::asset_manager::AssetManager;
+
+    #[test]
+    #[ignore = "requires VERA_SDK_STARTUP_WASM and VERA_SDK_PREVIOUS_WASM"]
+    fn startup_component_app_sources_and_lost_lease_recovery_keep_the_same_recipes() {
+        use crate::assets::{
+            asset_manager::test_support::audio_test_install,
+            audio_bag::{decode_bag_audio, test_support::build_idx},
+            csf_file::test_support::build_test_csf,
+            startup_resources::StartupComponentSource,
+        };
+        use std::sync::Arc;
+        assert!(!crate::rules::ARES_ENABLED);
+        let wasm = std::fs::read(std::env::var_os("VERA_SDK_STARTUP_WASM").unwrap()).unwrap();
+        let dir = audio_test_install("sdk-startup-app");
+        let write =
+            |name: &str, bytes: &[u8]| std::fs::write(dir.path().join(name), bytes).unwrap();
+        let install_component = |bytes: &[u8]| {
+            write("gameplay.wasm", bytes);
+            write(
+                "vera-mod.json",
+                &serde_json::to_vec(&serde_json::json!({
+                    "api_version": 1, "program": "gameplay.wasm",
+                    "sha256": crate::util::sha256::sha256_hex(bytes),
+                }))
+                .unwrap(),
+            );
+        };
+        install_component(&wasm);
+        for (name, text) in [
+            ("rulesmd.ini", "[General]\nBuildSpeed=.7\n"),
+            ("artmd.ini", "[Animations]\n"),
+            ("aimd.ini", "[AI]\n"),
+            (
+                "soundmd.ini",
+                "[SoundList]\n0=StartupCue\n[StartupCue]\nSounds=modtone\n",
+            ),
+            ("evamd.ini", "[DialogList]\n"),
+        ] {
+            write(name, text.as_bytes());
+        }
+        write("ra2md.csf", &build_test_csf("NAME", "original"));
+        write("ares.csf", &build_test_csf("NAME", "extension"));
+        let pcm: Vec<u8> = [1000i16, -1000]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        write("audio.idx", &build_idx(&[("baseonly", 0, 4, 22050, 4)]));
+        write("audio.bag", &pcm);
+        write("ares.idx", &build_idx(&[("modtone", 0, 4, 22050, 4)]));
+        write("ares.bag", &pcm);
+        let assets =
+            crate::mod_sdk::open_active_assets(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .unwrap();
+        let frozen = assets.startup_resources().clone();
+        let StartupComponentSource::Admitted {
+            bytes: original, ..
+        } = &frozen.component
+        else {
+            panic!("component must be admitted at the real startup frontier");
+        };
+        let mut process = ProcessAssets::new(MediaArchiveMode::STOCK_DIGITAL, true);
+        // These are the same CSF and process-source entry points as AppState
+        // initialization, including actual SoundRegistry sample admission.
+        process.csf = Some(crate::app::loading::init::load_csf(&assets).unwrap());
+        process.initialize_sources_if_needed(&assets).unwrap();
+        assert_eq!(process.csf.as_ref().unwrap().get("NAME"), Some("extension"));
+        let audio = process.audio_catalog.as_ref().unwrap();
+        let cue = audio.sounds().get("StartupCue").unwrap();
+        assert!(cue.samples_resolved);
+        let (entry, data) = audio.index().unwrap().get(&cue.sounds[0]).unwrap();
+        assert_eq!(
+            decode_bag_audio(entry, data).unwrap().samples_i16,
+            [1000, -1000]
+        );
+        assert_eq!(audio.index.as_ref().unwrap().additional_sources.len(), 1);
+        process.return_from_loading(assets);
+        drop(process.lease_for_loading().unwrap());
+        process.note_lease_ended_without_return();
+        let recovered = process.reconstruct_manager(dir.path()).unwrap();
+        let StartupComponentSource::Admitted { bytes, .. } =
+            &recovered.startup_resources().component
+        else {
+            panic!("recovery must retain the admitted source");
+        };
+        assert!(Arc::ptr_eq(original, bytes));
+        assert!(Arc::ptr_eq(
+            frozen.strings.as_ref().unwrap(),
+            recovered.startup_resources().strings.as_ref().unwrap(),
+        ));
+        process.initialize_sources_if_needed(&recovered).unwrap();
+        assert_eq!(process.csf.as_ref().unwrap().get("NAME"), Some("extension"));
+        let previous = std::fs::read(std::env::var_os("VERA_SDK_PREVIOUS_WASM").unwrap()).unwrap();
+        install_component(&previous);
+        assert!(
+            process.reconstruct_manager(dir.path()).is_err(),
+            "recovery cannot change the selected component identity"
+        );
+    }
 
     #[test]
     fn generated_rules_agreement_covers_rmg_settings_and_theater_inputs() {

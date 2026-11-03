@@ -205,14 +205,15 @@ pub fn load_with_launch_and_ini(
     accepted_native_id_prefix: Option<u32>,
     process_rules: Option<&mut crate::rules::process_owner::NativeRulesProcessOwner>,
 ) -> Result<HeadlessScenario, String> {
-    let mut assets = AssetManager::new(retail_dir, MediaArchiveMode::STOCK_DIGITAL)
-        .and_then(|assets| assets.with_ini_roots(ini))
-        .map_err(|error| {
-            format!(
-                "open retail MIX archives in {}: {error}",
-                retail_dir.display()
-            )
-        })?;
+    let mut assets =
+        crate::mod_sdk::open_active_assets(retail_dir, MediaArchiveMode::STOCK_DIGITAL)
+            .and_then(|assets| assets.with_ini_roots(ini))
+            .map_err(|error| {
+                format!(
+                    "open retail MIX archives in {}: {error}",
+                    retail_dir.display()
+                )
+            })?;
     load_with_assets(
         retail_dir,
         map_file_name,

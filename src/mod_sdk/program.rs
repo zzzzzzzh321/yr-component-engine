@@ -1,6 +1,6 @@
 //! Saved component identity and frozen configuration. The compiled executor is a
 //! disposable cache; each evaluation still gets a fresh guest instance.
-use super::host::NativeHost;
+use super::host::{NativeHost, StartupHost};
 use crate::rules::ini_parser::IniFile;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,6 +24,175 @@ pub struct Program {
 struct Executor {
     runtime: ComponentRuntime,
     module: LoadedModule,
+}
+
+/// Immutable module admission shared by early resource recipes and later Rules
+/// configuration. The runtime and its LoadedModule never cross engine tokens.
+pub(super) struct AdmittedComponent {
+    bytes: Vec<u8>,
+    digest: String,
+    manifest: api::ModuleManifest,
+    executor: Arc<Executor>,
+}
+
+impl AdmittedComponent {
+    pub(super) fn load(bytes: Vec<u8>, expected: &str) -> Result<Self, String> {
+        let runtime = ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
+        let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
+        let manifest = module.manifest().clone();
+        if [
+            api::HookKind::Configure,
+            api::HookKind::Attach,
+            api::HookKind::Damage,
+            api::HookKind::Tick,
+        ]
+        .iter()
+        .any(|kind| !manifest.hooks.contains(kind))
+        {
+            return Err("engine SDK v1 requires configure, attach, damage and tick hooks".into());
+        }
+        Ok(Self {
+            bytes,
+            digest: expected.into(),
+            manifest,
+            executor: Arc::new(Executor { runtime, module }),
+        })
+    }
+
+    pub(super) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(super) fn has_startup_resources(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::StartupResources)
+    }
+
+    pub(super) fn startup_resource_policy(
+        &self,
+        context: api::StartupResourceContext,
+    ) -> Result<Option<api::StartupResourcePolicy>, String> {
+        if !self.has_startup_resources() {
+            return Ok(None);
+        }
+        let request = Request {
+            api_version: api::API_VERSION,
+            context: Context::StartupResources(context),
+            config: Vec::new(),
+            state: Vec::new(),
+        };
+        let plan = self
+            .executor
+            .runtime
+            .evaluate(&self.executor.module, &request, Arc::new(StartupHost))
+            .map_err(|e| e.to_string())?;
+        Ok(plan.startup_resources)
+    }
+
+    pub(super) fn configure(
+        self,
+        passes: &[IniFile],
+        object_types: &[String],
+        warheads: &[String],
+        weapons: &[String],
+        registries: &[crate::rules::native_processing::SdkRegistryPass],
+        seed: Option<&Program>,
+        steps: &[crate::rules::native_processing::SdkConfigurationStep],
+    ) -> Result<Program, String> {
+        let Self {
+            bytes,
+            digest,
+            manifest,
+            executor,
+        } = self;
+        let expected = digest.as_str();
+        if (manifest.hooks.contains(&api::HookKind::Effects)
+            || manifest.hooks.contains(&api::HookKind::ArmorResource)
+            || manifest.hooks.contains(&api::HookKind::ProductionResource)
+            || manifest.hooks.contains(&api::HookKind::EmpResource)
+            || manifest.hooks.contains(&api::HookKind::FoundationResource))
+            && (passes.is_empty() || registries.len() + 1 != passes.len())
+        {
+            return Err(
+                "resource configuration requires physical Rules read-point registries".into(),
+            );
+        }
+        let boundary_aware = manifest.hooks.contains(&api::HookKind::ConfigureBoundary);
+        let config = if let Some(seed) = seed.filter(|_| boundary_aware) {
+            if seed.digest != expected || seed.manifest != manifest {
+                return Err(
+                    "retained process component identity changed without ScenarioClear".into(),
+                );
+            }
+            seed.config.clone()
+        } else {
+            Vec::new()
+        };
+        let mut program = Program {
+            bytes,
+            digest: expected.into(),
+            manifest,
+            config,
+            compiled: OnceLock::new(),
+        };
+        if boundary_aware && !steps.is_empty() {
+            use crate::rules::native_processing::SdkConfigurationStep;
+            for (index, step) in steps.iter().enumerate() {
+                match step {
+                    SdkConfigurationStep::RulesPass { ini, registry } => program.configure_pass(
+                        &executor,
+                        index,
+                        ini,
+                        false,
+                        &[],
+                        &[],
+                        &[],
+                        Some(registry),
+                    )?,
+                    SdkConfigurationStep::Boundary(boundary) => program.configure(
+                        &executor,
+                        Context::ConfigureBoundary(api::ConfigureBoundaryContext {
+                            boundary: *boundary,
+                        }),
+                        NativeHost::simulation(),
+                        &format!("configuration boundary {index} ({boundary:?})"),
+                    )?,
+                }
+            }
+            let final_ini = passes
+                .last()
+                .ok_or("no final Rules projection after process history")?;
+            program.configure_pass(
+                &executor,
+                steps.len(),
+                final_ini,
+                true,
+                object_types,
+                warheads,
+                weapons,
+                None,
+            )?;
+        } else {
+            for (index, ini) in passes.iter().enumerate() {
+                program.configure_pass(
+                    &executor,
+                    index,
+                    ini,
+                    index + 1 == passes.len(),
+                    object_types,
+                    warheads,
+                    weapons,
+                    registries.get(index),
+                )?;
+            }
+        }
+        program
+            .compiled
+            .set(Ok(executor))
+            .map_err(|_| "component cache already set".to_string())?;
+        Ok(program)
+    }
 }
 
 impl fmt::Debug for Program {
@@ -93,9 +262,7 @@ impl Program {
         )
     }
 
-    /// New boundary-aware components consume the actual pending native Process
-    /// timeline. Legacy components retain their original current-scenario input.
-    /// Opaque continuation is reusable only by the exact same saved component.
+    /// Configure an admitted module against the one retained Rules timeline.
     pub(crate) fn load_with_process_context(
         bytes: Vec<u8>,
         expected: &str,
@@ -107,106 +274,15 @@ impl Program {
         seed: Option<&Program>,
         steps: &[crate::rules::native_processing::SdkConfigurationStep],
     ) -> Result<Self, String> {
-        let runtime = ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
-        let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
-        let manifest = module.manifest().clone();
-        if (manifest.hooks.contains(&api::HookKind::Effects)
-            || manifest.hooks.contains(&api::HookKind::ArmorResource)
-            || manifest.hooks.contains(&api::HookKind::ProductionResource)
-            || manifest.hooks.contains(&api::HookKind::EmpResource)
-            || manifest.hooks.contains(&api::HookKind::FoundationResource))
-            && (passes.is_empty() || registries.len() + 1 != passes.len())
-        {
-            return Err(
-                "resource configuration requires physical Rules read-point registries".into(),
-            );
-        }
-        if [
-            api::HookKind::Configure,
-            api::HookKind::Attach,
-            api::HookKind::Damage,
-            api::HookKind::Tick,
-        ]
-        .iter()
-        .any(|kind| !manifest.hooks.contains(kind))
-        {
-            return Err("engine SDK v1 requires configure, attach, damage and tick hooks".into());
-        }
-        let boundary_aware = manifest.hooks.contains(&api::HookKind::ConfigureBoundary);
-        let config = if let Some(seed) = seed.filter(|_| boundary_aware) {
-            if seed.digest != expected || seed.manifest != manifest {
-                return Err(
-                    "retained process component identity changed without ScenarioClear".into(),
-                );
-            }
-            seed.config.clone()
-        } else {
-            Vec::new()
-        };
-        let mut program = Self {
-            bytes,
-            digest: expected.into(),
-            manifest,
-            config,
-            compiled: OnceLock::new(),
-        };
-        let executor = Arc::new(Executor { runtime, module });
-        if boundary_aware && !steps.is_empty() {
-            use crate::rules::native_processing::SdkConfigurationStep;
-            for (index, step) in steps.iter().enumerate() {
-                match step {
-                    SdkConfigurationStep::RulesPass { ini, registry } => program.configure_pass(
-                        &executor,
-                        index,
-                        ini,
-                        false,
-                        &[],
-                        &[],
-                        &[],
-                        Some(registry),
-                    )?,
-                    SdkConfigurationStep::Boundary(boundary) => program.configure(
-                        &executor,
-                        Context::ConfigureBoundary(api::ConfigureBoundaryContext {
-                            boundary: *boundary,
-                        }),
-                        NativeHost::simulation(),
-                        &format!("configuration boundary {index} ({boundary:?})"),
-                    )?,
-                }
-            }
-            let final_ini = passes
-                .last()
-                .ok_or("no final Rules projection after process history")?;
-            program.configure_pass(
-                &executor,
-                steps.len(),
-                final_ini,
-                true,
-                object_types,
-                warheads,
-                weapons,
-                None,
-            )?;
-        } else {
-            for (index, ini) in passes.iter().enumerate() {
-                program.configure_pass(
-                    &executor,
-                    index,
-                    ini,
-                    index + 1 == passes.len(),
-                    object_types,
-                    warheads,
-                    weapons,
-                    registries.get(index),
-                )?;
-            }
-        }
-        program
-            .compiled
-            .set(Ok(executor))
-            .map_err(|_| "component cache already set".to_string())?;
-        Ok(program)
+        AdmittedComponent::load(bytes, expected)?.configure(
+            passes,
+            object_types,
+            warheads,
+            weapons,
+            registries,
+            seed,
+            steps,
+        )
     }
 
     fn configure_pass(
@@ -422,15 +498,11 @@ impl Program {
     fn executor(&self) -> Result<&Arc<Executor>, String> {
         self.compiled
             .get_or_init(|| {
-                let runtime =
-                    ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
-                let module = runtime
-                    .load(&self.bytes, &self.digest)
-                    .map_err(|e| e.to_string())?;
-                if module.manifest() != &self.manifest {
+                let admitted = AdmittedComponent::load(self.bytes.clone(), &self.digest)?;
+                if admitted.manifest != self.manifest {
                     return Err("saved module manifest mismatch".into());
                 }
-                Ok(Arc::new(Executor { runtime, module }))
+                Ok(admitted.executor)
             })
             .as_ref()
             .map_err(Clone::clone)

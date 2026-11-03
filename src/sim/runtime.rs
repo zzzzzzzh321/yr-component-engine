@@ -542,18 +542,19 @@ mod tests {
     #[test]
     #[ignore = "requires the current EMP-capable reference component in VERA_SDK_REFERENCE_WASM"]
     fn generated_component_admission_uses_final_rules_before_first_constructor() {
-        use crate::assets::asset_manager::AssetManager;
+        use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
         use crate::map::construction_trace::{RmgConstructionPhase, RmgConstructionTrace};
-        use crate::map::source::test_support::TestDirectory;
         use crate::rules::ini_parser::IniFile;
         use crate::rules::process_owner::{NativeRulesProcessOwner, NativeScenarioRulesPrefix};
         use crate::sim::native_identity::build_noncampaign_fresh_id_prefix;
 
         assert!(!crate::rules::ARES_ENABLED, "exercise the ordinary engine");
         let wasm = std::fs::read(std::env::var_os("VERA_SDK_REFERENCE_WASM").unwrap()).unwrap();
-        let directory = TestDirectory::new("generated-component-admission");
-        directory.write("gameplay.wasm", &wasm);
-        directory.write(
+        let directory = audio_test_install("generated-component-admission");
+        let write =
+            |name: &str, bytes: &[u8]| std::fs::write(directory.path().join(name), bytes).unwrap();
+        write("gameplay.wasm", &wasm);
+        write(
             "vera-mod.json",
             &serde_json::to_vec(&serde_json::json!({
                 "api_version": vera_mod_api::API_VERSION,
@@ -567,8 +568,10 @@ mod tests {
         sparkle_shp[6..8].copy_from_slice(&6u16.to_le_bytes());
         sparkle_shp[12..14].copy_from_slice(&1u16.to_le_bytes());
         sparkle_shp[14..16].copy_from_slice(&1u16.to_le_bytes());
-        directory.write("SDK_EMP_SPARK.SHP", &sparkle_shp);
-        let assets = AssetManager::from_loose_root_for_test(directory.path());
+        write("SDK_EMP_SPARK.SHP", &sparkle_shp);
+        let assets =
+            crate::mod_sdk::open_active_assets(directory.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .unwrap();
         let mut owner = NativeRulesProcessOwner::from_cold_start_sources(
             IniFile::from_str(
                 "[BuildingTypes]\n0=TEST\n[Animations]\n0=SDK_EMP_SPARK\n1=ELECTRO\n\

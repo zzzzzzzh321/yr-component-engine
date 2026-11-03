@@ -11,6 +11,7 @@ use anyhow::Result;
 use crate::assets::asset_manager::AssetManager;
 use crate::map::map_file::{self, MapFile};
 use crate::rules::ini_parser::IniFile;
+use crate::rules::ini_parser::directives::DirectiveOptions;
 use crate::util::sha256::sha256_hex;
 
 const MAP_EXTENSIONS: [&str; 5] = ["mmx", "yro", "map", "mpr", "yrm"];
@@ -240,7 +241,11 @@ fn expand_map_ini_with_options(
     strict: bool,
     logical_name: Option<&str>,
 ) -> Result<IniFile> {
-    if !(crate::rules::ARES_ENABLED || crate::rules::PHOBOS_ENABLED) {
+    let options = crate::rules::ini_parser::directives::DirectiveOptions {
+        strict,
+        ..crate::rules::ini_parser::directives::DirectiveOptions::production_for(assets)
+    };
+    if !DirectiveOptions::production_is_active(assets) {
         return Ok(ini);
     }
     let name = match source {
@@ -249,16 +254,9 @@ fn expand_map_ini_with_options(
         _ => "<map>".to_owned(),
     };
     let name = logical_name.unwrap_or(&name);
-    let (expanded, _) = crate::rules::retail_sources::expand_ini_with_assets(
-        assets,
-        ini,
-        name,
-        crate::rules::ini_parser::directives::DirectiveOptions {
-            strict,
-            ..crate::rules::ini_parser::directives::DirectiveOptions::production()
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
+    let (expanded, _) =
+        crate::rules::retail_sources::expand_ini_with_assets(assets, ini, name, options)
+            .map_err(anyhow::Error::msg)?;
     Ok(expanded.ini)
 }
 
@@ -466,7 +464,7 @@ pub fn prepare_transfer_map_source(
 
 pub fn transfer_file_source(path: &Path, resource: TransferResource) -> Result<LoadedMapSource> {
     let input = read_loose_map_input_bounded(path, Some(resource.limit()))?;
-    decode_transfer(&input.bytes, resource)?;
+    decode_transfer(&input.bytes, resource, DirectiveOptions::production())?;
     Ok(input.source)
 }
 
@@ -528,11 +526,15 @@ pub struct LoadedTransferAsset {
 
 /// Whether this build's gameplay selection will expand includes after the
 /// transfer is installed, as the directive owner selects them.
-fn include_expansion_will_run(ini: &IniFile) -> bool {
-    crate::rules::ini_parser::directives::DirectiveOptions::production().expands_includes(ini)
+fn include_expansion_will_run(ini: &IniFile, options: DirectiveOptions) -> bool {
+    options.expands_includes(ini)
 }
 
-fn decode_transfer(bytes: &[u8], resource: TransferResource) -> Result<TransferContent> {
+fn decode_transfer(
+    bytes: &[u8],
+    resource: TransferResource,
+    options: DirectiveOptions,
+) -> Result<TransferContent> {
     if resource == TransferResource::Preview {
         anyhow::ensure!(bytes.len() >= 128, "preview header missing");
         let width = u16::from_le_bytes([bytes[8], bytes[9]])
@@ -573,7 +575,7 @@ fn decode_transfer(bytes: &[u8], resource: TransferResource) -> Result<TransferC
         let mut options = crate::map::rmg::RmgOptions::default();
         options.apply_sed(&ini);
         options.normalize();
-    } else if !include_expansion_will_run(&ini) {
+    } else if !include_expansion_will_run(&ini, options) {
         map_file::MapFile::from_ini(ini.clone())?;
     }
     Ok(TransferContent::Scenario(ini))
@@ -588,6 +590,26 @@ pub fn install_received_asset(
     length: usize,
     resource: TransferResource,
 ) -> Result<LoadedTransferAsset> {
+    install_received_asset_with_options(
+        directory,
+        bytes,
+        digest,
+        length,
+        resource,
+        DirectiveOptions::production(),
+    )
+}
+
+/// Active transports pass the same frozen dialect choice as the later strict
+/// asset-backed expansion. Raw callers retain the native-profile wrapper.
+pub fn install_received_asset_with_options(
+    directory: &Path,
+    bytes: Vec<u8>,
+    digest: &str,
+    length: usize,
+    resource: TransferResource,
+    options: DirectiveOptions,
+) -> Result<LoadedTransferAsset> {
     install_received_asset_with_limits(
         directory,
         bytes,
@@ -595,6 +617,7 @@ pub fn install_received_asset(
         length,
         resource,
         cache::Limits::default(),
+        options,
     )
 }
 
@@ -605,6 +628,7 @@ fn install_received_asset_with_limits(
     length: usize,
     resource: TransferResource,
     limits: cache::Limits,
+    options: DirectiveOptions,
 ) -> Result<LoadedTransferAsset> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -617,7 +641,7 @@ fn install_received_asset_with_limits(
         sha256_hex(&bytes) == digest,
         "received map checksum differs"
     );
-    let content = decode_transfer(&bytes, resource)?;
+    let content = decode_transfer(&bytes, resource, options)?;
     let cache = cache::Cache::open(directory, true, limits)?;
     let path = cache.path(digest, resource)?;
     let already_cached = read_loose_map_input_bounded(&path, Some(resource.limit()))
@@ -666,6 +690,22 @@ pub fn load_received_asset(
     length: usize,
     resource: TransferResource,
 ) -> Result<LoadedTransferAsset> {
+    load_received_asset_with_options(
+        directory,
+        digest,
+        length,
+        resource,
+        DirectiveOptions::production(),
+    )
+}
+
+pub fn load_received_asset_with_options(
+    directory: &Path,
+    digest: &str,
+    length: usize,
+    resource: TransferResource,
+    options: DirectiveOptions,
+) -> Result<LoadedTransferAsset> {
     anyhow::ensure!(
         valid_source_sha256(digest) && length > 0 && length <= resource.limit(),
         "invalid cached map identity"
@@ -677,7 +717,7 @@ pub fn load_received_asset(
         input.source.physical_identity() == Some((length, digest)),
         "cached map identity differs"
     );
-    let content = decode_transfer(&input.bytes, resource)?;
+    let content = decode_transfer(&input.bytes, resource, options)?;
     cache.make_room(&path, 0)?;
     let LoadedMapSource::Loose { cache_lease, .. } = &mut input.source else {
         unreachable!("loose cache input");
@@ -756,6 +796,8 @@ pub fn try_load_mmx(ra2_dir: &Path, names: &[&str]) -> Result<LoadedMap> {
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    pub const SOURCE_TEST_MAP: &[u8] = b"[Map]\nTheater=TEMPERATE\nSize=0,0,2,1\nLocalSize=0,0,2,1\n[IsoMapPack5]\n1=DwALABwBAAIA/////wAAABEAAA==\n";
+
     use super::*;
     use crate::assets::mix_hash::mix_hash;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -864,7 +906,7 @@ mod tests {
         assert_eq!(asset_map_candidates("MP01T2.MAP"), vec!["MP01T2.MAP"]);
     }
 
-    const SOURCE_TEST_MAP: &[u8] = b"[Map]\nTheater=TEMPERATE\nSize=0,0,2,1\nLocalSize=0,0,2,1\n[IsoMapPack5]\n1=DwALABwBAAIA/////wAAABEAAA==\n";
+    use super::test_support::SOURCE_TEST_MAP;
     // SHA-256 independently computed from the literal raw INI buffer, not from
     // its parsed or normalized representation.
     const SOURCE_TEST_MAP_SHA256: &str =
@@ -882,6 +924,7 @@ mod tests {
             bytes.len(),
             TransferResource::Seed,
             limits,
+            DirectiveOptions::production(),
         )
     }
 
@@ -1346,6 +1389,91 @@ mod tests {
             let loaded = resolve_network_map_ini(loaded, &assets, false, "Included.map").unwrap();
             validate_network_map_content(&loaded.ini, false).unwrap();
         }
+    }
+
+    #[test]
+    fn startup_include_choice_reaches_ini_transfer_cache_and_strict_map_admission() {
+        let root =
+            crate::assets::asset_manager::test_support::audio_test_install("startup-includes");
+        let bytes = b"[#include]\n0=child.ini\n";
+        std::fs::write(root.path().join("included.ini"), bytes).unwrap();
+        std::fs::write(root.path().join("child.ini"), SOURCE_TEST_MAP).unwrap();
+        std::fs::write(
+            root.path().join("inherit.ini"),
+            b"[BASE]\nValue=7\n[CHILD]\n$Inherits=BASE\n",
+        )
+        .unwrap();
+        let open = |enabled| {
+            AssetManager::new_with_startup_admission(
+                root.path(),
+                crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
+                |_| {
+                    Ok(crate::assets::startup_resources::StartupResources {
+                        hash_include: Some(enabled),
+                        ..Default::default()
+                    })
+                },
+            )
+            .unwrap()
+        };
+        let assets = open(true);
+        assert!(
+            crate::rules::retail_sources::select_ini(&assets, "included.ini")
+                .unwrap()
+                .ini
+                .section("Map")
+                .is_some()
+        );
+        let options = DirectiveOptions::production_for(&assets);
+        let digest = sha256_hex(bytes);
+        let cache = root.path().join("cache");
+        install_received_asset_with_options(
+            &cache,
+            bytes.to_vec(),
+            &digest,
+            bytes.len(),
+            TransferResource::Map,
+            options,
+        )
+        .unwrap();
+        let loaded = load_received_asset_with_options(
+            &cache,
+            &digest,
+            bytes.len(),
+            TransferResource::Map,
+            options,
+        )
+        .unwrap();
+        let TransferContent::Scenario(ini) = loaded.content else {
+            panic!("authored map");
+        };
+        let loaded = resolve_network_map_ini(
+            LoadedMapIni {
+                source: loaded.source,
+                ini,
+            },
+            &assets,
+            false,
+            "Included.map",
+        )
+        .unwrap();
+        validate_network_map_content(&loaded.ini, false).unwrap();
+        let off = open(false);
+        let inherited = crate::rules::retail_sources::select_ini(&off, "inherit.ini").unwrap();
+        assert_eq!(
+            inherited.ini.section("CHILD").unwrap().read_int("Value", 0),
+            7
+        );
+        assert!(
+            load_received_asset_with_options(
+                &cache,
+                &digest,
+                bytes.len(),
+                TransferResource::Map,
+                DirectiveOptions::production_for(&off),
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -207,7 +207,7 @@ fn probe_saved_snapshot(path: &Path, retail: &Path, module_path: Option<&Path>) 
             "mod-sdk-save-probe".into(),
             files,
         )?)?;
-        let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
+        let assets = super::open_active_assets(retail, MediaArchiveMode::STOCK_DIGITAL)?;
         let resources = loaded
             .take_scenario_resources()
             .context("saved resources missing")?;
@@ -418,7 +418,7 @@ fn run_probe(
     }
     community::install(community::Snapshot::new("mod-sdk-probe".into(), files)?)?;
     drop(assets);
-    let assets = AssetManager::new(retail, MediaArchiveMode::STOCK_DIGITAL)?;
+    let assets = super::open_active_assets(retail, MediaArchiveMode::STOCK_DIGITAL)?;
     let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
     let (_, _, mut owner) = crate::rules::retail_sources::load_startup_rules(
         &assets,

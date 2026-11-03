@@ -17,11 +17,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::assets::error::AssetError;
+use crate::assets::startup_resources::{CsfCandidate, CsfCompositionPolicy, CsfLanguageGate};
 use crate::util::read_helpers::read_u32_le;
 
-#[cfg(feature = "ares")]
 mod ares_labels;
-#[cfg(feature = "ares")]
 use ares_labels::{native_label_search, sort_labels as ares_sort_labels};
 
 /// Magic bytes for the file header: " FSC".
@@ -54,7 +53,6 @@ pub struct CsfFile {
 #[derive(Debug, Clone)]
 enum CsfEntries {
     Raw(HashMap<String, Option<CsfText>>),
-    #[cfg(feature = "ares")]
     Ares(Vec<(String, Option<CsfText>)>),
 }
 
@@ -137,14 +135,47 @@ impl CsfFile {
     /// Stock YR loads the md table alone. Installed Ares6BD886->10060DF0
     /// appends its fixed candidates; native controls: tools/rules_oracle/ares_csf.
     pub fn load_active<'a>(
+        lookup: impl FnMut(&str) -> Option<&'a [u8]>,
+    ) -> Result<(Self, Vec<String>), AssetError> {
+        Self::load_active_with_policy(lookup, |_| Ok(None))
+    }
+
+    /// The base parser runs before the pure candidate provider. Selection and
+    /// binary/label ownership remain here, including partial malformed writes.
+    pub fn load_active_with_policy<'a>(
         mut lookup: impl FnMut(&str) -> Option<&'a [u8]>,
+        provider: impl FnOnce(u32) -> Result<Option<CsfCompositionPolicy>, String>,
     ) -> Result<(Self, Vec<String>), AssetError> {
         let bytes = lookup("ra2md.csf").ok_or_else(|| AssetError::AssetNotFound {
             name: "ra2md.csf".to_string(),
         })?;
         let mut table = Self::from_bytes(bytes)?;
-        #[cfg(feature = "ares")]
-        {
+        let policy = provider(table.language)
+            .map_err(|detail| AssetError::ParseError {
+                format: "startup string composition".into(),
+                detail,
+            })?
+            .unwrap_or_else(|| {
+                if cfg!(feature = "ares") {
+                    CsfCompositionPolicy::OrderedRecords {
+                        candidates: table
+                            .ares_candidates()
+                            .map(|(name, ignore)| CsfCandidate {
+                                name,
+                                language: if ignore {
+                                    CsfLanguageGate::Ignore
+                                } else {
+                                    CsfLanguageGate::MatchBaseOrNeutral
+                                },
+                            })
+                            .collect(),
+                    }
+                } else {
+                    CsfCompositionPolicy::BaseOnly
+                }
+            });
+        let mut admitted = Vec::new();
+        if let CsfCompositionPolicy::OrderedRecords { candidates } = policy {
             let CsfEntries::Raw(entries) = table.entries else {
                 unreachable!("from_bytes returns a raw table")
             };
@@ -153,23 +184,17 @@ impl CsfFile {
             // Their map iteration order cannot affect this unique-key order.
             ares_sort_labels(&mut labels);
             table.entries = CsfEntries::Ares(labels);
-        }
-        let mut admitted = Vec::new();
-        #[cfg(feature = "ares")]
-        for (name, ignore_language) in table.ares_candidates() {
-            if let Some(bytes) = lookup(&name)
-                && table.append_ares(bytes, ignore_language)
-            {
-                admitted.push(name);
+            for candidate in candidates {
+                if let Some(bytes) = lookup(&candidate.name)
+                    && table.append_ares(bytes, candidate.language == CsfLanguageGate::Ignore)
+                {
+                    admitted.push(candidate.name);
+                }
             }
         }
-        // Keep the feature-OFF load route unchanged.
-        #[cfg(not(feature = "ares"))]
-        let _ = (&mut table, &mut admitted);
         Ok((table, admitted))
     }
 
-    #[cfg(feature = "ares")]
     fn ares_candidates(&self) -> impl Iterator<Item = (String, bool)> + use<> {
         // Original GetLanguage734640 table845678, descriptor+8. Ares
         //10060E13 uses "us" for an unknown language, not a host locale.
@@ -195,7 +220,6 @@ impl CsfFile {
 
     ///100608C0's admission is distinct from LoadFile's base-header checks:
     /// supplemental zero counts are valid, and the base language never changes.
-    #[cfg(feature = "ares")]
     fn append_ares(&mut self, data: &[u8], ignore_language: bool) -> bool {
         if data.len() < MIN_FILE_SIZE
             || read_u32_le(data, 0) != HEADER_MAGIC
@@ -252,7 +276,6 @@ impl CsfFile {
         let key = key.to_ascii_uppercase();
         match &self.entries {
             CsfEntries::Raw(entries) => entries.get(&key)?.as_ref(),
-            #[cfg(feature = "ares")]
             CsfEntries::Ares(labels) => labels[native_label_search(labels, &key)?].1.as_ref(),
         }
     }
@@ -269,7 +292,6 @@ impl CsfFile {
     pub fn len(&self) -> usize {
         match &self.entries {
             CsfEntries::Raw(entries) => entries.len(),
-            #[cfg(feature = "ares")]
             CsfEntries::Ares(labels) => labels.len(),
         }
     }
@@ -287,7 +309,6 @@ impl CsfFile {
                     .iter()
                     .filter_map(|(k, v)| v.as_ref().map(|v| (k.as_str(), v.value.as_str()))),
             ),
-            #[cfg(feature = "ares")]
             CsfEntries::Ares(labels) => Box::new(
                 labels
                     .iter()
@@ -550,67 +571,50 @@ fn normalize_whitespace(units: &[u16]) -> Vec<u16> {
     out
 }
 
-/// Encode a string into CSF format (UTF-16-LE then bitwise-NOT).
 #[cfg(any(test, feature = "test-support"))]
-fn encode_csf_string(s: &str) -> Vec<u8> {
-    let utf16: Vec<u16> = s.encode_utf16().collect();
-    utf16
-        .iter()
-        .flat_map(|c| c.to_le_bytes())
-        .map(|b| !b)
-        .collect()
-}
-
-/// Build a minimal CSF file with one label entry.
-#[cfg(any(test, feature = "test-support"))]
-fn build_test_csf(label: &str, value: &str) -> Vec<u8> {
-    let encoded_value: Vec<u8> = encode_csf_string(value);
-    let char_count: u32 = value.encode_utf16().count() as u32;
-
-    let mut data: Vec<u8> = Vec::new();
-
-    // Header (24 bytes).
-    data.extend_from_slice(&HEADER_MAGIC.to_le_bytes()); // " FSC"
-    data.extend_from_slice(&3u32.to_le_bytes()); // version
-    data.extend_from_slice(&1u32.to_le_bytes()); // label count
-    data.extend_from_slice(&1u32.to_le_bytes()); // string pair count
-    data.extend_from_slice(&0xAABB_CCDDu32.to_le_bytes()); // reserved
-    data.extend_from_slice(&0u32.to_le_bytes()); // language (US English)
-
-    // Label entry.
-    data.extend_from_slice(&LABEL_MAGIC.to_le_bytes()); // " LBL"
-    data.extend_from_slice(&1u32.to_le_bytes()); // 1 string pair
-    data.extend_from_slice(&(label.len() as u32).to_le_bytes());
-    data.extend_from_slice(label.as_bytes());
-
-    // String value.
-    data.extend_from_slice(&STRING_MAGIC.to_le_bytes()); // " RTS"
-    data.extend_from_slice(&char_count.to_le_bytes());
-    data.extend_from_slice(&encoded_value);
-
-    data
-}
-
-/// Authored localization fixture using the CSF owner's binary encoder.
-#[cfg(any(test, feature = "test-support"))]
-pub fn test_csf(entries: &[(&str, &str)]) -> CsfFile {
-    assert!(!entries.is_empty());
-    let mut data = build_test_csf(entries[0].0, entries[0].1);
-    let count = u32::try_from(entries.len()).unwrap().to_le_bytes();
-    data[8..12].copy_from_slice(&count);
-    data[12..16].copy_from_slice(&count);
-    for &(key, value) in &entries[1..] {
-        data.extend_from_slice(&build_test_csf(key, value)[24..]);
-    }
-    CsfFile::from_bytes(&data).unwrap()
-}
-
-#[cfg(test)]
-mod tests {
+pub mod test_support {
     use super::*;
 
-    #[cfg(feature = "ares")]
-    fn supplemental_fixture(
+    /// Encode a string into CSF format (UTF-16-LE then bitwise-NOT).
+    pub(super) fn encode_csf_string(s: &str) -> Vec<u8> {
+        let utf16: Vec<u16> = s.encode_utf16().collect();
+        utf16
+            .iter()
+            .flat_map(|c| c.to_le_bytes())
+            .map(|b| !b)
+            .collect()
+    }
+
+    /// Build a minimal CSF file with one label entry.
+    pub fn build_test_csf(label: &str, value: &str) -> Vec<u8> {
+        let encoded_value: Vec<u8> = encode_csf_string(value);
+        let char_count: u32 = value.encode_utf16().count() as u32;
+
+        let mut data: Vec<u8> = Vec::new();
+
+        // Header (24 bytes).
+        data.extend_from_slice(&HEADER_MAGIC.to_le_bytes()); // " FSC"
+        data.extend_from_slice(&3u32.to_le_bytes()); // version
+        data.extend_from_slice(&1u32.to_le_bytes()); // label count
+        data.extend_from_slice(&1u32.to_le_bytes()); // string pair count
+        data.extend_from_slice(&0xAABB_CCDDu32.to_le_bytes()); // reserved
+        data.extend_from_slice(&0u32.to_le_bytes()); // language (US English)
+
+        // Label entry.
+        data.extend_from_slice(&LABEL_MAGIC.to_le_bytes()); // " LBL"
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 string pair
+        data.extend_from_slice(&(label.len() as u32).to_le_bytes());
+        data.extend_from_slice(label.as_bytes());
+
+        // String value.
+        data.extend_from_slice(&STRING_MAGIC.to_le_bytes()); // " RTS"
+        data.extend_from_slice(&char_count.to_le_bytes());
+        data.extend_from_slice(&encoded_value);
+
+        data
+    }
+
+    pub fn supplemental_fixture(
         entries: &[(&str, &str)],
         language: u32,
         version: u32,
@@ -625,6 +629,72 @@ mod tests {
         data[12..16].copy_from_slice(&counts.to_le_bytes());
         data[20..24].copy_from_slice(&language.to_le_bytes());
         data
+    }
+}
+
+#[cfg(test)]
+use test_support::build_test_csf;
+
+/// Authored localization fixture using the CSF owner's binary encoder.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_csf(entries: &[(&str, &str)]) -> CsfFile {
+    assert!(!entries.is_empty());
+    let count = u32::try_from(entries.len()).unwrap();
+    let data = test_support::supplemental_fixture(entries, 0, 3, count);
+    CsfFile::from_bytes(&data).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use super::test_support::{encode_csf_string, supplemental_fixture};
+
+    #[test]
+    fn explicit_csf_recipe_follows_base_language_and_keeps_partial_writes() {
+        let base = supplemental_fixture(&[("A", "base"), ("B", "old")], 6, 3, 2);
+        let mut supplement = supplemental_fixture(&[("A", "new"), ("B", "broken")], 7, 3, 2);
+        supplement.truncate(supplement.len() - 1);
+        let calls = std::cell::Cell::new(0);
+        let policy = |language| {
+            calls.set(calls.get() + 1);
+            assert_eq!(language, 6);
+            Ok(Some(CsfCompositionPolicy::OrderedRecords {
+                candidates: vec![
+                    CsfCandidate {
+                        name: "wrong-language.csf".into(),
+                        language: CsfLanguageGate::MatchBaseOrNeutral,
+                    },
+                    CsfCandidate {
+                        name: "accepted.csf".into(),
+                        language: CsfLanguageGate::Ignore,
+                    },
+                ],
+            }))
+        };
+        let (table, admitted) = CsfFile::load_active_with_policy(
+            |name| match name {
+                "ra2md.csf" => Some(base.as_slice()),
+                "wrong-language.csf" | "accepted.csf" => Some(supplement.as_slice()),
+                _ => None,
+            },
+            policy,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(table.get("A"), Some("new"));
+        assert_eq!(
+            table.get("B"),
+            None,
+            "the prior slot is freed before a bad value"
+        );
+        assert_eq!(admitted, ["accepted.csf"]);
+        assert!(CsfFile::load_active_with_policy(|_| None, policy).is_err());
+        assert_eq!(
+            calls.get(),
+            1,
+            "missing required base never invokes the provider"
+        );
     }
 
     #[test]
