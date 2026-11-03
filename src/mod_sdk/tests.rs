@@ -32,7 +32,7 @@ fn entity() -> api::EntityContext {
 fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     let host = NativeHost::configuration(
         IniFile::from_str(
-            "[S]\nNumber=$12\nBad=garbage\nClear=<default>\nCppClear=<none>\nRate=0.125\nPrecise=0.10000000000000001\nName=none\nYes=  yes\nEmpty=\nMission=Hunt\nThreshold=inair\n",
+            "[S]\nNumber=$12\nNegative=-255\nBad=garbage\nClear=<default>\nCppClear=<none>\nRate=0.125\nPrecise=0.10000000000000001\nName=none\nYes=  yes\nEmpty=\nMission=Hunt\nThreshold=inair\n",
         ),
         Vec::new(),
     );
@@ -44,6 +44,14 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     };
     assert_eq!(read("Number", "nullable-int", b"null"), 12);
     assert_eq!(read("Bad", "nullable-int", b"12"), 12);
+    assert_eq!(read("Number", "ares-nullable-int", b"null"), 12);
+    assert_eq!(read("Negative", "ares-nullable-int", b"null"), -255);
+    assert_eq!(read("Clear", "ares-nullable-int", b"12"), 12);
+    assert_eq!(read("Name", "ares-nullable-int", b"12"), 12);
+    assert_eq!(
+        read("Empty", "ares-nullable-int", b"null"),
+        serde_json::Value::Null
+    );
     assert_eq!(read("Yes", "ares-bool", b"false"), true);
     assert_eq!(read("Bad", "ares-bool", b"true"), true);
     assert_eq!(read("Empty", "ares-bool", b"true"), true);
@@ -181,6 +189,76 @@ fn sdk_registered_references_use_each_types_reached_reader_not_the_final_catalog
     assert!(
         map.registry("$vehicles").is_empty(),
         "missing bodies do not run a suffix"
+    );
+}
+
+#[test]
+fn sdk_registered_techno_references_keep_common_identity_and_physical_prefix() {
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[BuildingTypes]\n0=EARLY\n1=SHARED\n[VehicleTypes]\n0=SOURCE\n1=SHARED\n\
+         [EARLY]\nConvert.Script=LATE\nFreeUnit=LATE\n\
+         [SOURCE]\nConvert.Script=SHARED\nClear=<none>\n[SHARED]\nStrength=100\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[EARLY]\nConvert.Script=LATE\n[SOURCE]\nConvert.Script=UNKNOWN\n"),
+    );
+    let processed = layers.process().unwrap();
+    let host = |index: usize| {
+        NativeHost::configuration(processed.sdk_passes()[index].clone(), Vec::new())
+            .with_registries(processed.sdk_registries()[index].clone())
+    };
+    let read = |host: &NativeHost, owner, key, scope, current: Option<api::ProductionTypeRef>| {
+        let value = host
+            .config_read(
+                owner,
+                key,
+                &format!("ares-ref:$technos@{scope}"),
+                &serde_json::to_vec(&current).unwrap(),
+            )
+            .unwrap();
+        serde_json::from_slice::<Option<api::ProductionTypeRef>>(&value).unwrap()
+    };
+    let root = host(0);
+    let first = Some(api::ProductionTypeRef {
+        category: api::ProductionObjectKind::Building,
+        ordinal: 1,
+    });
+    assert_eq!(
+        read(&root, "SOURCE", "Convert.Script", "$vehicles", None),
+        first,
+        "Find returns the earlier Building identity, not the later same-name Unit"
+    );
+    assert_eq!(
+        read(&root, "EARLY", "Convert.Script", "$buildings", None),
+        None,
+        "Building's common suffix precedes its own FreeUnit allocation"
+    );
+    assert_eq!(read(&root, "SOURCE", "Clear", "$vehicles", first), None);
+    let late = processed.sdk_registries()[0]
+        .production_view()
+        .technos
+        .iter()
+        .find(|entry| entry.name == "LATE")
+        .unwrap()
+        .identity;
+    let map = host(1);
+    assert_eq!(
+        read(&map, "EARLY", "Convert.Script", "$buildings", None),
+        Some(late)
+    );
+    assert_eq!(
+        read(&map, "SOURCE", "Convert.Script", "$vehicles", first),
+        first
+    );
+    assert!(
+        root.config_read(
+            "SOURCE",
+            "Convert.Script",
+            "ares-ref:$technos@$infantry",
+            b"null"
+        )
+        .is_err()
     );
 }
 

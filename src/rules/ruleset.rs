@@ -4836,8 +4836,36 @@ impl RuleSet {
                     .as_ref()
                     .map(|program| program.type_resource_policy(&object.id, object.resource_user()))
                     .transpose()?
-                    .flatten();
+                    .flatten()
+                    .filter(|policy| policy.applies_to(object.resource_user()));
                 Ok(policy)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        // Convert.Script1003C650 binds a registered Techno pointer, including
+        // Building and cross-class targets that the runtime converter refuses.
+        // Validate all ordinals before publishing any resource projection.
+        let conversion_targets = type_policies
+            .iter()
+            .map(|policy| {
+                policy
+                    .and_then(|policy| policy.conversion)
+                    .and_then(|policy| policy.script_target)
+                    .map(|identity| {
+                        let category =
+                            crate::rules::prerequisite::production_category(identity.category);
+                        let id = self
+                            .type_array_ids(category)
+                            .get(identity.ordinal as usize)
+                            .ok_or_else(|| {
+                                "script conversion reference is outside its type registry"
+                                    .to_string()
+                            })?;
+                        Ok(crate::rules::superweapon_type::DeliveryType {
+                            category,
+                            id: id.clone(),
+                        })
+                    })
+                    .transpose()
             })
             .collect::<Result<Vec<_>, String>>()?;
         if type_policies
@@ -4879,8 +4907,13 @@ impl RuleSet {
                 .expect("retained weapon")
                 .bind_resource_policy(policy);
         }
-        for (object, policy) in self.object_list.iter_mut().zip(type_policies) {
-            object.bind_type_resource_policy(policy);
+        for ((object, policy), target) in self
+            .object_list
+            .iter_mut()
+            .zip(type_policies)
+            .zip(conversion_targets)
+        {
+            object.bind_type_resource_policy(policy, target);
         }
         self.project_resource_reload();
         self.external_armor_names = armor.names;
@@ -5317,6 +5350,14 @@ impl RuleSet {
 
     pub(crate) const fn match_rules_policy(&self) -> Option<vera_mod_api::MatchRulesPolicy> {
         self.match_rules_policy
+    }
+
+    /// Installed Team Update6E9443/action6810039D7C. The handler selector is
+    /// independent of whether this team or any type currently has a target.
+    pub(crate) fn script_type_conversion_enabled(&self) -> bool {
+        self.match_rules_policy
+            .and_then(|policy| policy.script_type_conversion)
+            .unwrap_or(crate::rules::ARES_ENABLED)
     }
 
     pub(crate) fn external_effects_enabled(&self) -> bool {
@@ -7103,7 +7144,8 @@ impl RuleSet {
             .type_resource_policy()
             .unwrap_or_else(|| vera_mod_api::TypeResourcePolicy::empty(object.resource_user()));
         policy.input = Some(input);
-        object.bind_type_resource_policy(Some(policy));
+        let target = object.script_conversion().cloned();
+        object.bind_type_resource_policy(Some(policy), target);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -7114,7 +7156,8 @@ impl RuleSet {
             .type_resource_policy()
             .unwrap_or_else(|| vera_mod_api::TypeResourcePolicy::empty(object.resource_user()));
         policy.cloak_allowed = Some(allowed);
-        object.bind_type_resource_policy(Some(policy));
+        let target = object.script_conversion().cloned();
+        object.bind_type_resource_policy(Some(policy), target);
     }
 
     /// `Type == Rules+0x498` (`[General] PrismType=`, `0x0044B2F8`).
@@ -7960,6 +8003,31 @@ impl RuleSet {
         if !spotlight_policies.is_empty() {
             b"component-spotlight-types-v1".hash(&mut hasher);
             spotlight_policies.hash(&mut hasher);
+        }
+        let conversion_policies = self
+            .object_list
+            .iter()
+            .filter_map(|object| {
+                object
+                    .type_resource_policy()
+                    .and_then(|policy| policy.conversion)
+                    .map(|policy| {
+                        (
+                            object.category,
+                            object.id.to_ascii_uppercase(),
+                            policy,
+                            object.script_conversion(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        let conversion_enabled = self
+            .match_rules_policy
+            .and_then(|policy| policy.script_type_conversion);
+        if conversion_enabled.is_some() || !conversion_policies.is_empty() {
+            b"component-script-conversion-v1".hash(&mut hasher);
+            conversion_enabled.hash(&mut hasher);
+            conversion_policies.hash(&mut hasher);
         }
         self.object_list
             .iter()

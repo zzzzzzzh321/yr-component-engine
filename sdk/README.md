@@ -3,10 +3,19 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.12.0 development candidate**, config version **12**, state version **1**;
+is the **0.13.0 development candidate**, config version **13**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+The conversion increment adds optional type targets and signed secondary ROT,
+plus an explicit match-wide Script68 selector. The shared Team VM and same-object
+conversion owner retain entity identity, health, ammo, mining and locomotor state.
+Configuration references use the actual common Techno construction prefix. This
+bounded increment has passed connected behavior, legacy controls, application
+resource loading and seven real-retail loading modes. Making the retained
+inactive miner variant available changes the traced full-save layout; preserve
+the corresponding older engines and components for older saves.
 
 The spotlight increment extends the existing optional type resource with a
 capability override, type-rule selector, attachment, height/distance and channel

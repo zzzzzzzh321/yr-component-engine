@@ -1408,18 +1408,22 @@ mod tests {
              [S]\nDamage=1\nProjectile=B\nWarhead=W\n[B]\nAG=yes\n[W]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n"
         )).unwrap();
         let mut obj = rules.object("TANK").unwrap().clone();
-        obj.bind_type_resource_policy(Some(vera_mod_api::TypeResourcePolicy {
-            users: vera_mod_api::WEAPON_USER_UNIT,
-            reload: None,
-            depleted_weapon: Some(vera_mod_api::DepletedWeaponPolicy {
-                weapon_index: 1,
-                threshold: 0,
+        obj.bind_type_resource_policy(
+            Some(vera_mod_api::TypeResourcePolicy {
+                users: vera_mod_api::WEAPON_USER_UNIT,
+                reload: None,
+                depleted_weapon: Some(vera_mod_api::DepletedWeaponPolicy {
+                    weapon_index: 1,
+                    threshold: 0,
+                }),
+                input: None,
+                keep_alive: None,
+                cloak_allowed: None,
+                spotlight: None,
+                conversion: None,
             }),
-            input: None,
-            keep_alive: None,
-            cloak_allowed: None,
-            spotlight: None,
-        }));
+            None,
+        );
         let target = TargetFacts::Cell {
             land_type: 0,
             tile_in_water_set: false,

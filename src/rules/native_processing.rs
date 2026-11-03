@@ -125,12 +125,25 @@ pub(crate) fn read_ares_registered_reference<'a>(
     key: &str,
     mut ids: impl Iterator<Item = &'a str> + Clone,
 ) -> Option<Option<String>> {
+    match read_ares_registered_index(section, key, ids.clone())? {
+        Some(index) => Some(Some(ids.nth(index)?.to_owned())),
+        None => Some(None),
+    }
+}
+
+/// Common ReadString2048 / nullable Find input for Anim1000C9C0 and
+/// Techno1003C650. Find1000D3E6/10007EA6 reject none before scanning; the
+/// containing reader then clears its pointer. Unknown names retain it.
+fn read_ares_registered_index<'a>(
+    section: &IniSection,
+    key: &str,
+    ids: impl Iterator<Item = &'a str>,
+) -> Option<Option<usize>> {
     let name = section.read_name(key, 2048)?;
     if is_native_none_type_name(name) {
         return Some(None);
     }
-    let index = ares_type_index_of_name(name, ids.clone())?;
-    Some(Some(ids.nth(index)?.to_owned()))
+    ares_type_index_of_name(name, ids).map(Some)
 }
 
 /// BuildingTypeExt's SuperWeapons IndexLookup1000D4D0: raw stored-ID
@@ -759,6 +772,60 @@ impl SdkRegistryPass {
             vera_mod_api::NullableResourceName::Inherit
             | vera_mod_api::NullableResourceName::Clear => None,
         })
+    }
+
+    /// Resolve only the common Techno array at this source type's actual
+    /// extension visits. Equal names in another class keep their first Find
+    /// identity; conversion admission remains the runtime owner's decision.
+    pub(crate) fn read_techno_reference(
+        &self,
+        owner: &str,
+        section: &IniSection,
+        key: &str,
+        registry: &str,
+        mut current: Option<vera_mod_api::ProductionTypeRef>,
+    ) -> Result<Option<vera_mod_api::ProductionTypeRef>, String> {
+        use vera_mod_api::{ProductionObjectKind, ProductionReadSite};
+        let category = match registry {
+            "$buildings" => ProductionObjectKind::Building,
+            "$aircraft" => ProductionObjectKind::Aircraft,
+            "$vehicles" => ProductionObjectKind::Unit,
+            "$infantry" => ProductionObjectKind::Infantry,
+            _ => return Err(format!("not a Techno reader scope: {registry}")),
+        };
+        let source = self
+            .production
+            .technos
+            .iter()
+            .find(|entry| entry.identity.category == category && entry.name == owner)
+            .ok_or_else(|| format!("no registered {registry} source [{owner}]"))?;
+        let mut reached = false;
+        for read in &self.production.reads {
+            if !matches!(&read.site, ProductionReadSite::TechnoExtension { object }
+                if *object == source.identity)
+            {
+                continue;
+            }
+            reached = true;
+            let types = self
+                .production
+                .technos
+                .get(..read.prefix.technos as usize)
+                .ok_or("invalid common Techno read-point prefix")?;
+            if let Some(target) = read_ares_registered_index(
+                section,
+                key,
+                types.iter().map(|entry| entry.name.as_str()),
+            ) {
+                current = target.map(|index| types[index].identity);
+            }
+        }
+        if !reached {
+            return Err(format!(
+                "no Techno extension reader for {registry} [{owner}]"
+            ));
+        }
+        Ok(current)
     }
 
     pub(crate) fn read_nullable_animation_reference(
@@ -5250,26 +5317,6 @@ impl RulesPassProcessor {
         Some(resolved)
     }
 
-    /// Installed Ares Find10007EA0 resolves a nullable TechnoType pointer.
-    /// The common construction array decides equal names across categories.
-    #[cfg(feature = "ares")]
-    fn find_existing_techno_type(
-        &self,
-        name: &str,
-    ) -> Option<crate::rules::superweapon_type::DeliveryType> {
-        let index = ares_type_index_of_name(
-            name,
-            self.techno_type_order
-                .iter()
-                .map(|&(family, index)| self.families[&family][index].native_stored_id.as_str()),
-        )?;
-        let (family, member) = self.techno_type_order[index];
-        Some(crate::rules::superweapon_type::DeliveryType {
-            category: family.object_category().expect("TechnoType array category"),
-            id: self.families[&family][member].native_stored_id.clone(),
-        })
-    }
-
     /// Ares pointer reader1003C650: ReadString2048, Find10007EA0, then
     /// none10003950; absent/empty/unknown retains, an explicit none clears.
     #[cfg(feature = "ares")]
@@ -5278,11 +5325,20 @@ impl RulesPassProcessor {
         section: &IniSection,
         key: &str,
     ) -> Option<Option<crate::rules::superweapon_type::DeliveryType>> {
-        let name = section.read_name(key, 2048)?;
-        if is_native_none_type_name(name) {
-            return Some(None);
-        }
-        self.find_existing_techno_type(name).map(Some)
+        let target = read_ares_registered_index(
+            section,
+            key,
+            self.techno_type_order
+                .iter()
+                .map(|&(family, index)| self.families[&family][index].native_stored_id.as_str()),
+        )?;
+        Some(target.map(|index| {
+            let (family, member) = self.techno_type_order[index];
+            crate::rules::superweapon_type::DeliveryType {
+                category: family.object_category().expect("TechnoType array category"),
+                id: self.families[&family][member].native_stored_id.clone(),
+            }
+        }))
     }
 
     /// Installed Ares Anim pointer Parser1000C9C0/Find1000D3E0: look up

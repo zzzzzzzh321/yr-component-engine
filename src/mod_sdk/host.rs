@@ -161,6 +161,10 @@ impl HostServices for NativeHost {
                 key,
                 serde_json::from_value(value).map_err(|e| e.to_string())?
             )),
+            "ares-nullable-int" => serde_json::json!(section.read_ares_nullable_int(
+                key,
+                serde_json::from_value(value).map_err(|e| e.to_string())?
+            )),
             "nullable-bool" => serde_json::json!(section.read_phobos_nullable_bool(
                 key,
                 serde_json::from_value(value).map_err(|e| e.to_string())?
@@ -194,14 +198,22 @@ impl HostServices for NativeHost {
                     (false, &reader["ares-ref:".len()..])
                 };
                 let (target, scope) = spec.split_once('@').ok_or_else(bad)?;
-                if target != "$animations" {
+                if target != "$animations" && !(target == "$technos" && !nullable) {
                     return Err(bad());
                 }
                 let registries = self
                     .registries
                     .as_ref()
                     .ok_or("registered references require physical Rules read-point data")?;
-                if nullable {
+                if target == "$technos" {
+                    serde_json::json!(registries.read_techno_reference(
+                        owner,
+                        &section,
+                        key,
+                        scope,
+                        serde_json::from_value(value).map_err(|e| e.to_string())?,
+                    )?)
+                } else if nullable {
                     serde_json::json!(registries.read_nullable_animation_reference(
                         owner,
                         &section,

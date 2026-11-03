@@ -68,7 +68,6 @@ impl TechnoAmmo {
     /// Installed Ares conversion100437A0..100437B3 keeps the lesser signed
     /// count. Dock/release state and the Techno reload clock are preserved;
     /// InitialAmmo belongs only to construction.
-    #[cfg(feature = "ares")]
     pub(crate) fn change_type_capacity(&mut self, maximum: i32) {
         self.current = self.current.min(maximum);
         self.max = maximum;

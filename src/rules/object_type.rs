@@ -1839,6 +1839,9 @@ pub struct ObjectType {
     /// Immutable policy rebuilt from the admitted component's frozen config.
     /// The live ammunition count and reload clock remain on GameEntity.
     type_resource_policy: Option<vera_mod_api::TypeResourcePolicy>,
+    /// Canonical target derived from the frozen class-qualified conversion
+    /// reference. Rebuilt atomically with type_resource_policy, never live state.
+    component_script_conversion: Option<crate::rules::superweapon_type::DeliveryType>,
 
     /// The native elite weapon array (`TechnoTypeClass+0xA94`, stride `0x1C`).
     /// Same shape and same storage relationship: slot 0 is
@@ -2489,23 +2492,47 @@ impl ObjectType {
         let _ = (attachment, cloak_allowed, turret_rot_override);
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn script_conversion(
         &self,
     ) -> Option<&crate::rules::superweapon_type::DeliveryType> {
-        self.convert_script.as_ref()
+        if self
+            .type_resource_policy
+            .and_then(|policy| policy.conversion)
+            .is_some()
+        {
+            return self.component_script_conversion.as_ref();
+        }
+        #[cfg(feature = "ares")]
+        {
+            self.convert_script.as_ref()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            None
+        }
     }
 
     /// Retained nullable input; preserve presence independently of ROT.
-    #[cfg(feature = "ares")]
     pub(crate) fn turret_rot_override(&self) -> Option<i32> {
-        self.turret_rot_override
+        if let Some(policy) = self
+            .type_resource_policy
+            .and_then(|policy| policy.conversion)
+        {
+            return policy.secondary_rot;
+        }
+        #[cfg(feature = "ares")]
+        {
+            self.turret_rot_override
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            None
+        }
     }
 
     /// Ares conversion1004380E..10043839 selects the optional secondary ROT.
-    #[cfg(feature = "ares")]
     pub(crate) fn secondary_turn_rate(&self) -> i32 {
-        self.turret_rot_override.unwrap_or(self.turret_rot)
+        self.turret_rot_override().unwrap_or(self.turret_rot)
     }
 
     #[cfg(feature = "ares")]
@@ -3138,8 +3165,15 @@ impl ObjectType {
     pub(crate) fn bind_type_resource_policy(
         &mut self,
         policy: Option<vera_mod_api::TypeResourcePolicy>,
+        conversion_target: Option<crate::rules::superweapon_type::DeliveryType>,
     ) {
         self.type_resource_policy = policy.filter(|p| p.applies_to(self.resource_user()));
+        // A new binding replaces both projections, including explicit off and
+        // unbinding. No canonical pointer from the previous policy survives.
+        self.component_script_conversion = self
+            .type_resource_policy
+            .and_then(|policy| policy.conversion)
+            .and(conversion_target);
     }
 
     pub(crate) fn type_resource_policy(&self) -> Option<vera_mod_api::TypeResourcePolicy> {
@@ -4126,6 +4160,7 @@ impl ObjectType {
             weapon_list: vec![None; WEAPON_SLOT_COUNT],
             resource_reload: false,
             type_resource_policy: None,
+            component_script_conversion: None,
             elite_weapon_list: vec![None; WEAPON_SLOT_COUNT],
             weapon_count: 0,
             naval_targeting: section.read_int("NavalTargeting", 0),
@@ -4472,6 +4507,45 @@ mod absorber_pip_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn component_conversion_projection_clears_on_off_and_unbind() {
+        let ini = IniFile::from_str("[SOURCE]\nROT=3\n");
+        let mut object = ObjectType::from_ini_section(
+            "SOURCE",
+            ini.section("SOURCE").unwrap(),
+            ObjectCategory::Vehicle,
+        );
+        let target = crate::rules::superweapon_type::DeliveryType {
+            category: ObjectCategory::Building,
+            id: "TARGET".into(),
+        };
+        #[cfg(feature = "ares")]
+        object.bind_script_conversion(Some(&target));
+        let mut policy = vera_mod_api::TypeResourcePolicy::empty(object.resource_user());
+        policy.conversion = Some(vera_mod_api::TypeConversionPolicy {
+            script_target: Some(vera_mod_api::ProductionTypeRef {
+                category: vera_mod_api::ProductionObjectKind::Building,
+                ordinal: 0,
+            }),
+            secondary_rot: Some(-1),
+        });
+        object.bind_type_resource_policy(Some(policy), Some(target.clone()));
+        assert_eq!(object.script_conversion(), Some(&target));
+        assert_eq!(object.secondary_turn_rate(), -1);
+
+        policy.conversion = Some(Default::default());
+        object.bind_type_resource_policy(Some(policy), None);
+        assert!(object.script_conversion().is_none());
+        assert_eq!(object.secondary_turn_rate(), 3);
+        object.bind_type_resource_policy(None, None);
+        assert_eq!(object.secondary_turn_rate(), 3);
+        assert_eq!(
+            object.script_conversion().is_some(),
+            crate::rules::ARES_ENABLED
+        );
+        assert!(object.component_script_conversion.is_none());
+    }
+
     #[test]
     fn fly_bank_rules_read_stock_values_and_keep_each_pass_sentinels() {
         use crate::rules::ini_parser::IniFile;

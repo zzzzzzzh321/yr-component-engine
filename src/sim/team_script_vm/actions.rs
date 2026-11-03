@@ -123,6 +123,7 @@ impl Simulation {
 
 /// Whether the dispatch has a port of `action_id`'s handler. Mode-specific
 /// residuals can still refuse a path (Script22 currently admits single player).
+/// An implemented extension can still be disabled by its match-wide selector.
 pub(super) const fn action_is_ported(action_id: i32) -> bool {
     matches!(
         action_id,
@@ -178,7 +179,8 @@ pub(super) const fn action_is_ported(action_id: i32) -> bool {
             | 62
             | 63
             | 64
-    ) || (cfg!(feature = "ares") && action_id == 68)
+            | 68
+    )
 }
 
 /// A member's NavCom as a team target, for `Distance`.
@@ -199,7 +201,8 @@ impl Simulation {
     /// and the member carries passengers; a script run past its end
     /// destroys the team; the mission target and move target are cleared.
     /// Otherwise the move target falls back to the mission target. Stock
-    /// actions outside `0..=0x40` do nothing; an Ares build also admits68.
+    /// actions outside `0..=0x40` do nothing; the admitted conversion policy
+    /// can additionally enable68, with the legacy Ares profile as fallback.
     pub(super) fn team_step_script(
         &mut self,
         team_id: u64,
@@ -272,7 +275,9 @@ impl Simulation {
                 argument: 0,
             },
         );
-        if action.action_id as u32 > 0x40 && !(cfg!(feature = "ares") && action.action_id == 68) {
+        if action.action_id as u32 > 0x40
+            && !(action.action_id == 68 && rules.script_type_conversion_enabled())
+        {
             return;
         }
         self.team_run_action(team_id, action, first, rules, registry, frame_effects);
@@ -926,7 +931,6 @@ impl Simulation {
                     team.advance_pending = true;
                 }
             }
-            #[cfg(feature = "ares")]
             68 => {
                 // Installed TeamClass_Update hook6E9443 ->1003A310 ->
                 // dispatch10039C30/action6810039D7C: linked members use
