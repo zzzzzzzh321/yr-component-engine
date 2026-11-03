@@ -109,7 +109,7 @@ struct NativeRulesSourceSnapshot {
     rules_art_names: [String; 2],
     selected_rules_root: IniFile,
     langrule: Option<NativeLangRuleSource>,
-    fixed_art: IniFile,
+    fixed_art: Arc<IniFile>,
     /// ARTMD `[Movies]`, selected once by Load_Game_Rules52D121. Movie
     /// references in campaigns and Basic share these indices across reloads.
     movies: crate::rules::movies::MovieRegistry,
@@ -329,6 +329,7 @@ impl NativeRulesProcessOwner {
         personal_rules: PersonalRules,
     ) -> Result<Self, RulesError> {
         let movies = crate::rules::movies::MovieRegistry::from_art(&fixed_art);
+        let fixed_art = Arc::new(fixed_art);
         if let Some(NativeLangRuleSource::SelectionFailed(error)) = langrule.as_ref() {
             log::warn!("Optional LANGRULE.INI selection failed: {error}");
         }
@@ -344,8 +345,10 @@ impl NativeRulesProcessOwner {
             }
             None | Some(NativeLangRuleRead::Absent | NativeLangRuleRead::SelectionFailed) => None,
         };
+        let mut registry_state = NativeRulesRegistryState::default();
+        registry_state.bind_fixed_art_source(Arc::clone(&fixed_art));
         let cold_trace = process_native_rules_cold_start(
-            NativeRulesRegistryState::default(),
+            registry_state,
             &selected_rules_root,
             &fixed_art,
             startup_langrule.as_ref(),
@@ -733,6 +736,7 @@ impl NativeRulesProcessOwner {
     ) -> Result<RuleSet, RulesError> {
         processed.validate_saved_state()?;
         let mut rules = RuleSet::from_processed_rules(processed)?;
+        rules.bind_fixed_art_source(Arc::clone(&self.sources.fixed_art));
         self.bind_type_audio_references(&mut rules, processed);
         Ok(rules)
     }
@@ -745,6 +749,7 @@ impl NativeRulesProcessOwner {
         validated_rules: Option<&RuleSet>,
     ) {
         self.assert_no_prepared_prefix();
+        processed.bind_fixed_art_source(Arc::clone(&self.sources.fixed_art));
         // Saved loading has already validated and rebound this exact program;
         // its skipped continuation inputs must not replay Configure on restore.
         processed.retain_sdk_configuration_program(
@@ -1129,7 +1134,7 @@ impl NativeRulesProcessOwner {
             NativeScenarioRulesLoad {
                 rules,
                 processed_ini,
-                fixed_art_ini: self.sources.fixed_art.clone(),
+                fixed_art_ini: self.sources.fixed_art.as_ref().clone(),
                 receipt: NativeScenarioRulesReceipt {
                     pre_reset: NativeRulesPhaseReceipt {
                         events: pre_reset_events,

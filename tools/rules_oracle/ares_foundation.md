@@ -24,6 +24,18 @@ only the span:4A8C9E centers that span without subtracting a negative list minim
 The existing rendering zshape calculation receives correct declared dimensions;
 no depth offset is fitted to an image.
 
+An ordinary engine can also bind the same geometry through an optional external
+`foundation_resource` declaration. The component records the stock dual-read
+history and first Custom section reference at actual Building reads, including
+while disabled. Final selection is a stock selector or an immutable fixed-ART
+source/hash/section reference. The host validates all resources before publishing
+through the original Foundation owner and refreshing reservation spacing. The
+shared `from_custom_art_section` kernel parses complete arrays; the legacy
+first-read wrapper delegates to it. Geometry never crosses the guest ABI.
+Saved resource binding uses the existing matching fixed ART and exact saved
+Program without replaying Configure. Legacy Ares-profile invalid raw geometry
+still fails its original early registry validation, including external-off loads.
+
 ## Executed evidence
 
 `ares_foundation.py` extends the existing EmpProbe/Probe VM and
@@ -62,6 +74,12 @@ Production lifecycle regression:
 `sim::world::custom_foundation_tests::` (construct/Unlimbo/Mark, actual occupied
 cells, navigation, hidden counters, snapshot restore and UnInit cleanup).
 Feature-off protection: `rules::foundation::tests::`.
+External-component regressions: `sim::world::sdk_foundation_tests::` cover the
+maximum sparse outline backing and direct slot10, off/Image/on first selection,
+invalid unselected geometry, sparse construction/Mark/navigation/placement,
+exact saved-source rebinding and limbo cleanup. Existing formal application and
+placement GPU controls also passed; they do not compare every Custom rendering
+path with native output.
 These are Rust regressions, not a claim of whole-game rendered parity.
 
 ## Bounds and residuals

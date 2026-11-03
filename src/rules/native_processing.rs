@@ -372,6 +372,9 @@ impl RulesLayerStack {
                     theater,
                 ),
             };
+        let mut registry_state = registry_state;
+        let fixed_art_source = registry_state.freeze_fixed_art_source(fixed_art);
+        let fixed_art = fixed_art_source.as_ref();
         let mut processor = RulesPassProcessor::with_registry_state(registry_state);
         processor.image_theater = theater;
         let mut after_map_result = None;
@@ -518,6 +521,9 @@ fn process_native_rules_cold_start_inner(
     langrule: Option<&IniFile>,
     fixed_eva: &EvaRegistry,
 ) -> Result<(NativeTypeConstructionTrace, [usize; 5]), RulesError> {
+    let mut registry_state = registry_state;
+    let fixed_art_source = registry_state.freeze_fixed_art_source(fixed_art);
+    let fixed_art = fixed_art_source.as_ref();
     let mut processor = RulesPassProcessor::with_registry_state(registry_state);
     // Load_Game_Rules52D0FF calls Colors66D3A0 on the selected root before
     // ColorAdd52D111 and AudioVisual52D132, even without LANGRULE.INI.
@@ -583,6 +589,9 @@ pub(crate) fn process_native_campaign_rules_prepass(
     fixed_art: &IniFile,
     fixed_eva: &EvaRegistry,
 ) -> Result<NativeTypeConstructionTrace, NativeRulesProcessingFailure> {
+    let mut registry_state = registry_state;
+    let fixed_art_source = registry_state.freeze_fixed_art_source(fixed_art);
+    let fixed_art = fixed_art_source.as_ref();
     let mut processor = RulesPassProcessor::with_registry_state(registry_state);
     if let Some(ini) = scenario_named_ini
         && let Err(error) = processor.apply_pass(ini, fixed_art, fixed_eva, false)
@@ -713,6 +722,9 @@ pub(crate) struct SdkRegistryPass {
     animations: Vec<String>,
     reads: Vec<SdkRegistryRead>,
     production: vera_mod_api::ProductionRegistryView,
+    foundation: vera_mod_api::FoundationRegistryView,
+    fixed_art: Option<std::sync::Arc<IniFile>>,
+    fixed_art_hash: u64,
 }
 
 /// Pending physical reads belong to the same move-only Rules transaction.
@@ -734,6 +746,18 @@ struct SdkRegistryRead {
 }
 
 impl SdkRegistryPass {
+    pub(crate) fn fixed_art_hash(&self) -> u64 {
+        self.fixed_art_hash
+    }
+
+    pub(crate) fn foundation_view(&self) -> &vera_mod_api::FoundationRegistryView {
+        &self.foundation
+    }
+
+    pub(crate) fn fixed_art_source(&self) -> Option<&IniFile> {
+        self.fixed_art.as_deref()
+    }
+
     pub(crate) fn production_view(&self) -> &vera_mod_api::ProductionRegistryView {
         &self.production
     }
@@ -877,6 +901,19 @@ pub struct ProcessedRulesLayers {
 }
 
 impl ProcessedRulesLayers {
+    pub(crate) fn bind_fixed_art_source(&mut self, source: std::sync::Arc<IniFile>) {
+        self.native_type_construction_trace
+            .registry_state
+            .fixed_art_source = Some(source);
+    }
+
+    /// One immutable process-selected ART source, shared by configuration
+    /// read points and final resource binding. Saved loads rebind it only
+    /// after the existing fixed-ART digest check; it is not saved state.
+    pub(crate) fn fixed_art_source(&self) -> Option<&std::sync::Arc<IniFile>> {
+        self.native_registry_state().fixed_art_source.as_ref()
+    }
+
     pub(crate) fn sdk_configuration_seed(
         &self,
     ) -> Option<&std::sync::Arc<crate::mod_sdk::Program>> {
@@ -3286,6 +3323,8 @@ impl AresGlobalControls {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct NativeRulesRegistryState {
     #[serde(skip)]
+    fixed_art_source: Option<std::sync::Arc<IniFile>>,
+    #[serde(skip)]
     sdk_configuration_steps: Vec<SdkConfigurationStep>,
     #[serde(skip)]
     sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
@@ -3383,6 +3422,7 @@ impl Default for NativeRulesRegistryState {
         Self {
             sdk_configuration_steps: Vec::new(),
             sdk_configuration_seed: None,
+            fixed_art_source: None,
             compatibility: RulesCompatibility::default(),
             ares_prerequisites: crate::rules::ARES_ENABLED.then(GenericPrerequisites::default),
             ares_armors: crate::rules::ARES_ENABLED.then(ArmorCatalog::default),
@@ -3453,6 +3493,24 @@ impl Default for NativeRulesRegistryState {
 }
 
 impl NativeRulesRegistryState {
+    pub(crate) fn bind_fixed_art_source(&mut self, source: std::sync::Arc<IniFile>) {
+        self.fixed_art_source = Some(source);
+    }
+
+    fn freeze_fixed_art_source(&mut self, source: &IniFile) -> std::sync::Arc<IniFile> {
+        // Pointer identity only avoids cloning our already-frozen source.
+        // A different object is frozen afresh; hash equality is not authority
+        // to reuse a different process input.
+        if self
+            .fixed_art_source
+            .as_ref()
+            .is_none_or(|current| !std::ptr::eq(current.as_ref(), source))
+        {
+            self.fixed_art_source = Some(std::sync::Arc::new(source.clone()));
+        }
+        self.fixed_art_source.as_ref().unwrap().clone()
+    }
+
     pub(crate) fn sdk_configuration_seed(
         &self,
     ) -> Option<&std::sync::Arc<crate::mod_sdk::Program>> {
@@ -3815,6 +3873,7 @@ impl NativeRulesRegistryState {
         Self {
             sdk_configuration_steps: self.sdk_configuration_steps,
             sdk_configuration_seed: self.sdk_configuration_seed,
+            fixed_art_source: self.fixed_art_source,
             //6686C0..668BF0 has no RulesExt reconstruction. Early-map Process
             //686D35 precedes this TypeReset6876AC and its flags/phase survive.
             #[cfg(feature = "ares")]
@@ -4801,6 +4860,9 @@ struct RulesPassProcessor {
     sdk_configuration_steps: Vec<SdkConfigurationStep>,
     sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     sdk_production_reads: Vec<vera_mod_api::ProductionReadPoint>,
+    sdk_foundation_reads: Vec<vera_mod_api::FoundationReadPoint>,
+    fixed_art_source: Option<std::sync::Arc<IniFile>>,
+    fixed_art_hash: u64,
     image_theater: ImageTheater,
     compatibility: RulesCompatibility,
     ares_prerequisites: Option<GenericPrerequisites>,
@@ -4880,10 +4942,17 @@ impl Default for RulesPassProcessor {
 
 impl RulesPassProcessor {
     fn with_registry_state(registry_state: NativeRulesRegistryState) -> Self {
+        let fixed_art_hash = registry_state
+            .fixed_art_source
+            .as_ref()
+            .map_or(0, |source| source.content_hash());
         Self {
             sdk_configuration_steps: registry_state.sdk_configuration_steps,
             sdk_configuration_seed: registry_state.sdk_configuration_seed,
             sdk_production_reads: Vec::new(),
+            sdk_foundation_reads: Vec::new(),
+            fixed_art_source: registry_state.fixed_art_source,
+            fixed_art_hash,
             image_theater: ImageTheater::Uninitialized,
             compatibility: registry_state.compatibility,
             ares_prerequisites: registry_state.ares_prerequisites,
@@ -4959,7 +5028,18 @@ impl RulesPassProcessor {
         fixed_eva: &EvaRegistry,
         primary_rules: bool,
     ) -> Result<(), RulesError> {
+        // Direct reader controls can start without a process source owner.
+        // Production passes all reuse the single frozen Arc above.
+        if self
+            .fixed_art_source
+            .as_ref()
+            .is_none_or(|source| !std::ptr::eq(source.as_ref(), fixed_art))
+        {
+            self.fixed_art_hash = fixed_art.content_hash();
+            self.fixed_art_source = Some(std::sync::Arc::new(fixed_art.clone()));
+        }
         self.sdk_production_reads.clear();
+        self.sdk_foundation_reads.clear();
         self.record_sdk_production_read(vera_mod_api::ProductionReadSite::ProcessEntry);
         // Preserve reached partial reads too: Side/Tiberium failure keeps the
         // same native registry, so its pending component chronology must agree.
@@ -5834,6 +5914,11 @@ impl RulesPassProcessor {
 
     fn sdk_registry_pass(&self) -> SdkRegistryPass {
         SdkRegistryPass {
+            foundation: vera_mod_api::FoundationRegistryView {
+                reads: self.sdk_foundation_reads.clone(),
+            },
+            fixed_art: self.fixed_art_source.clone(),
+            fixed_art_hash: self.fixed_art_hash,
             animations: self
                 .families
                 .get(&RulesTypeFamily::Animation)
@@ -6759,6 +6844,20 @@ impl RulesPassProcessor {
                         member
                             .building_foundation
                             .read_custom_pass(fixed_art.section_or_empty(&image));
+                        // BuildingRead461225..46125D's current Image section,
+                        // before later Rules passes or local ART image redirects.
+                        // The component owns selection history, not geometry.
+                        let building = self.sdk_production_identity(family, index);
+                        self.sdk_foundation_reads
+                            .push(vera_mod_api::FoundationReadPoint {
+                                building,
+                                type_name: native_stored_id.clone(),
+                                art: vera_mod_api::ImmutableIniSectionRef {
+                                    source: vera_mod_api::FixedIniSource::FixedArt,
+                                    source_hash: self.fixed_art_hash,
+                                    section: image.clone(),
+                                },
+                            });
                         if let Some(unit) = self.resolve_scalar_from(
                             &raw,
                             "FreeUnit",
@@ -7935,6 +8034,7 @@ impl RulesPassProcessor {
                 registry_state: NativeRulesRegistryState {
                     sdk_configuration_steps: self.sdk_configuration_steps,
                     sdk_configuration_seed: self.sdk_configuration_seed,
+                    fixed_art_source: self.fixed_art_source,
                     compatibility: self.compatibility,
                     ares_prerequisites: self.ares_prerequisites,
                     ares_armors: self.ares_armors,

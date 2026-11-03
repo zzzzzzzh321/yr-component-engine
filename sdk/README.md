@@ -3,10 +3,27 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.13.0 development candidate**, config version **13**, state version **1**;
+is the **0.14.0 development candidate**, config version **14**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+The Foundation candidate adds `foundation_resource` for class-qualified Building
+identities. A component selects a stock selector or a small immutable section
+reference into the process-selected fixed ART. The host validates its source hash,
+section and geometry, then publishes through the original Foundation owner before
+construction. Cell and complete outline arrays stay outside guest messages and
+configuration. A separate `fixed-art-view` preserves the earlier closed production
+view. Saved configuration is rebound against the existing matching fixed ART,
+without replaying Configure. This bounded increment passed actual-component
+spatial/save tests, direct-consumer and legacy controls, formal application and
+existing placement GPU checks, seven retail loading modes and a previous-component
+loading control. Making the Custom enum available in the ordinary build changes
+its traced full-save layout and derived configuration digest; retain corresponding
+older engines and components for older saves. Stock world-state hash encoding
+remains unchanged. This does not establish universal rendered Custom parity.
+Legacy Ares-profile invalid raw Custom declarations still fail their original
+early registry validation, including when an external component later disables them.
 
 The conversion increment adds optional type targets and signed secondary ROT,
 plus an explicit match-wide Script68 selector. The shared Team VM and same-object

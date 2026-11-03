@@ -42,6 +42,19 @@ fn registry_snapshot_has_a_bounded_bulk_limit_without_widening_scalar_readers() 
             .config_read("".into(), "".into(), "rules-registry-view".into(), vec![])
             .is_err()
     );
+    assert_eq!(
+        state(65_537)
+            .config_read("".into(), "".into(), "fixed-art-view".into(), vec![])
+            .unwrap()
+            .unwrap()
+            .len(),
+        65_537
+    );
+    assert!(
+        state(MAX_MESSAGE_BYTES + 1)
+            .config_read("".into(), "".into(), "fixed-art-view".into(), vec![])
+            .is_err()
+    );
 }
 
 fn entity() -> EntityContext {

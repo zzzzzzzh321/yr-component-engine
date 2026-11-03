@@ -113,7 +113,8 @@ impl Program {
         if (manifest.hooks.contains(&api::HookKind::Effects)
             || manifest.hooks.contains(&api::HookKind::ArmorResource)
             || manifest.hooks.contains(&api::HookKind::ProductionResource)
-            || manifest.hooks.contains(&api::HookKind::EmpResource))
+            || manifest.hooks.contains(&api::HookKind::EmpResource)
+            || manifest.hooks.contains(&api::HookKind::FoundationResource))
             && (passes.is_empty() || registries.len() + 1 != passes.len())
         {
             return Err(
@@ -245,6 +246,9 @@ impl Program {
         if let Some(registry) = registry {
             host = host.with_registries(registry.clone());
         }
+        if self.has_foundation_resource() {
+            host = host.enable_fixed_art_inputs();
+        }
         self.configure(
             executor,
             context,
@@ -300,6 +304,23 @@ impl Program {
             &[],
         )?;
         Ok(plan.weapon_resource)
+    }
+
+    pub(crate) fn has_foundation_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::FoundationResource)
+    }
+
+    pub(crate) fn foundation_resource_policy(
+        &self,
+        resource: &api::FoundationResourceContext,
+    ) -> Result<Option<api::FoundationResourcePolicy>, String> {
+        if !self.has_foundation_resource() {
+            return Ok(None);
+        }
+        let plan = self.evaluate(Context::FoundationResource(resource.clone()), &[])?;
+        Ok(plan.foundation_resource)
     }
 
     pub(crate) fn has_emp_resource(&self) -> bool {

@@ -47,6 +47,15 @@ not perform another INI read or implement a second numeric algorithm.
 `rules-registry-view` returns the typed catalogs and actual read-point prefixes
 for a physical Rules pass. Its bulk output uses the 8 MiB message cap; ordinary
 INI reader outputs and all reader current-value inputs retain their 64 KiB cap.
+The optional `fixed-art-view` is a separate bounded bulk read with that same
+8 MiB cap. Only a Foundation-capable configuration host exposes its fixed source;
+older components receive their unchanged production view and input allowance.
+`source-string:N` and `foundation-stock` take an `ImmutableIniValue` containing a
+fixed-source section reference and scalar current value. The host validates the
+source hash, delegates to the original string or stock Foundation reader, and
+returns only the scalar result. Missing sections use native defaults. Geometry
+is parsed by the original Foundation owner at final resource binding and never
+crosses the component ABI. These readers are unavailable during simulation.
 `comma-list:N` delegates the native comma-only `IniSection::read_list`, retaining
 the current value on missing/empty reads. The earlier `list:N` reader retains
 its comma/space/tab tokenization; callers select the semantics their native

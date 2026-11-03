@@ -10,15 +10,12 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Foundation {
     Stock(u8),
-    #[cfg(feature = "ares")]
     Custom(CustomFoundation),
     /// A configuration the current 16-bit consumer interface cannot admit.
     /// Retained only until the process-registry validation rejects the load.
-    #[cfg(feature = "ares")]
     InvalidCustom,
 }
 
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CustomFoundation {
     width: i32,
@@ -61,9 +58,7 @@ impl Foundation {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Stock(id) => FOUNDATION_TABLE[usize::from(*id)].name,
-            #[cfg(feature = "ares")]
             Self::Custom(_) => "Custom",
-            #[cfg(feature = "ares")]
             Self::InvalidCustom => "Custom",
         }
     }
@@ -71,9 +66,7 @@ impl Foundation {
     pub(crate) fn selector(&self) -> u8 {
         match self {
             Self::Stock(id) => *id,
-            #[cfg(feature = "ares")]
             Self::Custom(_) => 127,
-            #[cfg(feature = "ares")]
             Self::InvalidCustom => 127,
         }
     }
@@ -81,7 +74,6 @@ impl Foundation {
     pub(crate) fn valid(&self) -> bool {
         match self {
             Self::Stock(id) => usize::from(*id) < FOUNDATION_TABLE.len(),
-            #[cfg(feature = "ares")]
             Self::Custom(custom) => {
                 u16::try_from(custom.width).is_ok()
                     && u16::try_from(custom.height).is_ok()
@@ -91,7 +83,6 @@ impl Foundation {
                     && custom.cells.windows(2).all(|pair| pair[0] < pair[1])
                     && !custom.cells.contains(&(0x7fff, 0x7fff))
             }
-            #[cfg(feature = "ares")]
             Self::InvalidCustom => false,
         }
     }
@@ -102,12 +93,10 @@ impl Foundation {
                 let def = &FOUNDATION_TABLE[usize::from(*id)];
                 (def.width, def.height)
             }
-            #[cfg(feature = "ares")]
             Self::Custom(custom) => (
                 u16::try_from(custom.width).expect("validated custom foundation width"),
                 u16::try_from(custom.height).expect("validated custom foundation height"),
             ),
-            #[cfg(feature = "ares")]
             Self::InvalidCustom => unreachable!("invalid foundation rejected before projection"),
         }
     }
@@ -128,16 +117,13 @@ impl Foundation {
     pub fn cell_offsets(&self) -> Vec<(i16, i16)> {
         match self {
             Self::Stock(_) => foundation_cell_offsets(self.name()),
-            #[cfg(feature = "ares")]
             Self::Custom(custom) => custom.cells.clone(),
-            #[cfg(feature = "ares")]
             Self::InvalidCustom => unreachable!("invalid foundation rejected before projection"),
         }
     }
 
     pub(crate) fn custom_outline(&self) -> Option<&[(i16, i16)]> {
         match self {
-            #[cfg(feature = "ares")]
             Self::Custom(custom) => Some(&custom.outline),
             _ => None,
         }
@@ -183,7 +169,6 @@ impl Foundation {
     ) {
         match self {
             Self::Stock(id) => *id = read_building_foundation(*id, image, type_id, &mut read),
-            #[cfg(feature = "ares")]
             _ => {}
         }
     }
@@ -200,6 +185,13 @@ impl Foundation {
         {
             return;
         }
+        *self = Self::from_custom_art_section(art);
+    }
+
+    /// Shared resource kernel of Building ReadINI464A49 -> Ares1000DD40.
+    /// The caller owns the Custom selector and first-read latch; this parser
+    /// owns the original geometry, normalization and resource admission only.
+    pub(crate) fn from_custom_art_section(art: &crate::rules::ini_parser::IniSection) -> Self {
         let width = art.read_int("Foundation.X", 0);
         let height = art.read_int("Foundation.Y", 0);
         let outline_len = art.read_int("FoundationOutline.Length", 0).max(10);
@@ -212,8 +204,7 @@ impl Foundation {
             || width.checked_mul(height).is_none()
             || outline_len > 1_048_576
         {
-            *self = Self::InvalidCustom;
-            return;
+            return Self::InvalidCustom;
         }
         let mut cells = Vec::new();
         // Invalid dimensions remain invalid state until registry validation
@@ -244,12 +235,12 @@ impl Foundation {
             outline.push(pair);
         }
         outline.push((0x7fff, 0x7fff));
-        *self = Self::Custom(CustomFoundation {
+        Self::Custom(CustomFoundation {
             width,
             height,
             cells,
             outline,
-        });
+        })
     }
 }
 
@@ -447,6 +438,31 @@ pub fn foundation_id(value: &str) -> u8 {
 
 pub fn foundation_name(value: &str) -> &'static str {
     foundation_def(value).name
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::Foundation;
+    use crate::rules::ini_parser::IniFile;
+
+    #[test]
+    fn geometry_resource_kernel_keeps_backing_independent_of_custom_header() {
+        // The module owns the selector; the shared1000DD40 geometry kernel
+        // must preserve backing after a sentinel for the direct index10 user.
+        let art = IniFile::from_str(
+            "[RESOURCE]\nFoundation=1x1\nFoundation.X=3\nFoundation.Y=2\n\
+             Foundation.0=2,1\nFoundation.1=0,0\nFoundation.2=2,1\n\
+             FoundationOutline.Length=11\nFoundationOutline.10=7,-2\n",
+        );
+        let foundation = Foundation::from_custom_art_section(art.section("RESOURCE").unwrap());
+        assert!(foundation.valid());
+        assert_eq!(foundation.dimensions(), (3, 2));
+        assert_eq!(foundation.cell_offsets(), [(0, 0), (2, 1)]);
+        let outline = foundation.custom_outline().unwrap();
+        assert_eq!(outline[0], (0x7fff, 0x7fff));
+        assert_eq!(outline[10], (7, -2));
+        assert_eq!(outline.last(), Some(&(0x7fff, 0x7fff)));
+    }
 }
 
 pub fn foundation_dimensions(value: &str) -> (u16, u16) {

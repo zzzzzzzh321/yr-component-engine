@@ -12,6 +12,8 @@ pub(super) struct NativeHost {
     /// Derived bytes of the immutable per-call registry. The same payload is
     /// counted for bounded decode work and returned by the bulk reader.
     registry_message: OnceLock<Result<Vec<u8>, String>>,
+    fixed_art_inputs: bool,
+    fixed_art_message: OnceLock<Result<Vec<u8>, String>>,
 }
 
 impl NativeHost {
@@ -21,6 +23,8 @@ impl NativeHost {
             weapons,
             registries: None,
             registry_message: OnceLock::new(),
+            fixed_art_inputs: false,
+            fixed_art_message: OnceLock::new(),
         }
     }
 
@@ -30,6 +34,12 @@ impl NativeHost {
     ) -> Self {
         self.registries = Some(Arc::new(registries));
         self.registry_message = OnceLock::new();
+        self.fixed_art_message = OnceLock::new();
+        self
+    }
+
+    pub(super) fn enable_fixed_art_inputs(mut self) -> Self {
+        self.fixed_art_inputs = true;
         self
     }
 
@@ -39,6 +49,8 @@ impl NativeHost {
             weapons: Vec::new(),
             registries: None,
             registry_message: OnceLock::new(),
+            fixed_art_inputs: false,
+            fixed_art_message: OnceLock::new(),
         }
     }
 
@@ -55,11 +67,52 @@ impl NativeHost {
             .map(Vec::as_slice)
             .map_err(Clone::clone)
     }
+
+    fn fixed_art_view_bytes(&self) -> Result<&[u8], String> {
+        if !self.fixed_art_inputs || self.ini.is_none() {
+            return Err("fixed ART configuration is unavailable".into());
+        }
+        self.fixed_art_message
+            .get_or_init(|| {
+                let registry = self
+                    .registries
+                    .as_ref()
+                    .ok_or("missing fixed ART read points")?;
+                registry
+                    .fixed_art_source()
+                    .ok_or("missing fixed ART source")?;
+                serde_json::to_vec(registry.foundation_view()).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
+    }
+
+    fn fixed_art_for(&self, reference: &api::ImmutableIniSectionRef) -> Result<&IniFile, String> {
+        reference.validate()?;
+        if !self.fixed_art_inputs || self.ini.is_none() {
+            return Err("fixed ART configuration is unavailable".into());
+        }
+        let registry = self
+            .registries
+            .as_ref()
+            .ok_or("missing fixed ART read points")?;
+        if reference.source != api::FixedIniSource::FixedArt
+            || reference.source_hash != registry.fixed_art_hash()
+        {
+            return Err("immutable INI reference differs from fixed ART".into());
+        }
+        registry
+            .fixed_art_source()
+            .ok_or_else(|| "missing fixed ART source".into())
+    }
 }
 
 impl HostServices for NativeHost {
     fn configuration_input_bytes(&self) -> usize {
-        self.registry_view_bytes().map_or(0, <[u8]>::len)
+        self.registry_view_bytes()
+            .map_or(0, <[u8]>::len)
+            .saturating_add(self.fixed_art_view_bytes().map_or(0, <[u8]>::len))
     }
 
     fn config(&self, section: &str, key: &str) -> Option<String> {
@@ -78,6 +131,41 @@ impl HostServices for NativeHost {
     ) -> Result<Vec<u8>, String> {
         if reader == "rules-registry-view" {
             return self.registry_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader == "fixed-art-view" {
+            return self.fixed_art_view_bytes().map(<[u8]>::to_vec);
+        }
+        if let Some(capacity) = reader.strip_prefix("source-string:") {
+            let capacity = capacity.parse::<usize>().map_err(|e| e.to_string())?;
+            if !(1..=4096).contains(&capacity) {
+                return Err("invalid fixed-source string capacity".into());
+            }
+            let input: api::ImmutableIniValue<String> =
+                serde_json::from_slice(current).map_err(|e| e.to_string())?;
+            let ini = self.fixed_art_for(&input.reference)?;
+            let value = ini.section_or_empty(&input.reference.section).read_string(
+                key,
+                &input.current,
+                capacity,
+            );
+            return serde_json::to_vec(&value).map_err(|e| e.to_string());
+        }
+        if reader == "foundation-stock" {
+            let input: api::ImmutableIniValue<u8> =
+                serde_json::from_slice(current).map_err(|e| e.to_string())?;
+            if key != "Foundation" || input.current >= api::STOCK_FOUNDATION_COUNT {
+                return Err("invalid stock foundation reader input".into());
+            }
+            let ini = self.fixed_art_for(&input.reference)?;
+            let value = crate::rules::foundation::read_building_foundation(
+                input.current,
+                &input.reference.section,
+                section,
+                |name, current| {
+                    crate::rules::foundation::read_foundation(ini.section_or_empty(name), current)
+                },
+            );
+            return serde_json::to_vec(&value).map_err(|e| e.to_string());
         }
         if reader == "verse-token" {
             let token: String = serde_json::from_slice(current).map_err(|e| e.to_string())?;
@@ -277,6 +365,19 @@ impl HostServices for NativeHost {
     }
 
     fn registry(&self, name: &str) -> Vec<String> {
+        if name == "$fixed-art" {
+            return if self.fixed_art_inputs
+                && self.ini.is_some()
+                && self
+                    .registries
+                    .as_ref()
+                    .is_some_and(|r| r.fixed_art_source().is_some())
+            {
+                vec!["FixedArt".into()]
+            } else {
+                Vec::new()
+            };
+        }
         if name == "$weapons" {
             return self.weapons.clone();
         }

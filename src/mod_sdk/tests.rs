@@ -93,6 +93,83 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
 }
 
 #[test]
+fn sdk_fixed_art_readers_use_the_frozen_source_and_explicit_capability() {
+    let processed = RulesLayerStack::new(IniFile::from_str(
+        "[BuildingTypes]\n0=B\n[B]\nImage=ART\nFoundation=4x4\n",
+    ))
+    .process_with_fixed_art(&IniFile::from_str(
+        "[ART]\nFoundation=Custom\nHeader=abcdefgh\n[B]\nFoundation=2x1\n",
+    ))
+    .unwrap();
+    let make_host = || {
+        NativeHost::configuration(processed.sdk_passes()[0].clone(), vec![])
+            .with_registries(processed.sdk_registries()[0].clone())
+    };
+    let old_host = make_host();
+    assert!(old_host.registry("$fixed-art").is_empty());
+    assert!(
+        old_host
+            .config_read("", "", "fixed-art-view", b"null")
+            .is_err()
+    );
+    // The closed production-view shape remains identical for earlier guests.
+    serde_json::from_slice::<api::ProductionRegistryView>(
+        &old_host
+            .config_read("", "", "rules-registry-view", b"null")
+            .unwrap(),
+    )
+    .unwrap();
+    let host = make_host().enable_fixed_art_inputs();
+    assert_eq!(host.registry("$fixed-art"), vec!["FixedArt"]);
+    let view: api::FoundationRegistryView =
+        serde_json::from_slice(&host.config_read("", "", "fixed-art-view", b"null").unwrap())
+            .unwrap();
+    assert_eq!(view.reads.len(), 1);
+    assert_eq!(view.reads[0].art.section, "ART");
+    let reference = view.reads[0].art.clone();
+    let input = serde_json::to_vec(&api::ImmutableIniValue {
+        reference: reference.clone(),
+        current: String::new(),
+    })
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<String>(
+            &host
+                .config_read("ART", "Header", "source-string:5", &input)
+                .unwrap(),
+        )
+        .unwrap(),
+        "abcd"
+    );
+    let input = serde_json::to_vec(&api::ImmutableIniValue {
+        reference: reference.clone(),
+        current: 0u8,
+    })
+    .unwrap();
+    assert_eq!(
+        host.config_read("B", "Foundation", "foundation-stock", &input)
+            .unwrap(),
+        b"1"
+    );
+    let mut wrong = reference;
+    wrong.source_hash ^= 1;
+    let input = serde_json::to_vec(&api::ImmutableIniValue {
+        reference: wrong,
+        current: String::new(),
+    })
+    .unwrap();
+    assert!(
+        host.config_read("ART", "Header", "source-string:5", &input)
+            .is_err()
+    );
+    assert!(
+        NativeHost::simulation()
+            .config_read("ART", "Header", "source-string:5", &input)
+            .is_err()
+    );
+}
+
+#[test]
 fn sdk_registered_references_use_each_types_reached_reader_not_the_final_catalog() {
     let mut layers = RulesLayerStack::new(IniFile::from_str(
         "[BuildingTypes]\n0=EARLY\n[VehicleTypes]\n0=LATE\n[Warheads]\n0=EFFECT\n\

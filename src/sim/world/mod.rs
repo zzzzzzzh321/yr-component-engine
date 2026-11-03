@@ -8888,3 +8888,6 @@ mod sdk_emp_tests;
 
 #[cfg(test)]
 mod sdk_spotlight_tests;
+
+#[cfg(test)]
+mod sdk_foundation_tests;

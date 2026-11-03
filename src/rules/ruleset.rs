@@ -4382,6 +4382,9 @@ pub struct RuleSet {
     external_armor_names: Option<Vec<String>>,
     sdk_passes: Vec<IniFile>,
     sdk_registries: Vec<crate::rules::native_processing::SdkRegistryPass>,
+    /// Read-only startup-selected ART, shared with the native Process owner.
+    /// Rebound after saved-source admission; never part of guest config bytes.
+    fixed_art_source: Option<std::sync::Arc<IniFile>>,
     sdk_animation_names: Vec<String>,
     effect_resources: std::collections::BTreeMap<
         vera_mod_api::EffectResourceContext,
@@ -4775,6 +4778,7 @@ impl RuleSet {
     }
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
+        let foundations = self.collect_foundation_resource_bindings()?;
         let armor = self.collect_armor_resource_bindings()?;
         let emp = self.collect_emp_resource_bindings()?;
         let (production, production_objects) = self.collect_production_resource_bindings()?;
@@ -4884,6 +4888,20 @@ impl RuleSet {
                 "survival contributions require an explicit tracked-presence match rule".into(),
             );
         }
+        // Every resource has been admitted before changing effective geometry.
+        // TypeFacts and all spatial consumers continue using this one value.
+        for (name, foundation) in foundations {
+            if let Some(object) = self
+                .object_list
+                .iter_mut()
+                .find(|object| object.category == ObjectCategory::Building && object.id == name)
+            {
+                object.foundation = foundation;
+                object.base_reservation_spacing = object
+                    .base_reservation_writer_eligible()
+                    .then_some(self.ai_base_spacing);
+            }
+        }
         self.match_rules_policy = match_rules_policy;
         self.external_emp = emp.rules;
         for (object, policy) in self.object_list.iter_mut().zip(emp.objects) {
@@ -4933,6 +4951,97 @@ impl RuleSet {
                 .bind_external_armor(table);
         }
         Ok(())
+    }
+
+    /// Bind only the already-selected source. Saved callers admit its original
+    /// hash before this point; no resource lookup may reselect ART from assets.
+    pub(crate) fn bind_fixed_art_source(&mut self, source: std::sync::Arc<IniFile>) {
+        self.fixed_art_source = Some(source);
+    }
+
+    fn collect_foundation_resource_bindings(
+        &self,
+    ) -> Result<Vec<(String, crate::rules::foundation::Foundation)>, String> {
+        use crate::rules::foundation::Foundation;
+        use vera_mod_api::{
+            FixedIniSource, FoundationResourceContext, FoundationResourcePolicy,
+            ProductionObjectKind, ProductionTypeRef,
+        };
+        let Some(program) = self
+            .external_mod
+            .as_deref()
+            .filter(|program| program.has_foundation_resource())
+        else {
+            return Ok(Vec::new());
+        };
+        // Use the native Building array, including constructor-only entries.
+        // Class ordinals do not come from the projected object/name lookup.
+        let policies = self
+            .building_ids
+            .iter()
+            .enumerate()
+            .map(|(ordinal, name)| {
+                let building = ProductionTypeRef {
+                    category: ProductionObjectKind::Building,
+                    ordinal: u32::try_from(ordinal)
+                        .map_err(|_| "Building registry exceeds resource identity space")?,
+                };
+                program
+                    .foundation_resource_policy(&FoundationResourceContext { building })
+                    .map(|policy| (name.clone(), policy))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let source = self.fixed_art_source.as_deref();
+        let source_hash = source.map(IniFile::content_hash);
+        // Validate all references before parsing even one large geometry.
+        // Earlier seed references remain valid: readpoint history is an input
+        // to the component, not an authorization list for immutable resources.
+        for (name, policy) in &policies {
+            match policy {
+                None => {}
+                Some(FoundationResourcePolicy::Stock { selector }) => {
+                    if !Foundation::Stock(*selector).valid() {
+                        return Err(format!("invalid stock foundation for {name}: {selector}"));
+                    }
+                }
+                Some(FoundationResourcePolicy::ArtSection { reference }) => {
+                    if reference.source != FixedIniSource::FixedArt
+                        || Some(reference.source_hash) != source_hash
+                    {
+                        return Err(format!("foundation source differs from fixed ART: {name}"));
+                    }
+                    if source
+                        .and_then(|art| art.section(&reference.section))
+                        .is_none()
+                    {
+                        return Err(format!(
+                            "foundation ART section is unavailable for {name}: {}",
+                            reference.section
+                        ));
+                    }
+                }
+            }
+        }
+        policies
+            .into_iter()
+            .filter_map(|(name, policy)| policy.map(|policy| (name, policy)))
+            .map(|(name, policy)| {
+                let foundation = match policy {
+                    FoundationResourcePolicy::Stock { selector } => Foundation::Stock(selector),
+                    FoundationResourcePolicy::ArtSection { reference } => {
+                        Foundation::from_custom_art_section(
+                            source
+                                .and_then(|art| art.section(&reference.section))
+                                .expect("admitted fixed ART section"),
+                        )
+                    }
+                };
+                if !foundation.valid() {
+                    return Err(format!("invalid custom foundation resource for {name}"));
+                }
+                Ok((name, foundation))
+            })
+            .collect()
     }
 
     fn collect_emp_resource_bindings(&self) -> Result<EmpResourceBindings, String> {
@@ -6896,6 +7005,7 @@ impl RuleSet {
             external_emp: None,
             sdk_passes: processed.sdk_passes().to_vec(),
             sdk_registries: processed.sdk_registries().to_vec(),
+            fixed_art_source: processed.fixed_art_source().cloned(),
             sdk_animation_names: processed
                 .anim_type_reference_states()
                 .map(|(name, _)| name.to_owned())
