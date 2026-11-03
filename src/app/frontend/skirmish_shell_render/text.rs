@@ -111,6 +111,23 @@ pub(super) fn country_choice_label(
 /// the fixed CSF catalog as native4E3A00 uses it. A missing raw UIName remains
 /// empty; the country catalog decides whether that row is eligible.
 pub(super) fn country_label(state: &AppState, country: LaunchCountry) -> String {
+    if let Some(key) = state
+        .frontend
+        .skirmish_shell_state
+        .country_catalog
+        .ui_name_for_choice(country)
+    {
+        return key
+            .and_then(|key| {
+                state
+                    .process_assets
+                    .csf
+                    .as_ref()
+                    .and_then(|csf| csf.get(key))
+            })
+            .unwrap_or("")
+            .to_owned();
+    }
     if let Some(rules) = state.rules() {
         let Some(id) = rules.country_name(country.index()) else {
             return String::new();

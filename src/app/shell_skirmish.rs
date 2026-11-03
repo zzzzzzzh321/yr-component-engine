@@ -197,14 +197,11 @@ impl App {
             return false;
         };
 
-        #[cfg(feature = "ares")]
         let extra_flags = state
-            .process_assets
-            .native_rules()
-            .map(|rules| rules.country_flag_files())
-            .unwrap_or_default();
-        #[cfg(not(feature = "ares"))]
-        let extra_flags = Vec::new();
+            .frontend
+            .skirmish_shell_state
+            .country_catalog
+            .extra_flag_files();
         state.frontend.skirmish_shell_chrome =
             crate::render::skirmish_shell_chrome::build_skirmish_shell_chrome_atlas(
                 &state.renderer.gpu,

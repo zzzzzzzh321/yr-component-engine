@@ -3407,6 +3407,8 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "ureq",
+ "vera-mod-api",
+ "vera-mod-runtime",
  "vera20k-core",
  "wasm-bindgen",
  "wasm-bindgen-futures",

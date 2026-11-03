@@ -40,6 +40,7 @@ fn fixture_with_country(
             .native_rules()
             .unwrap()
             .country_loading(launch.local_slot().country.index())
+            .unwrap()
             .is_none()
     );
     crate::app::frontend::skirmish_session::prepare_external_skirmish_countries(
@@ -196,7 +197,8 @@ fn ares_country_loading_attempt_freezes_early_palette_color_and_binds_late_text(
         assets
             .native_rules()
             .unwrap()
-            .country_loading_text_hsv(early.country),
+            .country_loading_text_hsv(early.country)
+            .unwrap(),
         Some([17, 128, 240])
     );
     let early_rgb = early.text_rgb.expect("the Country names a loading color");
@@ -328,7 +330,9 @@ fn ares_country_loading_attempt_failures_cancel_pending_prefix_and_preserve_actu
                 .unwrap()
                 .country_loading(country)
                 .unwrap()
-                .0
+                .unwrap()
+                .extension
+                .unwrap()
                 .files()
                 .0,
             "child.shp"

@@ -128,6 +128,7 @@ libc = "0.2"
 # crates' build profile the same. tools/tests/test_cargo_run.py checks the
 # features still match.
 [dev-dependencies]
+vera-mod-runtime = { path = "../sdk/runtime", features = ["test-support"] }
 # Native binary64 test values must survive their JSON decimal transport exactly.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }

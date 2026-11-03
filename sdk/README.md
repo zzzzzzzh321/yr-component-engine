@@ -3,7 +3,7 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.16.0 development candidate**, config version **15**, state version **1**;
+is the **0.17.0 development candidate**, config version **15**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
@@ -22,10 +22,20 @@ projections finalize their own receipt without replacing the live process histor
 `[VeraFeatures]`. It is read at the actual Country prelude; the installation-time EVA
 catalog layout remains frozen separately. This bounded shared-configuration/gameplay
 increment passed actual-Wasm/save, direct-consumer, formal application and legacy
-controls, seven retail loading modes and previous-.15 loading. Menu/flag, early
-loading presentation, EVA SetSide, sidebar and score/theme application consumption
-remain the next increment. These results do not establish full Ares, GUI/device,
+controls, seven retail loading modes and previous-.15 loading. The 0.17 candidate also connects live Country menus/flags, early/late
+loading presentation and LoadingTheme. EVA SetSide, sidebar and score consumption
+remain later increments. These results do not establish full Ares, GUI/device,
 networking or performance equivalence. See [faction contracts](api/src/faction.rs).
+
+The Country presentation chain uses one accepted live Program and the existing
+menu/loading snapshots. ScenarioClear keeps still-live faction inheritance history;
+TypeReset clears it when those types are actually destroyed. Independent optional
+`loading_theme_resource` reads bounded names from the retained root Side/Country
+or parsed campaign Basic through the canonical host reader and original Theme owner.
+It requires cold Rules admission and `configure_boundary`, without requiring
+faction or Country-reader hooks. Related actual-component and legacy controls passed;
+seven real-retail loading modes and previous-.16 loading also passed. Full GUI/device output is not claimed.
+See [loading-theme contract](api/src/loading.rs).
 
 The startup increment adds optional `startup_resources`: source composition,
 audio pairs and string supplements are selected before their original resource

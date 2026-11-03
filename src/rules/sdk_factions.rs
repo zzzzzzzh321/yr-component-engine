@@ -4,10 +4,11 @@ use super::RuleSet;
 use crate::rules::ares_country_paradrop::AresCountryParadrop;
 use crate::rules::ares_country_presentation::AresCountryPresentation;
 use crate::rules::ares_side_extension::AresSideExtension;
-use vera_mod_api::{
-    FactionCountryLoading, FactionCountryPolicy, FactionNullableRef, FactionResourceContext,
-    FactionResourcePolicy, FactionSidePolicy, ProductionObjectKind, ProductionTypeRef,
-};
+use crate::rules::faction_resource_bindings::{self, FactionCatalog};
+pub(super) use crate::rules::faction_resource_bindings::FrozenCountry;
+use vera_mod_api::{FactionCountryLoading, ProductionTypeRef};
+#[cfg(test)]
+use vera_mod_api::{FactionCountryPolicy, FactionNullableRef, FactionSidePolicy, ProductionObjectKind};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(super) struct FrozenFactionBindings {
@@ -17,17 +18,33 @@ pub(super) struct FrozenFactionBindings {
     pub countries: Vec<Option<Option<FrozenCountry>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct FrozenCountry {
-    pub veteran_buildings: Vec<u32>,
-    pub paradrop: AresCountryParadrop,
-    pub loading: FactionCountryLoading,
-    pub presentation: AresCountryPresentation,
-}
-
 impl FrozenFactionBindings {
     pub fn has_overrides(&self) -> bool {
         self.sides.iter().any(Option::is_some) || self.countries.iter().any(Option::is_some)
+    }
+}
+
+impl FactionCatalog for RuleSet {
+    fn side_id(&self, ordinal: u32) -> Option<&str> {
+        self.side_ids.get(ordinal as usize).map(String::as_str)
+    }
+
+    fn country_id(&self, ordinal: u32) -> Option<&str> {
+        self.country_ids.get(ordinal as usize).map(String::as_str)
+    }
+
+    fn type_id(&self, reference: ProductionTypeRef) -> Option<&str> {
+        self.type_array_ids(crate::rules::prerequisite::production_category(
+            reference.category,
+        ))
+        .get(reference.ordinal as usize)
+        .map(String::as_str)
+    }
+
+    fn animation_id(&self, ordinal: u32) -> Option<&str> {
+        self.sdk_animation_names
+            .get(ordinal as usize)
+            .map(String::as_str)
     }
 }
 
@@ -43,205 +60,37 @@ impl RuleSet {
             return Ok(FrozenFactionBindings::default());
         };
         let mut result = FrozenFactionBindings::default();
-        for (ordinal, stored_id) in self.side_ids.iter().enumerate() {
-            let context = FactionResourceContext::Side {
-                ordinal: ordinal
-                    .try_into()
-                    .map_err(|_| "Side ordinal exceeds SDK identity")?,
-                stored_id: stored_id.clone(),
-            };
-            let policy = program.faction_resource_policy(&context)?;
-            if let Some(policy) = &policy {
-                policy.validate_for(&context)?;
-            }
-            result.sides.push(match policy {
-                None => None,
-                Some(FactionResourcePolicy::Side { policy }) => {
-                    Some(policy.map(|p| self.bind_faction_side(p)).transpose()?)
-                }
-                _ => return Err("Side query returned a Country policy".into()),
-            });
+        for ordinal in 0..self.side_ids.len() {
+            let ordinal = ordinal
+                .try_into()
+                .map_err(|_| "Side ordinal exceeds SDK identity")?;
+            result.sides.push(faction_resource_bindings::query_side(
+                program, self, ordinal,
+            )?);
         }
-        for (ordinal, stored_id) in self.country_ids.iter().enumerate() {
-            let context = FactionResourceContext::Country {
-                ordinal: ordinal
-                    .try_into()
-                    .map_err(|_| "Country ordinal exceeds SDK identity")?,
-                stored_id: stored_id.clone(),
-            };
-            let policy = program.faction_resource_policy(&context)?;
-            if let Some(policy) = &policy {
-                policy.validate_for(&context)?;
-            }
-            result.countries.push(match policy {
-                None => None,
-                Some(FactionResourcePolicy::Country { policy }) => {
-                    Some(policy.map(|p| self.bind_faction_country(p)).transpose()?)
-                }
-                _ => return Err("Country query returned a Side policy".into()),
-            });
+        for ordinal in 0..self.country_ids.len() {
+            let ordinal = ordinal
+                .try_into()
+                .map_err(|_| "Country ordinal exceeds SDK identity")?;
+            result
+                .countries
+                .push(faction_resource_bindings::query_country(
+                    program, self, ordinal,
+                )?);
         }
         Ok(result)
     }
 
-    // Same category-local ProductionTypeRef resolver used by production and
-    // conversion. A constructor-only registered entry is a valid identity.
-    fn faction_type_name(&self, reference: ProductionTypeRef) -> Result<String, String> {
-        self.type_array_ids(crate::rules::prerequisite::production_category(
-            reference.category,
-        ))
-        .get(reference.ordinal as usize)
-        .filter(|_| reference.ordinal <= i32::MAX as u32)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "faction reference is outside its {:?} registry: {}",
-                reference.category, reference.ordinal
-            )
-        })
+    // Preserve the existing regression entry points while the implementation
+    // lives in the same binder used by production queries.
+    #[cfg(test)]
+    fn bind_faction_side(&self, policy: FactionSidePolicy) -> Result<AresSideExtension, String> {
+        faction_resource_bindings::bind_side(self, policy)
     }
 
-    fn faction_nullable_type(
-        &self,
-        reference: FactionNullableRef<ProductionTypeRef>,
-        category: ProductionObjectKind,
-    ) -> Result<Option<Option<String>>, String> {
-        match reference {
-            FactionNullableRef::Unset => Ok(None),
-            FactionNullableRef::Null => Ok(Some(None)),
-            FactionNullableRef::Resolved(value) if value.category == category => {
-                self.faction_type_name(value).map(|name| Some(Some(name)))
-            }
-            _ => Err("faction reference has the wrong type family".into()),
-        }
-    }
-
-    fn faction_animation_name(&self, ordinal: u32) -> Result<String, String> {
-        self.sdk_animation_names
-            .get(ordinal as usize)
-            .cloned()
-            .ok_or_else(|| format!("faction animation is outside its registry: {ordinal}"))
-    }
-
-    fn faction_drop_types(&self, types: Vec<ProductionTypeRef>) -> Result<Vec<String>, String> {
-        types
-            .into_iter()
-            .map(|reference| {
-                if !matches!(
-                    reference.category,
-                    ProductionObjectKind::Infantry | ProductionObjectKind::Unit
-                ) {
-                    return Err("faction paradrop reference must be Infantry or Unit".into());
-                }
-                self.faction_type_name(reference)
-            })
-            .collect()
-    }
-
-    fn bind_faction_side(&self, p: FactionSidePolicy) -> Result<AresSideExtension, String> {
-        use ProductionObjectKind::{Aircraft, Building, Infantry, Unit};
-        let text = p.presentation;
-        let parachute_anim = match p.parachute_anim {
-            FactionNullableRef::Unset => None,
-            FactionNullableRef::Null => Some(None),
-            FactionNullableRef::Resolved(index) => Some(Some(self.faction_animation_name(index)?)),
-        };
-        Ok(AresSideExtension {
-            default_disguise: self.faction_nullable_type(p.default_disguise, Infantry)?,
-            crew: self.faction_nullable_type(p.crew, Infantry)?,
-            engineer: self.faction_nullable_type(p.engineer, Infantry)?,
-            technician: self.faction_nullable_type(p.technician, Infantry)?,
-            survivor_divisor: p.survivor_divisor,
-            base_defenses: p
-                .base_defenses
-                .map(|indices| {
-                    indices
-                        .into_iter()
-                        .map(|ordinal| {
-                            self.faction_type_name(ProductionTypeRef {
-                                category: Building,
-                                ordinal,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?,
-            base_defense_counts: p.base_defense_counts,
-            paradrop_types: p
-                .paradrop_types
-                .map(|types| self.faction_drop_types(types))
-                .transpose()?,
-            paradrop_num: p.paradrop_num,
-            paradrop_aircraft: self.faction_nullable_type(p.paradrop_aircraft, Aircraft)?,
-            parachute_anim,
-            tooltip_color: p.tooltip_color,
-            message_text_color_index: p.message_text_color_index,
-            sidebar_mix_file_index: p.sidebar_mix_file_index,
-            sidebar_yuri_file_names: p.sidebar_yuri_file_names,
-            eva_voice_index: p.eva_voice_index,
-            hunter_seeker: self.faction_nullable_type(p.hunter_seeker, Unit)?,
-            campaign_score_background: text.campaign_score_background,
-            campaign_score_transition: text.campaign_score_transition,
-            campaign_score_animation: text.campaign_score_animation,
-            campaign_score_palette: text.campaign_score_palette,
-            multiplayer_score_background: text.multiplayer_score_background,
-            multiplayer_score_bars: text.multiplayer_score_bars,
-            multiplayer_score_palette: text.multiplayer_score_palette,
-            campaign_score_under_par_theme: text.campaign_score_under_par_theme,
-            campaign_score_over_par_theme: text.campaign_score_over_par_theme,
-            multiplayer_score_win_theme: text.multiplayer_score_win_theme,
-            multiplayer_score_lose_theme: text.multiplayer_score_lose_theme,
-            graphical_text_image: text.graphical_text_image,
-            graphical_text_palette: text.graphical_text_palette,
-            dialog_background_image: text.dialog_background_image,
-            dialog_background_palette: text.dialog_background_palette,
-        })
-    }
-
-    fn bind_faction_country(&self, p: FactionCountryPolicy) -> Result<FrozenCountry, String> {
-        for &ordinal in &p.veteran_buildings {
-            self.faction_type_name(ProductionTypeRef {
-                category: ProductionObjectKind::Building,
-                ordinal,
-            })?;
-        }
-        if p.paradrop
-            .aircraft
-            .as_ref()
-            .is_some_and(|r| r.category != ProductionObjectKind::Aircraft)
-        {
-            return Err("Country paradrop plane has the wrong type family".into());
-        }
-        let text = p.presentation;
-        Ok(FrozenCountry {
-            veteran_buildings: p.veteran_buildings,
-            paradrop: AresCountryParadrop {
-                parachute_anim: p
-                    .paradrop
-                    .parachute_anim
-                    .map(|i| self.faction_animation_name(i))
-                    .transpose()?,
-                aircraft: p
-                    .paradrop
-                    .aircraft
-                    .map(|r| self.faction_type_name(r))
-                    .transpose()?,
-                types: self.faction_drop_types(p.paradrop.types)?,
-                counts: p.paradrop.counts,
-            },
-            loading: p.loading,
-            presentation: AresCountryPresentation {
-                flag: text.flag,
-                status: text.status,
-                taunt: text.taunt,
-                observer_background: text.observer_background,
-                observer_flag: text.observer_flag,
-                observer_flag_alt_palette: text.observer_flag_alt_palette,
-                list_index: text.list_index,
-                random_weight: text.random_weight,
-                ai_random_weight: text.ai_random_weight,
-            },
-        })
+    #[cfg(test)]
+    fn bind_faction_country(&self, policy: FactionCountryPolicy) -> Result<FrozenCountry, String> {
+        faction_resource_bindings::bind_country(self, policy)
     }
 
     pub(super) fn external_country_faction(&self, country: &str) -> Option<Option<&FrozenCountry>> {

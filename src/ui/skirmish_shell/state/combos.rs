@@ -316,6 +316,27 @@ pub fn country_choices(rules: &crate::rules::ruleset::RuleSet) -> Vec<SkirmishCo
         .map(SkirmishComboItem::Country)
         .collect()
 }
+/// The same catalog built from the accepted live Country ordinal/body view.
+pub(crate) fn live_country_choices(
+    rows: &[crate::rules::process_owner::LiveCountryMenuRow],
+) -> Vec<SkirmishComboItem> {
+    let mut countries: Vec<_> = rows
+        .iter()
+        .filter(|row| row.multiplay && row.ui_name.as_ref().is_some_and(|key| !key.is_empty()))
+        .filter_map(|row| {
+            let list_index = row.presentation.as_ref().map_or(100, |p| p.list_index);
+            (list_index >= 0).then_some((list_index, row.index.0))
+        })
+        .collect();
+    countries.sort_by_key(|&(list_index, index)| (list_index, index));
+    std::iter::once(SkirmishCountryChoice::Random)
+        .chain(countries.into_iter().map(|(_, index)| {
+            SkirmishCountryChoice::Country(LaunchCountry::from_country_index(u32::from(index)))
+        }))
+        .map(SkirmishComboItem::Country)
+        .collect()
+}
+
 /// Shared4E4770/4E48E0 color catalog. A row retains its current claim while
 /// other occupied rows remove those colors from its available entries.
 pub fn available_color_choices(

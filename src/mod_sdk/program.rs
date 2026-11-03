@@ -1,6 +1,6 @@
 //! Saved component identity and frozen configuration. The compiled executor is a
 //! disposable cache; each evaluation still gets a fresh guest instance.
-use super::host::{NativeHost, StartupHost};
+use super::host::{IniNamesHost, NativeHost, StartupHost};
 use crate::rules::ini_parser::IniFile;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -51,9 +51,12 @@ impl AdmittedComponent {
         {
             return Err("engine SDK v1 requires configure, attach, damage and tick hooks".into());
         }
-        if manifest
+        if (manifest
             .hooks
             .contains(&api::HookKind::ConfigureCountryRead)
+            || manifest
+                .hooks
+                .contains(&api::HookKind::LoadingThemeResource))
             && !manifest.hooks.contains(&api::HookKind::ConfigureBoundary)
         {
             return Err(
@@ -76,6 +79,12 @@ impl AdmittedComponent {
         self.manifest
             .hooks
             .contains(&api::HookKind::StartupResources)
+    }
+
+    pub(super) fn has_loading_theme_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::LoadingThemeResource)
     }
 
     pub(super) fn requires_early_admission(&self) -> bool {
@@ -242,6 +251,33 @@ impl Program {
             .contains(&api::HookKind::ConfigureCountryRead)
     }
 
+    pub(crate) fn has_loading_theme_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::LoadingThemeResource)
+    }
+
+    pub(crate) fn has_early_configuration(&self) -> bool {
+        self.has_country_read() || self.has_loading_theme_resource()
+    }
+
+    /// Query the selected physical source using the accepted configuration.
+    /// This cannot advance history or expose other INI/configuration services.
+    pub(crate) fn loading_theme_policy(
+        &self,
+        context: api::LoadingThemeResourceContext,
+        source: &IniFile,
+    ) -> Result<Option<api::LoadingThemePolicy>, String> {
+        if !self.has_loading_theme_resource() {
+            return Ok(None);
+        }
+        context.validate()?;
+        let host = IniNamesHost::new(source.clone(), context.sections(), 128);
+        Ok(self
+            .evaluate_with_host(Context::LoadingThemeResource(context), &[], Arc::new(host))?
+            .loading_theme)
+    }
+
     /// An isolated projection constructs fresh registries from the same
     /// selected module. It must not inherit or advance the live config history.
     pub(crate) fn fresh_configuration_seed(&self) -> Self {
@@ -275,7 +311,7 @@ impl Program {
         index: usize,
         step: &crate::rules::native_processing::SdkConfigurationStep,
     ) -> Result<Self, String> {
-        if !self.has_country_read() {
+        if !self.has_early_configuration() {
             return Err("component has no early configuration capability".into());
         }
         let executor = self.executor()?;
@@ -708,6 +744,15 @@ impl Program {
     }
 
     pub(crate) fn evaluate(&self, context: Context, state: &[u8]) -> Result<Plan, String> {
+        self.evaluate_with_host(context, state, Arc::new(NativeHost::simulation()))
+    }
+
+    fn evaluate_with_host(
+        &self,
+        context: Context,
+        state: &[u8],
+        host: Arc<dyn vera_mod_runtime::HostServices>,
+    ) -> Result<Plan, String> {
         let executor = self.executor()?;
         let request = Request {
             api_version: api::API_VERSION,
@@ -717,11 +762,7 @@ impl Program {
         };
         let plan = executor
             .runtime
-            .evaluate(
-                &executor.module,
-                &request,
-                Arc::new(NativeHost::simulation()),
-            )
+            .evaluate(&executor.module, &request, host)
             .map_err(|e| e.to_string())?;
         if plan.config.is_some() || !plan.operations.is_empty() {
             return Err("unsupported operation or configuration write during simulation".into());

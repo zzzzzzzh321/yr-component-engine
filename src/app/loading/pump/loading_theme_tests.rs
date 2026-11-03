@@ -97,7 +97,8 @@ fn ares_loading_theme_selection_matches_two_native_histories() {
                 &IniFile::from_str(&map_text),
                 assets,
                 500,
-            );
+            )
+            .unwrap();
             let expected = stage["play_requests"][0].as_i64().unwrap() as i32;
             assert_eq!(
                 audio.theme.slots().retained,

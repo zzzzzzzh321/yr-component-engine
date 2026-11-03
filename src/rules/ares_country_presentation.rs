@@ -72,7 +72,7 @@ impl AresCountryPresentation {
 
     /// The weight an AI "Random" row draws with (`0x1001CA11..0x1001CA1A`):
     /// `AIRandomSelectionWeight` once set, else `RandomSelectionWeight`.
-    pub(crate) fn ai_weight(&self) -> i32 {
+    pub fn ai_weight(&self) -> i32 {
         self.ai_random_weight.unwrap_or(self.random_weight)
     }
 

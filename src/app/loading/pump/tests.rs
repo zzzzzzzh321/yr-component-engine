@@ -879,17 +879,22 @@ fn loading_rows_draw_their_own_country_insignia_file() {
         ))
         .expect("insignia country rules parse");
     assert_eq!(
-        super::loading_row_insignia(Some(&rules), None, 1).as_deref(),
+        super::loading_row_insignia(None, Some(&rules), None, 1)
+            .unwrap()
+            .as_deref(),
         Some("myflag.pcx")
     );
     assert_eq!(
-        super::loading_row_insignia(Some(&rules), Some(LoadingArtVariant::Americans), 0).as_deref(),
+        super::loading_row_insignia(None, Some(&rules), Some(LoadingArtVariant::Americans), 0)
+            .unwrap()
+            .as_deref(),
         Some("usai.pcx")
     );
     // An observer row carries no Country selection, so the stock `-3` chain
     // (obsi.pcx) still decides.
     assert_eq!(
-        super::loading_row_insignia(Some(&rules), Some(LoadingArtVariant::Observer), 0),
+        super::loading_row_insignia(None, Some(&rules), Some(LoadingArtVariant::Observer), 0)
+            .unwrap(),
         None
     );
 }

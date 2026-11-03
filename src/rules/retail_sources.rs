@@ -271,7 +271,7 @@ impl RetailRulesSources {
         let native_owner = self.into_owner(sounds, eva)?;
         let component_projection = native_owner
             .sdk_configuration_program()
-            .is_some_and(|program| program.has_country_read());
+            .is_some_and(|program| program.has_early_configuration());
         let (compatibility_rules, compatibility_projection) =
             match native_owner.startup_compatibility_projection() {
                 Ok(processed) => {

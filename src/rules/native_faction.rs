@@ -301,6 +301,99 @@ impl SdkRegistryPass {
     }
 }
 
+/// Borrowed adapter over the actual live families. No name projection or
+/// final/isolated registry is used to resolve a declaration's ordinal.
+impl crate::rules::faction_resource_bindings::FactionCatalog for NativeRulesRegistryState {
+    fn side_id(&self, ordinal: u32) -> Option<&str> {
+        self.families
+            .get(&RulesTypeFamily::Side)?
+            .get(ordinal as usize)
+            .map(|member| member.native_stored_id.as_str())
+    }
+    fn country_id(&self, ordinal: u32) -> Option<&str> {
+        self.families
+            .get(&RulesTypeFamily::Country)?
+            .get(ordinal as usize)
+            .map(|member| member.native_stored_id.as_str())
+    }
+    fn type_id(&self, reference: ProductionTypeRef) -> Option<&str> {
+        let family = match reference.category {
+            ProductionObjectKind::Unit => RulesTypeFamily::Vehicle,
+            ProductionObjectKind::Infantry => RulesTypeFamily::Infantry,
+            ProductionObjectKind::Building => RulesTypeFamily::Building,
+            ProductionObjectKind::Aircraft => RulesTypeFamily::Aircraft,
+        };
+        self.families
+            .get(&family)?
+            .get(reference.ordinal as usize)
+            .map(|member| member.native_stored_id.as_str())
+    }
+    fn animation_id(&self, ordinal: u32) -> Option<&str> {
+        self.families
+            .get(&RulesTypeFamily::Animation)?
+            .get(ordinal as usize)
+            .map(|member| member.native_stored_id.as_str())
+    }
+}
+
+fn live_faction_error(value: String) -> RulesError {
+    RulesError::InvalidValue {
+        section: "vera-mod".into(),
+        key: "faction_resource".into(),
+        expected: "valid declaration at an accepted live configuration checkpoint".into(),
+        value,
+    }
+}
+
+impl NativeRulesRegistryState {
+    fn live_faction_program(&self) -> Result<Option<&crate::mod_sdk::Program>, RulesError> {
+        let Some(program) = self
+            .sdk_configuration_seed
+            .as_deref()
+            .filter(|program| program.has_faction_resource())
+        else {
+            return Ok(None);
+        };
+        if !self.sdk_configuration_steps.is_empty() {
+            return Err(live_faction_error(format!(
+                "{} completed configuration steps remain unaccepted",
+                self.sdk_configuration_steps.len(),
+            )));
+        }
+        Ok(Some(program))
+    }
+
+    pub(crate) fn ensure_live_faction_checkpoint(&self) -> Result<(), RulesError> {
+        self.live_faction_program().map(|_| ())
+    }
+
+    /// Pure current-receipt query. None keeps the legacy profile; Some(None)
+    /// explicitly selects stock. Constructor-only entries are valid catalog IDs.
+    pub(crate) fn live_faction_side(
+        &self,
+        ordinal: u32,
+    ) -> Result<Option<Option<crate::rules::ares_side_extension::AresSideExtension>>, RulesError>
+    {
+        let Some(program) = self.live_faction_program()? else {
+            return Ok(None);
+        };
+        crate::rules::faction_resource_bindings::query_side(program, self, ordinal)
+            .map_err(live_faction_error)
+    }
+
+    pub(crate) fn live_faction_country(
+        &self,
+        ordinal: u32,
+    ) -> Result<Option<Option<crate::rules::faction_resource_bindings::FrozenCountry>>, RulesError>
+    {
+        let Some(program) = self.live_faction_program()? else {
+            return Ok(None);
+        };
+        crate::rules::faction_resource_bindings::query_country(program, self, ordinal)
+            .map_err(live_faction_error)
+    }
+}
+
 /// One acceptance loop for completed physical reads. Each successful step
 /// commits its opaque checkpoint before consuming that step; a later failure
 /// keeps that checkpoint and the unconsumed failure/suffix. Legacy modules keep
@@ -311,7 +404,7 @@ pub(super) fn advance_sdk_configuration(
 ) -> Result<(), RulesError> {
     if seed
         .as_ref()
-        .is_none_or(|program| !program.has_country_read())
+        .is_none_or(|program| !program.has_early_configuration())
     {
         return Ok(());
     }

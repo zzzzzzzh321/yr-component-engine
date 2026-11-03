@@ -24,6 +24,56 @@ impl HostServices for StartupHost {
     }
 }
 
+/// A physical-source query may read only bounded native names in the supplied
+/// sections. All parsing remains in NativeHost's canonical INI reader.
+pub(super) struct IniNamesHost {
+    host: NativeHost,
+    sections: Vec<String>,
+    reader: String,
+}
+
+impl IniNamesHost {
+    pub(super) fn new(ini: IniFile, sections: Vec<String>, capacity: usize) -> Self {
+        Self {
+            host: NativeHost::configuration(ini, Vec::new()),
+            sections,
+            reader: format!("name:{capacity}"),
+        }
+    }
+}
+
+impl HostServices for IniNamesHost {
+    fn config(&self, _: &str, _: &str) -> Option<String> {
+        None
+    }
+
+    fn config_read(
+        &self,
+        section: &str,
+        key: &str,
+        reader: &str,
+        input: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        if reader != self.reader
+            || !self
+                .sections
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(section))
+        {
+            return Err("INI name query exceeds its selected source scope".into());
+        }
+        self.host.config_read(section, key, reader, input)
+    }
+
+    fn registry(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn damage_kernel(&self, _: &api::DamageKernelInput) -> Result<i32, String> {
+        Err("numeric services are unavailable to INI name queries".into())
+    }
+}
+
 pub(super) struct NativeHost {
     ini: Option<Arc<IniFile>>,
     weapons: Vec<String>,

@@ -2756,7 +2756,7 @@ pub(crate) fn load_map_from_initial(
     runtime_color_scheme_count: usize,
     the_team_enabled: bool,
     native_rules_owner: &mut crate::rules::process_owner::NativeRulesProcessOwner,
-    #[cfg(feature = "ares")] prepared_noncampaign_prefix: &mut Option<
+    prepared_noncampaign_prefix: &mut Option<
         crate::rules::process_owner::NativeNonCampaignPrefixPreparation,
     >,
     audio: Option<&crate::app::process_assets::ProcessAudioCatalog>,
@@ -2778,7 +2778,6 @@ pub(crate) fn load_map_from_initial(
             asset_manager,
             native_rules_owner,
             the_team_enabled,
-            #[cfg(feature = "ares")]
             prepared_noncampaign_prefix,
             audio,
             shared_cell_dummy: shared_cell_dummy.clone(),
@@ -2918,10 +2917,8 @@ fn load_map_first_step(
                 services.the_team_enabled,
             )?;
             let tmcj4f_ini = tmcj4f_ini.as_ref();
-            #[cfg(feature = "ares")]
             let prepared_prefix = services.prepared_noncampaign_prefix.take();
             let rules_prefix = if materialization == FreshMapMaterialization::AcceptedGenerated {
-                #[cfg(feature = "ares")]
                 assert!(
                     prepared_prefix.is_none(),
                     "generated loading cannot consume an ordinary prefix"
@@ -2930,7 +2927,6 @@ fn load_map_first_step(
                     mode_override_ini.as_ref(),
                 )
             } else if game_mode_nonzero {
-                #[cfg(feature = "ares")]
                 if let Some(preparation) = prepared_prefix {
                     crate::rules::process_owner::NativeScenarioRulesPrefix::PreparedNonCampaign {
                         preparation,
@@ -2941,12 +2937,7 @@ fn load_map_first_step(
                         mode_override_ini.as_ref(),
                     )
                 }
-                #[cfg(not(feature = "ares"))]
-                crate::rules::process_owner::NativeScenarioRulesPrefix::NonCampaign(
-                    mode_override_ini.as_ref(),
-                )
             } else {
-                #[cfg(feature = "ares")]
                 assert!(
                     prepared_prefix.is_none(),
                     "campaign loading cannot consume an ordinary prefix"

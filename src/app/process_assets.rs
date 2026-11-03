@@ -419,10 +419,9 @@ impl ProcessAssets {
     /// retail reader there; the presence of a Side policy is not a subscription.
     pub(crate) fn requires_external_country_initialization(&self) -> bool {
         cfg!(feature = "ares")
-            || self
-                .native_rules
-                .as_ref()
-                .is_some_and(|owner| owner.uses_component_country_reader())
+            || self.native_rules.as_ref().is_some_and(|owner| {
+                owner.uses_component_country_reader() || owner.uses_component_loading_theme()
+            })
     }
 
     pub(crate) fn refresh_multiplayer_country_bodies(
@@ -440,12 +439,36 @@ impl ProcessAssets {
             .flat_map(|rules| rules.multiplayer_countries())
     }
 
-    #[cfg(feature = "ares")]
-    pub(crate) fn country_random_rows(&self) -> Vec<(&str, Option<&str>, bool, i32, i32)> {
+    pub(crate) fn country_menu_rows(
+        &self,
+    ) -> Result<
+        Option<Vec<crate::rules::process_owner::LiveCountryMenuRow>>,
+        crate::rules::error::RulesError,
+    > {
         self.native_rules
             .as_ref()
-            .map(|rules| rules.country_random_rows())
-            .unwrap_or_default()
+            .map_or(Ok(None), |owner| owner.country_menu_rows())
+    }
+
+    pub(crate) fn defers_loading_theme(&self) -> bool {
+        cfg!(feature = "ares")
+            || self
+                .native_rules
+                .as_ref()
+                .is_some_and(|owner| owner.uses_component_loading_theme())
+    }
+
+    pub(crate) fn select_loading_theme(
+        &self,
+        country: Option<crate::rules::ruleset::CountryIdx>,
+        campaign: Option<&crate::rules::ini_parser::IniFile>,
+    ) -> Result<crate::rules::process_owner::LoadingThemeSelection, crate::rules::error::RulesError>
+    {
+        crate::rules::process_owner::select_loading_theme(
+            self.native_rules.as_ref(),
+            country,
+            campaign,
+        )
     }
 
     /// The score dialog's theme name for a side, or `None` for gamemd's
@@ -473,20 +496,13 @@ impl ProcessAssets {
     /// `Game_GetFlagSurface @ 0x1001DCE0` country insignia by HouseType index,
     /// for lobby/diplomacy rows that resolve before a match Rules projection
     /// exists.
-    pub(crate) fn country_flag_surface(&self, index: u16) -> Option<String> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .native_rules
-                .as_ref()
-                .and_then(|rules| rules.country_flag_surface(index))
-                .map(str::to_owned);
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = index;
-            None
-        }
+    pub(crate) fn country_flag_surface(
+        &self,
+        index: u16,
+    ) -> Result<Option<String>, crate::rules::error::RulesError> {
+        self.native_rules
+            .as_ref()
+            .map_or(Ok(None), |owner| owner.country_flag_surface(index))
     }
 
     pub(crate) fn project_multiplayer_countries(

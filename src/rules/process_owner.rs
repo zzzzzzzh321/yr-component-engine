@@ -36,7 +36,9 @@ use crate::rules::native_processing::{
 };
 use crate::rules::object_type::ObjectCategory;
 use crate::rules::personal_rules::PersonalRules;
-use crate::rules::ruleset::RuleSet;
+use crate::rules::ruleset::{CountryIdx, CountryRules, RuleSet};
+use crate::rules::ares_country_presentation::AresCountryPresentation;
+use crate::rules::country_loading::AresCountryLoading;
 use crate::rules::sound_ini::{EvaRegistry, SoundRegistry};
 
 /// Source snapshot for the optional LANGRULE input. `Selected` retains the
@@ -136,7 +138,6 @@ enum NativeRulesRegistryOwner {
     /// Full_Init's E_multi has run, but its first Draw still reads this live
     /// registry before Type reset. The owner retains the constructor chronology
     /// until the matching loading attempt finishes or explicitly retires it.
-    #[cfg(feature = "ares")]
     PreparedNonCampaign {
         trace: NativeTypeConstructionTrace,
         identity: Arc<()>,
@@ -149,7 +150,6 @@ impl NativeRulesRegistryOwner {
             Self::BeforeReset(trace) => trace.registry_state(),
             Self::Live(state) => state,
             Self::Scenario(processed) => processed.native_registry_state(),
-            #[cfg(feature = "ares")]
             Self::PreparedNonCampaign { trace, .. } => trace.registry_state(),
         }
     }
@@ -175,7 +175,6 @@ impl NativeRulesRegistryOwner {
                 .into_ini_and_native_type_construction_trace()
                 .1
                 .into_registry_state_discarding_events(),
-            #[cfg(feature = "ares")]
             Self::PreparedNonCampaign { .. } => {
                 panic!("prepared Rules prefix requires its loading attempt's ticket")
             }
@@ -192,12 +191,32 @@ pub struct NativeRulesProcessOwner {
     registry: Option<NativeRulesRegistryOwner>,
 }
 
+/// Owned presentation of one actual live Country ordinal. Explicit-stock
+/// component rows retain body facts and have no extension presentation.
+#[derive(Debug, Clone)]
+pub struct LiveCountryMenuRow {
+    pub index: CountryIdx,
+    pub id: String,
+    pub name: Option<String>,
+    pub ui_name: Option<String>,
+    pub multiplay: bool,
+    pub presentation: Option<AresCountryPresentation>,
+}
+
+/// Snapshot taken from the retained live Country before a loading transition.
+/// An allocated stock Country keeps its Side but has no extension override.
+#[derive(Debug, Clone)]
+pub struct LiveCountryLoading {
+    pub side: i32,
+    pub extension: Option<AresCountryLoading>,
+    pub text_hsv: Option<[u8; 3]>,
+}
+
 /// Move-only permission to consume or retire one prepared noncampaign prefix.
 ///
 /// This ticket contains no Rules state or constructor events. Pointer identity
 /// binds it to the exact preparation, including across different process owners;
 /// allocating this presentation capability consumes no simulation RNG or IDs.
-#[cfg(feature = "ares")]
 #[derive(Debug)]
 #[must_use = "a prepared Rules prefix must be consumed or explicitly cancelled"]
 pub struct NativeNonCampaignPrefixPreparation {
@@ -276,7 +295,6 @@ pub enum NativeScenarioRulesPrefix<'a> {
     RandomMap(Option<&'a IniFile>),
     /// Ordinary E_multi already ran before the first loading frame. Consume
     /// its exact chronology without clearing classes or reading root again.
-    #[cfg(feature = "ares")]
     PreparedNonCampaign {
         preparation: NativeNonCampaignPrefixPreparation,
         mode_rules_override: Option<&'a IniFile>,
@@ -292,6 +310,104 @@ impl NativeScenarioRulesLoad {
             self.receipt,
         )
     }
+}
+
+/// The ordinary Theme runtime remains the sole name/default/playback owner.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoadingThemeSelection {
+    Stock,
+    Names([Option<String>; 2]),
+}
+
+/// Ares1002FB80 (hooks683C70/683D05) reads the already-selected root's
+/// retained Side then Country, or the parsed campaign map's Basic section.
+/// The query observes the accepted checkpoint before E_multi; it never
+/// processes a pass, copies inherited fields or finalizes configuration.
+pub fn select_loading_theme(
+    owner: Option<&NativeRulesProcessOwner>,
+    country: Option<CountryIdx>,
+    campaign: Option<&IniFile>,
+) -> Result<LoadingThemeSelection, RulesError> {
+    use vera_mod_api::{FactionResourceContext, LoadingThemePolicy, LoadingThemeResourceContext};
+    if let Some(owner) = owner
+        && let Some(program) = owner
+            .sdk_configuration_program()
+            .filter(|program| program.has_loading_theme_resource())
+    {
+        let state = owner
+            .registry
+            .as_ref()
+            .expect("Rules transition reentered")
+            .registry_state();
+        let error = |value| RulesError::InvalidValue {
+            section: "vera-mod".into(),
+            key: "loading_theme_resource".into(),
+            expected: "valid declaration at an accepted live configuration checkpoint".into(),
+            value,
+        };
+        if !state.sdk_configuration_steps().is_empty() {
+            return Err(error(
+                "completed configuration steps remain unaccepted".into(),
+            ));
+        }
+        let (context, source) = if let Some(map) = campaign {
+            (LoadingThemeResourceContext::Campaign, map)
+        } else {
+            let selected = country.and_then(|index| {
+                state
+                    .country_projection()
+                    .nth(usize::from(index.0))
+                    .map(|(id, _, _, side, ..)| (index, id, side))
+            });
+            let side = selected.and_then(|(_, _, side)| {
+                let ordinal = u32::try_from(side).ok()?;
+                let (id, _) = state.side_projection().nth(ordinal as usize)?;
+                Some(FactionResourceContext::Side {
+                    ordinal,
+                    stored_id: id.to_owned(),
+                })
+            });
+            let country = selected.map(|(index, id, _)| FactionResourceContext::Country {
+                ordinal: u32::from(index.0),
+                stored_id: id.to_owned(),
+            });
+            (
+                LoadingThemeResourceContext::Rules { side, country },
+                &owner.sources.selected_rules_root,
+            )
+        };
+        if let Some(policy) = program
+            .loading_theme_policy(context, source)
+            .map_err(error)?
+        {
+            return Ok(match policy {
+                LoadingThemePolicy::Retail => LoadingThemeSelection::Stock,
+                LoadingThemePolicy::Names { values } => {
+                    let mut names = values.into_iter();
+                    LoadingThemeSelection::Names([names.next().flatten(), names.next().flatten()])
+                }
+            });
+        }
+    }
+    #[cfg(feature = "ares")]
+    {
+        let names = if let Some(map) = campaign {
+            [
+                map.section("Basic")
+                    .and_then(|section| section.read_name("LoadingTheme", 128))
+                    .map(str::to_owned),
+                None,
+            ]
+        } else {
+            owner
+                .zip(country)
+                .map(|(owner, country)| owner.loading_theme_names(country))
+                .unwrap_or_default()
+        };
+        return Ok(LoadingThemeSelection::Names(names));
+    }
+    #[cfg(not(feature = "ares"))]
+    Ok(LoadingThemeSelection::Stock)
 }
 
 impl NativeRulesProcessOwner {
@@ -448,53 +564,91 @@ impl NativeRulesProcessOwner {
             .map(|(id, body, ..)| (id, body.read_name("Name", 0x31)))
     }
 
-    /// Every retained country's Ares `File.Flag=` (stock/unknown defaults
-    /// included), deduplicated case-insensitively for shell atlas loading.
-    #[cfg(feature = "ares")]
-    pub fn country_flag_files(&self) -> Vec<String> {
+    /// Shared live selection for menu and loading. The binder validates the
+    /// same declaration and original ordinal catalogs as gameplay; whole-absent
+    /// responses keep the legacy profile, while explicit stock suppresses it.
+    fn live_country_extension(
+        &self,
+        index: CountryIdx,
+    ) -> Result<Option<(AresCountryPresentation, AresCountryLoading)>, RulesError> {
         let state = self
             .registry
             .as_ref()
             .expect("Rules transition reentered")
             .registry_state();
-        let mut files = Vec::new();
-        for (_, _, _, _, _, country) in state.country_projection() {
-            let Some(flag) = country.presentation().flag.as_deref() else {
+        if let Some(policy) = state.live_faction_country(u32::from(index.0))? {
+            return Ok(policy.map(|country| {
+                (
+                    country.presentation,
+                    AresCountryLoading::from_declaration(country.loading),
+                )
+            }));
+        }
+        #[cfg(feature = "ares")]
+        return Ok(state.country_projection().nth(usize::from(index.0)).map(
+            |(_, _, _, _, _, country)| (country.presentation().clone(), country.loading().clone()),
+        ));
+        #[cfg(not(feature = "ares"))]
+        Ok(None)
+    }
+
+    /// Ordered actual Country bodies plus their current accepted presentation.
+    /// No isolated RuleSet, parent replay, or name-based rebinding participates.
+    pub fn country_menu_rows(&self) -> Result<Option<Vec<LiveCountryMenuRow>>, RulesError> {
+        if !self.uses_extended_country_presentation() {
+            return Ok(None);
+        }
+        let state = self
+            .registry
+            .as_ref()
+            .expect("Rules transition reentered")
+            .registry_state();
+        state.ensure_live_faction_checkpoint()?;
+        let rows = state
+            .country_projection()
+            .enumerate()
+            .map(|(ordinal, (id, body, ..))| {
+                let index =
+                    CountryIdx(u16::try_from(ordinal).expect("Country ordinal exceeds u16"));
+                let facts = CountryRules::from_ini_section(body);
+                let multiplay = facts.is_multiplay();
+                Ok(LiveCountryMenuRow {
+                    index,
+                    id: id.to_owned(),
+                    name: facts.name,
+                    ui_name: facts.ui_name,
+                    multiplay,
+                    presentation: self
+                        .live_country_extension(index)?
+                        .map(|(presentation, _)| presentation),
+                })
+            })
+            .collect::<Result<Vec<_>, RulesError>>()?;
+        Ok(Some(rows))
+    }
+
+    /// Additional extension flag roots, deduplicated in actual Country order.
+    /// Stock choices use the original stock atlas roots at the caller.
+    pub fn country_flag_files(&self) -> Result<Vec<String>, RulesError> {
+        let mut files: Vec<String> = Vec::new();
+        for row in self.country_menu_rows()?.unwrap_or_default() {
+            let Some(flag) = row.presentation.and_then(|p| p.flag) else {
                 continue;
             };
             if !files
                 .iter()
-                .any(|existing: &String| existing.eq_ignore_ascii_case(flag))
+                .any(|existing| existing.eq_ignore_ascii_case(&flag))
             {
-                files.push(flag.to_owned());
+                files.push(flag);
             }
         }
-        files
+        Ok(files)
     }
 
-    /// Rows consumed by the Ares weighted country picker: registry ID, Name,
-    /// Multiplay gate and both weights. Values come from the same retained
-    /// Country extension as the shell flag/status projection.
-    #[cfg(feature = "ares")]
-    pub fn country_random_rows(&self) -> Vec<(&str, Option<&str>, bool, i32, i32)> {
-        let state = self
-            .registry
-            .as_ref()
-            .expect("Rules transition reentered")
-            .registry_state();
-        state
-            .country_projection()
-            .map(|(id, body, _, _, _, country)| {
-                let presentation = country.presentation();
-                (
-                    id,
-                    body.read_name("Name", 0x31),
-                    body.read_bool("Multiplay", false),
-                    presentation.random_weight,
-                    presentation.ai_weight(),
-                )
-            })
-            .collect()
+    /// Random selection consumes the same owned rows and extension weights as
+    /// the menu; explicit-stock rows remain available to the stock picker.
+    pub fn country_random_rows(&self) -> Result<Option<Vec<LiveCountryMenuRow>>, RulesError> {
+        self.country_menu_rows()
     }
 
     /// The live registry's SideExt for a side index: `None` for a negative or
@@ -550,27 +704,20 @@ impl NativeRulesProcessOwner {
         }
     }
 
-    /// `Game_GetFlagSurface @ 0x1001DCE0` for a shell HouseType country index:
-    /// that country's `File.Flag`, or the `rani.pcx` null-surface branch when
-    /// the file is cleared. `None` when no Country holds that index.
-    #[cfg(feature = "ares")]
-    pub fn country_flag_surface(&self, index: u16) -> Option<&str> {
-        let id = self.country_name(i32::from(index))?;
-        let state = self
-            .registry
-            .as_ref()
-            .expect("Rules transition reentered")
-            .registry_state();
-        state
-            .country_projection()
-            .find(|(candidate, ..)| candidate.eq_ignore_ascii_case(id))
-            .map(|(_, _, _, _, _, country)| {
-                country
-                    .presentation()
+    /// Game_GetFlagSurface1001DCE0 selects this exact Country ordinal.
+    /// A cleared extension flag uses rani.pcx; a stock choice keeps the caller's
+    /// stock surface route. Duplicate stored IDs never select an earlier row.
+    pub fn country_flag_surface(&self, index: u16) -> Result<Option<String>, RulesError> {
+        if self.country_name(i32::from(index)).is_none() {
+            return Ok(None);
+        }
+        Ok(self
+            .live_country_extension(CountryIdx(index))?
+            .map(|(presentation, _)| {
+                presentation
                     .flag
-                    .as_deref()
-                    .unwrap_or(crate::rules::ruleset::STOCK_UNKNOWN_INSIGNIA)
-            })
+                    .unwrap_or_else(|| crate::rules::ruleset::STOCK_UNKNOWN_INSIGNIA.to_owned())
+            }))
     }
 
     pub fn country_name(&self, index: i32) -> Option<&str> {
@@ -579,20 +726,31 @@ impl NativeRulesProcessOwner {
             .map(|(id, _)| id)
     }
 
-    /// Ares loading hooks read the actual retained Country before Full_Init
-    /// destroys the registry. Consumers clone this view once per loading attempt.
-    #[cfg(feature = "ares")]
+    /// Read the accepted retained Country at this ordinal before reset.
+    /// The view owns presentation data; it cannot advance component history.
     pub fn country_loading(
         &self,
-        index: crate::rules::ruleset::CountryIdx,
-    ) -> Option<(&crate::rules::country_loading::AresCountryLoading, i32)> {
-        self.registry
+        index: CountryIdx,
+    ) -> Result<Option<LiveCountryLoading>, RulesError> {
+        let state = self
+            .registry
             .as_ref()
             .expect("Rules transition reentered")
-            .registry_state()
-            .country_projection()
-            .nth(usize::from(index.0))
-            .map(|(_, _, _, side, _, country)| (country.loading(), side))
+            .registry_state();
+        let Some((_, _, _, side, ..)) = state.country_projection().nth(usize::from(index.0)) else {
+            return Ok(None);
+        };
+        let extension = self
+            .live_country_extension(index)?
+            .map(|(_, loading)| loading);
+        let text_hsv = extension
+            .as_ref()
+            .and_then(|loading| state.loading_text_hsv(loading.color_index()));
+        Ok(Some(LiveCountryLoading {
+            side,
+            extension,
+            text_hsv,
+        }))
     }
 
     /// Ares1002FB80 reads the retained Country's Side then Country directly
@@ -628,20 +786,15 @@ impl NativeRulesProcessOwner {
         [side, read(country)]
     }
 
-    /// Early Ares6847B7 loading color, resolved against this same retained
-    /// registry before E_multi or the later mode/map Rules reset can change it.
-    /// `None` when the Country sets no color, leaving the stock side color.
-    #[cfg(feature = "ares")]
+    /// Early Ares6847B7 color from the same accepted Country loading view
+    /// and original retained Colors owner. Stock choices have no override.
     pub fn country_loading_text_hsv(
         &self,
-        index: crate::rules::ruleset::CountryIdx,
-    ) -> Option<[u8; 3]> {
-        let (loading, _) = self.country_loading(index)?;
-        self.registry
-            .as_ref()
-            .expect("Rules transition reentered")
-            .registry_state()
-            .loading_text_hsv(loading.color_index())
+        index: CountryIdx,
+    ) -> Result<Option<[u8; 3]>, RulesError> {
+        Ok(self
+            .country_loading(index)?
+            .and_then(|loading| loading.text_hsv))
     }
 
     /// Refresh derived frontend country/side fields without replaying Process
@@ -737,7 +890,6 @@ impl NativeRulesProcessOwner {
         match self.registry.as_ref()? {
             NativeRulesRegistryOwner::Scenario(processed) => Some(processed.as_ref()),
             NativeRulesRegistryOwner::BeforeReset(_) | NativeRulesRegistryOwner::Live(_) => None,
-            #[cfg(feature = "ares")]
             NativeRulesRegistryOwner::PreparedNonCampaign { .. } => None,
         }
     }
@@ -815,7 +967,6 @@ impl NativeRulesProcessOwner {
             NativeRulesRegistryOwner::Scenario(processed) => {
                 processed.retain_sdk_configuration_program(program)
             }
-            #[cfg(feature = "ares")]
             NativeRulesRegistryOwner::PreparedNonCampaign { trace, .. } => {
                 trace.retain_sdk_configuration_program(program)
             }
@@ -828,6 +979,20 @@ impl NativeRulesProcessOwner {
     pub fn uses_component_country_reader(&self) -> bool {
         self.sdk_configuration_program()
             .is_some_and(|program| program.has_country_read())
+    }
+
+    /// Presence subscribes to the live facade even when a resource explicitly
+    /// selects stock. A theme-only component does not enable faction menus.
+    pub fn uses_extended_country_presentation(&self) -> bool {
+        crate::rules::ARES_ENABLED
+            || self
+                .sdk_configuration_program()
+                .is_some_and(|program| program.has_faction_resource())
+    }
+
+    pub fn uses_component_loading_theme(&self) -> bool {
+        self.sdk_configuration_program()
+            .is_some_and(|program| program.has_loading_theme_resource())
     }
 
     /// Last accepted checkpoint of the live authority. Pending physical reads
@@ -843,7 +1008,7 @@ impl NativeRulesProcessOwner {
         let mut state = NativeRulesRegistryState::default();
         if let Some(program) = self
             .sdk_configuration_program()
-            .filter(|p| p.has_country_read())
+            .filter(|p| p.has_early_configuration())
         {
             state.retain_sdk_configuration_program(Some(Arc::new(
                 program.fresh_configuration_seed(),
@@ -951,7 +1116,6 @@ impl NativeRulesProcessOwner {
     /// Ares6847B7/1002F8F0 color and552D58/1001E0E0 PAL consumers run earlier.
     /// The app must transfer any retired scene's runtime Rules writes first.
     /// Generated RMG saved-DL admission deliberately keeps its existing path.
-    #[cfg(feature = "ares")]
     pub fn prepare_noncampaign_scenario_prefix(
         &mut self,
     ) -> Result<NativeNonCampaignPrefixPreparation, RulesError> {
@@ -979,7 +1143,6 @@ impl NativeRulesProcessOwner {
     /// Keep the actual post-prefix registry, including consumed Country parent
     /// flags. Its unconsumed constructor chronology belongs to this cancelled
     /// attempt and must not be replayed by the next Scenario's numeric cursor.
-    #[cfg(feature = "ares")]
     pub fn cancel_prepared_noncampaign_scenario_prefix(
         &mut self,
         preparation: NativeNonCampaignPrefixPreparation,
@@ -991,7 +1154,6 @@ impl NativeRulesProcessOwner {
     }
 
     fn assert_no_prepared_prefix(&self) {
-        #[cfg(feature = "ares")]
         assert!(
             !matches!(
                 self.registry.as_ref(),
@@ -1041,7 +1203,6 @@ impl NativeRulesProcessOwner {
         state
     }
 
-    #[cfg(feature = "ares")]
     fn take_prepared_noncampaign_trace(
         &mut self,
         preparation: NativeNonCampaignPrefixPreparation,
@@ -1137,7 +1298,6 @@ impl NativeRulesProcessOwner {
                 };
                 (trace, mode)
             }
-            #[cfg(feature = "ares")]
             NativeScenarioRulesPrefix::PreparedNonCampaign {
                 preparation,
                 mode_rules_override,

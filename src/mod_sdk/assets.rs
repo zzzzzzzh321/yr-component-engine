@@ -89,6 +89,9 @@ pub(crate) fn load_from_assets_for_process(
     let Some(admitted) = asset_program(assets)? else {
         return Ok(None);
     };
+    if admitted.has_loading_theme_resource() && seed.is_none() {
+        return Err("loading theme component was not admitted before cold Rules processing".into());
+    }
     admitted
         .configure(
             passes,
@@ -114,7 +117,7 @@ pub(crate) fn early_configuration_seed(
     let admitted = AdmittedComponent::load(bytes, &identity.sha256)?;
     super::startup::require_startup_frontier(&admitted, early)?;
     let program = admitted.into_configuration_seed();
-    Ok(program.has_country_read().then(|| Arc::new(program)))
+    Ok(program.has_early_configuration().then(|| Arc::new(program)))
 }
 
 /// Restore the exact saved configuration after projecting retained Rules.

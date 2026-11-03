@@ -23,6 +23,10 @@ mod country_loading_tests;
 #[path = "pump/loading_theme_tests.rs"]
 mod loading_theme_tests;
 
+#[cfg(test)]
+#[path = "pump/sdk_presentation_tests.rs"]
+mod sdk_presentation_tests;
+
 use crate::app::AppState;
 use crate::app::loading::campaign_presentation::CampaignLoadingPresentation;
 use crate::app::loading::composition::{
@@ -562,7 +566,6 @@ impl LoadingRequest {
             request: self,
             initial,
             context,
-            #[cfg(feature = "ares")]
             rules_prefix: None,
         })
     }
@@ -577,17 +580,14 @@ struct PreparedScenarioLoad {
     request: LoadingRequest,
     initial: MapLoadInitial,
     context: FreshScenarioLoadContextDescriptor,
-    #[cfg(feature = "ares")]
     rules_prefix: Option<crate::rules::process_owner::NativeNonCampaignPrefixPreparation>,
 }
 
 struct ConstructingScenarioLoad {
     load: init::FreshMapLoadJob,
-    #[cfg(feature = "ares")]
     rules_prefix: Option<crate::rules::process_owner::NativeNonCampaignPrefixPreparation>,
 }
 
-#[cfg(feature = "ares")]
 fn retire_rules_prefix(
     preparation: Option<crate::rules::process_owner::NativeNonCampaignPrefixPreparation>,
     assets: &mut crate::app::process_assets::ProcessAssets,
@@ -602,7 +602,6 @@ fn retire_rules_prefix(
 }
 
 impl PreparedScenarioLoad {
-    #[cfg(feature = "ares")]
     fn cancel_rules_prefix(&mut self, assets: &mut crate::app::process_assets::ProcessAssets) {
         retire_rules_prefix(self.rules_prefix.take(), assets);
     }
@@ -740,9 +739,7 @@ pub(crate) enum NativeLoadingArt {
 pub(crate) struct NativeLoadingScreenState {
     pub variant: NativeLoadingArt,
     local_side_index: i32,
-    #[cfg(feature = "ares")]
     early_country_loading: Option<EarlyCountryLoading>,
-    #[cfg(feature = "ares")]
     late_country_loading: Option<crate::rules::country_loading::AresCountryLoading>,
     /// Local player's MP color scheme — source of the progress outline and bar
     /// remap. Derived from the launch session, not the country variant.
@@ -770,7 +767,6 @@ pub(crate) struct NativeLoadingScreenState {
 
 /// Two immutable observations, not a second Country owner: Color/PAL are
 /// resolved before Full_Init; the later file/labels are read after E_multi.
-#[cfg(feature = "ares")]
 struct EarlyCountryLoading {
     country: crate::rules::ruleset::CountryIdx,
     palette_name: String,
@@ -792,9 +788,7 @@ impl NativeLoadingScreenState {
         Self {
             variant: NativeLoadingArt::StockOffline(variant),
             local_side_index,
-            #[cfg(feature = "ares")]
             early_country_loading: None,
-            #[cfg(feature = "ares")]
             late_country_loading: None,
             color_index,
             // Static placeholders; replaced by `resolve_player_colors` once rules load.
@@ -818,9 +812,7 @@ impl NativeLoadingScreenState {
             // BeginProgress684620 passes Campaign.CD; color resolver642B30
             // distinguishes exactly zero from all nonzero values.
             local_side_index: cd,
-            #[cfg(feature = "ares")]
             early_country_loading: None,
-            #[cfg(feature = "ares")]
             late_country_loading: None,
             color_index: HouseColorIndex(0),
             backing_rgb: FALLBACK_BACKING_RGB,
@@ -871,7 +863,6 @@ impl NativeLoadingScreenState {
         }
         // Ares1002F8F0 publishes this signed index once for the loading
         // attempt; negative resumes the stock side-color branch above.
-        #[cfg(feature = "ares")]
         if let Some(text_rgb) = self
             .early_country_loading
             .as_ref()
@@ -904,11 +895,9 @@ pub(crate) struct LoadingSession {
 
 impl LoadingSession {
     fn retire(mut self, assets: &mut crate::app::process_assets::ProcessAssets) {
-        #[cfg(feature = "ares")]
         if let LoadingStage::Prepared(prepared) = &mut self.stage {
             prepared.cancel_rules_prefix(assets);
         }
-        #[cfg(feature = "ares")]
         if let LoadingStage::ConstructingScenario(constructing) = &mut self.stage {
             retire_rules_prefix(constructing.rules_prefix.take(), assets);
         }
@@ -1021,7 +1010,6 @@ impl LoadingJob {
     }
 }
 
-#[cfg(feature = "ares")]
 fn country_loading_index(
     startup: &LoadingStartup,
     external_launch: bool,
@@ -1041,7 +1029,6 @@ fn country_loading_index(
     Some(launch.local_slot().country.index())
 }
 
-#[cfg(feature = "ares")]
 fn bind_early_country_loading(
     native: &mut NativeLoadingScreenState,
     startup: &LoadingStartup,
@@ -1056,12 +1043,19 @@ fn bind_early_country_loading(
     let Some(index) = country_loading_index(startup, external_launch) else {
         return Ok(());
     };
-    let (country, side) = owner.country_loading(index).ok_or_else(|| {
+    if !owner.uses_extended_country_presentation() {
+        return Ok(());
+    }
+    let view = owner.country_loading(index)?.ok_or_else(|| {
         anyhow::anyhow!(
             "loading Country {} was not allocated by session admission",
             index.0
         )
     })?;
+    let Some(country) = view.extension else {
+        // Allocated and explicitly stock is a valid selection, not a missing Country.
+        return Ok(());
+    };
     let palette_name = country.files().1.to_owned();
     let palette = if palette_name.is_empty() {
         None
@@ -1079,10 +1073,8 @@ fn bind_early_country_loading(
                     .map(|source| source.source_archive.to_owned())
             })
             .flatten();
-    let text_rgb = owner
-        .country_loading_text_hsv(index)
-        .map(|hsv| normalize_rgb(hsv_to_rgb(hsv)));
-    native.local_side_index = side;
+    let text_rgb = view.text_hsv.map(|hsv| normalize_rgb(hsv_to_rgb(hsv)));
+    native.local_side_index = view.side;
     if let Some(text_rgb) = text_rgb {
         native.text_rgb = text_rgb;
     }
@@ -1096,7 +1088,6 @@ fn bind_early_country_loading(
     Ok(())
 }
 
-#[cfg(feature = "ares")]
 fn prepare_country_loading_prefix(
     process_assets: &mut crate::app::process_assets::ProcessAssets,
     resident: Option<&mut crate::sim::world::Simulation>,
@@ -1130,14 +1121,11 @@ fn prepare_country_loading_prefix(
         )?;
     }
     let preparation = owner.prepare_noncampaign_scenario_prefix()?;
-    native.late_country_loading = Some(
-        owner
-            .country_loading(early.country)
-            .expect("E_multi preserves an already allocated Country")
-            .0
-            .clone(),
-    );
     prepared.rules_prefix = Some(preparation);
+    native.late_country_loading = owner
+        .country_loading(early.country)?
+        .expect("E_multi preserves an already allocated Country")
+        .extension;
     Ok(())
 }
 
@@ -1405,21 +1393,19 @@ fn lease_loading_assets_and_play_loading_theme(
     now_ms: u64,
 ) -> LoadingSession {
     session.job.asset_manager = process_assets.lease_for_loading();
-    #[cfg(not(feature = "ares"))]
-    if let Some(assets) = audio_service_asset_manager(process_assets, Some(&session)) {
+    if !process_assets.defers_loading_theme()
+        && let Some(assets) = audio_service_asset_manager(process_assets, Some(&session))
+    {
         let _ = audio.play_theme("LOADING", assets, now_ms);
     }
     // Ares683C70 needs the selected map INI. Its one playback occurs at the
     // consuming Selected->Prepared transition, before the Rules prefix reset.
-    #[cfg(feature = "ares")]
-    let _ = (audio, now_ms);
     session
 }
 
 /// Installed Ares683C70/683D05 select from the already parsed map (campaign)
 /// or the early process Rules/Country/Side authority (other sessions). Called
 /// only by Selected->Prepared, before E_multi and later mode/map type writes.
-#[cfg(feature = "ares")]
 fn play_ares_loading_theme(
     process_assets: &crate::app::process_assets::ProcessAssets,
     audio: &mut crate::app::audio_runtime::AppAudioRuntime,
@@ -1427,27 +1413,24 @@ fn play_ares_loading_theme(
     scenario: &crate::rules::ini_parser::IniFile,
     assets: &AssetManager,
     wall_ms: u64,
-) {
-    let names = if startup.campaign().is_some() {
-        [
-            scenario
-                .section("Basic")
-                .and_then(|section| section.read_name("LoadingTheme", 128))
-                .map(str::to_owned),
-            None,
-        ]
-    } else {
-        startup
-            .launch_session()
-            .and_then(|launch| launch.humans.first())
-            .and_then(|first| {
-                process_assets
-                    .native_rules()
-                    .map(|owner| owner.loading_theme_names(first.slot.country.index()))
-            })
-            .unwrap_or([None, None])
-    };
-    audio.play_ares_loading_theme(names.iter().map(Option::as_deref), assets, wall_ms);
+) -> anyhow::Result<()> {
+    if !process_assets.defers_loading_theme() {
+        return Ok(());
+    }
+    let country = startup
+        .launch_session()
+        .and_then(|launch| launch.humans.first())
+        .map(|first| first.slot.country.index());
+    let campaign = startup.campaign().map(|_| scenario);
+    match process_assets.select_loading_theme(country, campaign)? {
+        crate::rules::process_owner::LoadingThemeSelection::Stock => {
+            let _ = audio.play_theme("LOADING", assets, wall_ms);
+        }
+        crate::rules::process_owner::LoadingThemeSelection::Names(names) => {
+            audio.play_ares_loading_theme(names.iter().map(Option::as_deref), assets, wall_ms);
+        }
+    }
+    Ok(())
 }
 
 /// The asset manager the audio service polls Theme with: the resident
@@ -1702,8 +1685,7 @@ fn pump_loading_after_present(
         request,
         initial,
         context: fresh_scenario_context,
-        #[cfg(feature = "ares")]
-            rules_prefix: mut prepared_rules_prefix,
+        rules_prefix: mut prepared_rules_prefix,
     } = prepared;
     state
         .frontend
@@ -1774,16 +1756,7 @@ fn pump_loading_after_present(
         // The outgoing scene no longer advances. Return its live Type and
         // ambient Rules writes before Full_Init's optional prefix Process.
         // Type reset deletes Types but retains the ambient scalar defaults.
-        let should_retire_outgoing = {
-            #[cfg(feature = "ares")]
-            {
-                prepared_rules_prefix.is_none()
-            }
-            #[cfg(not(feature = "ares"))]
-            {
-                true
-            }
-        };
+        let should_retire_outgoing = prepared_rules_prefix.is_none();
         if should_retire_outgoing && let Some(runtime) = state.match_state.sim_runtime.as_mut() {
             native_rules_owner.consume_outgoing_scenario_rules(
                 runtime.simulation.retire_object_type_tech_levels(),
@@ -1834,7 +1807,6 @@ fn pump_loading_after_present(
                     progress.runtime_color_scheme_count,
                     the_team_enabled,
                     native_rules_owner,
-                    #[cfg(feature = "ares")]
                     &mut prepared_rules_prefix,
                     audio,
                     shared_cell_dummy,
@@ -1856,7 +1828,6 @@ fn pump_loading_after_present(
                     asset_manager,
                     native_rules_owner,
                     the_team_enabled,
-                    #[cfg(feature = "ares")]
                     prepared_noncampaign_prefix: &mut prepared_rules_prefix,
                     audio,
                     shared_cell_dummy,
@@ -1890,7 +1861,6 @@ fn pump_loading_after_present(
     // init borrows the ticket until its actual Rules reset boundary. Any
     // earlier asset/map validation failure leaves it here for explicit retire;
     // a consumed ticket's load_scenario already restored its partial Live state.
-    #[cfg(feature = "ares")]
     if continuing.is_none() {
         retire_rules_prefix(prepared_rules_prefix.take(), &mut state.process_assets);
     }
@@ -1899,7 +1869,6 @@ fn pump_loading_after_present(
             state.frontend.loading_session = Some(LoadingSession {
                 stage: LoadingStage::ConstructingScenario(ConstructingScenarioLoad {
                     load: continuing.expect("pending native construction"),
-                    #[cfg(feature = "ares")]
                     rules_prefix: prepared_rules_prefix,
                 }),
                 native,
@@ -2010,7 +1979,6 @@ fn pump_map_construction(
             asset_manager,
             native_rules_owner,
             the_team_enabled,
-            #[cfg(feature = "ares")]
             prepared_noncampaign_prefix: &mut constructing.rules_prefix,
             audio,
             shared_cell_dummy,
@@ -2028,7 +1996,6 @@ fn pump_map_construction(
             Ok(LoadingPump::Pending)
         }
         Ok(Some(mut result)) => {
-            #[cfg(feature = "ares")]
             if let LoadingStage::ConstructingScenario(constructing) = &mut session.stage {
                 retire_rules_prefix(constructing.rules_prefix.take(), &mut state.process_assets);
             }
@@ -2343,8 +2310,6 @@ fn prepare_loading_session(
     configured_ra2_dir: Option<PathBuf>,
     network: Option<crate::app::lan_service::LoadingNetworkService<'_>>,
 ) -> anyhow::Result<LoadingSession> {
-    #[cfg(not(feature = "ares"))]
-    let _ = audio;
     if let Err(err) =
         ensure_session_job_asset_manager(process_assets, &mut session, configured_ra2_dir)
     {
@@ -2378,7 +2343,6 @@ fn prepare_loading_session(
                 // an immutable request, while retained catalog fields update.
                 process_assets.reload_campaigns(assets);
             }
-            #[cfg(feature = "ares")]
             if let Some(native) = native.as_mut() {
                 let early = process_assets
                     .native_rules()
@@ -2426,18 +2390,18 @@ fn prepare_loading_session(
             };
             match prepared {
                 Ok(prepared) => {
-                    #[cfg(feature = "ares")]
-                    play_ares_loading_theme(
+                    if let Err(err) = play_ares_loading_theme(
                         process_assets,
                         audio,
                         prepared.request.startup(),
                         &prepared.initial.map_data().ini,
                         assets,
                         crate::app::match_runtime::frame_pacer::wall_clock_ms(),
-                    );
-                    #[cfg(feature = "ares")]
+                    ) {
+                        job.retire(process_assets);
+                        return Err(err);
+                    }
                     let mut prepared = prepared;
-                    #[cfg(feature = "ares")]
                     if let Some(native) = native.as_mut()
                         && let Err(err) = prepare_country_loading_prefix(
                             process_assets,
@@ -2678,7 +2642,6 @@ fn ensure_loading_composition_snapshot(state: &mut AppState) {
         .as_mut()
         .and_then(|session| session.native.as_mut())
     {
-        #[cfg(feature = "ares")]
         let snapshot = {
             let mut snapshot = snapshot;
             if let Some(country) = native.late_country_loading.as_ref() {
@@ -2913,15 +2876,21 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
         .progress_row
         .participants
         .iter()
-        .map(
-            |row| crate::render::loading_screen_chrome::LoadingParticipantArtInput {
-                variant: row.variant,
-                ramp: row.ramp,
-                side_icon: loading_row_insignia(state.rules(), row.variant, row.country_index),
-            },
-        )
-        .collect();
-    #[cfg(feature = "ares")]
+        .map(|row| -> anyhow::Result<_> {
+            Ok(
+                crate::render::loading_screen_chrome::LoadingParticipantArtInput {
+                    variant: row.variant,
+                    ramp: row.ramp,
+                    side_icon: loading_row_insignia(
+                        Some(&state.process_assets),
+                        state.rules(),
+                        row.variant,
+                        row.country_index,
+                    )?,
+                },
+            )
+        })
+        .collect::<anyhow::Result<_>>()?;
     let country_background = state
         .frontend
         .loading_session
@@ -2940,7 +2909,6 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
         });
     let art = crate::render::loading_screen_chrome::LoadingScreenArtInput {
         variant,
-        #[cfg(feature = "ares")]
         background: country_background.as_ref().map(|file| {
             let early = state
                 .frontend
@@ -2955,8 +2923,6 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
                 palette_name: &early.palette_name,
             }
         }),
-        #[cfg(not(feature = "ares"))]
-        background: None,
     };
     let atlas = build_loading_screen_atlas_with_composition(
         &state.renderer.gpu,
@@ -2968,7 +2934,6 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
         composition_input,
         &participant_art,
     );
-    #[cfg(feature = "ares")]
     if state.frontend.external_launch
         && crate::app::match_diagnostics::MatchDiagnosticsState::external_network_audit_enabled()
         && let Some(background) = art.background
@@ -3328,14 +3293,24 @@ pub(super) fn loading_art_variant_from_launch_country(
 /// has no entry. An observer row is not a Country index and keeps the stock
 /// `-3` insignia; a stock build's rules return `None` and keep the table.
 fn loading_row_insignia(
+    process_assets: Option<&crate::app::process_assets::ProcessAssets>,
     rules: Option<&crate::rules::ruleset::RuleSet>,
     variant: Option<LoadingArtVariant>,
     country_index: u16,
-) -> Option<String> {
+) -> Result<Option<String>, crate::rules::error::RulesError> {
     if variant == Some(LoadingArtVariant::Observer) {
-        return None;
+        return Ok(None);
     }
-    rules?.country_insignia_pcx(country_index)
+    // Atlas preparation is one consuming load operation, never a frame query.
+    // Explicit stock must keep the static table even in a legacy Ares build.
+    if let Some(process_assets) = process_assets
+        && process_assets
+            .native_rules()
+            .is_some_and(|owner| owner.uses_extended_country_presentation())
+    {
+        return process_assets.country_flag_surface(country_index);
+    }
+    Ok(rules.and_then(|rules| rules.country_insignia_pcx(country_index)))
 }
 
 /// Normalize an 8-bit RGB triple to 0..1.

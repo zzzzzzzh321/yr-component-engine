@@ -3600,13 +3600,13 @@ impl NativeRulesRegistryState {
 
     /// ScenarioClear10004EF1 recreates RulesExt; TypeReset6686C0 does not.
     /// Only the opaque component owns the interpretation of this boundary.
-    /// Early Country readers retain their immutable program identity until the
-    /// guest consumes this clear; legacy components retain the old cold reload.
+    /// Early component readers retain their immutable program identity until
+    /// the guest consumes this clear; legacy components keep the old cold reload.
     pub(crate) fn clear_sdk_configuration_for_scenario(&mut self) {
         if !self
             .sdk_configuration_seed
             .as_ref()
-            .is_some_and(|program| program.has_country_read())
+            .is_some_and(|program| program.has_early_configuration())
         {
             self.sdk_configuration_seed = None;
         }
@@ -3621,7 +3621,6 @@ impl NativeRulesRegistryState {
     /// stores a kind1 ordinal. A negative index is no override: the loading
     /// screen's own stock AlliedLoad/SovietLoad branch keeps the color.
     /// The process owner exposes the value, never the mutable/raw registry.
-    #[cfg(feature = "ares")]
     pub(crate) fn loading_text_hsv(&self, index: i32) -> Option<[u8; 3]> {
         // This representation is owned by allocate_colors; both native
         // variants share one HSV. No final RuleSet list participates.

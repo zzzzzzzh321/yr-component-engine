@@ -208,6 +208,7 @@ pub(crate) struct MultiplayerShellRuntime {
     cooperative_registry: CooperativeRegistry,
     cooperative_progress: CooperativeProgressState,
     cooperative_country_roster: Vec<CooperativeCountryRosterEntry>,
+    weighted_country_random: bool,
     /// Process A8EB68, initialized0; independent of COOPMD AIDifficulty.
     cooperative_difficulty: i32,
     /// `[0xA8B254]`, the multiplayer scenario index (catalog order, BSS 0).
@@ -228,7 +229,13 @@ impl MultiplayerShellRuntime {
         let side = process_assets.read_multiplayer_country(&ini, self.local_preferences.side);
         read_local_preference_fields(&ini, &mut self.local_preferences);
         self.local_preferences.side = side;
-        self.refresh_multiplayer_country_catalog(process_assets);
+        // ReadMultiPlayer can allocate identities even without a body pass.
+        // Presentation is queried only after PrepareSession, never by Options
+        // or the startup settings reader. Keep its original ID/Name projection.
+        self.cooperative_country_roster = process_assets
+            .multiplayer_countries()
+            .map(|(id, name)| CooperativeCountryRosterEntry::new(id, name))
+            .collect();
     }
 
     /// Derived HouseType ID/Name view. Refresh after either native registry
@@ -236,29 +243,28 @@ impl MultiplayerShellRuntime {
     pub(crate) fn refresh_multiplayer_country_catalog(
         &mut self,
         process_assets: &crate::app::process_assets::ProcessAssets,
+        rows: Option<&[crate::rules::process_owner::LiveCountryMenuRow]>,
     ) {
-        #[cfg(feature = "ares")]
-        {
-            self.cooperative_country_roster = process_assets
-                .country_random_rows()
-                .into_iter()
-                .map(|(id, name, multiplay, random_weight, ai_random_weight)| {
+        if let Some(rows) = rows {
+            self.cooperative_country_roster = rows
+                .iter()
+                .map(|row| {
                     CooperativeCountryRosterEntry::new_with_random(
-                        id,
-                        name,
-                        multiplay,
-                        random_weight,
-                        ai_random_weight,
+                        &row.id,
+                        row.name.as_deref(),
+                        row.multiplay,
+                        row.presentation.as_ref().map_or(1, |p| p.random_weight),
+                        row.presentation.as_ref().map_or(1, |p| p.ai_weight()),
                     )
                 })
                 .collect();
-        }
-        #[cfg(not(feature = "ares"))]
-        {
+            self.weighted_country_random = rows.iter().any(|row| row.presentation.is_some());
+        } else {
             self.cooperative_country_roster = process_assets
                 .multiplayer_countries()
                 .map(|(id, name)| CooperativeCountryRosterEntry::new(id, name))
                 .collect();
+            self.weighted_country_random = false;
         }
     }
 
@@ -861,7 +867,14 @@ impl MultiplayerShellRuntime {
         let registry = &self.cooperative_registry;
         let roster = &self.cooperative_country_roster;
         let mut draw_country = |role, rng: &mut SimRng| {
-            draw_shell_country(registry, progress.as_ref(), roster, role, rng)
+            draw_shell_country(
+                registry,
+                progress.as_ref(),
+                roster,
+                self.weighted_country_random,
+                role,
+                rng,
+            )
         };
         let mut assignments = ShellRandomAssignmentState::new(session);
         assignments.resolve_humans(&mut self.scenario_rng, &mut draw_country)?;
@@ -923,6 +936,7 @@ impl MultiplayerShellRuntime {
             cooperative_registry,
             cooperative_progress,
             cooperative_country_roster,
+            weighted_country_random: cfg!(feature = "ares"),
             cooperative_difficulty: 0,
             scenario_index: 0,
             scenario_start_header: crate::map::preview::ScenarioStartHeader::default(),
@@ -1060,8 +1074,16 @@ impl MultiplayerShellRuntime {
         let registry = &self.cooperative_registry;
         let roster = &self.cooperative_country_roster;
         let mut assignments = ShellRandomAssignmentState::new(&staged_session);
-        let mut draw_country =
-            |role, rng: &mut SimRng| draw_shell_country(registry, None, roster, role, rng);
+        let mut draw_country = |role, rng: &mut SimRng| {
+            draw_shell_country(
+                registry,
+                None,
+                roster,
+                self.weighted_country_random,
+                role,
+                rng,
+            )
+        };
 
         assignments.resolve_local_country(&mut self.scenario_rng, &mut draw_country)?;
         assignments.pack_ai_assignments(&session.opponents);
@@ -1596,6 +1618,7 @@ fn draw_shell_country(
     registry: &CooperativeRegistry,
     progress: Option<&CooperativeProgressRecord>,
     roster: &[CooperativeCountryRosterEntry],
+    weighted: bool,
     role: RandomCountryRole,
     rng: &mut SimRng,
 ) -> Result<LaunchCountry, CooperativeError> {
@@ -1607,8 +1630,7 @@ fn draw_shell_country(
         draw_country_for_progress(registry, progress, cooperative_role, roster, rng)
             .map(|index| LaunchCountry::from_country_index(index as u32))
     } else {
-        #[cfg(feature = "ares")]
-        {
+        if weighted {
             let ai = matches!(role, RandomCountryRole::Ai { .. });
             let weight = |entry: &CooperativeCountryRosterEntry| {
                 if ai {
@@ -1640,10 +1662,7 @@ fn draw_shell_country(
             }
             return Err(CooperativeError::NoEligibleRandomCountries);
         }
-        #[cfg(not(feature = "ares"))]
         {
-            let _ = roster;
-            let _ = role;
             Ok(LaunchCountry::from_country_index(
                 rng.next_range_u32_inclusive(0, 9),
             ))
@@ -1948,6 +1967,7 @@ mod tests {
             cooperative_registry,
             cooperative_progress,
             cooperative_country_roster: controlled_ten_country_roster(),
+            weighted_country_random: cfg!(feature = "ares"),
             cooperative_difficulty: 0,
             scenario_index: 0,
             scenario_start_header: crate::map::preview::ScenarioStartHeader::default(),
@@ -1977,6 +1997,7 @@ mod tests {
             cooperative_registry: CooperativeRegistry::default(),
             cooperative_progress: CooperativeProgressState::default(),
             cooperative_country_roster: controlled_ten_country_roster(),
+            weighted_country_random: cfg!(feature = "ares"),
             cooperative_difficulty: 0,
             scenario_index: 0,
             scenario_start_header: crate::map::preview::ScenarioStartHeader::default(),
@@ -3425,9 +3446,16 @@ WOLTaunts=junk
         let registry = CooperativeRegistry::default();
         let mut rng = SimRng::new(1);
         assert_eq!(
-            draw_shell_country(&registry, None, &roster, RandomCountryRole::Human, &mut rng)
-                .unwrap()
-                .raw_index(),
+            draw_shell_country(
+                &registry,
+                None,
+                &roster,
+                true,
+                RandomCountryRole::Human,
+                &mut rng
+            )
+            .unwrap()
+            .raw_index(),
             1
         );
         let mut rng = SimRng::new(1);
@@ -3436,6 +3464,7 @@ WOLTaunts=junk
                 &registry,
                 None,
                 &roster,
+                true,
                 RandomCountryRole::Ai { index: 0 },
                 &mut rng
             )
@@ -3448,7 +3477,14 @@ WOLTaunts=junk
         )];
         let mut rng = SimRng::new(1);
         assert!(matches!(
-            draw_shell_country(&registry, None, &none, RandomCountryRole::Human, &mut rng),
+            draw_shell_country(
+                &registry,
+                None,
+                &none,
+                true,
+                RandomCountryRole::Human,
+                &mut rng
+            ),
             Err(CooperativeError::NoEligibleRandomCountries)
         ));
     }

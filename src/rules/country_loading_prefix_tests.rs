@@ -44,8 +44,13 @@ fn enter_shell(owner: &mut NativeRulesProcessOwner) {
     owner.refresh_multiplayer_country_bodies().unwrap();
 }
 
-fn child(owner: &NativeRulesProcessOwner) -> &crate::rules::country_loading::AresCountryLoading {
-    owner.country_loading(CountryIdx(1)).unwrap().0
+fn child(owner: &NativeRulesProcessOwner) -> crate::rules::country_loading::AresCountryLoading {
+    owner
+        .country_loading(CountryIdx(1))
+        .unwrap()
+        .unwrap()
+        .extension
+        .unwrap()
 }
 
 #[test]
@@ -56,7 +61,7 @@ fn ares_country_loading_prefix_exposes_both_primary_passes_before_type_reset() {
     assert_eq!(early.files(), ("parent.shp", "parent.pal"));
     assert_eq!(early.labels()[0], "Name:Parent");
     assert_eq!(
-        owner.country_loading_text_hsv(CountryIdx(1)),
+        owner.country_loading_text_hsv(CountryIdx(1)).unwrap(),
         Some([17, 128, 240])
     );
 

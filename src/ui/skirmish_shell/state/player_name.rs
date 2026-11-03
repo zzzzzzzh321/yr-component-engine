@@ -241,6 +241,7 @@ pub(crate) struct CountryMenuEntry {
     /// stock static country table.
     flag: Option<String>,
     status_key: Option<String>,
+    ui_name: Option<String>,
 }
 
 /// Derived country-menu projection, refreshed from the canonical Rules
@@ -260,6 +261,7 @@ impl Default for CountryMenuCatalog {
                 country: None,
                 flag: None,
                 status_key: None,
+                ui_name: None,
             }],
         }
     }
@@ -276,6 +278,7 @@ impl CountryMenuCatalog {
                         country: None,
                         flag: Some("rani.pcx".to_owned()),
                         status_key: Some("STT:PlayerSideRandom".to_owned()),
+                        ui_name: None,
                     }
                 }
                 super::SkirmishComboItem::Country(super::SkirmishCountryChoice::Country(
@@ -284,6 +287,9 @@ impl CountryMenuCatalog {
                     let id = rules.country_name(CountryIdx(country.raw_index()));
                     CountryMenuEntry {
                         country: Some(*country),
+                        ui_name: id
+                            .and_then(|id| rules.country_display_name_sources(id).0)
+                            .map(str::to_owned),
                         flag: id.and_then(|id| rules.country_flag_surface(id)),
                         status_key: id
                             .and_then(|id| rules.country_status_key(id))
@@ -294,10 +300,52 @@ impl CountryMenuCatalog {
                     country: None,
                     flag: None,
                     status_key: None,
+                    ui_name: None,
                 },
             })
             .collect();
         Self { items, entries }
+    }
+
+    pub(crate) fn from_live_rows(rows: &[crate::rules::process_owner::LiveCountryMenuRow]) -> Self {
+        let items = super::combos::live_country_choices(rows);
+        // Keep hidden countries in the existing snapshot too: row flags and
+        // status belong to the Country ordinal, not to the visible list index.
+        let entries = rows
+            .iter()
+            .map(|row| CountryMenuEntry {
+                country: Some(LaunchCountry::from_country_index(u32::from(row.index.0))),
+                flag: row
+                    .presentation
+                    .as_ref()
+                    .map(|p| p.flag.clone().unwrap_or_else(|| "rani.pcx".to_owned())),
+                status_key: row.presentation.as_ref().and_then(|p| p.status.clone()),
+                ui_name: row.ui_name.clone(),
+            })
+            .collect();
+        Self { items, entries }
+    }
+
+    pub(crate) fn extra_flag_files(&self) -> Vec<String> {
+        let mut flags: Vec<String> = Vec::new();
+        for flag in self.entries.iter().filter_map(|entry| entry.flag.as_ref()) {
+            if !flags
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(flag))
+            {
+                flags.push(flag.clone());
+            }
+        }
+        flags
+    }
+
+    /// Outer None means this snapshot has no such ordinal; inner None is an
+    /// allocated Country with no UIName, which must remain an empty label.
+    pub(crate) fn ui_name_for_choice(&self, country: LaunchCountry) -> Option<Option<&str>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.country == Some(country))
+            .map(|entry| entry.ui_name.as_deref())
     }
 
     pub(super) fn items(&self) -> &[super::SkirmishComboItem] {
@@ -399,6 +447,14 @@ pub enum SkirmishShellDialog {
 impl SkirmishShellState {
     pub fn refresh_country_catalog(&mut self, rules: &crate::rules::ruleset::RuleSet) {
         self.country_catalog = CountryMenuCatalog::from_rules(rules);
+        self.open_combo_dropdown = None;
+    }
+
+    pub(crate) fn refresh_live_country_catalog(
+        &mut self,
+        rows: &[crate::rules::process_owner::LiveCountryMenuRow],
+    ) {
+        self.country_catalog = CountryMenuCatalog::from_live_rows(rows);
         self.open_combo_dropdown = None;
     }
 

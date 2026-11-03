@@ -155,7 +155,6 @@ pub(crate) fn stock_country_by_id(id: &str) -> Option<&'static CountryLoadingDef
 /// CountryExt+2C/+4C, three CSF label records, and signed ColorScheme+11C.
 /// Cached native CSF pointers are deliberately absent: save10076570 writes
 /// labels only; load100764D0 resolves them against the fixed process catalog.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AresCountryLoading {
     file: String,
@@ -188,6 +187,21 @@ impl AresCountryLoading {
             special: defaults.map_or("GUI:Unknown", |entry| entry.special).into(),
             brief: defaults.map_or("GUI:Unknown", |entry| entry.brief).into(),
             color: -1,
+        }
+    }
+}
+
+impl AresCountryLoading {
+    /// Pure data admission from an already validated frozen declaration. This
+    /// does not read INI, initialize defaults, inherit, or resolve a color.
+    pub(crate) fn from_declaration(value: vera_mod_api::FactionCountryLoading) -> Self {
+        Self {
+            file: value.file,
+            palette: value.palette,
+            name: value.name,
+            special: value.special,
+            brief: value.brief,
+            color: value.color_index,
         }
     }
 
@@ -225,7 +239,10 @@ impl AresCountryLoading {
         }
         Some(result)
     }
+}
 
+#[cfg(feature = "ares")]
+impl AresCountryLoading {
     /// CountryExt1001C770: only the actual primary Rules pass calls this.
     /// ReadString2048 is followed by a byte-preserving 31-character copy.
     /// INI storage represents native bytes as characters, not UTF-8 bytes.

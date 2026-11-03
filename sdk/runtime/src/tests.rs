@@ -105,22 +105,17 @@ fn request() -> Request {
     }
 }
 
-fn escaped(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("\\{byte:02x}")).collect()
-}
-
 /// A real canonical-ABI component. Its mutable global is intentionally absent
 /// from the returned plan, so evaluating it twice detects accidental reuse.
 fn fixture(api: u32, body: &str, extra: &str) -> Vec<u8> {
-    let manifest = serde_json::to_vec(&ModuleManifest {
+    let manifest = ModuleManifest {
         api_version: api,
         id: "test.component".into(),
         version: "1".into(),
         state_version: 1,
         config_version: 1,
         hooks: vec![HookKind::Tick, HookKind::Configure],
-    })
-    .unwrap();
+    };
     let plan = serde_json::to_vec(&Plan {
         state: vec![1],
         ..Plan::unchanged(&request())
@@ -132,43 +127,12 @@ fn fixture(api: u32, body: &str, extra: &str) -> Vec<u8> {
             .find("[1]")
             .unwrap()
         + 1;
-    let text = format!(
-        r#"(component
-        {extra}
-        (core module $m
-            (memory (export "memory") 1)
-            (global $heap (mut i32) (i32.const 8192))
-            (global $counter (mut i32) (i32.const 0))
-            (data (i32.const 256) "{}")
-            (data (i32.const 2048) "{}")
-            (func (export "realloc") (param i32 i32 i32 i32) (result i32)
-                (local $old i32)
-                global.get $heap local.tee $old local.get 3 i32.add global.set $heap local.get $old)
-            (func (export "evaluate") (param i32 i32 i32 i32) (result i32)
-                (i32.store (i32.const 0) (i32.const 0))
-                (if (i32.eq (local.get 1) (i32.const 8))
-                    (then
-                        (i32.store (i32.const 4) (i32.const 256))
-                        (i32.store (i32.const 8) (i32.const {})))
-                    (else
-                        {body}
-                        (global.set $counter (i32.add (global.get $counter) (i32.const 1)))
-                        (i32.store8 (i32.const {counter}) (i32.add (global.get $counter) (i32.const 48)))
-                        (i32.store (i32.const 4) (i32.const 2048))
-                        (i32.store (i32.const 8) (i32.const {}))))
-                (i32.const 0)))
-        (core instance $i (instantiate $m))
-        (func (export "evaluate")
-            (param "kind" string) (param "input" (list u8))
-            (result (result (list u8) (error string)))
-            (canon lift (core func $i "evaluate")
-                (memory (core memory $i "memory")) (realloc (core func $i "realloc")))))"#,
-        escaped(&manifest),
-        escaped(&plan),
-        manifest.len(),
-        plan.len()
+    let body = format!(
+        "{body}\n\
+         (global.set $counter (i32.add (global.get $counter) (i32.const 1)))\n\
+         (i32.store8 (i32.const {counter}) (i32.add (global.get $counter) (i32.const 48)))"
     );
-    wat::parse_str(text).unwrap()
+    test_support::component_fixture(&manifest, &plan, &body, extra)
 }
 
 fn load(runtime: &ComponentRuntime, bytes: &[u8]) -> Result<LoadedModule, RuntimeError> {

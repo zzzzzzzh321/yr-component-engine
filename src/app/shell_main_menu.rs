@@ -363,21 +363,48 @@ impl App {
                 .process_assets
                 .project_multiplayer_countries(&mut runtime.resources.rules);
         }
-        if let Some(rules) = state.frontend.frontend_rules.as_ref() {
-            state
+        if context == MultiplayerSettingsContext::Shell {
+            // Query once after the actual body pass. Both existing snapshots
+            // consume the same accepted, ordered owned rows before publication.
+            let country_rows = state.process_assets.country_menu_rows()?;
+            let previous_flags = state
                 .frontend
                 .skirmish_shell_state
-                .refresh_country_catalog(rules);
-        } else if let Some(runtime) = state.match_state.sim_runtime.as_ref() {
+                .country_catalog
+                .extra_flag_files();
+            if let Some(rows) = country_rows.as_deref() {
+                state
+                    .frontend
+                    .skirmish_shell_state
+                    .refresh_live_country_catalog(rows);
+            } else if let Some(rules) = state.frontend.frontend_rules.as_ref() {
+                state
+                    .frontend
+                    .skirmish_shell_state
+                    .refresh_country_catalog(rules);
+            } else if let Some(runtime) = state.match_state.sim_runtime.as_ref() {
+                state
+                    .frontend
+                    .skirmish_shell_state
+                    .refresh_country_catalog(&runtime.resources.rules);
+            }
+            if previous_flags
+                != state
+                    .frontend
+                    .skirmish_shell_state
+                    .country_catalog
+                    .extra_flag_files()
+            {
+                state.frontend.skirmish_shell_chrome = None;
+            }
             state
                 .frontend
-                .skirmish_shell_state
-                .refresh_country_catalog(&runtime.resources.rules);
+                .multiplayer_shell_runtime
+                .refresh_multiplayer_country_catalog(
+                    &state.process_assets,
+                    country_rows.as_deref(),
+                );
         }
-        state
-            .frontend
-            .multiplayer_shell_runtime
-            .refresh_multiplayer_country_catalog(&state.process_assets);
         Ok(())
     }
 

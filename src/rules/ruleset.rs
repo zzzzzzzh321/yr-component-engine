@@ -210,7 +210,11 @@ impl Default for CountryRules {
 }
 
 impl CountryRules {
-    fn from_ini_section(section: &crate::rules::ini_parser::IniSection) -> Self {
+    pub(crate) fn is_multiplay(&self) -> bool {
+        self.multiplay
+    }
+
+    pub(crate) fn from_ini_section(section: &crate::rules::ini_parser::IniSection) -> Self {
         Self {
             // Filled from the typed Process receipt; neither veteran lists
             // nor earlier Color strings are re-resolved against final catalogs.
@@ -4767,7 +4771,7 @@ impl RuleSet {
         let registry = processed.native_registry_state();
         let Some(checkpoint) = registry
             .sdk_configuration_seed()
-            .filter(|program| program.has_country_read())
+            .filter(|program| program.has_early_configuration())
         else {
             return Ok(());
         };

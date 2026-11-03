@@ -341,7 +341,6 @@ pub(crate) struct LoadingCompositionSnapshot {
 impl LoadingCompositionSnapshot {
     /// Ares553820/553B3B/553E54 use the actual retained Country label records,
     /// keeping the shared localization, special uppercase and layout owners.
-    #[cfg(feature = "ares")]
     pub(crate) fn bind_country_loading(
         &mut self,
         loading: &crate::rules::country_loading::AresCountryLoading,
@@ -1453,8 +1452,13 @@ mod tests {
             .unwrap();
         owner.read_multiplayer_country(&crate::rules::ini_parser::IniFile::empty(), 6);
         owner.refresh_multiplayer_country_bodies().unwrap();
-        let (retained, _) = owner.country_loading(LaunchCountry::Iraq.index()).unwrap();
-        composition.bind_country_loading(retained, Some(&csf));
+        let retained = owner
+            .country_loading(LaunchCountry::Iraq.index())
+            .unwrap()
+            .unwrap()
+            .extension
+            .unwrap();
+        composition.bind_country_loading(&retained, Some(&csf));
         assert_eq!(
             composition.text.country_name.as_deref(),
             Some("Custom country")
