@@ -50,6 +50,7 @@ pub(crate) fn observe_area_visit(
                 "source_id": origin.0,
                 "no_source": origin.0 == RAD_NO_ATTACKER,
                 "no_source_house": origin.1.is_none(),
+                "source_house": origin.1.map(|house| world.interner.resolve(house)),
                 "rng_streams": {
                     "main": world.main_rng.native_state_hex(),
                     "scenario": world.scenario_rng.native_state_hex(),

@@ -3,10 +3,21 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.20.0 development candidate**, config version **15**, state version **1**;
+is the **0.21.0 development candidate**, config version **15**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.21 adds optional `match_rules.anim_damage` selectors. Existing Anim
+House, or an attached Techno's House, supplies damage provenance; ART Warhead
+can take priority over the original own-ID INVISO/C4Warhead or FlameDamage2
+fallback. The host retains reference allocation, accumulation, timers, integer
+debit and the shared area receiver. No attacking object is invented from House
+or visual remap. The component declares both installed fixes without new INI
+switches or per-frame guest calls. Current/absent/previous/explicit-off component
+controls, legacy and targeted retail loading passed. The full combination matrix
+remains a final finite-phase gate. Weapon= and Damage.Delay= remain outside this
+bounded migration.
 
 Version 0.20 adds optional `match_rules.building_presentation` selectors for
 independent building SHP/MAKE palette groups and DestroyAnim House fallback.

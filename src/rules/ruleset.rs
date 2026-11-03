@@ -5503,6 +5503,17 @@ impl RuleSet {
         self.match_rules_policy
     }
 
+    /// Ares1000B179/1000B1AF select existing Anim damage Warhead/House
+    /// inputs. The original Anim state, numeric path and receiver stay shared.
+    pub(crate) fn anim_damage_policy(&self) -> vera_mod_api::AnimDamagePolicy {
+        self.match_rules_policy
+            .and_then(|policy| policy.anim_damage)
+            .unwrap_or(vera_mod_api::AnimDamagePolicy {
+                use_source_house: crate::rules::ARES_ENABLED,
+                prefer_art_warhead: crate::rules::ARES_ENABLED,
+            })
+    }
+
     /// Ares715857 ->715876 admits independent successful palette groups;
     /// retained ART requests and the sole PAL resolver stay host-owned.
     pub(crate) fn independent_building_palette_groups(&self) -> bool {
@@ -7754,6 +7765,11 @@ impl RuleSet {
             b"building-presentation-v1".hash(&mut hasher);
             policy.independent_palette_groups.hash(&mut hasher);
             policy.destroy_anim_house_fallback.hash(&mut hasher);
+        }
+        if let Some(policy) = self.match_rules_policy.and_then(|p| p.anim_damage) {
+            b"anim-damage-v1".hash(&mut hasher);
+            policy.use_source_house.hash(&mut hasher);
+            policy.prefer_art_warhead.hash(&mut hasher);
         }
         // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);

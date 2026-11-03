@@ -5,94 +5,239 @@ use crate::rules::process_owner::{NativeRulesProcessOwner, NativeScenarioRulesPr
 use crate::rules::retail_ini_fixture::{retail_assets, retail_rules_owner};
 
 #[test]
+#[ignore = "requires VERA_SDK_ANIM_DAMAGE_WASM and VERA_SDK_ANIM_DAMAGE_PREVIOUS_WASM"]
 fn ordinary_anim_damage_uses_optional_ares_warhead_and_owner() {
-    let ini = crate::sim::arena_fixture::clear_ground_ini(
-        "[Countries]\n0=Americans\n1=Russians\n[VehicleTypes]\n0=TARGET\n\
-         [TARGET]\nStrength=1000\nArmor=light\n[Animations]\n0=PULSE\n\
-         [CombatDamage]\nFlameDamage2=FALLBACK\n[Warheads]\n0=FALLBACK\n1=CUSTOM\n\
-         [FALLBACK]\nCellSpread=.3\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n\
-         [CUSTOM]\nCellSpread=.3\n\
-         Verses=0%,0%,0%,0%,0%,0%,0%,0%,0%,0%,0%\n",
-    );
-    let art = IniFile::from_str("[PULSE]\nRate=900\nEnd=4\nDamage=10\nWarhead=CUSTOM\n");
-    let processed = crate::rules::native_processing::RulesLayerStack::new(ini)
-        .process_with_fixed_art(&art)
-        .unwrap();
-    let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
-    let mut registry = crate::rules::art_data::ArtRegistry::from_ini(&art);
-    registry.bind_anim_frame_count_for_test("PULSE", 4);
-    rules.install_art_data(registry);
-    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 17);
-    sim.intern_rule_type_ids(&rules);
-    sim.resolve_type_handles(&rules);
-    let invoker = sim.interner.get("Americans").unwrap();
-    let mut targets = Vec::new();
-    for (x, explicit_owner) in [(20, true), (30, false)] {
-        let target = sim
-            .spawn_object("TARGET", "Russians", x, 20, 0, &rules)
-            .unwrap();
-        let coord = crate::sim::movement::ground_pose::position_world_coord(
-            &sim.entities().get(target).unwrap().position,
-        );
-        let world = AnimWorldCoord {
-            x: coord.x,
-            y: coord.y,
-            z: coord.z,
-        };
-        let (rx, ry, sx, sy, z) = world.to_cell_sub_z();
-        let pulse = sim.interner.intern("PULSE");
-        let anim = sim
-            .spawn_anim_at_world(
-                &rules,
-                AnimClassSpawnDescriptor::new(pulse, rx, ry, sx, sy, z),
-                world,
-            )
-            .unwrap();
-        sim.set_anim_owner_object(anim, Some(target), &rules);
-        if explicit_owner {
-            sim.substrate.set_anim_owner_house(anim, invoker);
-        }
-        targets.push(target);
-    }
-    let (_, visits) = crate::sim::combat::receiver_fixture::trace_area_visits(|| {
-        for _ in 0..6 {
-            sim.advance_tick(&[], Some(&rules), None, Some(rules.overlay_registry()), 22);
-        }
+    use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
+    use crate::rules::art_data::ArtRegistry;
+    use crate::rules::retail_sources::RetailRulesSources;
+    use crate::sim::runtime::{ScenarioGameplayProgram, bind_scenario_gameplay_resources};
+    use vera_mod_api::{Context, HookKind, MatchRulesContext, ModuleManifest, Plan, Request};
+
+    let component = |key| std::fs::read(std::env::var_os(key).unwrap()).unwrap();
+    let wasm = component("VERA_SDK_ANIM_DAMAGE_WASM");
+    let previous = component("VERA_SDK_ANIM_DAMAGE_PREVIOUS_WASM");
+    let unchanged = Plan::unchanged(&Request {
+        api_version: 1,
+        context: Context::MatchRules(MatchRulesContext {}),
+        config: vec![],
+        state: vec![],
     });
-    assert!(
-        !visits.is_empty(),
-        "ordinary AnimAI must reach the real area receiver"
+    let mut retail = unchanged.clone();
+    retail.match_rules = Some(
+        serde_json::from_value(serde_json::json!({
+            "survival": "retail",
+            "anim_damage": {"use_source_house": false, "prefer_art_warhead": false}
+        }))
+        .unwrap(),
     );
-    for target in targets {
-        let health = sim.entities().get(target).unwrap().health.current();
-        #[cfg(feature = "ares")]
-        assert_eq!(
-            health, 1000,
-            "CUSTOM has zero effectiveness, unlike FALLBACK"
-        );
-        #[cfg(not(feature = "ares"))]
-        assert!(
-            health < 1000,
-            "stock AnimAI keeps its effective FlameDamage2"
-        );
-    }
-    for visit in visits {
-        assert_eq!(
-            visit["no_source"], true,
-            "neither animation owner is an attacker"
-        );
-        #[cfg(feature = "ares")]
-        {
-            assert_eq!(visit["warhead"], "CUSTOM");
-            assert_eq!(
-                visit["no_source_house"], false,
-                "explicit and attached owners both propagate"
+    let retail = vera_mod_runtime::test_support::component_fixture_by_kind(
+        &ModuleManifest {
+            api_version: 1,
+            id: "retail-anim-damage".into(),
+            version: "1".into(),
+            state_version: 1,
+            config_version: 1,
+            hooks: vec![
+                HookKind::Configure,
+                HookKind::Attach,
+                HookKind::Damage,
+                HookKind::Tick,
+                HookKind::MatchRules,
+            ],
+        },
+        &serde_json::to_vec(&unchanged).unwrap(),
+        &[("match_rules", &serde_json::to_vec(&retail).unwrap())],
+    );
+    let source = "[Clear]\nBuildable=yes\n[Countries]\n0=Americans\n1=Russians\n\
+         [VehicleTypes]\n0=TARGET\n[TARGET]\nStrength=1000\nArmor=light\n\
+         [Animations]\n0=PULSE\n1=STOCK\n2=UNKNOWN\n3=INVISO\n\
+         [CombatDamage]\nFlameDamage2=FALLBACK\nC4Warhead=C4FALLBACK\n\
+         [Warheads]\n0=FALLBACK\n1=CUSTOM\n2=C4FALLBACK\n\
+         [FALLBACK]\nCellSpread=.3\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n\
+         [C4FALLBACK]\nCellSpread=.3\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n\
+         [CUSTOM]\nCellSpread=.3\n\
+         Verses=0%,0%,0%,0%,0%,0%,0%,0%,0%,0%,0%\n";
+    let art = "[PULSE]\nRate=900\nEnd=4\nDamage=10\nWarhead=CUSTOM\n\
+         [STOCK]\nImage=PULSE\nRate=900\nEnd=4\nDamage=10\n\
+         [UNKNOWN]\nImage=PULSE\nRate=900\nEnd=4\nDamage=10\nWarhead=UNDECLARED\n\
+         [INVISO]\nImage=PULSE\nRate=900\nEnd=4\nDamage=10\nWarhead=CUSTOM\n";
+    for (label, module, extended) in [
+        ("anim-current", Some(wasm.as_slice()), true),
+        ("anim-none", None, crate::rules::ARES_ENABLED),
+        (
+            "anim-previous",
+            Some(previous.as_slice()),
+            crate::rules::ARES_ENABLED,
+        ),
+        ("anim-retail", Some(retail.as_slice()), false),
+    ] {
+        let dir = audio_test_install(label);
+        let write =
+            |name: &str, bytes: &[u8]| std::fs::write(dir.path().join(name), bytes).unwrap();
+        if let Some(module) = module {
+            write("gameplay.wasm", module);
+            write(
+                "vera-mod.json",
+                &serde_json::to_vec(&serde_json::json!({
+                    "api_version": 1, "program": "gameplay.wasm",
+                    "sha256": crate::util::sha256::sha256_hex(module),
+                }))
+                .unwrap(),
             );
         }
-        #[cfg(not(feature = "ares"))]
+        write("rulesmd.ini", source.as_bytes());
+        write("artmd.ini", art.as_bytes());
+        // Real SHP table, shared by these four ART images; no injected bounds.
+        let mut shp = vec![0u8; 8 + 4 * 24];
+        shp[2..4].copy_from_slice(&1u16.to_le_bytes());
+        shp[4..6].copy_from_slice(&1u16.to_le_bytes());
+        shp[6..8].copy_from_slice(&4u16.to_le_bytes());
+        write("PULSE.SHP", &shp);
+        let assets =
+            crate::mod_sdk::open_active_assets(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .unwrap();
+        let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
+        let mut owner = RetailRulesSources::select(&assets)
+            .unwrap()
+            .into_owner(audio.sounds().clone(), audio.eva().clone())
+            .unwrap();
+        let (mut rules, _, fixed_art, _) = owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::NonCampaign(None),
+                &IniFile::empty(),
+            )
+            .unwrap()
+            .into_parts();
+        rules.install_art_data(ArtRegistry::from_ini(&fixed_art));
+        let roots = ["PULSE", "STOCK", "UNKNOWN", "INVISO"].map(str::to_owned);
+        rules.bind_anim_class_assets(&roots, &assets, "tem", "TEMPERATE");
+        assert_eq!(
+            rules
+                .art()
+                .anim_runtime_config("PULSE")
+                .unwrap()
+                .raw_shp_frame_count,
+            Some(4)
+        );
+        assert_eq!(
+            rules
+                .art()
+                .anim_runtime_config("UNKNOWN")
+                .unwrap()
+                .warhead
+                .as_deref(),
+            Some("UNDECLARED")
+        );
+        // WarheadFindOrAllocate75E3B0 -> Ctor75CEC0 admits a new type
+        // without a Rules section. The native projection keeps that body.
+        let unlisted = rules.warhead("UNDECLARED").unwrap();
+        assert_eq!(unlisted.verses_f64, [1.0; 11]);
+        assert_eq!(unlisted.cell_spread_f64, 0.0);
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 17);
+        bind_scenario_gameplay_resources(
+            &mut rules,
+            &assets,
+            ScenarioGameplayProgram::Fresh {
+                simulation: &mut sim,
+                rules_owner: &mut owner,
+            },
+            "tem",
+            "TEMPERATE",
+        )
+        .unwrap();
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let invoker = sim.interner.get("Americans").unwrap();
+        let mut targets = Vec::new();
+        for (index, name) in ["PULSE", "PULSE", "STOCK", "UNKNOWN", "INVISO"]
+            .into_iter()
+            .enumerate()
         {
-            assert_eq!(visit["warhead"], "FALLBACK");
-            assert_eq!(visit["no_source_house"], true);
+            let target = sim
+                .spawn_object("TARGET", "Russians", 4 + index as u16 * 6, 20, 0, &rules)
+                .unwrap();
+            let coord = crate::sim::movement::ground_pose::position_world_coord(
+                &sim.entities().get(target).unwrap().position,
+            );
+            let world = AnimWorldCoord {
+                x: coord.x,
+                y: coord.y,
+                z: coord.z,
+            };
+            let (rx, ry, sx, sy, z) = world.to_cell_sub_z();
+            let pulse = sim.interner.intern(name);
+            let anim = sim
+                .spawn_anim_at_world(
+                    &rules,
+                    AnimClassSpawnDescriptor::new(pulse, rx, ry, sx, sy, z),
+                    world,
+                )
+                .unwrap();
+            assert!(sim.set_anim_owner_object(anim, Some(target), &rules));
+            if index == 0 {
+                sim.substrate.set_anim_owner_house(anim, invoker);
+            }
+            targets.push((target, world));
+        }
+        if label == "anim-current" {
+            let saved = crate::sim::snapshot::GameSnapshot::load(
+                &crate::sim::snapshot::GameSnapshot::save(&sim, 0, 0, "anim-damage", 0),
+            )
+            .unwrap()
+            .sim;
+            for (id, anim) in sim.anims() {
+                let restored = saved.anim(*id).unwrap();
+                assert_eq!(restored.owner_house(), anim.owner_house());
+                assert_eq!(restored.owner_entity, anim.owner_entity);
+            }
+            let hash = rules.simulation_config_hash();
+            crate::mod_sdk::adopt_saved_program(&mut rules, &saved, &assets).unwrap();
+            assert_eq!(rules.simulation_config_hash(), hash);
+            assert_eq!(
+                crate::util::save_codec::serialize(rules.external_mod.as_deref().unwrap()).unwrap(),
+                crate::util::save_codec::serialize(saved.external_mod.as_ref().unwrap()).unwrap()
+            );
+        }
+        let (_, visits) = crate::sim::combat::receiver_fixture::trace_area_visits(|| {
+            for _ in 0..6 {
+                sim.advance_tick(&[], Some(&rules), None, Some(rules.overlay_registry()), 22);
+            }
+        });
+        for (index, (target, world)) in targets.into_iter().enumerate() {
+            let local: Vec<_> = visits
+                .iter()
+                .filter(|visit| visit["coord"] == serde_json::json!([world.x, world.y, world.z]))
+                .collect();
+            assert!(
+                !local.is_empty(),
+                "actual AreaDamage admission: {label}/{index}"
+            );
+            let damaged = matches!(index, 2 | 3) || !extended;
+            assert_eq!(
+                sim.entities().get(target).unwrap().health.current() < 1000,
+                damaged,
+                "CUSTOM is ineffective; allocated/default and stock WHs damage: {label}/{index}"
+            );
+            for visit in local {
+                let expected_wh = if extended && index == 3 {
+                    "UNDECLARED"
+                } else if extended && index != 2 {
+                    "CUSTOM"
+                } else if index == 4 {
+                    "C4FALLBACK"
+                } else {
+                    "FALLBACK"
+                };
+                assert_eq!(visit["warhead"], expected_wh, "{label}/{index}");
+                assert_eq!(visit["source_id"], crate::sim::combat::RAD_NO_ATTACKER);
+                assert_eq!(visit["no_source"], true, "House never becomes an attacker");
+                let house = extended.then_some(if index == 0 { "Americans" } else { "Russians" });
+                assert_eq!(
+                    visit["source_house"],
+                    serde_json::json!(house),
+                    "explicit House wins; otherwise attached Techno: {label}/{index}"
+                );
+            }
         }
     }
 }
