@@ -740,6 +740,7 @@ pub(crate) struct SdkRegistryPass {
     reads: Vec<SdkRegistryRead>,
     production: vera_mod_api::ProductionRegistryView,
     foundation: vera_mod_api::FoundationRegistryView,
+    cameo: vera_mod_api::CameoRegistryView,
     fixed_art: Option<std::sync::Arc<IniFile>>,
     fixed_art_hash: u64,
     faction: vera_mod_api::FactionRegistryView,
@@ -778,6 +779,10 @@ impl SdkRegistryPass {
 
     pub(crate) fn foundation_view(&self) -> &vera_mod_api::FoundationRegistryView {
         &self.foundation
+    }
+
+    pub(crate) fn cameo_view(&self) -> &vera_mod_api::CameoRegistryView {
+        &self.cameo
     }
 
     pub(crate) fn fixed_art_source(&self) -> Option<&IniFile> {
@@ -4960,6 +4965,7 @@ struct RulesPassProcessor {
     sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     sdk_production_reads: Vec<vera_mod_api::ProductionReadPoint>,
     sdk_foundation_reads: Vec<vera_mod_api::FoundationReadPoint>,
+    sdk_cameo_reads: Vec<vera_mod_api::CameoReadPoint>,
     sdk_faction_reads: Vec<vera_mod_api::FactionReadPoint>,
     sdk_fixed_eva: Option<std::sync::Arc<EvaRegistry>>,
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
@@ -5053,6 +5059,7 @@ impl RulesPassProcessor {
             sdk_configuration_seed: registry_state.sdk_configuration_seed,
             sdk_production_reads: Vec::new(),
             sdk_foundation_reads: Vec::new(),
+            sdk_cameo_reads: Vec::new(),
             sdk_faction_reads: Vec::new(),
             sdk_fixed_eva: None,
             fixed_art_source: registry_state.fixed_art_source,
@@ -5145,6 +5152,7 @@ impl RulesPassProcessor {
         }
         self.sdk_production_reads.clear();
         self.sdk_foundation_reads.clear();
+        self.sdk_cameo_reads.clear();
         self.sdk_faction_reads.clear();
         self.sdk_fixed_eva = Some(std::sync::Arc::new(fixed_eva.clone()));
         self.record_sdk_production_read(vera_mod_api::ProductionReadSite::ProcessEntry);
@@ -6041,6 +6049,9 @@ impl RulesPassProcessor {
             foundation: vera_mod_api::FoundationRegistryView {
                 reads: self.sdk_foundation_reads.clone(),
             },
+            cameo: vera_mod_api::CameoRegistryView {
+                reads: self.sdk_cameo_reads.clone(),
+            },
             fixed_art: self.fixed_art_source.clone(),
             fixed_art_hash: self.fixed_art_hash,
             animations: self
@@ -6688,6 +6699,14 @@ impl RulesPassProcessor {
                         // retained INI read history rather than an unresolved name.
                     }
                 }
+                // SWTypeExt10033B50..10033B66 reads SidebarPCX only after
+                // this actual Rules body. Keep the physical section identity;
+                // the guest owns filename history, not the merged projection.
+                self.sdk_cameo_reads
+                    .push(vera_mod_api::CameoReadPoint::SuperWeapon {
+                        ordinal: u32::try_from(index).expect("SuperWeapon ordinal exceeds u32"),
+                        section: raw.name.clone(),
+                    });
                 #[cfg(not(feature = "ares"))]
                 let _ = effective;
             } else {
@@ -6896,6 +6915,18 @@ impl RulesPassProcessor {
                         object: self.sdk_production_identity(family, index),
                     },
                 );
+                // Ares1003E81F..1003E856 reads both PCX names from the
+                // retained Type+1F8, before subclass reads. Missing ART is a
+                // real empty read; missing Rules never reaches this suffix.
+                self.sdk_cameo_reads
+                    .push(vera_mod_api::CameoReadPoint::Techno {
+                        object: self.sdk_production_identity(family, index),
+                        art: vera_mod_api::ImmutableIniSectionRef {
+                            source: vera_mod_api::FixedIniSource::FixedArt,
+                            source_hash: self.fixed_art_hash,
+                            section: image.clone(),
+                        },
+                    });
                 #[cfg(feature = "ares")]
                 {
                     // Find only: this nullable Anim reader never allocates.

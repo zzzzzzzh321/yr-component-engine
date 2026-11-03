@@ -3,10 +3,23 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.21.0 development candidate**, config version **15**, state version **1**;
+is the **0.22.0 development candidate**, config version **16**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.22 adds one `cameo_resource` catalog for normal, promoted and
+SuperWeapon PCX declarations. The component retains names at the actual physical
+Rules/ART read points; the host keeps the shared filename reader, PCX/SHP decoder,
+60x48 logical canvas and atlas. Missing promoted art falls back to normal PCX,
+then the existing SHP path; a fully transparent PCX stays selected. No new INI
+switch or per-icon guest call is required. An absent catalog preserves the old
+profile; an explicit empty catalog selects stock. Actual-component GPU, exact
+save restoration, legacy and seven retail-mode checks passed, including the
+previous component. Formal resource binding follows the completed scenario and
+common TypeReset; intermediate host configuration is not proof that native
+SuperWeapon extensions survive ClearScene. See the [catalog API](api/src/cameo.rs).
+This remains a bounded baseline migration, not full Ares or native pixel parity.
 
 Version 0.21 adds optional `match_rules.anim_damage` selectors. Existing Anim
 House, or an attached Techno's House, supplies damage provenance; ART Warhead

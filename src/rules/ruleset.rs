@@ -4375,6 +4375,14 @@ struct EmpResourceBindings {
     warheads: Vec<(String, Option<crate::rules::ares_emp::EmpWarheadRules>)>,
 }
 
+/// Derived projection of one accepted, immutable component catalog. The
+/// component owns declaration history; this cache owns no surfaces or clocks.
+#[derive(Debug, Clone, Default, Hash)]
+struct FrozenCameoResources {
+    technos: BTreeMap<vera_mod_api::ProductionTypeRef, [Option<String>; 2]>,
+    super_weapons: BTreeMap<u32, String>,
+}
+
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-support"), derive(Clone))]
 pub struct RuleSet {
@@ -4387,6 +4395,8 @@ pub struct RuleSet {
     /// None retains this build's native compatibility mode; Retail is an
     /// explicit component-owned choice, not the absence of a choice.
     match_rules_policy: Option<vera_mod_api::MatchRulesPolicy>,
+    /// None keeps the legacy profile; Some(empty) explicitly selects stock art.
+    cameo_resources: Option<FrozenCameoResources>,
     /// Canonical identity projection from the frozen armor component. None
     /// retains the native profile catalog; this never mutates its history.
     external_armor_names: Option<Vec<String>>,
@@ -4819,6 +4829,7 @@ impl RuleSet {
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
         let foundations = self.collect_foundation_resource_bindings()?;
+        let cameos = self.collect_cameo_resource_bindings()?;
         let armor = self.collect_armor_resource_bindings()?;
         let emp = self.collect_emp_resource_bindings()?;
         let factions = self.collect_faction_resource_bindings()?;
@@ -4961,6 +4972,7 @@ impl RuleSet {
         }
         self.rebuild_production_alternates();
         self.effect_resources = effect_resources;
+        self.cameo_resources = cameos;
         for (name, policy) in policies {
             self.weapons
                 .get_mut(&name)
@@ -5001,6 +5013,105 @@ impl RuleSet {
         self.fixed_art_source = Some(source);
     }
 
+    fn collect_cameo_resource_bindings(&self) -> Result<Option<FrozenCameoResources>, String> {
+        let Some(policy) = self
+            .external_mod
+            .as_deref()
+            .map(|program| program.cameo_resource_policy())
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        policy.validate()?;
+        let mut frozen = FrozenCameoResources::default();
+        for entry in policy.technos {
+            let category = crate::rules::prerequisite::production_category(entry.object.category);
+            if self
+                .type_array_ids(category)
+                .get(entry.object.ordinal as usize)
+                .is_none()
+            {
+                return Err("cameo Techno identity is outside its native type array".into());
+            }
+            frozen
+                .technos
+                .insert(entry.object, [entry.normal, entry.promoted]);
+        }
+        for entry in policy.super_weapons {
+            if self
+                .super_weapon_order
+                .get(entry.ordinal as usize)
+                .is_none()
+            {
+                return Err("cameo SuperWeapon identity is outside its native type array".into());
+            }
+            frozen.super_weapons.insert(entry.ordinal, entry.filename);
+        }
+        Ok(Some(frozen))
+    }
+
+    /// Ares1005E430: normal/promoted selectors consume one frozen catalog.
+    /// Missing declarations are stock; only a wholly absent catalog retains
+    /// the legacy final-Image resolver used by older components/builds.
+    pub fn pcx_cameos_for_type(&self, type_id: &str) -> [Option<&str>; 2] {
+        if let Some(catalog) = &self.cameo_resources {
+            let Some(object) = self.object(type_id) else {
+                return [None, None];
+            };
+            let Some(ordinal) = self
+                .type_array_index(object.category, &object.id)
+                .and_then(|index| u32::try_from(index).ok())
+            else {
+                return [None, None];
+            };
+            let category = match object.category {
+                ObjectCategory::Vehicle => vera_mod_api::ProductionObjectKind::Unit,
+                ObjectCategory::Infantry => vera_mod_api::ProductionObjectKind::Infantry,
+                ObjectCategory::Building => vera_mod_api::ProductionObjectKind::Building,
+                ObjectCategory::Aircraft => vera_mod_api::ProductionObjectKind::Aircraft,
+            };
+            return catalog
+                .technos
+                .get(&vera_mod_api::ProductionTypeRef { category, ordinal })
+                .map_or([None, None], |names| {
+                    [names[0].as_deref(), names[1].as_deref()]
+                });
+        }
+        #[cfg(feature = "ares")]
+        {
+            let image = self
+                .object(type_id)
+                .map_or(type_id, |object| object.image.as_str());
+            self.art().resolve_declared_pcx_cameos(type_id, image)
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            [None, None]
+        }
+    }
+
+    /// Ares1005E410 uses a separate SuperWeapon identity namespace. Loading
+    /// failure is still resolved by the original PCX/SHP rendering owner.
+    pub fn pcx_cameo_for_superweapon(&self, type_id: &str) -> Option<&str> {
+        let index = self.super_weapon_index(type_id)?;
+        if let Some(catalog) = &self.cameo_resources {
+            return catalog
+                .super_weapons
+                .get(&u32::try_from(index).ok()?)
+                .map(String::as_str);
+        }
+        #[cfg(feature = "ares")]
+        {
+            self.super_weapons
+                .get(self.super_weapon_order.get(index)?)?
+                .sidebar_pcx()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            None
+        }
+    }
     fn collect_foundation_resource_bindings(
         &self,
     ) -> Result<Vec<(String, crate::rules::foundation::Foundation)>, String> {
@@ -7074,6 +7185,7 @@ impl RuleSet {
             external_mod: None,
             external_factions: FrozenFactionBindings::default(),
             match_rules_policy: None,
+            cameo_resources: None,
             external_armor_names: None,
             external_production: None,
             external_emp: None,
@@ -7750,6 +7862,10 @@ impl RuleSet {
     /// slices and are not claimed by this hash yet.
     pub fn simulation_config_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(catalog) = &self.cameo_resources {
+            b"cameo-resources-v1".hash(&mut hasher);
+            catalog.hash(&mut hasher);
+        }
         if let Some(program) = &self.external_mod {
             b"vera-mod-config-v1".hash(&mut hasher);
             program.fold(&mut hasher);

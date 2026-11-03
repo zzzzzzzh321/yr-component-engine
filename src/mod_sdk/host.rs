@@ -83,6 +83,8 @@ pub(super) struct NativeHost {
     registry_message: OnceLock<Result<Vec<u8>, String>>,
     fixed_art_inputs: bool,
     fixed_art_message: OnceLock<Result<Vec<u8>, String>>,
+    cameo_inputs: bool,
+    cameo_message: OnceLock<Result<Vec<u8>, String>>,
     faction_inputs: bool,
     faction_message: OnceLock<Result<Vec<u8>, String>>,
 }
@@ -96,6 +98,8 @@ impl NativeHost {
             registry_message: OnceLock::new(),
             fixed_art_inputs: false,
             fixed_art_message: OnceLock::new(),
+            cameo_inputs: false,
+            cameo_message: OnceLock::new(),
             faction_inputs: false,
             faction_message: OnceLock::new(),
         }
@@ -108,12 +112,18 @@ impl NativeHost {
         self.registries = Some(Arc::new(registries));
         self.registry_message = OnceLock::new();
         self.fixed_art_message = OnceLock::new();
+        self.cameo_message = OnceLock::new();
         self.faction_message = OnceLock::new();
         self
     }
 
     pub(super) fn enable_fixed_art_inputs(mut self) -> Self {
         self.fixed_art_inputs = true;
+        self
+    }
+
+    pub(super) fn enable_cameo_inputs(mut self) -> Self {
+        self.cameo_inputs = true;
         self
     }
 
@@ -130,6 +140,8 @@ impl NativeHost {
             registry_message: OnceLock::new(),
             fixed_art_inputs: false,
             fixed_art_message: OnceLock::new(),
+            cameo_inputs: false,
+            cameo_message: OnceLock::new(),
             faction_inputs: false,
             faction_message: OnceLock::new(),
         }
@@ -171,7 +183,7 @@ impl NativeHost {
 
     fn fixed_art_for(&self, reference: &api::ImmutableIniSectionRef) -> Result<&IniFile, String> {
         reference.validate()?;
-        if !self.fixed_art_inputs || self.ini.is_none() {
+        if !(self.fixed_art_inputs || self.cameo_inputs) || self.ini.is_none() {
             return Err("fixed ART configuration is unavailable".into());
         }
         let registry = self
@@ -204,6 +216,23 @@ impl NativeHost {
             .map(Vec::as_slice)
             .map_err(Clone::clone)
     }
+
+    fn cameo_view_bytes(&self) -> Result<&[u8], String> {
+        if !self.cameo_inputs || self.ini.is_none() {
+            return Err("cameo configuration is unavailable".into());
+        }
+        self.cameo_message
+            .get_or_init(|| {
+                let registry = self
+                    .registries
+                    .as_ref()
+                    .ok_or("missing cameo read points")?;
+                serde_json::to_vec(registry.cameo_view()).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
+    }
 }
 
 impl HostServices for NativeHost {
@@ -211,6 +240,7 @@ impl HostServices for NativeHost {
         self.registry_view_bytes()
             .map_or(0, <[u8]>::len)
             .saturating_add(self.fixed_art_view_bytes().map_or(0, <[u8]>::len))
+            .saturating_add(self.cameo_view_bytes().map_or(0, <[u8]>::len))
     }
 
     fn config(&self, section: &str, key: &str) -> Option<String> {
@@ -232,6 +262,9 @@ impl HostServices for NativeHost {
         }
         if reader == "fixed-art-view" {
             return self.fixed_art_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader == "cameo-registry-view" {
+            return self.cameo_view_bytes().map(<[u8]>::to_vec);
         }
         if reader == "faction-registry-view" {
             return self.faction_view_bytes().map(<[u8]>::to_vec);
@@ -265,7 +298,22 @@ impl HostServices for NativeHost {
             );
             return serde_json::to_vec(&value).map_err(|e| e.to_string());
         }
+        if reader == "source-pcx-filename" {
+            if !self.cameo_inputs {
+                return Err("component has no cameo source capability".into());
+            }
+            let input: api::ImmutableIniValue<Option<String>> =
+                serde_json::from_slice(current).map_err(|e| e.to_string())?;
+            let ini = self.fixed_art_for(&input.reference)?;
+            let value = ini
+                .section_or_empty(&input.reference.section)
+                .read_ares_pcx_filename(key);
+            return serde_json::to_vec(&value).map_err(|e| e.to_string());
+        }
         if reader == "foundation-stock" {
+            if !self.fixed_art_inputs {
+                return Err("component has no foundation source capability".into());
+            }
             let input: api::ImmutableIniValue<u8> =
                 serde_json::from_slice(current).map_err(|e| e.to_string())?;
             if key != "Foundation" || input.current >= api::STOCK_FOUNDATION_COUNT {
@@ -297,6 +345,7 @@ impl HostServices for NativeHost {
             serde_json::from_slice(current).map_err(|e| e.to_string())?;
         let bad = || format!("invalid config reader/default: {reader}");
         let result = match reader {
+            "pcx-filename" => serde_json::json!(section.read_ares_pcx_filename(key)),
             "bool-prefix-reverse3" => serde_json::json!(section.read_bool_prefix_reverse3(
                 key,
                 serde_json::from_value(value).map_err(|e| e.to_string())?,
@@ -480,6 +529,13 @@ impl HostServices for NativeHost {
     }
 
     fn registry(&self, name: &str) -> Vec<String> {
+        if name == "$cameos" {
+            return if self.cameo_inputs && self.ini.is_some() && self.registries.is_some() {
+                vec!["Cameos".into()]
+            } else {
+                Vec::new()
+            };
+        }
         if name == "$fixed-art" {
             return if self.fixed_art_inputs
                 && self.ini.is_some()

@@ -190,7 +190,10 @@ impl bindings::vera::mod_sdk::host::Host for HostState {
         // scalar INI value. Keep scalar readers at their original64KiB cap.
         let output_limit = if matches!(
             reader.as_str(),
-            "rules-registry-view" | "fixed-art-view" | "faction-registry-view"
+            "rules-registry-view"
+                | "fixed-art-view"
+                | "faction-registry-view"
+                | "cameo-registry-view"
         ) {
             MAX_MESSAGE_BYTES
         } else {

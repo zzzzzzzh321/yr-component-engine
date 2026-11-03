@@ -32,6 +32,92 @@ fn failed_process_retains_only_reached_component_read_points() {
         registry.production_view().technos.is_empty(),
         "failure precedes Building allocation and BeforeTypeData"
     );
+    assert!(registry.cameo_view().reads.is_empty());
+}
+
+#[test]
+fn cameo_metadata_uses_actual_suffixes_and_retained_image_sources() {
+    use vera_mod_api::{
+        CameoReadPoint, FixedIniSource, ImmutableIniSectionRef, ProductionObjectKind,
+        ProductionTypeRef,
+    };
+    let art = IniFile::from_str(
+        "[FIRST]\nImage=BODY\nCameoPCX=first.pcx\n[BODY]\nCameoPCX=wrong.pcx\n\
+         [CAR_ART]\nCameoPCX=car.pcx\n[EMPTY]\nDummy=1\n",
+    );
+    let root = IniFile::from_str(
+        "[BuildingTypes]\n0=BASE\n[BASE]\nImage=FIRST\n\
+         [VehicleTypes]\n0=CAR\n[CAR]\nImage=CAR_ART\n\
+         [InfantryTypes]\n0=UNREAD\n[SuperWeaponTypes]\n0=POWER\n1=UNREAD_SW\n\
+         [POWER]\nSidebarPCX=first.pcx\n",
+    );
+    let mode = IniFile::from_str("[BASE]\nImage=EMPTY\n");
+    let map =
+        IniFile::from_str("[POWER]\nRechargeTime=2\n[BASE]\nStrength=10\n[CAR]\nImage=ABSENT\n");
+    let mut layers = RulesLayerStack::new(root);
+    layers.push(RulesLayerKind::GameMode, mode);
+    layers.push(RulesLayerKind::Scenario, map.clone());
+    let processed = layers.process_with_fixed_art(&art).unwrap();
+    let techno = |category, section: &str| CameoReadPoint::Techno {
+        object: ProductionTypeRef {
+            category,
+            ordinal: 0,
+        },
+        art: ImmutableIniSectionRef {
+            source: FixedIniSource::FixedArt,
+            source_hash: art.content_hash(),
+            section: section.to_owned(),
+        },
+    };
+    let sw = CameoReadPoint::SuperWeapon {
+        ordinal: 0,
+        section: "POWER".into(),
+    };
+    let registry = processed.sdk_registries();
+    assert_eq!(registry.len(), 3);
+    assert_eq!(
+        registry[0].cameo_view().reads,
+        [
+            sw.clone(),
+            techno(ProductionObjectKind::Building, "FIRST"),
+            techno(ProductionObjectKind::Unit, "CAR_ART")
+        ]
+    );
+    assert_eq!(
+        registry[1].cameo_view().reads,
+        [techno(ProductionObjectKind::Building, "EMPTY")],
+        "missing Rules bodies do not read orphan ART or retain old points"
+    );
+    assert_eq!(
+        registry[2].cameo_view().reads,
+        [
+            sw,
+            techno(ProductionObjectKind::Building, "EMPTY"),
+            techno(ProductionObjectKind::Unit, "ABSENT")
+        ],
+        "a reached suffix keeps its current Image even with no ART section"
+    );
+    assert_eq!(registry[2].fixed_art_hash(), art.content_hash());
+    assert!(std::sync::Arc::ptr_eq(
+        registry[0].fixed_art.as_ref().unwrap(),
+        registry[2].fixed_art.as_ref().unwrap()
+    ));
+    let mut continued = RulesPassProcessor::with_registry_state(
+        processed
+            .native_type_construction_trace
+            .into_registry_state_discarding_events(),
+    );
+    continued
+        .apply_pass(&map, &art, &EvaRegistry::default(), false)
+        .unwrap();
+    assert!(!continued.sdk_registry_pass().cameo_view().reads.is_empty());
+    continued
+        .process_country_only_pass(&IniFile::empty(), false)
+        .unwrap();
+    assert!(
+        continued.sdk_registry_pass().cameo_view().reads.is_empty(),
+        "Country-only work does not replay the preceding cameo suffixes"
+    );
 }
 
 #[test]

@@ -95,10 +95,10 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
 #[test]
 fn sdk_fixed_art_readers_use_the_frozen_source_and_explicit_capability() {
     let processed = RulesLayerStack::new(IniFile::from_str(
-        "[BuildingTypes]\n0=B\n[B]\nImage=ART\nFoundation=4x4\n",
+        "[BuildingTypes]\n0=B\n[B]\nImage=ART\nFoundation=4x4\nSidebarPCX=Plain.PCX\n",
     ))
     .process_with_fixed_art(&IniFile::from_str(
-        "[ART]\nFoundation=Custom\nHeader=abcdefgh\n[B]\nFoundation=2x1\n",
+        "[ART]\nFoundation=Custom\nHeader=abcdefgh\nCameoPCX=NoNe\n[B]\nFoundation=2x1\n",
     ))
     .unwrap();
     let make_host = || {
@@ -151,6 +151,60 @@ fn sdk_fixed_art_readers_use_the_frozen_source_and_explicit_capability() {
             .unwrap(),
         b"1"
     );
+    let cameo_host = make_host().enable_cameo_inputs();
+    assert!(cameo_host.registry("$fixed-art").is_empty());
+    assert!(!cameo_host.registry("$cameos").is_empty());
+    assert!(
+        cameo_host
+            .config_read("", "", "fixed-art-view", b"null")
+            .is_err()
+    );
+    let cameo_view: api::CameoRegistryView = serde_json::from_slice(
+        &cameo_host
+            .config_read("", "", "cameo-registry-view", b"null")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cameo_view.reads.len(), 1);
+    let pcx_input = serde_json::to_vec(&api::ImmutableIniValue {
+        reference: reference.clone(),
+        current: None::<String>,
+    })
+    .unwrap();
+    assert!(
+        host.config_read("ART", "CameoPCX", "source-pcx-filename", &pcx_input)
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::from_slice::<Option<String>>(
+            &cameo_host
+                .config_read("ART", "CameoPCX", "source-pcx-filename", &pcx_input)
+                .unwrap(),
+        )
+        .unwrap(),
+        Some("none".into()),
+        "PCX names do not use nullable faction-reference semantics"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Option<String>>(
+            &cameo_host
+                .config_read("B", "SidebarPCX", "pcx-filename", b"null")
+                .unwrap(),
+        )
+        .unwrap(),
+        Some("plain.pcx".into())
+    );
+    assert_eq!(
+        cameo_host
+            .config_read("ART", "Missing", "source-pcx-filename", &pcx_input)
+            .unwrap(),
+        b"null"
+    );
+    assert!(
+        NativeHost::simulation()
+            .config_read("ART", "CameoPCX", "source-pcx-filename", &pcx_input)
+            .is_err()
+    );
     let mut wrong = reference;
     wrong.source_hash ^= 1;
     let input = serde_json::to_vec(&api::ImmutableIniValue {
@@ -161,6 +215,9 @@ fn sdk_fixed_art_readers_use_the_frozen_source_and_explicit_capability() {
     assert!(
         host.config_read("ART", "Header", "source-string:5", &input)
             .is_err()
+    );
+    assert!(
+        cameo_host.config_read("ART", "CameoPCX", "source-pcx-filename", &input).is_err()
     );
     assert!(
         NativeHost::simulation()
