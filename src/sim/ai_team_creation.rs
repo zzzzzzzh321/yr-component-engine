@@ -352,22 +352,6 @@ fn draw_ai_trigger(
 /// Ares `AITriggerTypeClass_ConditionMet_SideIndex @ 0x1002F2D0` accepts
 /// every registered side: 0 is unrestricted, otherwise token-1 must equal the
 /// house's side index. The stock build keeps its three-token domain.
-fn side_admits(trigger_side: i32, house_side: i32) -> bool {
-    #[cfg(feature = "ares")]
-    {
-        trigger_side == 0 || house_side == trigger_side - 1
-    }
-    #[cfg(not(feature = "ares"))]
-    {
-        match trigger_side {
-            1 => house_side == 0,
-            2 => house_side == 1,
-            3 => house_side == 2,
-            _ => true,
-        }
-    }
-}
-
 fn is_eligible(
     sim: &Simulation,
     rules: &RuleSet,
@@ -432,7 +416,9 @@ fn is_eligible(
             }
         }
     }
-    if !side_admits(trigger.side, house.side_index()) || house.tech_level() < trigger.threshold {
+    if !rules.ai_side_token_admits(trigger.side, house.side_index())
+        || house.tech_level() < trigger.threshold
+    {
         return false;
     }
     if !condition_holds(sim, rules, trigger, owner, enemy) {

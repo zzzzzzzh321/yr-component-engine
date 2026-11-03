@@ -414,9 +414,23 @@ impl ProcessAssets {
         })
     }
 
-    pub(crate) fn refresh_multiplayer_country_bodies(&mut self) {
-        if let Some(rules) = self.native_rules.as_mut() {
-            rules.refresh_multiplayer_country_bodies();
+    /// Direct-launch adapters subscribe explicitly to the pre-body Country
+    /// initialization frontier. A disabled faction module still selects the
+    /// retail reader there; the presence of a Side policy is not a subscription.
+    pub(crate) fn requires_external_country_initialization(&self) -> bool {
+        cfg!(feature = "ares")
+            || self
+                .native_rules
+                .as_ref()
+                .is_some_and(|owner| owner.uses_component_country_reader())
+    }
+
+    pub(crate) fn refresh_multiplayer_country_bodies(
+        &mut self,
+    ) -> Result<(), crate::rules::error::RulesError> {
+        match self.native_rules.as_mut() {
+            Some(rules) => rules.refresh_multiplayer_country_bodies(),
+            None => Ok(()),
         }
     }
 

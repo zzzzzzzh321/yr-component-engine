@@ -121,7 +121,8 @@ fn ares_side_sidebar_waits_for_full_type_pass_and_preserves_failed_process_state
     // The Country-only prepass may allocate a Side but never executes the
     // ReadTypeData679A10 hook. SideExt ctor1002D9F0 leaves +88=0/+8C=false.
     let prepass =
-        process_native_noncampaign_rules_prepass(NativeRulesRegistryState::default(), &root);
+        process_native_noncampaign_rules_prepass(NativeRulesRegistryState::default(), &root)
+            .unwrap();
     let state = prepass.registry_state().families[&RulesTypeFamily::Side][0]
         .ares_side
         .as_ref()

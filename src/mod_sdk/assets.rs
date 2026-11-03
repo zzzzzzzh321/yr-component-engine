@@ -102,6 +102,21 @@ pub(crate) fn load_from_assets_for_process(
         .map(|p| Some(Arc::new(p)))
 }
 
+/// The Rules registry retains this same Program before its first Country
+/// body. Missing still-unknown legacy payloads keep the original late binder.
+pub(crate) fn early_configuration_seed(
+    assets: &crate::assets::asset_manager::AssetManager,
+) -> Result<Option<Arc<Program>>, String> {
+    let Some((identity, bytes, early)) = super::startup::resolve_program_bytes(assets, true)?
+    else {
+        return Ok(None);
+    };
+    let admitted = AdmittedComponent::load(bytes, &identity.sha256)?;
+    super::startup::require_startup_frontier(&admitted, early)?;
+    let program = admitted.into_configuration_seed();
+    Ok(program.has_country_read().then(|| Arc::new(program)))
+}
+
 /// Restore the exact saved configuration after projecting retained Rules.
 /// The current work must contain the same portable component; Configure is
 /// never replayed against a save and updates require a fresh match.

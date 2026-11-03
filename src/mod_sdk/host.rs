@@ -33,6 +33,8 @@ pub(super) struct NativeHost {
     registry_message: OnceLock<Result<Vec<u8>, String>>,
     fixed_art_inputs: bool,
     fixed_art_message: OnceLock<Result<Vec<u8>, String>>,
+    faction_inputs: bool,
+    faction_message: OnceLock<Result<Vec<u8>, String>>,
 }
 
 impl NativeHost {
@@ -44,6 +46,8 @@ impl NativeHost {
             registry_message: OnceLock::new(),
             fixed_art_inputs: false,
             fixed_art_message: OnceLock::new(),
+            faction_inputs: false,
+            faction_message: OnceLock::new(),
         }
     }
 
@@ -54,11 +58,17 @@ impl NativeHost {
         self.registries = Some(Arc::new(registries));
         self.registry_message = OnceLock::new();
         self.fixed_art_message = OnceLock::new();
+        self.faction_message = OnceLock::new();
         self
     }
 
     pub(super) fn enable_fixed_art_inputs(mut self) -> Self {
         self.fixed_art_inputs = true;
+        self
+    }
+
+    pub(super) fn enable_faction_inputs(mut self) -> Self {
+        self.faction_inputs = true;
         self
     }
 
@@ -70,6 +80,8 @@ impl NativeHost {
             registry_message: OnceLock::new(),
             fixed_art_inputs: false,
             fixed_art_message: OnceLock::new(),
+            faction_inputs: false,
+            faction_message: OnceLock::new(),
         }
     }
 
@@ -125,6 +137,23 @@ impl NativeHost {
             .fixed_art_source()
             .ok_or_else(|| "missing fixed ART source".into())
     }
+
+    fn faction_view_bytes(&self) -> Result<&[u8], String> {
+        if !self.faction_inputs || self.ini.is_none() {
+            return Err("faction configuration is unavailable".into());
+        }
+        self.faction_message
+            .get_or_init(|| {
+                let registry = self
+                    .registries
+                    .as_ref()
+                    .ok_or("missing faction read points")?;
+                serde_json::to_vec(registry.faction_view()).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
+    }
 }
 
 impl HostServices for NativeHost {
@@ -153,6 +182,23 @@ impl HostServices for NativeHost {
         }
         if reader == "fixed-art-view" {
             return self.fixed_art_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader == "faction-registry-view" {
+            return self.faction_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader.starts_with("faction-") {
+            if !self.faction_inputs {
+                return Err("component has no faction configuration capability".into());
+            }
+            let ini = self
+                .ini
+                .as_ref()
+                .ok_or("faction input is unavailable during simulation")?;
+            return self
+                .registries
+                .as_ref()
+                .ok_or("missing faction read points")?
+                .read_faction_value(reader, section, ini.section_or_empty(section), key, current);
         }
         if let Some(capacity) = reader.strip_prefix("source-string:") {
             let capacity = capacity.parse::<usize>().map_err(|e| e.to_string())?;

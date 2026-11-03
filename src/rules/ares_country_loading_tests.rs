@@ -144,7 +144,7 @@ fn ares_country_loading_production_passes_and_save_keep_gui_without_sim_hash_cha
     let bytes = save_codec::serialize(state).unwrap();
     let restored: NativeRulesRegistryState = save_codec::deserialize(&bytes).unwrap();
     let mut reader = RulesPassProcessor::with_registry_state(restored);
-    reader.process_house_family(&root, true);
+    reader.process_house_family(&root, true).unwrap();
     let country = &reader.families[&RulesTypeFamily::Country][1].country_veterancy;
     assert_eq!(country.loading().files().0, "child.shp"); // Consumed parent flag survives save.
     assert_eq!(country.loading().labels()[0], "Name:Child");

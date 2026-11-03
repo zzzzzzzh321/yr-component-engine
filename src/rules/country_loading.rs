@@ -148,7 +148,6 @@ pub fn stock_country_loading(index: usize) -> Option<&'static CountryLoadingDefa
 /// Ares1001C107..1001C135: the stored ID compared (case-insensitively)
 /// against the literal name table at 0x10097FC8. `None` takes the unknown
 /// branch 0x1001C413, whatever the Country's registry position.
-#[cfg(feature = "ares")]
 pub(crate) fn stock_country_by_id(id: &str) -> Option<&'static CountryLoadingDefaults> {
     STOCK.iter().find(|entry| entry.id.eq_ignore_ascii_case(id))
 }

@@ -35,6 +35,144 @@ fn failed_process_retains_only_reached_component_read_points() {
 }
 
 #[test]
+fn faction_metadata_preserves_side_sweep_and_country_only_frontiers() {
+    use vera_mod_api::FactionReadSite;
+    let pass = IniFile::from_str(
+        "[Countries]\n0=EARLY\n1=MISSING\n[Sides]\nFIRST=EARLY\n[EARLY]\nParentCountry=MISSING\nSide=LATER\n",
+    );
+    let mut processor = RulesPassProcessor::default();
+    processor
+        .apply_pass(&pass, &IniFile::empty(), &EvaRegistry::default(), true)
+        .unwrap();
+    let full = processor.sdk_registry_pass();
+    assert_eq!(full.faction_view().sides, ["FIRST", "LATER"]);
+    let reads = &full.faction_view().reads;
+    assert_eq!(reads.len(), 3);
+    assert_eq!(reads[0].site, FactionReadSite::SideSweep { side: 0 });
+    assert_eq!(reads[0].prefix.sides, 1);
+    let seed = serde_json::to_vec(&vera_mod_api::FactionReadValue {
+        read: 0,
+        current: Some(vec![3]),
+    })
+    .unwrap();
+    let retained: Option<Vec<i32>> = serde_json::from_slice(
+        &full
+            .read_faction_value(
+                "faction-nullable-ints",
+                "FIRST",
+                pass.section_or_empty("FIRST"),
+                "ParaDrop.Num",
+                &seed,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        retained,
+        Some(vec![3]),
+        "missing Side sections are real reads that retain defaults"
+    );
+    assert_eq!(reads[1].prefix.sides, 2);
+    assert_eq!(
+        reads[1].site,
+        FactionReadSite::CountrySuffix {
+            country: 0,
+            primary_rules: true,
+            body_read: true,
+            parent: "MISSING".into(),
+            side: 1,
+        }
+    );
+    assert!(matches!(&reads[2].site, FactionReadSite::CountrySuffix {
+        country: 1, primary_rules: true, body_read: false, parent, side: -1,
+    } if parent.is_empty()));
+    processor.process_country_only_pass(&pass, true).unwrap();
+    let country_only = processor.sdk_registry_pass();
+    assert_eq!(country_only.faction_view().reads.len(), 2);
+    assert!(
+        country_only
+            .faction_view()
+            .reads
+            .iter()
+            .all(|point| matches!(point.site, FactionReadSite::CountrySuffix { .. }))
+    );
+    assert!(country_only.production_view().reads.is_empty());
+    assert_eq!(
+        processor.sdk_configuration_steps.len(),
+        1,
+        "legacy guests receive no Country-only replay"
+    );
+}
+
+#[test]
+fn faction_pointer_reader_uses_the_reached_family_prefix() {
+    use vera_mod_api::{
+        FactionNullableRef, FactionReadValue, ProductionObjectKind, ProductionTypeRef,
+    };
+    let pass = IniFile::from_str(
+        "[Countries]\n0=COUNTRY\n[Sides]\nFIRST=COUNTRY\n[FIRST]\nHunterSeeker=FUTURE\n[BuildingTypes]\n0=YARD\n[YARD]\nFreeUnit=FUTURE\n",
+    );
+    let mut processor = RulesPassProcessor::default();
+    processor
+        .apply_pass(&pass, &IniFile::empty(), &EvaRegistry::default(), true)
+        .unwrap();
+    let first = processor.sdk_registry_pass();
+    let seed = serde_json::to_vec(&FactionReadValue {
+        read: 0,
+        current: FactionNullableRef::<ProductionTypeRef>::Unset,
+    })
+    .unwrap();
+    let read = |registry: &SdkRegistryPass| -> FactionNullableRef<ProductionTypeRef> {
+        serde_json::from_slice(
+            &registry
+                .read_faction_value(
+                    "faction-nullable-ref:unit",
+                    "FIRST",
+                    pass.section("FIRST").unwrap(),
+                    "HunterSeeker",
+                    &seed,
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(first.faction_view().reads[0].prefix.units, 0);
+    assert!(
+        first
+            .production_view()
+            .technos
+            .iter()
+            .any(|entry| entry.name == "FUTURE")
+    );
+    assert_eq!(
+        read(&first),
+        FactionNullableRef::Unset,
+        "later FreeUnit allocation cannot repair the earlier Find"
+    );
+    processor
+        .apply_pass(&pass, &IniFile::empty(), &EvaRegistry::default(), true)
+        .unwrap();
+    assert_eq!(
+        read(&processor.sdk_registry_pass()),
+        FactionNullableRef::Resolved(ProductionTypeRef {
+            category: ProductionObjectKind::Unit,
+            ordinal: 0
+        })
+    );
+    assert!(
+        first
+            .read_faction_value(
+                "faction-nullable-ref:unit",
+                "YARD",
+                pass.section("YARD").unwrap(),
+                "FreeUnit",
+                &seed
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn airburst_retained_flag_matches_native_reads_and_registry_restore() {
     let native = crate::test_fixture::json("tools/projectile_oracle/airburst_retained.json");
     let initial = IniFile::from_str(
@@ -2055,7 +2193,7 @@ fn retail_cold_start_and_noncampaign_prepass_match_verified_native_oracles() {
     let startup_hash = native_type_event_oracle_hash(startup.events());
     let startup_state = startup.into_registry_state_discarding_events();
     let (prepass, prepass_boundaries) =
-        process_native_noncampaign_rules_prepass_inner(startup_state, &rules);
+        process_native_noncampaign_rules_prepass_inner(startup_state, &rules).unwrap();
     assert_eq!(prepass_boundaries, [14, 46, 51]);
     assert_eq!(prepass.event_count(), 51);
     assert_eq!(
@@ -2177,7 +2315,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
 
     let retained_state = repeat.into_registry_state_discarding_events();
     let (prepass, prepass_boundaries) =
-        process_native_noncampaign_rules_prepass_inner(retained_state, &root);
+        process_native_noncampaign_rules_prepass_inner(retained_state, &root).unwrap();
     // ReadGeneral671DD2 runs in this prefix before TypeReset6686C0.
     assert_eq!(prepass.registry_state().rules_tree_strength, 375);
     assert_eq!(

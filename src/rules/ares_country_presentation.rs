@@ -11,8 +11,7 @@
 //! common block `0x1001C5D0` then reads the weights and `ListIndex`. These
 //! values are GUI/process state, not simulation CRC inputs.
 
-#[cfg(feature = "ares")]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct AresCountryPresentation {
     /// `+0x08` `File.Flag=` (PCX, lowercased, at most 31 bytes). `None` is
     /// the cleared file, which the flag hook answers with `rani.pcx`.
@@ -37,14 +36,12 @@ pub struct AresCountryPresentation {
     pub ai_random_weight: Option<i32>,
 }
 
-#[cfg(feature = "ares")]
 impl Default for AresCountryPresentation {
     fn default() -> Self {
         Self::for_country_id("")
     }
 }
 
-#[cfg(feature = "ares")]
 impl AresCountryPresentation {
     /// Constructor `0x1001B767..0x1001B908` (`ListIndex` 100, weight 1, AI
     /// weight unset), then `HouseTypeExt::Initialize @ 0x1001C0F0` by stored
@@ -94,6 +91,7 @@ impl AresCountryPresentation {
     /// the named PCX/SHP fails to load (`0x1001C7CA..0x1001C7E5`,
     /// `0x1001B9DA..0x1001B9F3`). VERA keeps the name; see the docs page's
     /// missing-file residual.
+    #[cfg(feature = "ares")]
     pub(crate) fn read_primary(&mut self, section: &crate::rules::ini_parser::IniSection) {
         use crate::rules::ini_parser::is_native_none_type_name;
         use crate::rules::ini_value::truncate_native_bytes;
@@ -122,6 +120,7 @@ impl AresCountryPresentation {
     /// Common block `0x1001C69C..0x1001C6D9`, after the parent copy:
     /// `RandomSelectionWeight`, the optional `AIRandomSelectionWeight`
     /// (`0x10008CC0`), then `ListIndex`.
+    #[cfg(feature = "ares")]
     pub(crate) fn read_common(&mut self, section: &crate::rules::ini_parser::IniSection) {
         self.random_weight = section.read_ares_int("RandomSelectionWeight", self.random_weight);
         self.ai_random_weight =

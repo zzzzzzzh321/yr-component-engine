@@ -499,7 +499,7 @@ fn shows_alt_cameo(
     if !has_alternate {
         return false;
     }
-    if crate::rules::ARES_ENABLED {
+    if rules.country_extended_veterancy_enabled(country) {
         if obj.category == ObjectCategory::Building && obj.undeploys_into.is_some() {
             return false;
         }

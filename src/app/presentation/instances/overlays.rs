@@ -298,8 +298,7 @@ pub(crate) fn build_display_effect_instances(
             None
         },
     ];
-    #[cfg(feature = "ares")]
-    parachute_names.extend(input.rules.side_parachute_animations().map(Some));
+    parachute_names.extend(input.rules.faction_parachute_animations().map(Some));
     let parachute_types = parachute_names
         .into_iter()
         .flatten()

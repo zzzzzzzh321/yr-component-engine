@@ -57,7 +57,7 @@ fn session_country_read_and_deferred_bodies_match_original_execution() {
                 "token {:?}",
                 row["token"]
             );
-            owner.refresh_multiplayer_country_bodies();
+            owner.refresh_multiplayer_country_bodies().unwrap();
             assert_eq!(
                 snapshot(&owner),
                 phase["refreshed"],
@@ -82,7 +82,7 @@ fn session_country_allocation_projects_and_survives_until_type_reset() {
     let mut owner = fixture(root);
     let settings = IniFile::from_str("[MultiPlayer]\nSide=Orphan\n");
     assert_eq!(owner.read_multiplayer_country(&settings, -1), 1);
-    owner.refresh_multiplayer_country_bodies();
+    owner.refresh_multiplayer_country_bodies().unwrap();
     let mut projection = RuleSet::from_ini(&IniFile::from_str(root)).unwrap();
     owner.project_multiplayer_countries(&mut projection);
     assert_eq!(
@@ -92,7 +92,7 @@ fn session_country_allocation_projects_and_survives_until_type_reset() {
     assert!(projection.country_multiplay("Orphan"));
     assert_eq!(owner.country_name(1), Some("Orphan"));
     // Ordinary pre-reset body refresh preserves allocated orphan identities.
-    owner.refresh_multiplayer_country_bodies();
+    owner.refresh_multiplayer_country_bodies().unwrap();
     assert_eq!(owner.country_name(1), Some("Orphan"));
     let loaded = owner
         .load_scenario(

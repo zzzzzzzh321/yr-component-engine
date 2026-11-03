@@ -45,7 +45,7 @@ fn fixture(extra: &str) -> (TestDirectory, ProcessAssets) {
     );
     process.initialize_sources_if_needed(&manager).unwrap();
     process.read_multiplayer_country(&IniFile::empty(), 0);
-    process.refresh_multiplayer_country_bodies();
+    process.refresh_multiplayer_country_bodies().unwrap();
     process.return_from_loading(manager);
     (directory, process)
 }

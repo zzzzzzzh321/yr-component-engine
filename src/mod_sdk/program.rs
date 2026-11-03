@@ -51,6 +51,15 @@ impl AdmittedComponent {
         {
             return Err("engine SDK v1 requires configure, attach, damage and tick hooks".into());
         }
+        if manifest
+            .hooks
+            .contains(&api::HookKind::ConfigureCountryRead)
+            && !manifest.hooks.contains(&api::HookKind::ConfigureBoundary)
+        {
+            return Err(
+                "pre-body configuration requires configure_boundary lifecycle support".into(),
+            );
+        }
         Ok(Self {
             bytes,
             digest: expected.into(),
@@ -69,6 +78,10 @@ impl AdmittedComponent {
             .contains(&api::HookKind::StartupResources)
     }
 
+    pub(super) fn requires_early_admission(&self) -> bool {
+        self.has_startup_resources() || self.manifest.hooks.contains(&api::HookKind::EvaCatalog)
+    }
+
     pub(super) fn startup_resource_policy(
         &self,
         context: api::StartupResourceContext,
@@ -76,18 +89,41 @@ impl AdmittedComponent {
         if !self.has_startup_resources() {
             return Ok(None);
         }
+        Ok(self
+            .evaluate_startup(Context::StartupResources(context))?
+            .startup_resources)
+    }
+
+    pub(super) fn eva_catalog_policy(&self) -> Result<Option<api::EvaCatalogPolicy>, String> {
+        if !self.manifest.hooks.contains(&api::HookKind::EvaCatalog) {
+            return Ok(None);
+        }
+        Ok(self.evaluate_startup(Context::EvaCatalog)?.eva_catalog)
+    }
+
+    fn evaluate_startup(&self, context: Context) -> Result<Plan, String> {
         let request = Request {
             api_version: api::API_VERSION,
-            context: Context::StartupResources(context),
+            context,
             config: Vec::new(),
             state: Vec::new(),
         };
-        let plan = self
-            .executor
+        self.executor
             .runtime
             .evaluate(&self.executor.module, &request, Arc::new(StartupHost))
-            .map_err(|e| e.to_string())?;
-        Ok(plan.startup_resources)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Start the same immutable gameplay configuration before cold Rules
+    /// processing, without inventing a final Configure or another seed owner.
+    pub(super) fn into_configuration_seed(self) -> Program {
+        Program {
+            bytes: self.bytes,
+            digest: self.digest,
+            manifest: self.manifest,
+            config: Vec::new(),
+            compiled: OnceLock::from(Ok(self.executor)),
+        }
     }
 
     pub(super) fn configure(
@@ -100,97 +136,29 @@ impl AdmittedComponent {
         seed: Option<&Program>,
         steps: &[crate::rules::native_processing::SdkConfigurationStep],
     ) -> Result<Program, String> {
-        let Self {
-            bytes,
-            digest,
-            manifest,
-            executor,
-        } = self;
-        let expected = digest.as_str();
-        if (manifest.hooks.contains(&api::HookKind::Effects)
-            || manifest.hooks.contains(&api::HookKind::ArmorResource)
-            || manifest.hooks.contains(&api::HookKind::ProductionResource)
-            || manifest.hooks.contains(&api::HookKind::EmpResource)
-            || manifest.hooks.contains(&api::HookKind::FoundationResource))
-            && (passes.is_empty() || registries.len() + 1 != passes.len())
+        let retained = seed.filter(|_| {
+            self.manifest
+                .hooks
+                .contains(&api::HookKind::ConfigureBoundary)
+        });
+        if let Some(seed) = retained
+            && (seed.digest != self.digest || seed.manifest != self.manifest)
         {
-            return Err(
-                "resource configuration requires physical Rules read-point registries".into(),
-            );
+            return Err("retained process component identity changed without ScenarioClear".into());
         }
-        let boundary_aware = manifest.hooks.contains(&api::HookKind::ConfigureBoundary);
-        let config = if let Some(seed) = seed.filter(|_| boundary_aware) {
-            if seed.digest != expected || seed.manifest != manifest {
-                return Err(
-                    "retained process component identity changed without ScenarioClear".into(),
-                );
-            }
-            seed.config.clone()
-        } else {
-            Vec::new()
-        };
-        let mut program = Program {
-            bytes,
-            digest: expected.into(),
-            manifest,
-            config,
-            compiled: OnceLock::new(),
-        };
-        if boundary_aware && !steps.is_empty() {
-            use crate::rules::native_processing::SdkConfigurationStep;
-            for (index, step) in steps.iter().enumerate() {
-                match step {
-                    SdkConfigurationStep::RulesPass { ini, registry } => program.configure_pass(
-                        &executor,
-                        index,
-                        ini,
-                        false,
-                        &[],
-                        &[],
-                        &[],
-                        Some(registry),
-                    )?,
-                    SdkConfigurationStep::Boundary(boundary) => program.configure(
-                        &executor,
-                        Context::ConfigureBoundary(api::ConfigureBoundaryContext {
-                            boundary: *boundary,
-                        }),
-                        NativeHost::simulation(),
-                        &format!("configuration boundary {index} ({boundary:?})"),
-                    )?,
-                }
-            }
-            let final_ini = passes
-                .last()
-                .ok_or("no final Rules projection after process history")?;
-            program.configure_pass(
-                &executor,
-                steps.len(),
-                final_ini,
-                true,
-                object_types,
-                warheads,
-                weapons,
-                None,
-            )?;
-        } else {
-            for (index, ini) in passes.iter().enumerate() {
-                program.configure_pass(
-                    &executor,
-                    index,
-                    ini,
-                    index + 1 == passes.len(),
-                    object_types,
-                    warheads,
-                    weapons,
-                    registries.get(index),
-                )?;
-            }
+        let mut program = self.into_configuration_seed();
+        if let Some(seed) = retained {
+            program.config = seed.config.clone();
         }
-        program
-            .compiled
-            .set(Ok(executor))
-            .map_err(|_| "component cache already set".to_string())?;
+        program.configure_history(
+            passes,
+            object_types,
+            warheads,
+            weapons,
+            registries,
+            steps,
+            retained.is_some(),
+        )?;
         Ok(program)
     }
 }
@@ -217,6 +185,223 @@ impl Clone for Program {
 }
 
 impl Program {
+    fn configure_step(
+        &mut self,
+        executor: &Executor,
+        index: usize,
+        step: &crate::rules::native_processing::SdkConfigurationStep,
+    ) -> Result<(), String> {
+        use crate::rules::native_processing::SdkConfigurationStep;
+        match step {
+            SdkConfigurationStep::RulesPass { ini, registry } => {
+                self.configure_pass(executor, index, ini, false, &[], &[], &[], Some(registry))
+            }
+            SdkConfigurationStep::CountryPass { ini, registry } => {
+                if !self
+                    .manifest
+                    .hooks
+                    .contains(&api::HookKind::ConfigureFactionPass)
+                {
+                    return Ok(());
+                }
+                let host = NativeHost::configuration(ini.clone(), Vec::new())
+                    .with_registries(registry.clone())
+                    .enable_faction_inputs();
+                self.configure(
+                    executor,
+                    Context::ConfigureFactionPass,
+                    host,
+                    &format!("Country-only configuration {index}"),
+                )
+            }
+            SdkConfigurationStep::Boundary(boundary) => self.configure(
+                executor,
+                Context::ConfigureBoundary(api::ConfigureBoundaryContext {
+                    boundary: *boundary,
+                }),
+                NativeHost::simulation(),
+                &format!("configuration boundary {index} ({boundary:?})"),
+            ),
+        }
+    }
+
+    fn configure_steps(
+        &mut self,
+        executor: &Executor,
+        steps: &[crate::rules::native_processing::SdkConfigurationStep],
+    ) -> Result<(), String> {
+        for (index, step) in steps.iter().enumerate() {
+            self.configure_step(executor, index, step)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_country_read(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::ConfigureCountryRead)
+    }
+
+    /// An isolated projection constructs fresh registries from the same
+    /// selected module. It must not inherit or advance the live config history.
+    pub(crate) fn fresh_configuration_seed(&self) -> Self {
+        let mut program = self.clone();
+        program.config.clear();
+        program
+    }
+
+    pub(crate) fn has_faction_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::FactionResource)
+    }
+
+    pub(crate) fn faction_resource_policy(
+        &self,
+        resource: &api::FactionResourceContext,
+    ) -> Result<Option<api::FactionResourcePolicy>, String> {
+        if !self.has_faction_resource() {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate(Context::FactionResource(resource.clone()), &[])?
+            .faction_resource)
+    }
+
+    /// The registry owner commits each successful returned checkpoint and
+    /// removes that one pending step. A later failure keeps prior checkpoints.
+    pub(crate) fn advance_configuration_step(
+        &self,
+        index: usize,
+        step: &crate::rules::native_processing::SdkConfigurationStep,
+    ) -> Result<Self, String> {
+        if !self.has_country_read() {
+            return Err("component has no early configuration capability".into());
+        }
+        let executor = self.executor()?;
+        let mut candidate = self.clone();
+        candidate.configure_step(executor, index, step)?;
+        Ok(candidate)
+    }
+
+    /// Only the current physical INI is exposed. The Country body has not
+    /// executed, so no completed pass or suffix view is fabricated here.
+    pub(crate) fn configure_country_read(
+        &self,
+        pass: &IniFile,
+    ) -> Result<(Self, Option<api::CountryReadPolicy>), String> {
+        if !self.has_country_read() {
+            return Ok((self.clone(), None));
+        }
+        let executor = self.executor()?;
+        let plan = self.configuration_plan(
+            executor,
+            Context::ConfigureCountryRead,
+            NativeHost::configuration(pass.clone(), Vec::new()),
+            "Country pre-body configuration",
+        )?;
+        let mut candidate = self.clone();
+        if let Some(config) = plan.config {
+            candidate.config = config;
+        }
+        Ok((candidate, plan.country_read))
+    }
+
+    /// Finish an isolated receipt with its own already-admitted identity and
+    /// chronology. This never updates the live registry's checkpoint.
+    pub(crate) fn finish_configuration(
+        &self,
+        passes: &[IniFile],
+        object_types: &[String],
+        warheads: &[String],
+        weapons: &[String],
+        registries: &[crate::rules::native_processing::SdkRegistryPass],
+        steps: &[crate::rules::native_processing::SdkConfigurationStep],
+    ) -> Result<Self, String> {
+        let mut program = self.clone();
+        program.configure_history(
+            passes,
+            object_types,
+            warheads,
+            weapons,
+            registries,
+            steps,
+            true,
+        )?;
+        Ok(program)
+    }
+
+    /// One configuration owner serves fresh admission, early continuation and
+    /// isolated source projections. Saved restoration never enters this path.
+    fn configure_history(
+        &mut self,
+        passes: &[IniFile],
+        object_types: &[String],
+        warheads: &[String],
+        weapons: &[String],
+        registries: &[crate::rules::native_processing::SdkRegistryPass],
+        steps: &[crate::rules::native_processing::SdkConfigurationStep],
+        resumed: bool,
+    ) -> Result<(), String> {
+        if (self.manifest.hooks.contains(&api::HookKind::Effects)
+            || self.manifest.hooks.contains(&api::HookKind::ArmorResource)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::ProductionResource)
+            || self.manifest.hooks.contains(&api::HookKind::EmpResource)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::FactionResource)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::FoundationResource))
+            && (passes.is_empty() || registries.len() + 1 != passes.len())
+        {
+            return Err(
+                "resource configuration requires physical Rules read-point registries".into(),
+            );
+        }
+        let executor = Arc::clone(self.executor()?);
+        if self
+            .manifest
+            .hooks
+            .contains(&api::HookKind::ConfigureBoundary)
+            && (resumed || !steps.is_empty())
+        {
+            self.configure_steps(&executor, steps)?;
+            let final_ini = passes
+                .last()
+                .ok_or("no final Rules projection after process history")?;
+            self.configure_pass(
+                &executor,
+                steps.len(),
+                final_ini,
+                true,
+                object_types,
+                warheads,
+                weapons,
+                None,
+            )?;
+        } else {
+            for (index, ini) in passes.iter().enumerate() {
+                self.configure_pass(
+                    &executor,
+                    index,
+                    ini,
+                    index + 1 == passes.len(),
+                    object_types,
+                    warheads,
+                    weapons,
+                    registries.get(index),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn load(bytes: Vec<u8>, expected: &str, passes: &[IniFile]) -> Result<Self, String> {
         Self::load_with_types(bytes, expected, passes, &[], &[], &[])
     }
@@ -325,6 +510,9 @@ impl Program {
         if self.has_foundation_resource() {
             host = host.enable_fixed_art_inputs();
         }
+        if self.has_faction_resource() {
+            host = host.enable_faction_inputs();
+        }
         self.configure(
             executor,
             context,
@@ -340,6 +528,20 @@ impl Program {
         host: NativeHost,
         label: &str,
     ) -> Result<(), String> {
+        let plan = self.configuration_plan(executor, context, host, label)?;
+        if let Some(config) = plan.config {
+            self.config = config;
+        }
+        Ok(())
+    }
+
+    fn configuration_plan(
+        &self,
+        executor: &Executor,
+        context: Context,
+        host: NativeHost,
+        label: &str,
+    ) -> Result<Plan, String> {
         let request = Request {
             api_version: api::API_VERSION,
             context,
@@ -353,10 +555,7 @@ impl Program {
         if !plan.state.is_empty() || plan.damage.is_some() || !plan.operations.is_empty() {
             return Err("configuration returned simulation writes".into());
         }
-        if let Some(config) = plan.config {
-            self.config = config;
-        }
-        Ok(())
+        Ok(plan)
     }
 
     pub fn sha256(&self) -> &str {

@@ -831,7 +831,6 @@ impl IniSection {
     /// buffer, then copy31 bytes into char[32] and lowercase. An absent/empty
     /// read retains the previous filename (the projected read_name policy).
     /// Original reader controls: tools/sidebar_oracle/pcx_cameos.json.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_pcx_filename(&self, key: &str) -> Option<String> {
         self.read_name(key, 0x800)
             .map(|name| truncate_native_bytes(name, 0x1f).to_ascii_lowercase())

@@ -1452,7 +1452,7 @@ mod tests {
             )
             .unwrap();
         owner.read_multiplayer_country(&crate::rules::ini_parser::IniFile::empty(), 6);
-        owner.refresh_multiplayer_country_bodies();
+        owner.refresh_multiplayer_country_bodies().unwrap();
         let (retained, _) = owner.country_loading(LaunchCountry::Iraq.index()).unwrap();
         composition.bind_country_loading(retained, Some(&csf));
         assert_eq!(

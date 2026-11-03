@@ -41,7 +41,7 @@ fn owner(root: &str) -> NativeRulesProcessOwner {
 
 fn enter_shell(owner: &mut NativeRulesProcessOwner) {
     owner.read_multiplayer_country(&IniFile::empty(), 1);
-    owner.refresh_multiplayer_country_bodies();
+    owner.refresh_multiplayer_country_bodies().unwrap();
 }
 
 fn child(owner: &NativeRulesProcessOwner) -> &crate::rules::country_loading::AresCountryLoading {
@@ -60,7 +60,7 @@ fn ares_country_loading_prefix_exposes_both_primary_passes_before_type_reset() {
         Some([17, 128, 240])
     );
 
-    let preparation = owner.prepare_noncampaign_scenario_prefix();
+    let preparation = owner.prepare_noncampaign_scenario_prefix().unwrap();
     assert_eq!(child(&owner).files(), ("child.shp", "child.pal"));
     assert_eq!(child(&owner).labels()[0], "Name:Child");
     assert_eq!(early.files().1, "parent.pal", "early PAL stays immutable");
@@ -86,7 +86,7 @@ fn ares_country_loading_prefix_consumes_original_constructor_receipt_without_rer
     let root = format!("{ROOT}[General]\nAmerParaDropInf=BEFORE\n");
     let mut owner = owner(&root);
     enter_shell(&mut owner);
-    let preparation = owner.prepare_noncampaign_scenario_prefix();
+    let preparation = owner.prepare_noncampaign_scenario_prefix().unwrap();
 
     // Test-only source mutation makes an accidental second E_multi visible in
     // pre-reset constructor chronology. Production sources are frozen private
@@ -137,7 +137,7 @@ fn ares_country_loading_prefix_cancel_keeps_registry_and_rejects_stale_or_implic
         .0;
     assert!((0..3).all(|level| initial.ares_ai_bypasses_build_limit(level)));
     enter_shell(&mut owner);
-    let preparation = owner.prepare_noncampaign_scenario_prefix();
+    let preparation = owner.prepare_noncampaign_scenario_prefix().unwrap();
     // Retain an identity only inside this private test to exercise a replay
     // that public callers cannot construct: the public ticket is not Clone.
     let retired_identity = Arc::clone(&preparation.identity);
@@ -164,7 +164,7 @@ fn ares_country_loading_prefix_cancel_keeps_registry_and_rejects_stale_or_implic
         "cancel cannot rewind parent state"
     );
 
-    let next = owner.prepare_noncampaign_scenario_prefix();
+    let next = owner.prepare_noncampaign_scenario_prefix().unwrap();
     let wrong_owner = NativeNonCampaignPrefixPreparation {
         identity: Arc::new(()),
     };

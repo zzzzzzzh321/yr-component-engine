@@ -45,7 +45,8 @@ fn fixture_with_country(
     crate::app::frontend::skirmish_session::prepare_external_skirmish_countries(
         &mut assets,
         &launch,
-    );
+    )
+    .unwrap();
     assert_eq!(request.seed, Some(77));
     let mut session = LoadingSession::from_request(LoadingRequest::unverified_legacy_skirmish(
         *launch,
@@ -333,7 +334,7 @@ fn ares_country_loading_attempt_failures_cancel_pending_prefix_and_preserve_actu
             "child.shp"
         );
         let owner = assets.native_rules_mut_with_tile_cache().0.unwrap();
-        let next = owner.prepare_noncampaign_scenario_prefix();
+        let next = owner.prepare_noncampaign_scenario_prefix().unwrap();
         owner.cancel_prepared_noncampaign_scenario_prefix(next);
     }
 }

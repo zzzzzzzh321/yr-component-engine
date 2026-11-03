@@ -1116,7 +1116,7 @@ fn connect_succeeded(state: &mut AppState) {
         visit.page = WolPage::Backdrop { wait: None };
     }
     // ReadMultiPlayerSettings 0x006980C0.
-    App::prepare_multiplayer_settings(
+    let preparation = App::prepare_multiplayer_settings(
         state,
         crate::app::shell_main_menu::MultiplayerSettingsContext::Shell,
     );
@@ -1129,28 +1129,34 @@ fn connect_succeeded(state: &mut AppState) {
         .filter(|_| matches!(visit.mode.map(WolMode::native), Some(4 | 5)))
         .map(|flow| flow.server.clone());
     let file = super::persona::info_file(state);
-    let persona = connected_persona(
-        file.as_ref(),
-        &nickname,
-        online,
-        server.as_ref().map(WolServer::persona_server),
-        &|key| resolve(state, key),
-    );
-    let Ok(persona) = persona else {
-        if let Some(visit) = state.frontend.wol.as_mut() {
-            visit.authenticated = false;
-            visit.connected = false;
-            visit.requests.push(WolServiceRequest::Logout);
+    let persona = preparation.map_err(anyhow::Error::from).and_then(|()| {
+        connected_persona(
+            file.as_ref(),
+            &nickname,
+            online,
+            server.as_ref().map(WolServer::persona_server),
+            &|key| resolve(state, key),
+        )
+    });
+    let persona = match persona {
+        Ok(persona) => persona,
+        Err(error) => {
+            log::warn!("WOL connection preparation failed: {error:#}");
+            if let Some(visit) = state.frontend.wol.as_mut() {
+                visit.authenticated = false;
+                visit.connected = false;
+                visit.requests.push(WolServiceRequest::Logout);
+            }
+            apply(
+                state,
+                WolStep::Message {
+                    key: "TXT_CANT_CONNECT",
+                    yes_no: false,
+                    then: WolBoxThen::Welcome,
+                },
+            );
+            return;
         }
-        apply(
-            state,
-            WolStep::Message {
-                key: "TXT_CANT_CONNECT",
-                yes_no: false,
-                then: WolBoxThen::Welcome,
-            },
-        );
-        return;
     };
     // The nickname becomes the session handle [0xA8B380], the persona's
     // Country and Color the MultiPlayer picks, and WriteMultiPlayerSettings

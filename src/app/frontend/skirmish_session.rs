@@ -64,16 +64,18 @@ enum HandleSource {
 
 /// Direct launch adapters bypass PrepareSession52E11E/123. Share its Country
 /// allocation/body #1 without cached shell settings or the PortPool RNG draw.
-#[cfg(feature = "ares")]
 pub(crate) fn prepare_external_skirmish_countries(
     assets: &mut crate::app::process_assets::ProcessAssets,
     session: &SkirmishLaunchSession,
-) {
+) -> Result<(), crate::rules::error::RulesError> {
+    if !assets.requires_external_country_initialization() {
+        return Ok(());
+    }
     assets.read_multiplayer_country(
         &IniFile::empty(),
         i32::from(session.local_slot().country.raw_index()),
     );
-    assets.refresh_multiplayer_country_bodies();
+    assets.refresh_multiplayer_country_bodies()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1994,6 +1996,28 @@ mod tests {
             crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
             false,
         )
+    }
+
+    #[test]
+    fn external_country_preparation_without_component_keeps_the_existing_profile() {
+        use crate::map::source::test_support::TestDirectory;
+        let launch = random_session();
+        let mut process = empty_process_assets();
+        // A source-less process remains a successful no-op in both profiles.
+        prepare_external_skirmish_countries(&mut process, &launch).unwrap();
+        let directory = TestDirectory::new("external-country-profile");
+        directory.write("rulesmd.ini", b"[Countries]\n0=Americans\n[Americans]\n");
+        directory.write("artmd.ini", b"[Movies]\n");
+        let manager = AssetManager::from_loose_root_for_test(directory.path());
+        process.initialize_sources_if_needed(&manager).unwrap();
+        assert_eq!(process.multiplayer_countries().count(), 0);
+        prepare_external_skirmish_countries(&mut process, &launch).unwrap();
+        // The old Ares direct-launch path initializes Countries. Ordinary
+        // without a subscribing module must not gain this extra native read.
+        assert_eq!(
+            process.multiplayer_countries().count(),
+            usize::from(cfg!(feature = "ares"))
+        );
     }
 
     #[test]

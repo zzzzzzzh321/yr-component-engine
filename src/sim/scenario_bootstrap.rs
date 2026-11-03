@@ -4685,7 +4685,7 @@ mod tests {
             let index = owner
                 .read_multiplayer_country(&IniFile::from_str("[MultiPlayer]\nSide=Orphan\n"), -1);
             assert_eq!(index, 1);
-            owner.refresh_multiplayer_country_bodies();
+            owner.refresh_multiplayer_country_bodies().unwrap();
             let mut shell_rules = RuleSet::from_ini(&IniFile::from_str(root)).unwrap();
             owner.project_multiplayer_countries(&mut shell_rules);
             let mut launch = one_player_battle_launch("country-reset.map");

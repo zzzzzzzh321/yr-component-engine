@@ -8891,3 +8891,6 @@ mod sdk_spotlight_tests;
 
 #[cfg(test)]
 mod sdk_foundation_tests;
+
+#[cfg(test)]
+mod sdk_faction_tests;

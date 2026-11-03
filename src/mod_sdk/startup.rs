@@ -93,6 +93,9 @@ fn early_resources(assets: &AssetManager) -> Result<native::StartupResources, St
         },
         ..Default::default()
     };
+    resources.eva_registered_columns = admitted
+        .eva_catalog_policy()?
+        .map(|policy| policy == api::EvaCatalogPolicy::RegisteredVoiceColumns);
     if !admitted.has_startup_resources() {
         return Ok(resources);
     }
@@ -165,7 +168,7 @@ pub(super) fn require_startup_frontier(
     admitted: &AdmittedComponent,
     early: bool,
 ) -> Result<(), String> {
-    if !early && admitted.has_startup_resources() {
+    if !early && admitted.requires_early_admission() {
         Err("startup component was not available before resource selection".into())
     } else {
         Ok(())

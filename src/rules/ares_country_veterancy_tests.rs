@@ -71,7 +71,7 @@ fn ares_country_list_reads_match_native_find_only_controls() {
             }
         }
         let ini = pass(country, &row["values"]);
-        reader.process_house_family(&ini, false);
+        reader.process_house_family(&ini, false).unwrap();
         let label = row["name"].as_str().unwrap();
         assert_original_lists(
             &reader.families[&RulesTypeFamily::Country][index].country_veterancy,
@@ -93,7 +93,7 @@ fn ares_country_list_reads_match_native_find_only_controls() {
                 &row["after_later_registration_without_read"],
                 label,
             );
-            reader.process_house_family(&ini, false);
+            reader.process_house_family(&ini, false).unwrap();
             assert_original_lists(
                 &reader.families[&RulesTypeFamily::Country][index].country_veterancy,
                 &row["after_explicit_reread"],
@@ -181,7 +181,9 @@ fn ares_country_extension_histories_match_native_parent_and_retention() {
                 );
             }
             if initial["base_reader_mode"] == "missing_section_suffix" {
-                reader.process_house_family(&IniFile::empty(), false);
+                reader
+                    .process_house_family(&IniFile::empty(), false)
+                    .unwrap();
             } else {
                 reader.process_ares_country(index, &pass(country, &input["values"]), false);
             }

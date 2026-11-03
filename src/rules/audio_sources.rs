@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::assets::asset_manager::AssetManager;
 use crate::assets::audio_bag::AudioIndex;
 use crate::rules::retail_sources::{IniSourceIdentity, select_ini};
-use crate::rules::sound_ini::{EvaRegistry, SoundRegistry};
+use crate::rules::sound_ini::{EvaReadMode, EvaRegistry, SoundRegistry};
 
 #[derive(Debug)]
 pub struct AudioDefinitions {
@@ -37,6 +37,21 @@ impl AudioDefinitions {
     /// against the process sample index, selected before these readers as
     /// startup does (`406CE8` before `52C796`).
     pub fn select_admitting(assets: &AssetManager, index: Option<&AudioIndex>) -> Self {
+        let mode = match assets.startup_resources().eva_registered_columns {
+            Some(true) => EvaReadMode::RegisteredVoiceColumns,
+            Some(false) => EvaReadMode::Retail,
+            None => EvaReadMode::profile_default(),
+        };
+        Self::select_admitting_with_eva_mode(assets, index, mode)
+    }
+
+    /// Select the same fixed sources and sample admission with an explicit
+    /// EVAMD layout, before Rules can resolve Side voice tags (Ares10063660).
+    pub fn select_admitting_with_eva_mode(
+        assets: &AssetManager,
+        index: Option<&AudioIndex>,
+        eva_mode: EvaReadMode,
+    ) -> Self {
         let sound = select_ini(assets, "soundmd.ini")
             .map_err(|error| log::warn!("Audio definitions: {error}"))
             .ok();
@@ -51,7 +66,7 @@ impl AudioDefinitions {
             .map_err(|error| log::warn!("Audio definitions: {error}"))
             .ok();
         let eva_registry = eva.as_ref().map_or_else(EvaRegistry::default, |selected| {
-            EvaRegistry::from_ini(&selected.ini)
+            EvaRegistry::from_ini_with_mode(&selected.ini, eva_mode)
         });
         Self {
             sounds,
@@ -130,6 +145,76 @@ mod tests {
         assert_eq!(source.logical_name, "evamd.ini");
         assert_eq!(source.payload_len, evamd.len());
         assert_eq!(source.source_sha256, sha256_hex(evamd));
+    }
+
+    #[test]
+    fn explicit_eva_modes_preserve_stock_sources_and_legacy_default() {
+        use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
+        use crate::assets::startup_resources::StartupResources;
+
+        let directory = audio_test_install("fixed-eva-mode");
+        std::fs::write(
+            directory.path().join("soundmd.ini"),
+            b"[SoundList]\n0=Sound\n[Sound]\nSounds=sample.wav\n",
+        )
+        .unwrap();
+        let evamd =
+            b"[DialogList]\n0=EVA_Test\n[EVA_Test]\nAllied=allied\nRussian=russian\nYuri=yuri\n";
+        std::fs::write(directory.path().join("evamd.ini"), evamd).unwrap();
+        let assets = AssetManager::from_loose_root_for_test(directory.path());
+        for mode in [EvaReadMode::Retail, EvaReadMode::RegisteredVoiceColumns] {
+            let admitted = AssetManager::new_with_startup_admission(
+                directory.path(),
+                MediaArchiveMode::STOCK_DIGITAL,
+                |_| {
+                    Ok(StartupResources {
+                        eva_registered_columns: Some(mode == EvaReadMode::RegisteredVoiceColumns),
+                        ..StartupResources::default()
+                    })
+                },
+            )
+            .unwrap();
+            let definitions = AudioDefinitions::select(&admitted);
+            assert_eq!(
+                definitions.sounds().get("Sound").unwrap().sounds,
+                ["sample.wav"]
+            );
+            assert_eq!(definitions.eva().len(), 1);
+            let entry = definitions.eva().entry("EVA_Test").unwrap();
+            assert_eq!(entry.column_by_voice(0), Some("allied"));
+            assert_eq!(entry.column_by_voice(1), Some("russian"));
+            assert_eq!(entry.column_by_voice(2), Some("yuri"));
+            let (extra, opposite) = match mode {
+                EvaReadMode::Retail => (Some("yuri"), EvaReadMode::RegisteredVoiceColumns),
+                EvaReadMode::RegisteredVoiceColumns => (None, EvaReadMode::Retail),
+            };
+            assert_eq!(entry.column_by_voice(3), extra);
+            let overridden =
+                AudioDefinitions::select_admitting_with_eva_mode(&admitted, None, opposite);
+            assert_ne!(
+                overridden
+                    .eva()
+                    .entry("EVA_Test")
+                    .unwrap()
+                    .column_by_voice(3),
+                extra
+            );
+            assert_eq!(definitions.eva().voice_index_for_tag("extra"), None);
+            assert_eq!(
+                definitions.eva_source().unwrap().source_sha256,
+                sha256_hex(evamd)
+            );
+        }
+        let legacy = AudioDefinitions::select_admitting(&assets, None);
+        let explicit_default = AudioDefinitions::select_admitting_with_eva_mode(
+            &assets,
+            None,
+            EvaReadMode::profile_default(),
+        );
+        assert_eq!(
+            legacy.eva().entry("EVA_Test"),
+            explicit_default.eva().entry("EVA_Test")
+        );
     }
 
     #[test]

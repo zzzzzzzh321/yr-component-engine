@@ -62,6 +62,8 @@ pub type StringSupplementProvider =
 pub struct StartupResources {
     pub component: StartupComponentSource,
     pub hash_include: Option<bool>,
+    /// Fixed speech-catalog layout, selected before its one reader runs.
+    pub eva_registered_columns: Option<bool>,
     pub audio: Option<AudioCatalogPolicy>,
     pub strings: Option<StringSupplementProvider>,
 }

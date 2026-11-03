@@ -199,6 +199,9 @@ pub struct RetailRulesSources {
     langrule_selection_failure: Option<String>,
     pub artmd: SelectedIni,
     personal_rules: PersonalRules,
+    /// Unconfigured immutable component selected from the same active assets.
+    /// The live registry takes sole ownership before cold Rules processing.
+    configuration_seed: Option<Arc<crate::mod_sdk::Program>>,
 }
 
 impl RetailRulesSources {
@@ -217,6 +220,7 @@ impl RetailRulesSources {
             langrule_selection_failure,
             artmd,
             personal_rules: PersonalRules::default(),
+            configuration_seed: crate::mod_sdk::early_configuration_seed(assets)?,
         })
     }
 
@@ -243,7 +247,7 @@ impl RetailRulesSources {
             (None, Some(error)) => Some(NativeLangRuleSource::SelectionFailed(error)),
             (None, None) => None,
         };
-        NativeRulesProcessOwner::from_named_cold_start_sources(
+        NativeRulesProcessOwner::from_named_cold_start_sources_with_component(
             self.rulesmd.ini,
             langrule,
             self.artmd.ini,
@@ -254,6 +258,7 @@ impl RetailRulesSources {
                 self.artmd.source.logical_name,
             ],
             self.personal_rules,
+            self.configuration_seed,
         )
         .map_err(|error| format!("Native rules cold startup failed: {error}"))
     }
@@ -264,20 +269,36 @@ impl RetailRulesSources {
         eva: Arc<EvaRegistry>,
     ) -> Result<StartupRulesLoad, String> {
         let native_owner = self.into_owner(sounds, eva)?;
+        let component_projection = native_owner
+            .sdk_configuration_program()
+            .is_some_and(|program| program.has_country_read());
         let (compatibility_rules, compatibility_projection) =
             match native_owner.startup_compatibility_projection() {
                 Ok(processed) => {
-                    let mut compatibility_rules = RuleSet::from_processed_rules(&processed)
-                        .map_err(|error| {
-                            log::warn!("Failed to parse startup rules projection: {error}")
-                        })
-                        .ok();
+                    let mut compatibility_rules = match RuleSet::from_processed_rules(&processed) {
+                        Ok(rules) => Some(rules),
+                        Err(error) if component_projection => {
+                            return Err(format!("Startup component projection failed: {error}"));
+                        }
+                        Err(error) => {
+                            log::warn!("Failed to parse startup rules projection: {error}");
+                            None
+                        }
+                    };
                     if let Some(rules) = compatibility_rules.as_mut() {
                         native_owner.bind_type_audio_references(rules, &processed);
+                        // This completed projection has its own configuration
+                        // receipt. Never install it into the live cold registry.
+                        rules.bind_external_mod_from_checkpoint(&processed)?;
                     }
                     let compatibility_projection =
                         processed.into_projection_discarding_native_receipt();
                     (compatibility_rules, Some(compatibility_projection))
+                }
+                Err(error) if component_projection => {
+                    return Err(format!(
+                        "Startup component source processing failed: {error}"
+                    ));
                 }
                 Err(error) => {
                     log::warn!("Failed to build startup rules projection: {error}");

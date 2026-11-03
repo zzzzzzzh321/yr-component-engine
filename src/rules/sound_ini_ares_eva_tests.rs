@@ -22,6 +22,48 @@ fn registry() -> EvaRegistry {
 }
 
 #[test]
+fn explicit_reader_mode_keeps_catalog_layout_and_filename_selection_together() {
+    let row = control("registration");
+    let ini = crate::test_fixture::ini_sections(&row["input"]);
+    let registered = EvaRegistry::from_ini_with_mode(&ini, EvaReadMode::RegisteredVoiceColumns);
+    let retail = EvaRegistry::from_ini_with_mode(&ini, EvaReadMode::Retail);
+    let names: Vec<_> = registered.entries.iter().map(|entry| &entry.name).collect();
+    assert_eq!(serde_json::to_value(names).unwrap(), row["event_names"]);
+    assert_eq!(
+        serde_json::to_value(&registered.extra_tags).unwrap(),
+        row["tags"]
+    );
+    assert_eq!(registered.voice_index_for_tag("vOICEa"), Some(3));
+    assert_eq!(retail.voice_index_for_tag("VoiceA"), None);
+    assert_eq!(
+        retail.entry_by_index(1).unwrap().name,
+        row["input"]["DialogList"]["2"].as_str().unwrap(),
+        "retail names retain the original char[200] capacity",
+    );
+    for row in controls().iter().filter(|row| row["kind"] == "filename") {
+        let voice = i32::try_from(row["voice_index"].as_i64().unwrap()).unwrap();
+        assert_eq!(
+            registered
+                .entry("EVA_TEST")
+                .unwrap()
+                .column_by_voice(voice)
+                .unwrap_or(""),
+            row["filename"].as_str().unwrap(),
+            "registered voice {voice}",
+        );
+        assert_eq!(
+            retail.entry("EVA_TEST").unwrap().column_by_voice(voice),
+            match voice {
+                0 => Some("STOCK_A"),
+                1 => Some("STOCK_R"),
+                _ => Some("STOCK_Y"),
+            },
+            "retail voice {voice}",
+        );
+    }
+}
+
+#[test]
 fn fixed_catalog_uses_feature_specific_registration_and_voice_lookup() {
     let registry = registry();
     for (tag, index) in [("aLLied", 0), ("rUSsian", 1), ("yURI", 2)] {

@@ -328,6 +328,28 @@ impl NativeRulesProcessOwner {
         rules_art_names: [String; 2],
         personal_rules: PersonalRules,
     ) -> Result<Self, RulesError> {
+        Self::from_named_cold_start_sources_with_component(
+            selected_rules_root,
+            langrule,
+            fixed_art,
+            fixed_sounds,
+            fixed_eva,
+            rules_art_names,
+            personal_rules,
+            None,
+        )
+    }
+
+    pub(crate) fn from_named_cold_start_sources_with_component(
+        selected_rules_root: IniFile,
+        langrule: Option<NativeLangRuleSource>,
+        fixed_art: IniFile,
+        fixed_sounds: Arc<SoundRegistry>,
+        fixed_eva: Arc<EvaRegistry>,
+        rules_art_names: [String; 2],
+        personal_rules: PersonalRules,
+        configuration_seed: Option<Arc<crate::mod_sdk::Program>>,
+    ) -> Result<Self, RulesError> {
         let movies = crate::rules::movies::MovieRegistry::from_art(&fixed_art);
         let fixed_art = Arc::new(fixed_art);
         if let Some(NativeLangRuleSource::SelectionFailed(error)) = langrule.as_ref() {
@@ -346,14 +368,16 @@ impl NativeRulesProcessOwner {
             None | Some(NativeLangRuleRead::Absent | NativeLangRuleRead::SelectionFailed) => None,
         };
         let mut registry_state = NativeRulesRegistryState::default();
+        registry_state.retain_sdk_configuration_program(configuration_seed);
         registry_state.bind_fixed_art_source(Arc::clone(&fixed_art));
-        let cold_trace = process_native_rules_cold_start(
+        let mut cold_trace = process_native_rules_cold_start(
             registry_state,
             &selected_rules_root,
             &fixed_art,
             startup_langrule.as_ref(),
             &fixed_eva,
         )?;
+        cold_trace.flush_sdk_configuration()?;
         Ok(Self {
             sources: NativeRulesSourceSnapshot {
                 rules_art_names,
@@ -390,17 +414,29 @@ impl NativeRulesProcessOwner {
     }
 
     /// PrepareSession52E123; intentionally separate from D7's6980C0 call.
-    pub fn refresh_multiplayer_country_bodies(&mut self) {
+    pub fn refresh_multiplayer_country_bodies(&mut self) -> Result<(), RulesError> {
         self.assert_no_prepared_prefix();
         let (events, state) = self
             .registry
             .take()
             .expect("Rules transition reentered")
             .into_shell_state();
-        let mut trace =
-            refresh_native_multiplayer_country_bodies(state, &self.sources.selected_rules_root);
+        let (mut trace, mut error) = match refresh_native_multiplayer_country_bodies(
+            state,
+            &self.sources.selected_rules_root,
+        ) {
+            Ok(trace) => (trace, None),
+            Err(failure) => {
+                let (error, trace) = failure.into_parts();
+                (trace, Some(error))
+            }
+        };
+        if error.is_none() {
+            error = trace.flush_sdk_configuration().err();
+        }
         trace.prepend_events(events);
         self.registry = Some(NativeRulesRegistryOwner::BeforeReset(trace));
+        error.map_or(Ok(()), Err)
     }
 
     pub fn multiplayer_countries(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
@@ -765,10 +801,55 @@ impl NativeRulesProcessOwner {
         &mut self,
         program: Option<Arc<crate::mod_sdk::Program>>,
     ) {
-        let Some(NativeRulesRegistryOwner::Scenario(processed)) = self.registry.as_mut() else {
-            panic!("fresh gameplay configuration requires completed scenario Rules");
-        };
-        processed.retain_sdk_configuration_program(program);
+        match self
+            .registry
+            .as_mut()
+            .expect("Rules transition may not be re-entered")
+        {
+            NativeRulesRegistryOwner::BeforeReset(trace) => {
+                trace.retain_sdk_configuration_program(program)
+            }
+            NativeRulesRegistryOwner::Live(state) => {
+                state.retain_sdk_configuration_program(program)
+            }
+            NativeRulesRegistryOwner::Scenario(processed) => {
+                processed.retain_sdk_configuration_program(program)
+            }
+            #[cfg(feature = "ares")]
+            NativeRulesRegistryOwner::PreparedNonCampaign { trace, .. } => {
+                trace.retain_sdk_configuration_program(program)
+            }
+        }
+    }
+
+    /// Whether this process component subscribes to the Country pre-body reader.
+    /// Callers may select the existing preparation path without observing the
+    /// component's opaque checkpoint or advancing its configuration history.
+    pub fn uses_component_country_reader(&self) -> bool {
+        self.sdk_configuration_program()
+            .is_some_and(|program| program.has_country_read())
+    }
+
+    /// Last accepted checkpoint of the live authority. Pending physical reads
+    /// may remain; observing it never advances or replays that history.
+    pub(crate) fn sdk_configuration_program(&self) -> Option<&Arc<crate::mod_sdk::Program>> {
+        self.registry
+            .as_ref()?
+            .registry_state()
+            .sdk_configuration_seed()
+    }
+
+    fn isolated_projection_registry(&self) -> NativeRulesRegistryState {
+        let mut state = NativeRulesRegistryState::default();
+        if let Some(program) = self
+            .sdk_configuration_program()
+            .filter(|p| p.has_country_read())
+        {
+            state.retain_sdk_configuration_program(Some(Arc::new(
+                program.fresh_configuration_seed(),
+            )));
+        }
+        state
     }
 
     /// Consume the outgoing Simulation's runtime Rules writes once that
@@ -817,7 +898,7 @@ impl NativeRulesProcessOwner {
         self.startup_layers(langrule.as_ref())
             .process_with_fixed_art_and_registry_state_recovering(
                 &self.sources.fixed_art,
-                NativeRulesRegistryState::default(),
+                self.isolated_projection_registry(),
                 RulesProcessContext::Ordinary,
                 &self.sources.fixed_eva,
             )
@@ -853,7 +934,7 @@ impl NativeRulesProcessOwner {
         layers
             .process_with_fixed_art_and_registry_state_recovering(
                 &self.sources.fixed_art,
-                NativeRulesRegistryState::default(),
+                self.isolated_projection_registry(),
                 RulesProcessContext::ScenarioReset {
                     theater: crate::rules::object_image::ImageTheater::from_name(theater_name),
                     skip_root_color_add_and_mode,
@@ -871,16 +952,26 @@ impl NativeRulesProcessOwner {
     /// The app must transfer any retired scene's runtime Rules writes first.
     /// Generated RMG saved-DL admission deliberately keeps its existing path.
     #[cfg(feature = "ares")]
-    pub fn prepare_noncampaign_scenario_prefix(&mut self) -> NativeNonCampaignPrefixPreparation {
+    pub fn prepare_noncampaign_scenario_prefix(
+        &mut self,
+    ) -> Result<NativeNonCampaignPrefixPreparation, RulesError> {
         let state = self.take_pre_reset_state(true);
-        let trace =
-            process_native_noncampaign_rules_prepass(state, &self.sources.selected_rules_root);
+        let mut trace = match process_native_noncampaign_rules_prepass(
+            state,
+            &self.sources.selected_rules_root,
+        ) {
+            Ok(trace) => trace,
+            Err(failure) => return Err(self.recover_prefix_failure(failure)),
+        };
+        if let Err(error) = trace.flush_sdk_configuration() {
+            return Err(self.recover_prefix_trace(error, trace));
+        }
         let identity = Arc::new(());
         self.registry = Some(NativeRulesRegistryOwner::PreparedNonCampaign {
             trace,
             identity: Arc::clone(&identity),
         });
-        NativeNonCampaignPrefixPreparation { identity }
+        Ok(NativeNonCampaignPrefixPreparation { identity })
     }
 
     /// Retire an attempt which will not reach the destructive Type reset.
@@ -908,6 +999,25 @@ impl NativeRulesProcessOwner {
             ),
             "prepared Rules prefix must be consumed or cancelled before another Rules mutation"
         );
+    }
+
+    fn recover_prefix_failure(
+        &mut self,
+        failure: crate::rules::native_processing::NativeRulesProcessingFailure,
+    ) -> RulesError {
+        let (error, partial_trace) = failure.into_parts();
+        self.recover_prefix_trace(error, partial_trace)
+    }
+
+    fn recover_prefix_trace(
+        &mut self,
+        error: RulesError,
+        partial_trace: NativeTypeConstructionTrace,
+    ) -> RulesError {
+        self.registry = Some(NativeRulesRegistryOwner::Live(
+            partial_trace.into_registry_state_discarding_events(),
+        ));
+        error
     }
 
     /// The same pre-reset ownership transfer serves both atomic loading and
@@ -1014,17 +1124,18 @@ impl NativeRulesProcessOwner {
         F: FnOnce(RuleSet) -> T,
     {
         let clear_classes = !matches!(&prefix, NativeScenarioRulesPrefix::RandomMap(_));
-        let (pre_reset_trace, mode_rules_override) = match prefix {
+        let (mut pre_reset_trace, mode_rules_override) = match prefix {
             NativeScenarioRulesPrefix::NonCampaign(mode)
             | NativeScenarioRulesPrefix::RandomMap(mode) => {
                 let state = self.take_pre_reset_state(clear_classes);
-                (
-                    process_native_noncampaign_rules_prepass(
-                        state,
-                        &self.sources.selected_rules_root,
-                    ),
-                    mode,
-                )
+                let trace = match process_native_noncampaign_rules_prepass(
+                    state,
+                    &self.sources.selected_rules_root,
+                ) {
+                    Ok(trace) => trace,
+                    Err(failure) => return Err(self.recover_prefix_failure(failure)),
+                };
+                (trace, mode)
             }
             #[cfg(feature = "ares")]
             NativeScenarioRulesPrefix::PreparedNonCampaign {
@@ -1045,15 +1156,15 @@ impl NativeRulesProcessOwner {
                 ) {
                     Ok(trace) => trace,
                     Err(failure) => {
-                        let (error, partial_trace) = failure.into_parts();
-                        let (_, _, partial_state) = partial_trace.into_parts();
-                        self.registry = Some(NativeRulesRegistryOwner::Live(partial_state));
-                        return Err(error);
+                        return Err(self.recover_prefix_failure(failure));
                     }
                 };
                 (trace, None)
             }
         };
+        if let Err(error) = pre_reset_trace.flush_sdk_configuration() {
+            return Err(self.recover_prefix_trace(error, pre_reset_trace));
+        }
         let (pre_reset_events, pre_reset_super_count, pre_reset_state) =
             pre_reset_trace.into_parts();
         let langrule = self.read_langrule_for_process();
@@ -1252,6 +1363,9 @@ mod tests {
                         .read_name("Name", 32)
                         .unwrap()
                         .to_owned(),
+                    SdkConfigurationStep::CountryPass { .. } => {
+                        panic!("a legacy no-component timeline has no Country-only guest pass")
+                    }
                 })
                 .collect::<Vec<_>>()
         };

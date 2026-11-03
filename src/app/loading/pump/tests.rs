@@ -804,7 +804,7 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
     {
         ensure_session_job_asset_manager(&mut assets, &mut session, Some(ra2_dir.clone())).unwrap();
         assets.read_multiplayer_country(&crate::rules::ini_parser::IniFile::empty(), 0);
-        assets.refresh_multiplayer_country_bodies();
+        assets.refresh_multiplayer_country_bodies().unwrap();
     }
     let session = prepare_loading_session(
         &mut assets,

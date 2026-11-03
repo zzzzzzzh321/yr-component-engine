@@ -366,11 +366,10 @@ pub(crate) fn start_external_network(
         .match_state
         .session
         .enter_network(crate::app::match_runtime::session::NetworkReturnContext::Wol);
-    #[cfg(feature = "ares")]
     crate::app::frontend::skirmish_session::prepare_external_skirmish_countries(
         &mut state.process_assets,
         &launch,
-    );
+    )?;
     crate::app::shell_network_setup::install_setup(
         state,
         *launch,

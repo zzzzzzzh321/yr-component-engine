@@ -130,10 +130,13 @@ impl App {
     /// The retained preference owner supplies the edit; admission stays empty.
     pub(crate) fn open_lan_lobby(state: &mut AppState) {
         crate::app::shell_main_menu::clear_typed_codes_for_network_session(state);
-        Self::prepare_multiplayer_settings(
+        if let Err(error) = Self::prepare_multiplayer_settings(
             state,
             crate::app::shell_main_menu::MultiplayerSettingsContext::Shell,
-        );
+        ) {
+            Self::report_multiplayer_preparation_error(state, &error);
+            return;
+        }
         if !Self::ensure_skirmish_shell_chrome(state) {
             return;
         }

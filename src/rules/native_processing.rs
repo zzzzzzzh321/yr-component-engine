@@ -49,6 +49,9 @@ use crate::util::native_x87::NativeF64Bits;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+#[path = "native_faction.rs"]
+mod faction;
+
 /// AbstractType constructor410800's stored byte ID. The INI store represents
 /// native bytes as characters, so this cut is shared by Type and Campaign
 /// registries without UTF-8 byte-boundary differences.
@@ -575,8 +578,9 @@ fn process_native_rules_cold_start_inner(
 pub(crate) fn process_native_noncampaign_rules_prepass(
     registry_state: NativeRulesRegistryState,
     selected_rules_root: &IniFile,
-) -> NativeTypeConstructionTrace {
-    process_native_noncampaign_rules_prepass_inner(registry_state, selected_rules_root).0
+) -> Result<NativeTypeConstructionTrace, NativeRulesProcessingFailure> {
+    process_native_noncampaign_rules_prepass_inner(registry_state, selected_rules_root)
+        .map(|result| result.0)
 }
 
 /// Campaign Full_Init686D35 processes the optional scenario-basename INI
@@ -611,16 +615,22 @@ pub(crate) fn process_native_campaign_rules_prepass(
 fn process_native_noncampaign_rules_prepass_inner(
     registry_state: NativeRulesRegistryState,
     selected_rules_root: &IniFile,
-) -> (NativeTypeConstructionTrace, [usize; 3]) {
+) -> Result<(NativeTypeConstructionTrace, [usize; 3]), NativeRulesProcessingFailure> {
     let mut processor = RulesPassProcessor::with_registry_state(registry_state);
     processor.allocate_explicit_family(selected_rules_root, "Countries", RulesTypeFamily::Country);
     let after_countries = processor.native_type_construction_events.len();
     processor.allocate_general_references(selected_rules_root);
     let after_general = processor.native_type_construction_events.len();
-    processor.process_house_family(selected_rules_root, true);
+    let result = processor.process_country_only_pass(selected_rules_root, true);
     let after_house_bodies = processor.native_type_construction_events.len();
     let (_, trace, _) = processor.finish();
-    (trace, [after_countries, after_general, after_house_bodies])
+    match result {
+        Ok(()) => Ok((trace, [after_countries, after_general, after_house_bodies])),
+        Err(error) => Err(NativeRulesProcessingFailure {
+            error,
+            partial_trace: Box::new(trace),
+        }),
+    }
 }
 
 /// Session ReadMultiPlayer6980C0 calls Countries6722F0 before its Side475540
@@ -660,10 +670,17 @@ pub(crate) fn read_native_multiplayer_country(
 pub(crate) fn refresh_native_multiplayer_country_bodies(
     registry: NativeRulesRegistryState,
     root: &IniFile,
-) -> NativeTypeConstructionTrace {
+) -> Result<NativeTypeConstructionTrace, NativeRulesProcessingFailure> {
     let mut processor = RulesPassProcessor::with_registry_state(registry);
-    processor.process_house_family(root, true);
-    processor.finish().1
+    let result = processor.process_country_only_pass(root, true);
+    let trace = processor.finish().1;
+    match result {
+        Ok(()) => Ok(trace),
+        Err(error) => Err(NativeRulesProcessingFailure {
+            error,
+            partial_trace: Box::new(trace),
+        }),
+    }
 }
 
 /// Retained RulesClass type vectors, distinct from the process-resident type
@@ -725,6 +742,9 @@ pub(crate) struct SdkRegistryPass {
     foundation: vera_mod_api::FoundationRegistryView,
     fixed_art: Option<std::sync::Arc<IniFile>>,
     fixed_art_hash: u64,
+    faction: vera_mod_api::FactionRegistryView,
+    faction_colors: Vec<String>,
+    faction_eva: Option<std::sync::Arc<EvaRegistry>>,
 }
 
 /// Pending physical reads belong to the same move-only Rules transaction.
@@ -732,6 +752,12 @@ pub(crate) struct SdkRegistryPass {
 #[derive(Debug, Clone)]
 pub(crate) enum SdkConfigurationStep {
     RulesPass {
+        ini: IniFile,
+        registry: SdkRegistryPass,
+    },
+    /// A real PrepareSession/E_multi Country-only loop. It must not replay
+    /// other Configure readers as if another full RulesClass::Process ran.
+    CountryPass {
         ini: IniFile,
         registry: SdkRegistryPass,
     },
@@ -931,6 +957,11 @@ impl ProcessedRulesLayers {
             .registry_state
             .retain_sdk_configuration_program(program);
     }
+    pub(crate) fn flush_sdk_configuration(&mut self) -> Result<(), RulesError> {
+        self.native_type_construction_trace
+            .flush_sdk_configuration()
+    }
+
     pub(crate) fn sdk_passes(&self) -> &[IniFile] {
         &self.sdk_passes
     }
@@ -2722,6 +2753,18 @@ impl NativeTypeConstructionTrace {
         &self.registry_state
     }
 
+    pub(crate) fn retain_sdk_configuration_program(
+        &mut self,
+        program: Option<std::sync::Arc<crate::mod_sdk::Program>>,
+    ) {
+        self.registry_state
+            .retain_sdk_configuration_program(program);
+    }
+
+    pub(crate) fn flush_sdk_configuration(&mut self) -> Result<(), RulesError> {
+        self.registry_state.flush_sdk_configuration()
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -2905,13 +2948,10 @@ impl AresSideState {
             // SideExt1002EC00 reads EVA.Tag before the two sidebar keys.
             // Fixed EVAMD catalog lookup precedes literal none handling;
             // missing/empty/unknown retains the old index and never rebinds Vox.
-            if let Some(tag) = section.read_name("EVA.Tag", 0x800) {
-                if let Some(index) = eva.voice_index_for_tag(tag) {
-                    fields.eva_voice_index = index;
-                } else if is_native_none_type_name(tag) {
-                    fields.eva_voice_index = -1;
-                }
-            }
+            fields.eva_voice_index =
+                read_ares_index(section, "EVA.Tag", fields.eva_voice_index, |tag| {
+                    eva.voice_index_for_tag(tag)
+                });
             fields.parachute_anim =
                 read_ares_type_ref(section, "Parachute.Anim", &fields.parachute_anim, |name| {
                     SideRegisteredTypes::find(&types.animations, name)
@@ -2944,13 +2984,12 @@ impl AresSideState {
                 section.read_ares_nullable_int("SurvivorDivisor", fields.survivor_divisor);
             // `ValueableIdx<ColorScheme>` 0x1001CC70 over `0x1001BB30(name, 1)`:
             // a found scheme stores its index, `none` stores -1, else retain.
-            if let Some(name) = section.read_name("MessageTextColor", 0x800) {
-                if let Some(index) = color_index(name) {
-                    fields.message_text_color_index = index;
-                } else if is_native_none_type_name(name) {
-                    fields.message_text_color_index = -1;
-                }
-            }
+            fields.message_text_color_index = read_ares_index(
+                section,
+                "MessageTextColor",
+                fields.message_text_color_index,
+                &color_index,
+            );
             fields.hunter_seeker =
                 read_ares_type_ref(section, "HunterSeeker", &fields.hunter_seeker, |name| {
                     SideRegisteredTypes::find(&types.vehicles, name)
@@ -3094,13 +3133,12 @@ impl AresSideState {
 /// returning 0 (absent or empty) retains; a registered identity resolves;
 /// otherwise `none`/`<none>` (`0x10003950`) stores null (`Some(None)`, the -1
 /// index) and any other name retains.
-#[cfg(feature = "ares")]
-fn read_ares_type_ref(
+fn read_ares_type_ref<T: Clone>(
     section: &IniSection,
     key: &str,
-    current: &Option<Option<String>>,
-    resolve: impl Fn(&str) -> Option<String>,
-) -> Option<Option<String>> {
+    current: &Option<Option<T>>,
+    resolve: impl Fn(&str) -> Option<T>,
+) -> Option<Option<T>> {
     let Some(name) = section.read_name(key, 0x800) else {
         return current.clone();
     };
@@ -3111,16 +3149,42 @@ fn read_ares_type_ref(
     }
 }
 
+/// ColorScheme1001BB30 kind1 scans the reached Colors order; each row owns
+/// kind1 then kind53 in the runtime array. Unknown names remain unresolved.
+fn ares_color_scheme_index<'a>(name: &str, mut ids: impl Iterator<Item = &'a str>) -> Option<i32> {
+    ids.position(|id| id.eq_ignore_ascii_case(name))
+        .map(|index| (index as i32).wrapping_mul(2))
+}
+
+/// Side ValueableIdx readers1002EC00/1001CC70: fixed-catalog lookup first,
+/// then none clears to -1; absent, empty and unknown names keep the old index.
+fn read_ares_index(
+    section: &IniSection,
+    key: &str,
+    current: i32,
+    lookup: impl Fn(&str) -> Option<i32>,
+) -> i32 {
+    let Some(name) = section.read_name(key, 0x800) else {
+        return current;
+    };
+    lookup(name).unwrap_or_else(|| {
+        if is_native_none_type_name(name) {
+            -1
+        } else {
+            current
+        }
+    })
+}
+
 /// Ares `NullableVector<T>::Read` (`0x1002EB60`): ReadString(0x800) returning
 /// 0 (absent or empty) retains; `<default>` returns to the getter fallback;
 /// any other value replaces the vector, skipping names that do not resolve.
-#[cfg(feature = "ares")]
-fn read_nullable_type_vector(
+fn read_nullable_type_vector<T: Clone>(
     section: &IniSection,
     key: &str,
-    current: Option<&Vec<String>>,
-    resolve: impl Fn(&str) -> Option<String>,
-) -> Option<Vec<String>> {
+    current: Option<&Vec<T>>,
+    resolve: impl Fn(&str) -> Option<T>,
+) -> Option<Vec<T>> {
     let Some(value) = section.read_name(key, 0x800) else {
         return current.cloned();
     };
@@ -3139,7 +3203,6 @@ fn read_nullable_type_vector(
 
 /// Ares `NullableVector<int>::Read` (`0x1002EB00`) over `parse_values<int>`,
 /// with the same retain/`<default>` rules as [`read_nullable_type_vector`].
-#[cfg(feature = "ares")]
 fn read_nullable_int_vector(
     section: &IniSection,
     key: &str,
@@ -3158,26 +3221,24 @@ fn read_nullable_int_vector(
 /// `0x1000EB20`, `0x1001CC10`): the [`read_ares_type_ref`] rule without a
 /// separate unset state, so a `none` field and a never-set one are both
 /// `None` (the null pointer or -1 index).
-#[cfg(feature = "ares")]
-fn read_valueable_type(
+fn read_valueable_type<T: Clone>(
     section: &IniSection,
     key: &str,
-    current: &Option<String>,
-    resolve: impl Fn(&str) -> Option<String>,
-) -> Option<String> {
+    current: &Option<T>,
+    resolve: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
     read_ares_type_ref(section, key, &current.clone().map(Some), resolve).flatten()
 }
 
 /// Ares `ValueableVector<TechnoTypeClass*>::Read` (`0x1000EDD0`): ReadString
 /// returning 0 (absent or empty) retains; any other value replaces the
 /// vector with the tokens that resolve. There is no `<default>` form.
-#[cfg(feature = "ares")]
-fn read_valueable_type_vector(
+fn read_valueable_type_vector<T: Clone>(
     section: &IniSection,
     key: &str,
-    current: &[String],
-    resolve: impl Fn(&str) -> Option<String>,
-) -> Vec<String> {
+    current: &[T],
+    resolve: impl Fn(&str) -> Option<T>,
+) -> Vec<T> {
     match section.read_list(key, 0x800) {
         Some(tokens) => tokens.into_iter().filter_map(resolve).collect(),
         None => current.to_vec(),
@@ -3186,7 +3247,6 @@ fn read_valueable_type_vector(
 
 /// Ares `ValueableVector<int>::Read` (`0x1000ED00`), with the same retain
 /// rule as [`read_valueable_type_vector`].
-#[cfg(feature = "ares")]
 fn read_valueable_int_vector(section: &IniSection, key: &str, current: &[i32]) -> Vec<i32> {
     section
         .read_ares_int_list(key)
@@ -3529,10 +3589,27 @@ impl NativeRulesRegistryState {
         self.sdk_configuration_steps.clear();
     }
 
+    /// Accept only already-recorded physical steps without a new Rules read
+    /// or final Configure. Queries remain pure and never advance this ledger.
+    pub(crate) fn flush_sdk_configuration(&mut self) -> Result<(), RulesError> {
+        faction::advance_sdk_configuration(
+            &mut self.sdk_configuration_seed,
+            &mut self.sdk_configuration_steps,
+        )
+    }
+
     /// ScenarioClear10004EF1 recreates RulesExt; TypeReset6686C0 does not.
     /// Only the opaque component owns the interpretation of this boundary.
+    /// Early Country readers retain their immutable program identity until the
+    /// guest consumes this clear; legacy components retain the old cold reload.
     pub(crate) fn clear_sdk_configuration_for_scenario(&mut self) {
-        self.sdk_configuration_seed = None;
+        if !self
+            .sdk_configuration_seed
+            .as_ref()
+            .is_some_and(|program| program.has_country_read())
+        {
+            self.sdk_configuration_seed = None;
+        }
         self.sdk_configuration_steps.clear();
         self.sdk_configuration_steps
             .push(SdkConfigurationStep::Boundary(
@@ -4861,6 +4938,8 @@ struct RulesPassProcessor {
     sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     sdk_production_reads: Vec<vera_mod_api::ProductionReadPoint>,
     sdk_foundation_reads: Vec<vera_mod_api::FoundationReadPoint>,
+    sdk_faction_reads: Vec<vera_mod_api::FactionReadPoint>,
+    sdk_fixed_eva: Option<std::sync::Arc<EvaRegistry>>,
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
     fixed_art_hash: u64,
     image_theater: ImageTheater,
@@ -4951,6 +5030,8 @@ impl RulesPassProcessor {
             sdk_configuration_seed: registry_state.sdk_configuration_seed,
             sdk_production_reads: Vec::new(),
             sdk_foundation_reads: Vec::new(),
+            sdk_faction_reads: Vec::new(),
+            sdk_fixed_eva: None,
             fixed_art_source: registry_state.fixed_art_source,
             fixed_art_hash,
             image_theater: ImageTheater::Uninitialized,
@@ -5040,6 +5121,8 @@ impl RulesPassProcessor {
         }
         self.sdk_production_reads.clear();
         self.sdk_foundation_reads.clear();
+        self.sdk_faction_reads.clear();
+        self.sdk_fixed_eva = Some(std::sync::Arc::new(fixed_eva.clone()));
         self.record_sdk_production_read(vera_mod_api::ProductionReadSite::ProcessEntry);
         // Preserve reached partial reads too: Side/Tiberium failure keeps the
         // same native registry, so its pending component chronology must agree.
@@ -5088,7 +5171,7 @@ impl RulesPassProcessor {
         self.allocate_general_references(pass);
         #[cfg(feature = "ares")]
         self.ares_global_controls.read_before_type_data(pass);
-        self.process_type_data(pass, fixed_art, fixed_eva, primary_rules);
+        self.process_type_data(pass, fixed_art, fixed_eva, primary_rules)?;
 
         // ReadDifficulty66D270 skips an absent section. Once present, each
         // absent key receives its literal default, rather than a prior-pass
@@ -5342,7 +5425,6 @@ impl RulesPassProcessor {
     /// Ares and Phobos pointer vectors look up existing types at this exact
     /// read point. ReadString/strtok retain the native 2048-byte, comma-only
     /// list policy.
-    #[cfg(any(feature = "ares", feature = "phobos"))]
     fn resolve_existing_list_from(
         &self,
         section: &IniSection,
@@ -5444,7 +5526,6 @@ impl RulesPassProcessor {
     /// 10010850 uses Find10007E50 after none rejection10003950. Resolve once at
     /// the current pass; callers project the retained ordinal as their existing
     /// field needs.
-    #[cfg(any(feature = "ares", feature = "phobos"))]
     fn resolve_existing_list_indices_from(
         &self,
         section: &IniSection,
@@ -5914,6 +5995,25 @@ impl RulesPassProcessor {
 
     fn sdk_registry_pass(&self) -> SdkRegistryPass {
         SdkRegistryPass {
+            faction: vera_mod_api::FactionRegistryView {
+                sides: self
+                    .families
+                    .get(&RulesTypeFamily::Side)
+                    .into_iter()
+                    .flatten()
+                    .map(|member| member.native_stored_id.clone())
+                    .collect(),
+                countries: self
+                    .families
+                    .get(&RulesTypeFamily::Country)
+                    .into_iter()
+                    .flatten()
+                    .map(|member| member.native_stored_id.clone())
+                    .collect(),
+                reads: self.sdk_faction_reads.clone(),
+            },
+            faction_colors: self.colors.iter().map(|(id, _)| id.clone()).collect(),
+            faction_eva: self.sdk_fixed_eva.clone(),
             foundation: vera_mod_api::FoundationRegistryView {
                 reads: self.sdk_foundation_reads.clone(),
             },
@@ -6028,18 +6128,20 @@ impl RulesPassProcessor {
         fixed_art: &IniFile,
         _fixed_eva: &EvaRegistry,
         primary_rules: bool,
-    ) {
+    ) -> Result<(), RulesError> {
         // Ares ReadTypeData679A10 hook1002EFC0 sweeps every Side before
         // Country bodies. It does not require [Sides] or a Side section.
         // Country-only prepasses do not enter this hook. The live loop sees
         // only Sides allocated now, not any allocated by later Country reads.
+        let side_count = self.family_len(RulesTypeFamily::Side);
+        for array_index in 0..side_count {
+            self.record_sdk_faction_read(vera_mod_api::FactionReadSite::SideSweep {
+                side: u32::try_from(array_index).expect("Side ordinal"),
+            });
+        }
         #[cfg(feature = "ares")]
-        {
+        if !self.external_faction_owner() {
             let side_types = SideRegisteredTypes::collect(&self.families);
-            let side_count = self
-                .families
-                .get(&RulesTypeFamily::Side)
-                .map_or(0, Vec::len);
             for array_index in 0..side_count {
                 // Move the extension out so the shared ColorScheme lookup can
                 // read the retained registry; it goes back to the same Side.
@@ -6099,7 +6201,7 @@ impl RulesPassProcessor {
             );
             self.ares_prerequisites = Some(catalog);
         }
-        self.process_house_family(pass, primary_rules);
+        self.process_house_family(pass, primary_rules)?;
         self.process_super_weapon_family(pass);
         self.process_anim_family(fixed_art);
         self.process_techno_family(RulesTypeFamily::Building, pass, fixed_art);
@@ -6120,17 +6222,23 @@ impl RulesPassProcessor {
         self.process_particle_system_family(pass);
         self.process_voxel_anim_family(pass);
         // MissionControl adds no Type references.
+        Ok(())
     }
 
-    fn process_house_family(&mut self, pass: &IniFile, _primary_rules: bool) {
+    fn process_house_family(
+        &mut self,
+        pass: &IniFile,
+        primary_rules: bool,
+    ) -> Result<(), RulesError> {
         // Process668BFE calls Colors66D3A0 before Country allocation668CD1
         // and this first ReadTypeData679A2D loop. Use only names registered
         // now; a later pass cannot resolve an earlier unknown retroactively.
+        let read_policy = self.configure_country_frontier(pass)?;
         let mut index = 0;
         while index < self.family_len(RulesTypeFamily::Country) {
-            if let Some((_id, raw, _effective)) =
-                self.begin_rules_member_read(RulesTypeFamily::Country, index, pass)
-            {
+            let body = self.begin_rules_member_read(RulesTypeFamily::Country, index, pass);
+            let body_read = body.is_some();
+            if let Some((_id, raw, _effective)) = body {
                 let member = &mut self
                     .families
                     .get_mut(&RulesTypeFamily::Country)
@@ -6154,10 +6262,14 @@ impl RulesPassProcessor {
                     ("VeteranUnits", RulesTypeFamily::Vehicle),
                     ("VeteranAircraft", RulesTypeFamily::Aircraft),
                 ] {
-                    #[cfg(feature = "ares")]
-                    let resolved = self.resolve_existing_list_from(&raw, key, family, 0x800);
-                    #[cfg(not(feature = "ares"))]
-                    let resolved = self.resolve_list_from(&raw, key, family, 0x80);
+                    let resolved = match read_policy {
+                        vera_mod_api::CountryReadPolicy::ExistingOnly2048 => {
+                            self.resolve_existing_list_from(&raw, key, family, 0x800)
+                        }
+                        vera_mod_api::CountryReadPolicy::RetailAllocate128 => {
+                            self.resolve_list_from(&raw, key, family, 0x80)
+                        }
+                    };
                     if let Some(resolved) = resolved {
                         let veteran =
                             &mut self.family_mut(RulesTypeFamily::Country)[index].country_veterancy;
@@ -6178,10 +6290,21 @@ impl RulesPassProcessor {
             // Both original success51214F and failed-section51215A enter
             // Ares1001D110 ->1001C530. Do not put this suffix inside the
             // original section-admission branch or use final merged text.
+            let country = &self.families[&RulesTypeFamily::Country][index];
+            self.record_sdk_faction_read(vera_mod_api::FactionReadSite::CountrySuffix {
+                country: u32::try_from(index).expect("Country ordinal"),
+                primary_rules,
+                body_read,
+                parent: country.country_parent.clone(),
+                side: country.country_side_index,
+            });
             #[cfg(feature = "ares")]
-            self.process_ares_country(index, pass, _primary_rules);
+            if !self.external_faction_owner() {
+                self.process_ares_country(index, pass, primary_rules);
+            }
             index += 1;
         }
+        Ok(())
     }
 
     /// CountryExt1001C530/1001C5D0: first-attempt parent copy precedes this
@@ -6327,10 +6450,7 @@ impl RulesPassProcessor {
     /// retained [Colors] entry contributes kind1 then kind53, in native order.
     #[cfg(feature = "ares")]
     fn loading_color_index(&self, name: &str) -> Option<i32> {
-        self.colors
-            .iter()
-            .position(|(id, _)| id.eq_ignore_ascii_case(name))
-            .map(|index| (index as i32).wrapping_mul(2))
+        ares_color_scheme_index(name, self.colors.iter().map(|(id, _)| id.as_str()))
     }
 
     /// HouseType ReadINI51208C..512162 stores BC, then updates Side vectors

@@ -1129,7 +1129,7 @@ fn prepare_country_loading_prefix(
             resident.retire_voxel_type_damage(),
         )?;
     }
-    let preparation = owner.prepare_noncampaign_scenario_prefix();
+    let preparation = owner.prepare_noncampaign_scenario_prefix()?;
     native.late_country_loading = Some(
         owner
             .country_loading(early.country)

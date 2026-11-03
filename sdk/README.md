@@ -3,10 +3,29 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.15.0 development candidate**, config version **14**, state version **1**;
+is the **0.16.0 development candidate**, config version **15**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+The faction increment adds four separate optional capabilities: `eva_catalog`
+selects the fixed speech reader before Rules; `configure_country_read` selects the
+Country-body reader at its real prelude; `configure_faction_pass` consumes only
+actual Country-only reads; `faction_resource` queries frozen Side/Country policies
+by family ordinal and stored ID. One component-owned history performs initialization
+and one-shot inheritance. Existing host owners still execute crew/disguise,
+AI defense and side-token rules, paradrop/canopy selection and starting veterancy.
+Completed physical steps publish one accepted Program checkpoint; isolated startup
+projections finalize their own receipt without replacing the live process history.
+
+`AresFaction` defaults on for new configurations and can be explicitly disabled in
+`[VeraFeatures]`. It is read at the actual Country prelude; the installation-time EVA
+catalog layout remains frozen separately. This bounded shared-configuration/gameplay
+increment passed actual-Wasm/save, direct-consumer, formal application and legacy
+controls, seven retail loading modes and previous-.15 loading. Menu/flag, early
+loading presentation, EVA SetSide, sidebar and score/theme application consumption
+remain the next increment. These results do not establish full Ares, GUI/device,
+networking or performance equivalence. See [faction contracts](api/src/faction.rs).
 
 The startup increment adds optional `startup_resources`: source composition,
 audio pairs and string supplements are selected before their original resource
@@ -21,8 +40,9 @@ This bounded increment passed actual-component core and application checks,
 LAN worker install/cache and existing network controls, original PCM/text controls,
 legacy Ares resource tests, seven retail loading modes and previous-component
 loading. It does not establish full network, GUI/device output or performance parity.
-The opaque configuration remains version 14 and entity state version 1; retain
-matching old engine/component pairs for old full saves. See [startup recipes](api/src/startup.rs).
+The startup increment itself kept configuration version 14; the current faction
+increment uses version 15. Entity state remains version 1; retain matching old
+engine/component pairs for old full saves. See [startup recipes](api/src/startup.rs).
 
 The Foundation increment adds `foundation_resource` for class-qualified Building
 identities. A component selects a stock selector or a small immutable section

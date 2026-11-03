@@ -240,11 +240,17 @@ impl crate::app::persistence::options::launcher::LauncherParentOperations
     }
 
     fn prepare_network_settings(&mut self) {
-        App::prepare_multiplayer_settings(self.state, MultiplayerSettingsContext::Options);
+        if let Err(error) =
+            App::prepare_multiplayer_settings(self.state, MultiplayerSettingsContext::Options)
+        {
+            App::report_multiplayer_preparation_error(self.state, &error);
+        }
     }
 
     fn route_network(&mut self) {
-        crate::app::input::network_options::open(self.state, &[]);
+        if self.state.frontend.main_menu_shell_error.is_none() {
+            crate::app::input::network_options::open(self.state, &[]);
+        }
     }
 
     fn route_keyboard(&mut self) {
@@ -328,7 +334,7 @@ impl App {
     pub(crate) fn prepare_multiplayer_settings(
         state: &mut AppState,
         context: MultiplayerSettingsContext,
-    ) {
+    ) -> std::result::Result<(), crate::rules::error::RulesError> {
         //6980D6→6722F0 and475540 read the same process INI each visit and
         // may allocate a Country before the optional52E123 body pass.
         state
@@ -344,7 +350,7 @@ impl App {
             .session
             .prepare_multiplayer_settings(&main);
         if context == MultiplayerSettingsContext::Shell {
-            state.process_assets.refresh_multiplayer_country_bodies();
+            state.process_assets.refresh_multiplayer_country_bodies()?;
         }
         // These are compatibility projections of the one process registry.
         // A finished world can remain resident behind the shell, and rules()
@@ -372,6 +378,19 @@ impl App {
             .frontend
             .multiplayer_shell_runtime
             .refresh_multiplayer_country_catalog(&state.process_assets);
+        Ok(())
+    }
+
+    /// Preparation may execute a component before the destination shell exists.
+    /// Reuse the existing shell failure card and reject the route on failure.
+    pub(crate) fn report_multiplayer_preparation_error(
+        state: &mut AppState,
+        error: &crate::rules::error::RulesError,
+    ) {
+        let message = format!("Could not prepare multiplayer rules: {error}");
+        log::warn!("{message}");
+        state.frontend.main_menu_shell_error = Some(message);
+        state.platform.window.request_redraw();
     }
 
     /// A right-panel menu page (Single Player `0x100` or Movies & Credits
@@ -838,7 +857,12 @@ impl App {
     /// `0x0052E119`, `0x0052E168` -> `0x006AE2C0`). Its Back returns to
     /// Single Player either way (GameMode 0, state 1, `0x0052E175`).
     pub(super) fn enter_native_skirmish_from_single_player(state: &mut AppState) {
-        Self::prepare_multiplayer_settings(state, MultiplayerSettingsContext::Shell);
+        if let Err(error) =
+            Self::prepare_multiplayer_settings(state, MultiplayerSettingsContext::Shell)
+        {
+            Self::report_multiplayer_preparation_error(state, &error);
+            return;
+        }
         // Prepare dialog 0x102 from the process-lifetime MIX list before
         // destroying its 0x100 source. Active YR's FUN_00534E50 registers the
         // neutral pair on that shared list before the shell SHPs are loaded.

@@ -20,6 +20,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+#[path = "sdk_factions.rs"]
+mod sdk_factions;
+use sdk_factions::FrozenFactionBindings;
+
 use crate::rules::ares_prerequisites::{GenericPrerequisite, GenericPrerequisites};
 use crate::rules::combat_damage::CombatDamageDefaults;
 use crate::rules::crate_rules::CrateRules;
@@ -4372,6 +4376,8 @@ struct EmpResourceBindings {
 pub struct RuleSet {
     external_production: Option<FrozenProductionCatalog>,
     external_emp: Option<FrozenEmpRules>,
+    /// Derived, immutable resource bindings; never owns extension read history.
+    external_factions: FrozenFactionBindings,
     pub(crate) external_mod: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     /// Derived from the frozen component, rebuilt with all other projections.
     /// None retains this build's native compatibility mode; Retail is an
@@ -4721,17 +4727,7 @@ impl RuleSet {
         assets: &crate::assets::asset_manager::AssetManager,
         processed: &crate::rules::native_processing::ProcessedRulesLayers,
     ) -> Result<(), String> {
-        let objects = self
-            .object_list
-            .iter()
-            .map(|object| object.id.clone())
-            .collect::<Vec<_>>();
-        let mut warheads = self
-            .warheads
-            .values()
-            .map(|wh| wh.id.clone())
-            .collect::<Vec<_>>();
-        warheads.sort();
+        let (objects, warheads, weapons) = self.external_mod_names();
         let registry = processed.native_registry_state();
         self.external_mod = crate::mod_sdk::load_from_assets_for_process(
             assets,
@@ -4739,7 +4735,7 @@ impl RuleSet {
             &self.sdk_registries,
             &objects,
             &warheads,
-            &self.weapon_names(),
+            &weapons,
             registry.sdk_configuration_seed().map(|p| p.as_ref()),
             registry.sdk_configuration_steps(),
         )?;
@@ -4749,26 +4745,60 @@ impl RuleSet {
         &mut self,
         assets: &crate::assets::asset_manager::AssetManager,
     ) -> Result<(), String> {
-        let object_types = self
-            .object_list
-            .iter()
-            .map(|object| object.id.clone())
-            .collect::<Vec<_>>();
-        let mut warheads = self
-            .warheads
-            .values()
-            .map(|warhead| warhead.id.clone())
-            .collect::<Vec<_>>();
-        warheads.sort();
+        let (object_types, warheads, weapons) = self.external_mod_names();
         self.external_mod = crate::mod_sdk::load_from_assets(
             assets,
             &self.sdk_passes,
             &self.sdk_registries,
             &object_types,
             &warheads,
-            &self.weapon_names(),
+            &weapons,
         )?;
         self.bind_resource_policies()
+    }
+
+    /// Finish this isolated receipt's configuration without selecting assets
+    /// or advancing the live Process owner. Older components retain the
+    /// compatibility projection's existing profile path.
+    pub(crate) fn bind_external_mod_from_checkpoint(
+        &mut self,
+        processed: &ProcessedRulesLayers,
+    ) -> Result<(), String> {
+        let registry = processed.native_registry_state();
+        let Some(checkpoint) = registry
+            .sdk_configuration_seed()
+            .filter(|program| program.has_country_read())
+        else {
+            return Ok(());
+        };
+        let (object_types, warheads, weapons) = self.external_mod_names();
+        let program = checkpoint.finish_configuration(
+            &self.sdk_passes,
+            &object_types,
+            &warheads,
+            &weapons,
+            &self.sdk_registries,
+            registry.sdk_configuration_steps(),
+        )?;
+        self.external_mod = Some(std::sync::Arc::new(program));
+        self.bind_resource_policies()
+    }
+
+    /// Resource query names share one ordering contract across all admission
+    /// paths: native object order, then sorted Warhead and Weapon names.
+    fn external_mod_names(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let objects = self
+            .object_list
+            .iter()
+            .map(|object| object.id.clone())
+            .collect();
+        let mut warheads = self
+            .warheads
+            .values()
+            .map(|warhead| warhead.id.clone())
+            .collect::<Vec<_>>();
+        warheads.sort();
+        (objects, warheads, self.weapon_names())
     }
 
     pub(crate) fn weapon_names(&self) -> Vec<String> {
@@ -4781,6 +4811,7 @@ impl RuleSet {
         let foundations = self.collect_foundation_resource_bindings()?;
         let armor = self.collect_armor_resource_bindings()?;
         let emp = self.collect_emp_resource_bindings()?;
+        let factions = self.collect_faction_resource_bindings()?;
         let (production, production_objects) = self.collect_production_resource_bindings()?;
         let mut effect_resources = std::collections::BTreeMap::new();
         if let Some(program) = self
@@ -4903,6 +4934,7 @@ impl RuleSet {
             }
         }
         self.match_rules_policy = match_rules_policy;
+        self.external_factions = factions;
         self.external_emp = emp.rules;
         for (object, policy) in self.object_list.iter_mut().zip(emp.objects) {
             object.bind_external_emp(policy);
@@ -6999,6 +7031,7 @@ impl RuleSet {
 
         let mut rules = RuleSet {
             external_mod: None,
+            external_factions: FrozenFactionBindings::default(),
             match_rules_policy: None,
             external_armor_names: None,
             external_production: None,
@@ -7295,7 +7328,6 @@ impl RuleSet {
     /// (`HouseTypeClass+0xBC`): Allied for side 0, Soviet for 1, Third for any
     /// other (`0x00507BCA..0x00507BFA`).
     pub(crate) fn base_defense_types(&self, side_index: i32) -> &[String] {
-        #[cfg(feature = "ares")]
         if let Some(types) = self.side_base_defenses(side_index) {
             return types;
         }
@@ -8131,6 +8163,14 @@ impl RuleSet {
                     })
             })
             .collect::<Vec<_>>();
+        if self.external_factions.has_overrides() {
+            b"component-factions-v1".hash(&mut hasher);
+            self.external_factions.hash(&mut hasher);
+        }
+        if let Some(extended) = self.match_rules_policy.and_then(|p| p.extended_ai_side_tokens) {
+            b"component-ai-side-tokens-v1".hash(&mut hasher);
+            extended.hash(&mut hasher);
+        }
         let conversion_enabled = self
             .match_rules_policy
             .and_then(|policy| policy.script_type_conversion);
@@ -8972,6 +9012,14 @@ impl RuleSet {
     /// Aircraft413F98. With Ares, Building Init_Managers442D1B reaches
     ///100236D0 and its retained VeteranBuildings list with the same gates.
     pub fn country_starts_veteran(&self, country: &str, object: &ObjectType) -> bool {
+        if object.category == ObjectCategory::Building
+            && let Some(policy) = self.external_country_faction(country)
+        {
+            return policy.is_some_and(|policy| {
+                self.type_array_index(ObjectCategory::Building, &object.id)
+                    .is_some_and(|index| policy.veteran_buildings.contains(&(index as u32)))
+            });
+        }
         self.country_rules(country)
             .is_some_and(|rules| rules.veteran_types.contains(object.category, &object.id))
     }
@@ -8990,17 +9038,7 @@ impl RuleSet {
     /// Ares `File.Flag=` (stock/unknown defaults included). None in a stock
     /// build, where the shell keeps its fixed flag table.
     pub fn country_flag(&self, id: &str) -> Option<&str> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .country_rules(id)
-                .and_then(|country| country.presentation.flag.as_deref());
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            None
-        }
+        self.country_presentation(id)?.flag.as_deref()
     }
 
     /// The insignia surface a Country selection draws, as `Game_GetFlagSurface
@@ -9009,21 +9047,11 @@ impl RuleSet {
     /// when that file is cleared. `None` in a stock build, where each shell
     /// keeps its fixed country table.
     pub fn country_flag_surface(&self, id: &str) -> Option<String> {
-        #[cfg(feature = "ares")]
-        {
-            return self.country_rules(id).map(|country| {
-                country
-                    .presentation
-                    .flag
-                    .clone()
-                    .unwrap_or_else(|| STOCK_UNKNOWN_INSIGNIA.to_owned())
-            });
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            None
-        }
+        self.country_presentation(id).map(|p| {
+            p.flag
+                .clone()
+                .unwrap_or_else(|| STOCK_UNKNOWN_INSIGNIA.to_owned())
+        })
     }
 
     /// `Game_GetFlagSurface @ 0x1001DCE0` for a HouseType country index. An
@@ -9036,33 +9064,13 @@ impl RuleSet {
 
     /// Ares `MenuText.Status=` CSF key (stock/unknown defaults included).
     pub fn country_status_key(&self, id: &str) -> Option<&str> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .country_rules(id)
-                .and_then(|country| country.presentation.status.as_deref());
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            None
-        }
+        self.country_presentation(id)?.status.as_deref()
     }
 
     /// Ares `File.Taunt=` pattern; `~~` or the stock `%02i` receives the
     /// taunt number elsewhere. None in a stock build.
     pub fn country_taunt_pattern(&self, id: &str) -> Option<&str> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .country_rules(id)
-                .and_then(|country| country.presentation.taunt.as_deref());
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            None
-        }
+        self.country_presentation(id)?.taunt.as_deref()
     }
 
     /// `File.Taunt=` for a HouseType country index (the taunt byte's field).
@@ -9074,62 +9082,25 @@ impl RuleSet {
     /// Ares `ListIndex=`; negative hides the country. A stock build returns
     /// the common 100, preserving registry order.
     pub fn country_list_index(&self, id: &str) -> i32 {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .country_rules(id)
-                .map_or(100, |country| country.presentation.list_index);
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            100
-        }
+        self.country_presentation(id).map_or(100, |p| p.list_index)
     }
 
     /// Ares `RandomSelectionWeight=`, default 1.
     pub fn country_random_weight(&self, id: &str) -> i32 {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .country_rules(id)
-                .map_or(1, |country| country.presentation.random_weight);
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            1
-        }
+        self.country_presentation(id).map_or(1, |p| p.random_weight)
     }
 
     /// Ares `AIRandomSelectionWeight=` once set, else the human weight
     /// (`0x1001CA11..0x1001CA1A`).
     pub fn country_ai_random_weight(&self, id: &str) -> i32 {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .country_rules(id)
-                .map_or(1, |country| country.presentation.ai_weight());
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            self.country_random_weight(id)
-        }
+        self.country_presentation(id).map_or(1, |p| p.ai_weight())
     }
 
     /// `HouseTypeExt::GetParadropContent @ 0x1001BC20` for a country: its own
     /// `ParaDrop.Types`/`.Num` while the type list is non-empty, else `None`,
     /// which defers to the side layer (also the answer in a stock build).
     pub fn country_paradrop_lists(&self, id: &str) -> Option<(&[String], &[i32])> {
-        #[cfg(feature = "ares")]
-        {
-            return self.country_rules(id)?.paradrop.lists();
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            None
-        }
+        self.country_drop_rules(id)?.lists()
     }
 
     /// Ares `[Country] ParaDrop.Aircraft=` (`HouseTypeExt +0x154`), which
@@ -9137,15 +9108,7 @@ impl RuleSet {
     /// never-set or `none` index is `-1` there, so this answers `None` and the
     /// caller keeps the side layer.
     pub fn country_paradrop_aircraft(&self, id: &str) -> Option<&str> {
-        #[cfg(feature = "ares")]
-        {
-            return self.country_rules(id)?.paradrop.aircraft.as_deref();
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            None
-        }
+        self.country_drop_rules(id)?.aircraft.as_deref()
     }
 
     /// Ares `[Country] Parachute.Anim=` (`HouseTypeExt +0x158`), which
@@ -9153,40 +9116,25 @@ impl RuleSet {
     /// rules default. The canopy hook reaches it only when the type names no
     /// parachute of its own.
     pub fn country_parachute_anim(&self, id: &str) -> Option<&str> {
-        #[cfg(feature = "ares")]
-        {
-            return self.country_rules(id)?.paradrop.parachute_anim.as_deref();
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = id;
-            None
-        }
+        self.country_drop_rules(id)?.parachute_anim.as_deref()
     }
 
     /// Ares `File.ObserverBackground=` (PCX or SHP), when retained.
-    #[cfg(feature = "ares")]
     pub fn country_observer_background(&self, id: &str) -> Option<&str> {
-        self.country_rules(id)?
-            .presentation
+        self.country_presentation(id)?
             .observer_background
             .as_deref()
     }
 
     /// Ares `File.ObserverFlag=` (PCX or SHP), when retained.
-    #[cfg(feature = "ares")]
     pub fn country_observer_flag(&self, id: &str) -> Option<&str> {
-        self.country_rules(id)?
-            .presentation
-            .observer_flag
-            .as_deref()
+        self.country_presentation(id)?.observer_flag.as_deref()
     }
 
     /// Ares `File.ObserverFlagAltPalette=`.
-    #[cfg(feature = "ares")]
     pub fn country_observer_flag_alt_palette(&self, id: &str) -> bool {
-        self.country_rules(id)
-            .is_some_and(|country| country.presentation.observer_flag_alt_palette)
+        self.country_presentation(id)
+            .is_some_and(|p| p.observer_flag_alt_palette)
     }
 
     /// HouseType511850 scalar fields used by SetDifficulty4F6EC0. Unknown
@@ -9429,48 +9377,41 @@ impl RuleSet {
     /// selector inputs, not missing values or an instruction to clamp to one.
     /// An ordinary retail build has no SideExt configuration.
     pub fn side_sidebar_mix_file_index(&self, index: SideIdx) -> Option<i32> {
-        #[cfg(feature = "ares")]
-        return self
-            .side_extensions
-            .get(usize::from(index.0))
-            .map(|extension| extension.sidebar_mix_file_index);
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = index;
-            None
-        }
+        self.side_extension(i32::from(index.0))
+            .map(|p| p.sidebar_mix_file_index)
     }
 
     /// SideExt+8C selects Yuri-specific sidebar filenames independently of
     /// the Side array index and Sidebar.MixFileIndex.
     pub fn side_sidebar_yuri_file_names(&self, index: SideIdx) -> Option<bool> {
-        #[cfg(feature = "ares")]
-        return self
-            .side_extensions
-            .get(usize::from(index.0))
-            .map(|extension| extension.sidebar_yuri_file_names);
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = index;
-            None
-        }
+        self.side_extension(i32::from(index.0))
+            .map(|p| p.sidebar_yuri_file_names)
     }
 
     /// Signed SideExt+90 after reached EVA.Tag reads. Binding uses saved
     /// Scenario.Side and preserves an out-of-catalog value; filename selection
     /// decides whether that value has a column. Native: Ares1002FB00.
-    #[cfg(feature = "ares")]
     pub fn side_eva_voice_index(&self, side: i32) -> Option<i32> {
-        self.side_extension(side)
-            .map(|extension| extension.eva_voice_index)
+        self.side_extension(side).map(|p| p.eva_voice_index)
     }
 
-    #[cfg(feature = "ares")]
     fn side_extension(
         &self,
         side: i32,
     ) -> Option<&crate::rules::ares_side_extension::AresSideExtension> {
-        self.side_extensions.get(usize::try_from(side).ok()?)
+        let index = usize::try_from(side).ok()?;
+        if let Some(policy) = self
+            .external_factions
+            .sides
+            .get(index)
+            .and_then(Option::as_ref)
+        {
+            return policy.as_ref();
+        }
+        #[cfg(feature = "ares")]
+        return self.side_extensions.get(index);
+        #[cfg(not(feature = "ares"))]
+        None
     }
 
     /// Ares Side default fallbacks use the side's array index; a fourth or
@@ -9478,7 +9419,6 @@ impl RuleSet {
     /// 0x1002DEA0, 0x1002E130, 0x1002DDD0, 0x1002DD40, 0x1002DFB0,
     /// 0x1002E060). `None` means the installed build has no SideExt for this
     /// index, so the caller keeps its stock path.
-    #[cfg(feature = "ares")]
     fn ares_default_side_index(side: i32) -> usize {
         match side {
             1 => 1,
@@ -9491,103 +9431,60 @@ impl RuleSet {
     /// index. `Some(None)` is an explicit `none` (no crew), distinct from an
     /// unset key (caller falls back as native `SideExt::GetCrew @ 0x1002DE60`).
     pub(crate) fn side_crew(&self, side: i32) -> Option<Option<&str>> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            return Some(match &extension.crew {
-                Some(value) => value.as_deref(),
-                None => match side {
-                    1 => self.general.soviet_crew.as_deref(),
-                    2 => self.general.third_crew.as_deref(),
-                    _ => self.general.allied_crew.as_deref(),
-                },
-            });
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        let extension = self.side_extension(side)?;
+        Some(match &extension.crew {
+            Some(value) => value.as_deref(),
+            None => match side {
+                1 => self.general.soviet_crew.as_deref(),
+                2 => self.general.third_crew.as_deref(),
+                _ => self.general.allied_crew.as_deref(),
+            },
+        })
     }
 
     /// `[Side] Engineer=` else global `[General] Engineer=`
     /// (`SideExt::GetEngineer @ 0x1002DEE0`).
     pub(crate) fn side_engineer(&self, side: i32) -> Option<Option<&str>> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            return Some(match &extension.engineer {
-                Some(value) => value.as_deref(),
-                None => self.general.engineer_infantry.as_deref(),
-            });
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        let extension = self.side_extension(side)?;
+        Some(match &extension.engineer {
+            Some(value) => value.as_deref(),
+            None => self.general.engineer_infantry.as_deref(),
+        })
     }
 
     /// `[Side] Technician=` else global `[General] Technician=`
     /// (`SideExt::GetTechnician @ 0x1002E170`).
     pub(crate) fn side_technician(&self, side: i32) -> Option<Option<&str>> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            return Some(match &extension.technician {
-                Some(value) => value.as_deref(),
-                None => self.general.technician.as_deref(),
-            });
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        let extension = self.side_extension(side)?;
+        Some(match &extension.technician {
+            Some(value) => value.as_deref(),
+            None => self.general.technician.as_deref(),
+        })
     }
 
     /// `[Side] DefaultDisguise=` else the stock side disguise by array index
     /// (`SideExt::GetDisguise @ 0x1002DEA0`).
     pub(crate) fn side_disguise(&self, side: i32) -> Option<Option<&str>> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            return Some(match &extension.default_disguise {
-                Some(value) => value.as_deref(),
-                None => {
-                    self.general.infantry_disguises[Self::ares_default_side_index(side)].as_deref()
-                }
-            });
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        let extension = self.side_extension(side)?;
+        Some(match &extension.default_disguise {
+            Some(value) => value.as_deref(),
+            None => self.general.infantry_disguises[Self::ares_default_side_index(side)].as_deref(),
+        })
     }
 
     /// `[Side] SurvivorDivisor=` else `Allied/Soviet/ThirdSurvivorDivisor`
     /// (`SideExt::GetSurvivorDivisor @ 0x1002E130`).
     pub(crate) fn side_survivor_divisor(&self, side: i32) -> Option<i32> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            return Some(extension.survivor_divisor.unwrap_or(match side {
-                1 => self.general.soviet_survivor_divisor,
-                2 => self.general.third_survivor_divisor,
-                _ => self.general.allied_survivor_divisor,
-            }));
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        let extension = self.side_extension(side)?;
+        Some(extension.survivor_divisor.unwrap_or(match side {
+            1 => self.general.soviet_survivor_divisor,
+            2 => self.general.third_survivor_divisor,
+            _ => self.general.allied_survivor_divisor,
+        }))
     }
 
     /// `[Side] AI.BaseDefenses=` else the side-index list; a fourth or later
     /// side takes the Allied list (`SideExt::GetBaseDefenses @ 0x1002DDD0`).
-    #[cfg(feature = "ares")]
     pub(crate) fn side_base_defenses(&self, side: i32) -> Option<&[String]> {
         let extension = self.side_extension(side)?;
         Some(
@@ -9606,25 +9503,17 @@ impl RuleSet {
     /// a fourth or later side takes the Allied vector
     /// (`SideExt::GetBaseDefenseCounts @ 0x1002DD40`).
     pub(crate) fn side_base_defense_counts(&self, side: i32) -> Option<&[i32]> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            return Some(
-                extension
-                    .base_defense_counts
-                    .as_deref()
-                    .unwrap_or_else(|| match side {
-                        1 => &self.soviet_base_defense_counts,
-                        2 => &self.third_base_defense_counts,
-                        _ => &self.allied_base_defense_counts,
-                    }),
-            );
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        let extension = self.side_extension(side)?;
+        Some(
+            extension
+                .base_defense_counts
+                .as_deref()
+                .unwrap_or_else(|| match side {
+                    1 => &self.soviet_base_defense_counts,
+                    2 => &self.third_base_defense_counts,
+                    _ => &self.allied_base_defense_counts,
+                }),
+        )
     }
 
     /// `[Side] ParaDrop.Types=`/`ParaDrop.Num=` only when both are set;
@@ -9632,26 +9521,16 @@ impl RuleSet {
     /// Allied pair (`SideExt::GetParaDropTypes @ 0x1002E060`,
     /// `GetParaDropNum @ 0x1002DFB0`).
     pub(crate) fn side_paradrop(&self, side: i32) -> Option<(&[String], &[i32])> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            if let (Some(types), Some(counts)) =
-                (&extension.paradrop_types, &extension.paradrop_num)
-            {
-                return Some((types, counts));
-            }
-            let lists = match side {
-                1 => &self.general.sov_paradrop,
-                2 => &self.general.yuri_paradrop,
-                _ => &self.general.ally_paradrop,
-            };
-            return Some((lists.infantry.as_slice(), lists.counts.as_slice()));
+        let extension = self.side_extension(side)?;
+        if let (Some(types), Some(counts)) = (&extension.paradrop_types, &extension.paradrop_num) {
+            return Some((types, counts));
         }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        let lists = match side {
+            1 => &self.general.sov_paradrop,
+            2 => &self.general.yuri_paradrop,
+            _ => &self.general.ally_paradrop,
+        };
+        Some((lists.infantry.as_slice(), lists.counts.as_slice()))
     }
 
     /// `[Side] ParaDrop.Aircraft=` else the plane the SideExt initializer
@@ -9660,19 +9539,10 @@ impl RuleSet {
     /// `HouseTypeExt::GetParadropPlane @ 0x1001BCB0` falls back to
     /// `FindIndex("PDPLANE")` rather than cancelling the drop.
     pub(crate) fn side_paradrop_aircraft(&self, side: i32) -> Option<&str> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .side_extension(side)?
-                .paradrop_aircraft
-                .as_ref()?
-                .as_deref();
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        self.side_extension(side)?
+            .paradrop_aircraft
+            .as_ref()?
+            .as_deref()
     }
 
     /// `[Side] Parachute.Anim=` only; an unset key leaves the existing
@@ -9680,57 +9550,28 @@ impl RuleSet {
     /// `Some(None)` is an explicit `none`, which the canopy consumer resolves
     /// to `PARACH` (`HouseTypeExt::GetParachuteAnim @ 0x1001BBC0`).
     pub(crate) fn side_parachute_override(&self, side: i32) -> Option<Option<&str>> {
-        #[cfg(feature = "ares")]
-        {
-            let extension = self.side_extension(side)?;
-            return extension
-                .parachute_anim
-                .as_ref()
-                .map(|name| name.as_deref());
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        self.side_extension(side)?
+            .parachute_anim
+            .as_ref()
+            .map(|name| name.as_deref())
     }
 
     /// `[Side] ToolTipColor=` as RGB (initialized 255,255,0 for Nod/ThirdSide,
     /// 164,210,255 otherwise; `SideExt+80`).
     pub fn side_tooltip_color(&self, side: i32) -> Option<[u8; 3]> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .side_extension(side)
-                .map(|extension| extension.tooltip_color);
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        self.side_extension(side).map(|p| p.tooltip_color)
     }
 
     /// `[Side] MessageTextColor=` as the runtime ColorScheme index
     /// (initialized 11 for Nod, 25 for ThirdSide, 21 otherwise) or -1 for an
     /// explicit `none` (`SideExt+84`).
     pub fn side_message_text_color_index(&self, side: i32) -> Option<i32> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .side_extension(side)
-                .map(|extension| extension.message_text_color_index);
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = side;
-            None
-        }
+        self.side_extension(side)
+            .map(|p| p.message_text_color_index)
     }
 
     /// `[Side] HunterSeeker=`; no VERA consumer yet (the Hunter Seeker
     /// superweapon is a separate unported mechanism).
-    #[cfg(feature = "ares")]
     // Hunter Seeker superweapon launch is not ported; the parsed value has no
     // production consumer yet.
     #[allow(dead_code)]
@@ -9743,11 +9584,13 @@ impl RuleSet {
 
     /// Every distinct `[Side] Parachute.Anim=` identity, for the animation
     /// asset preload and canopy owner scan.
-    #[cfg(feature = "ares")]
     pub fn side_parachute_animations(&self) -> impl Iterator<Item = &str> {
-        self.side_extensions
-            .iter()
-            .filter_map(|extension| extension.parachute_anim.as_ref()?.as_deref())
+        (0..self.side_ids.len()).filter_map(move |index| {
+            self.side_extension(index as i32)?
+                .parachute_anim
+                .as_ref()?
+                .as_deref()
+        })
     }
 
     /// `[Side] GraphicalText.Image=` (SideExt `+0x1F8`) and
@@ -9757,7 +9600,6 @@ impl RuleSet {
     /// (`0x1002FAD0`, patch site `0x6D4E79`) reads them through `0x1002DF10` /
     /// `0x1002DF00`, which fall back to InitGame's literal `GRFXTXT` files per
     /// slot. `None` when the installed build has no SideExt for this index.
-    #[cfg(feature = "ares")]
     pub fn side_graphical_text(&self, side: i32) -> Option<(Option<&str>, Option<&str>)> {
         let extension = self.side_extension(side)?;
         Some((
