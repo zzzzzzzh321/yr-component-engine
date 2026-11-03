@@ -5503,6 +5503,26 @@ impl RuleSet {
         self.match_rules_policy
     }
 
+    /// Ares715857 ->715876 admits independent successful palette groups;
+    /// retained ART requests and the sole PAL resolver stay host-owned.
+    pub(crate) fn independent_building_palette_groups(&self) -> bool {
+        self.match_rules_policy
+            .and_then(|policy| policy.building_presentation)
+            .map_or(crate::rules::ARES_ENABLED, |policy| {
+                policy.independent_palette_groups
+            })
+    }
+
+    /// Ares441D25 ->441D37 assigns GetRemapColour even without a loaded
+    /// custom group. This selects only visual remapping, not Anim ownership.
+    pub(crate) fn destroy_anim_house_fallback_enabled(&self) -> bool {
+        self.match_rules_policy
+            .and_then(|policy| policy.building_presentation)
+            .map_or(crate::rules::ARES_ENABLED, |policy| {
+                policy.destroy_anim_house_fallback
+            })
+    }
+
     /// Installed Team Update6E9443/action6810039D7C. The handler selector is
     /// independent of whether this team or any type currently has a target.
     pub(crate) fn script_type_conversion_enabled(&self) -> bool {
@@ -7668,7 +7688,7 @@ impl RuleSet {
     /// Resolve one retained palette request. Ares715857->715876 removes
     /// only the original successful-group limit: a supplied request resolves
     /// its own file; a failed file never inherits another type's group.
-    /// Without Ares, retain the original one-successful-group compatibility
+    /// Otherwise retain the original one-successful-group compatibility
     /// policy and admit a supplied request only if it matches that group.
     /// None selects the singleton for the original effect/legacy consumers.
     /// This is the sole resource lookup/decoder used by core and client.
@@ -7684,8 +7704,9 @@ impl RuleSet {
                 .ok()
                 .map(|palette| (name, palette))
         };
-        #[cfg(feature = "ares")]
-        if let Some(name) = requested_name {
+        if self.independent_building_palette_groups()
+            && let Some(name) = requested_name
+        {
             return load(name);
         }
         let selected = self
@@ -7725,6 +7746,14 @@ impl RuleSet {
         if let Some(extended) = self.long_list_readers {
             b"long-list-readers-v1".hash(&mut hasher);
             extended.hash(&mut hasher);
+        }
+        if let Some(policy) = self
+            .match_rules_policy
+            .and_then(|p| p.building_presentation)
+        {
+            b"building-presentation-v1".hash(&mut hasher);
+            policy.independent_palette_groups.hash(&mut hasher);
+            policy.destroy_anim_house_fallback.hash(&mut hasher);
         }
         // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);

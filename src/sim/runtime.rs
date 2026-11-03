@@ -545,7 +545,8 @@ mod tests {
         use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
         use crate::map::construction_trace::{RmgConstructionPhase, RmgConstructionTrace};
         use crate::rules::ini_parser::IniFile;
-        use crate::rules::process_owner::{NativeRulesProcessOwner, NativeScenarioRulesPrefix};
+        use crate::rules::process_owner::NativeScenarioRulesPrefix;
+        use crate::rules::retail_sources::RetailRulesSources;
         use crate::sim::native_identity::build_noncampaign_fresh_id_prefix;
 
         assert!(!crate::rules::ARES_ENABLED, "exercise the ordinary engine");
@@ -569,20 +570,21 @@ mod tests {
         sparkle_shp[12..14].copy_from_slice(&1u16.to_le_bytes());
         sparkle_shp[14..16].copy_from_slice(&1u16.to_le_bytes());
         write("SDK_EMP_SPARK.SHP", &sparkle_shp);
+        write(
+            "rulesmd.ini",
+            b"[BuildingTypes]\n0=TEST\n[Animations]\n0=SDK_EMP_SPARK\n1=ELECTRO\n\
+              [TEST]\nStrength=300\nArmor=none\nShieldType=SDKShield\nNoManualFire=no\nEMP.Sparkles=SDK_EMP_SPARK\n\
+              [ShieldTypes]\n0=SDKShield\n[SDKShield]\nStrength=100\nArmor=none\n",
+        );
+        write("artmd.ini", b"[SDK_EMP_SPARK]\nLoopCount=-1\n");
         let assets =
             crate::mod_sdk::open_active_assets(directory.path(), MediaArchiveMode::STOCK_DIGITAL)
                 .unwrap();
-        let mut owner = NativeRulesProcessOwner::from_cold_start_sources(
-            IniFile::from_str(
-                "[BuildingTypes]\n0=TEST\n[Animations]\n0=SDK_EMP_SPARK\n1=ELECTRO\n\
-                 [TEST]\nStrength=300\nArmor=none\nShieldType=SDKShield\nNoManualFire=no\nEMP.Sparkles=SDK_EMP_SPARK\n\
-                 [ShieldTypes]\n0=SDKShield\n[SDKShield]\nStrength=100\nArmor=none\n",
-            ),
-            None,
-            IniFile::from_str("[SDK_EMP_SPARK]\nLoopCount=-1\n"),
-            Default::default(),
-            Default::default(),
-        ).unwrap();
+        let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
+        let mut owner = RetailRulesSources::select(&assets)
+            .unwrap()
+            .into_owner(audio.sounds().clone(), audio.eva().clone())
+            .unwrap();
         let map = crate::map::map_file::MapFile::from_bytes(
             b"[Map]\nTheater=TEMPERATE\nSize=0,0,40,40\nLocalSize=2,2,36,32\n\
               [Structures]\n0=Americans,TEST,256,7,9,0,None\n\
@@ -1356,6 +1358,16 @@ pub fn bind_scenario_gameplay_resources(
         ScenarioGameplayProgram::Saved(sim) => {
             crate::mod_sdk::adopt_saved_program(rules, sim, assets)?;
         }
+    }
+    // The ordinary closure precedes final component admission. A declared
+    // building policy must qualify its palette groups before any constructor
+    // can freeze a DestroyAnim remap; the original asset owner also retains
+    // the same immutable voxel bindings. Older/absent policies keep their path.
+    if rules
+        .match_rules_policy()
+        .is_some_and(|policy| policy.building_presentation.is_some())
+    {
+        rules.bind_effect_assets(assets, theater_ext, theater_name);
     }
     // Configure may publish AE or EMP resources after the ordinary closure pass.
     // Saved loading's later strict pass restores these same roots through the

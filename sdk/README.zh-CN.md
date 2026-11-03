@@ -2,9 +2,11 @@
 
 ## 当前开发状态
 
+0.20 增加可选的 `match_rules.building_presentation`，分别选择建筑 SHP／MAKE 独立调色板组和 DestroyAnim 无自定义组时的所属方颜色回退。参考组件安装即声明，不增加 INI 开关。ART 历史读取、调色板解析、动画状态与渲染仍由原引擎维护，正式组件绑定后在对象构造前重接同一资源目录。未声明保留原模式，显式 false 选择原版行为。实际销毁与保存恢复、索引 GPU 绘制、旧实现和真实资源加载对照通过；不扩展 bib、活动／超武动画、voxel 调色板或动画伤害归属。
+
 0.19 增加独立的纯启动声明 `long_list_readers`，在冷启动读取前选定 House 的 `Allies` 与 Techno 的 `Prerequisite`／`PrerequisiteOverride` 容量。安装 Ares 组件即使用2048，不增加 INI 开关；显式 `Retail128` 覆盖旧内置模式，未声明则沿用原模式。General 六类前置仍为128，物理 INI 行仍受原511字节限制。实际组件、定向联盟、保存恢复、资源管理器重建、旧实现及真实资源加载检查通过。新增资源序列化字段沿现有保存格式识别，不承诺旧完整存档自动迁移。
 
-保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.19.0 开发候选**，配置版本 **15**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
+保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.20.0 开发候选**，配置版本 **15**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
 
 阵营增量将 Side／Country 的初始化、一次父国继承和静态声明交给 `features/factions`，原引擎继续执行乘员、伪装、AI 防御与阵营条件、空降／降落伞和初始军衔。独立的 `configure_country_read` 在真实 Country 读取前选择原版短列表或 2048 容量的只查找读取器；`configure_faction_pass` 只处理实际发生的 Country-only 读取。已完成的步骤逐一发布同一 Program 检查点，独立启动投影只完成自己的读取记录，保留真实进程的配置历史。`faction_resource` 按实际类别内编号和 stored ID 查询冻结策略，引用保留未设置、清空和已解析三态。接口见 [阵营声明](api/src/faction.rs)。
 

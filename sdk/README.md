@@ -3,10 +3,20 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.19.0 development candidate**, config version **15**, state version **1**;
+is the **0.20.0 development candidate**, config version **15**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.20 adds optional `match_rules.building_presentation` selectors for
+independent building SHP/MAKE palette groups and DestroyAnim House fallback.
+The Ares component declares both installed fixes independently of gameplay INI
+switches. Existing retained ART readers, palette decoding, animation state and
+rendering stay host-owned; final component binding refreshes the existing asset
+catalog before constructors. Absence preserves the original profile; explicit
+false selects retail behavior. Actual-component fatal/save, indexed GPU, legacy
+and retail loading controls passed. This does not extend bib, active/super
+animations, voxel palettes or animation damage ownership.
 
 Version 0.19 adds the separate pure `long_list_readers` capability before cold
 Rules processing. `Extended2048` widens only House `Allies` and Techno

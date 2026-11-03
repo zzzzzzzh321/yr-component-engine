@@ -2599,15 +2599,110 @@ fn cell_anim_keeps_particle_and_object_images_independent_across_load() {
 /// indexed Batch sprite with a row beyond 255. Synthetic regression, not a
 /// rendered retail/native parity claim. Actual mod resources are unnecessary.
 #[test]
-#[ignore = "requires a wgpu adapter; production indexed draw and palette texture readback"]
+#[ignore = "requires a wgpu adapter; ordinary controls also need VERA_SDK_BUILDING_PRESENTATION_WASM"]
 fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
+    use vera_mod_api::{
+        BuildingPresentationPolicy, Context, HookKind, MatchRulesContext, MatchRulesPolicy,
+        ModuleManifest, Plan, Request, SurvivalRule,
+    };
+    if crate::rules::ARES_ENABLED {
+        let gpu = crate::render::terrain_draw_gpu_tests::Gpu::new();
+        building_palette_gpu_control(&gpu, "palette-legacy", None, true);
+        return;
+    }
+    assert!(!crate::rules::ARES_ENABLED, "exercise the ordinary engine");
+    let component = std::fs::read(
+        std::env::var_os("VERA_SDK_BUILDING_PRESENTATION_WASM")
+            .expect("set VERA_SDK_BUILDING_PRESENTATION_WASM"),
+    )
+    .unwrap();
+    let request = Request {
+        api_version: vera_mod_api::API_VERSION,
+        context: Context::MatchRules(MatchRulesContext {}),
+        config: vec![],
+        state: vec![],
+    };
+    let unchanged = Plan::unchanged(&request);
+    let mut selected = unchanged.clone();
+    selected.match_rules = Some(MatchRulesPolicy {
+        survival: SurvivalRule::Retail,
+        effects: None,
+        script_type_conversion: None,
+        extended_ai_side_tokens: None,
+        registered_side_ui: None,
+        building_presentation: Some(BuildingPresentationPolicy::default()),
+    });
+    let off = vera_mod_runtime::test_support::component_fixture_by_kind(
+        &ModuleManifest {
+            api_version: vera_mod_api::API_VERSION,
+            id: "test.building-palette-stock".into(),
+            version: "1".into(),
+            state_version: 1,
+            config_version: 1,
+            hooks: vec![
+                HookKind::Configure,
+                HookKind::Attach,
+                HookKind::Damage,
+                HookKind::Tick,
+                HookKind::MatchRules,
+            ],
+        },
+        &serde_json::to_vec(&unchanged).unwrap(),
+        &[("match_rules", &serde_json::to_vec(&selected).unwrap())],
+    );
+    let gpu = crate::render::terrain_draw_gpu_tests::Gpu::new();
+    let mut pixels = Vec::new();
+    for (label, module, independent) in [
+        ("palette-component", Some(component.as_slice()), true),
+        ("palette-stock", None, false),
+        ("palette-explicit-stock", Some(off.as_slice()), false),
+    ] {
+        eprintln!("building palette GPU control: {label}");
+        pixels.push(building_palette_gpu_control(
+            &gpu,
+            label,
+            module,
+            independent,
+        ));
+    }
+    let [component_pixels, stock_pixels, off_pixels] = pixels.as_slice() else {
+        unreachable!("three GPU controls")
+    };
+    assert_eq!(
+        stock_pixels, off_pixels,
+        "explicit stock keeps retail pixels"
+    );
+    assert_eq!(
+        component_pixels[0], stock_pixels[0],
+        "resident A keeps its pixels"
+    );
+    assert_ne!(component_pixels[1], stock_pixels[1], "B uses its own group");
+    assert_eq!(component_pixels[1], component_pixels[2], "B and MAKE agree");
+    assert_eq!(stock_pixels[1], stock_pixels[2], "stock B/MAKE agree");
+    assert_eq!(component_pixels[3], stock_pixels[3], "TerrainPalette wins");
+    assert_ne!(component_pixels[3], component_pixels[1]);
+}
+
+fn building_palette_gpu_control(
+    gpu: &crate::render::terrain_draw_gpu_tests::Gpu,
+    label: &str,
+    module: Option<&[u8]>,
+    independent: bool,
+) -> [Vec<u8>; 4] {
     use crate::render::{
         batch::{InstanceBufferPool, SpriteInstance},
-        terrain_draw_gpu_tests::{Gpu, camera, clear, sprite},
+        terrain_draw_gpu_tests::{camera, clear, sprite},
     };
-    use crate::rules::ini_parser::IniFile;
-    use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
-    let directory = StoredFrameTestDirectory::new();
+    use crate::assets::asset_manager::test_support::audio_test_install;
+    use crate::rules::{
+        audio_sources::AudioDefinitions, ini_parser::IniFile,
+        process_owner::NativeScenarioRulesPrefix, retail_sources::RetailRulesSources,
+    };
+    use crate::sim::{
+        runtime::{ScenarioGameplayProgram, bind_scenario_gameplay_resources},
+        world::Simulation,
+    };
+    let directory = audio_test_install(label);
     let shp = raw_shp(&[([2, 2], 7), ([2, 2], 7)]);
     for name in [
         "A.SHP",
@@ -2618,7 +2713,7 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
         "BMK.SHP",
         "WRECK.SHP",
     ] {
-        std::fs::write(directory.0.join(name), &shp).unwrap();
+        std::fs::write(directory.path().join(name), &shp).unwrap();
     }
     for (name, rgb) in [
         ("FIRSTTEM.PAL", [63u8, 0, 0]),
@@ -2626,32 +2721,66 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
     ] {
         let mut bytes = [0u8; 768];
         bytes[21..24].copy_from_slice(&rgb);
-        std::fs::write(directory.0.join(name), bytes).unwrap();
+        std::fs::write(directory.path().join(name), bytes).unwrap();
     }
-    let assets = AssetManager::from_loose_root_for_test(&directory.0);
-    let art = IniFile::from_str(
-        "[FIRST]\nPalette=first\nImage=A\nBuildup=AMK\n[EMPTY]\nImage=A\nBuildup=AMK\n\
-         [B]\nPalette=second\nBuildup=BMK\n[MISS]\nPalette=absent\n[CELL]\nPalette=second\nTerrainPalette=yes\n[WRECK]\nEnd=2\n",
-    );
-    let mut layers = RulesLayerStack::new(IniFile::from_str(
-        "[BuildingTypes]\n0=A\n1=B\n2=MISS\n3=CELL\n[A]\nImage=FIRST\nStrength=10\nDestroyAnim=WRECK\n[B]\nStrength=10\nDestroyAnim=WRECK\n[MISS]\nStrength=10\n[CELL]\nStrength=10\n[Animations]\n0=WRECK\n",
-    ));
-    layers.push(
-        RulesLayerKind::Scenario,
-        IniFile::from_str("[A]\nImage=EMPTY\n"),
-    );
-    let processed = layers.process_with_fixed_art(&art).unwrap();
-    let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
-    let mut registry = ArtRegistry::from_ini(&art);
-    registry.bind_anim_frame_count_for_test("WRECK", 2);
-    rules.install_art_data(registry);
+    for (name, bytes) in [
+        ("rulesmd.ini", b"[BuildingTypes]\n0=A\n1=B\n2=MISS\n3=CELL\n[A]\nImage=FIRST\nStrength=10\nDestroyAnim=WRECK\n[B]\nStrength=10\nDestroyAnim=WRECK\n[MISS]\nStrength=10\n[CELL]\nStrength=10\n[Animations]\n0=WRECK\n".as_slice()),
+        ("artmd.ini", b"[FIRST]\nPalette=first\nImage=A\nBuildup=AMK\n[EMPTY]\nImage=A\nBuildup=AMK\n[B]\nPalette=second\nBuildup=BMK\n[MISS]\nPalette=absent\n[CELL]\nPalette=second\nTerrainPalette=yes\n[WRECK]\nEnd=2\n".as_slice()),
+        ("soundmd.ini", b"".as_slice()),
+        ("evamd.ini", b"".as_slice()),
+    ] {
+        std::fs::write(directory.path().join(name), bytes).unwrap();
+    }
+    if let Some(module) = module {
+        std::fs::write(directory.path().join("gameplay.wasm"), module).unwrap();
+        std::fs::write(
+            directory.path().join("vera-mod.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": vera_mod_api::API_VERSION, "program": "gameplay.wasm",
+                "sha256": crate::util::sha256::sha256_hex(module),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    // All physical sources precede the ordinary startup frontier. The same
+    // native owner preserves FIRST's request across the map's Image=EMPTY.
+    let assets =
+        crate::mod_sdk::open_active_assets(directory.path(), MediaArchiveMode::STOCK_DIGITAL)
+            .unwrap();
+    let audio = AudioDefinitions::select(&assets);
+    let mut owner = RetailRulesSources::select(&assets)
+        .unwrap()
+        .into_owner(audio.sounds().clone(), audio.eva().clone())
+        .unwrap();
+    let (mut rules, _, fixed_art, _) = owner
+        .load_scenario(
+            NativeScenarioRulesPrefix::NonCampaign(None),
+            &IniFile::from_str("[A]\nImage=EMPTY\n"),
+        )
+        .unwrap()
+        .into_parts();
+    rules.install_art_data(ArtRegistry::from_ini(&fixed_art));
+    rules.bind_effect_assets(&assets, "tem", "TEMPERATE");
+    rules.bind_anim_class_assets(&["WRECK".into()], &assets, "tem", "TEMPERATE");
+    let mut sim = Simulation::with_seed(79);
+    bind_scenario_gameplay_resources(
+        &mut rules,
+        &assets,
+        ScenarioGameplayProgram::Fresh {
+            simulation: &mut sim,
+            rules_owner: &mut owner,
+        },
+        "tem",
+        "TEMPERATE",
+    )
+    .unwrap();
     assert_eq!(
         rules.object("A").unwrap().custom_palette_name(),
         Some("first")
     );
     let unit = Palette::from_rgb(|_| [0, 0, 252]);
     let cell = Palette::from_rgb(|_| [252, 252, 0]);
-    let gpu = Gpu::new();
     let format = wgpu::TextureFormat::Bgra8UnormSrgb;
     let batch = BatchRenderer::new_with_device(&gpu.device, &gpu.queue, format);
     let entities = crate::sim::entity_store::EntityStore::new();
@@ -2716,11 +2845,7 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
     );
     let red = Palette::from_rgb(|i| if i == 7 { [252, 0, 0] } else { [0; 3] });
     let green = Palette::from_rgb(|i| if i == 7 { [0, 252, 0] } else { [0; 3] });
-    let b = if cfg!(feature = "ares") {
-        &green
-    } else {
-        &unit
-    };
+    let b = if independent { &green } else { &unit };
     for (name, expected) in [
         ("A", &red),
         ("A_MAKE", &red),
@@ -2736,18 +2861,14 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
             "{name}"
         );
     }
-    if !crate::rules::ARES_ENABLED {
+    if !independent {
         assert_eq!(
             atlas.get(&key("B")).unwrap().source_palette,
             resident_unit_row.expect("the Unit fallback was already resident") + 1,
             "OFF B reuses the existing Unit palette row"
         );
     }
-    let high_type = if crate::rules::ARES_ENABLED {
-        "B"
-    } else {
-        "CELL"
-    };
+    let high_type = if independent { "B" } else { "CELL" };
     let high = *atlas.get(&key(high_type)).unwrap();
     assert!(
         high.source_palette > 256,
@@ -2800,6 +2921,8 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
     };
     let high_pixels = draw(&atlas, &high);
     let b_pixels = draw(&atlas, atlas.get(&key("B")).unwrap());
+    let make_pixels = draw(&atlas, atlas.get(&key("B_MAKE")).unwrap());
+    let cell_pixels = draw(&atlas, atlas.get(&key("CELL")).unwrap());
     assert_eq!(
         high_pixels,
         draw(&reference, &low),
@@ -2829,12 +2952,12 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
 
     // The same destroyed-building animation can need two palette groups for
     // one house. Only the surviving animations drive these refreshes; no donor
-    // building or extra-building request remains in the world.
+    // building or extra-building request remains in the world. These explicit
+    // remaps isolate rendering/persistence; core destruction tests cover their
+    // assignment through the fatal path.
     use crate::sim::anim_class::AnimRemap;
     use crate::sim::components::AnimClassSpawnDescriptor;
-    use crate::sim::world::Simulation;
     use crate::util::fixed_math::SimFixed;
-    let mut sim = Simulation::new();
     let house = sim.intern("Americans");
     let first_palette = sim.intern("FIRST");
     let second_palette = sim.intern("second");
@@ -2894,7 +3017,7 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
     let second_anim = spawn(&mut sim);
     sim.anims_mut_for_test().set_anim_remap(
         second_anim,
-        if crate::rules::ARES_ENABLED {
+        if independent {
             AnimRemap::ExtraBuildingScheme {
                 house,
                 palette: second_palette,
@@ -2925,7 +3048,7 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
                 resident_reference.get(&key("A")).unwrap(),
             ),
         ),
-        (second_anim, b, b_pixels),
+        (second_anim, b, b_pixels.clone()),
     ] {
         let anim = restored.anim(id).unwrap();
         let anim_key = ShpSpriteKey {
@@ -2946,8 +3069,8 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
             "surviving animation keeps its own palette"
         );
     }
+    [resident_pixels, b_pixels, make_pixels, cell_pixels]
 }
-
 fn physical_frame_texels(
     gpu: &crate::render::terrain_draw_gpu_tests::Gpu,
     atlas: &SpriteAtlas,

@@ -2035,3 +2035,249 @@ fn destroy_anim_retains_each_loaded_palette_and_house_fallback_after_save() {
         "the frozen palette enters simulation hashing"
     );
 }
+
+/// The ordinary closure precedes component admission in both fresh loaders.
+/// Exercise that frontier through the real fatal receiver, then rebuild the
+/// saved resources without reconfiguring the retained component.
+#[test]
+#[ignore = "requires VERA_SDK_BUILDING_PRESENTATION_WASM and VERA_SDK_BUILDING_PRESENTATION_PREVIOUS_WASM"]
+fn sdk_building_presentation_final_binding_and_saved_fatal_anims_keep_their_groups() {
+    use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
+    use crate::rules::art_data::ArtRegistry;
+    use crate::rules::native_processing::ProcessedRulesLayers;
+    use crate::rules::process_owner::NativeScenarioRulesPrefix;
+    use crate::rules::retail_sources::RetailRulesSources;
+    use crate::sim::anim_class::AnimRemap;
+    use crate::sim::runtime::{ScenarioGameplayProgram, bind_scenario_gameplay_resources};
+    use crate::sim::snapshot::GameSnapshot;
+    use vera_mod_api::{Context, HookKind, MatchRulesContext, ModuleManifest, Plan, Request};
+
+    let component = |key| std::fs::read(std::env::var_os(key).unwrap()).unwrap();
+    let wasm = component("VERA_SDK_BUILDING_PRESENTATION_WASM");
+    let previous = component("VERA_SDK_BUILDING_PRESENTATION_PREVIOUS_WASM");
+    let request = Request {
+        api_version: 1,
+        context: Context::MatchRules(MatchRulesContext {}),
+        config: vec![],
+        state: vec![],
+    };
+    let unchanged = Plan::unchanged(&request);
+    let mut retail = unchanged.clone();
+    retail.match_rules = Some(
+        serde_json::from_value(serde_json::json!({
+            "survival": "retail",
+            "building_presentation": {
+                "independent_palette_groups": false, "destroy_anim_house_fallback": false
+            }
+        }))
+        .unwrap(),
+    );
+    let retail = vera_mod_runtime::test_support::component_fixture_by_kind(
+        &ModuleManifest {
+            api_version: 1,
+            id: "retail-building-presentation".into(),
+            version: "1".into(),
+            state_version: 1,
+            config_version: 1,
+            hooks: vec![
+                HookKind::Configure,
+                HookKind::Attach,
+                HookKind::Damage,
+                HookKind::Tick,
+                HookKind::MatchRules,
+            ],
+        },
+        &serde_json::to_vec(&unchanged).unwrap(),
+        &[("match_rules", &serde_json::to_vec(&retail).unwrap())],
+    );
+    let root = RULES
+        .replace(
+            "[HALL]\nStrength=100\nDestroyAnim=DESTA",
+            "[HALL]\nStrength=100\nDestroyAnim=DESTA\nImage=FIRST",
+        )
+        .replace(
+            "[SHED]\nStrength=100",
+            "[SHED]\nStrength=100\nImage=MISSING\nDestroyAnim=DESTA",
+        )
+        + "\n[Animations]\n0=DESTA\n";
+    let art = format!(
+        "{ART}\n[FIRST]\nPalette=first\nFoundation=1x1\n\
+        [MISSING]\nPalette=absent\nFoundation=1x1\n[EMPTY]\nFoundation=1x1\n"
+    );
+    for (label, module, extended) in [
+        ("building-current", Some(wasm.as_slice()), true),
+        ("building-none", None, crate::rules::ARES_ENABLED),
+        (
+            "building-previous",
+            Some(previous.as_slice()),
+            crate::rules::ARES_ENABLED,
+        ),
+        ("building-retail", Some(retail.as_slice()), false),
+    ] {
+        let dir = audio_test_install(label);
+        let write =
+            |name: &str, bytes: &[u8]| std::fs::write(dir.path().join(name), bytes).unwrap();
+        let install = |module: &[u8]| {
+            write("gameplay.wasm", module);
+            write(
+                "vera-mod.json",
+                &serde_json::to_vec(&serde_json::json!({
+                    "api_version": 1, "program": "gameplay.wasm",
+                    "sha256": crate::util::sha256::sha256_hex(module),
+                }))
+                .unwrap(),
+            );
+        };
+        if let Some(module) = module {
+            install(module);
+        }
+        write("rulesmd.ini", root.as_bytes());
+        write("artmd.ini", art.as_bytes());
+        write("FIRSTTEM.PAL", &[1u8; 768]);
+        write("LIBTEM.PAL", &[2u8; 768]);
+        // The physical SHP header/table supplies constructor frame bounds.
+        let mut shp = vec![0u8; 8 + 10 * 24];
+        shp[2..4].copy_from_slice(&1u16.to_le_bytes());
+        shp[4..6].copy_from_slice(&1u16.to_le_bytes());
+        shp[6..8].copy_from_slice(&10u16.to_le_bytes());
+        shp[12..14].copy_from_slice(&1u16.to_le_bytes());
+        shp[14..16].copy_from_slice(&1u16.to_le_bytes());
+        write("DESTA.SHP", &shp);
+        let assets =
+            crate::mod_sdk::open_active_assets(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .unwrap();
+        let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
+        let mut owner = RetailRulesSources::select(&assets)
+            .unwrap()
+            .into_owner(audio.sounds().clone(), audio.eva().clone())
+            .unwrap();
+        let (mut rules, _, fixed_art, _) = owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::NonCampaign(None),
+                &IniFile::from_str("[HALL]\nImage=EMPTY\n"),
+            )
+            .unwrap()
+            .into_parts();
+        rules.install_art_data(ArtRegistry::from_ini(&fixed_art));
+        let roots = crate::rules::effect_asset_catalog::tolerant_anim_class_roots(&rules);
+        rules.bind_anim_class_assets(&roots, &assets, "tem", "TEMPERATE");
+        rules.bind_effect_assets(&assets, "tem", "TEMPERATE");
+        assert_eq!(
+            rules
+                .loaded_custom_palette_name(rules.object("STATUE").unwrap())
+                .is_some(),
+            crate::rules::ARES_ENABLED,
+            "ordinary pre-component closure: {label}"
+        );
+        let mut sim = sim(5);
+        bind_scenario_gameplay_resources(
+            &mut rules,
+            &assets,
+            ScenarioGameplayProgram::Fresh {
+                simulation: &mut sim,
+                rules_owner: &mut owner,
+            },
+            "tem",
+            "TEMPERATE",
+        )
+        .unwrap();
+        assert_eq!(rules.object("HALL").unwrap().image, "EMPTY");
+        assert_eq!(
+            rules.object("HALL").unwrap().custom_palette_name(),
+            Some("first")
+        );
+        assert_eq!(
+            rules
+                .loaded_custom_palette_name(rules.object("STATUE").unwrap())
+                .is_some(),
+            extended,
+            "final component bind must rebuild the catalog: {label}"
+        );
+        let house = sim.interner.get("Americans").unwrap();
+        let first = sim.interner.intern("first");
+        let lib = sim.interner.intern("lib");
+        let expected = [
+            Some(AnimRemap::ExtraBuildingScheme {
+                house,
+                palette: first,
+            }),
+            extended.then_some(AnimRemap::ExtraBuildingScheme {
+                house,
+                palette: lib,
+            }),
+            extended.then_some(AnimRemap::House(house)),
+        ];
+        for (i, kind) in ["HALL", "STATUE", "SHED"].into_iter().enumerate() {
+            let id = spawn(&mut sim, &rules, kind, 10 + i as u16 * 3, 20);
+            kill(&mut sim, &rules, id);
+            sim.flush_pending_delete();
+            assert!(
+                sim.entities().get(id).is_none(),
+                "donor {kind} retired: {label}"
+            );
+        }
+        assert_eq!(
+            sim.anims()
+                .map(|(_, anim)| anim.remap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{label}"
+        );
+        assert!(
+            sim.anims().all(|(_, anim)| anim.owner_house().is_none()),
+            "visual remapping must not grant damage ownership: {label}"
+        );
+        if label != "building-current" {
+            continue;
+        }
+
+        let saved = GameSnapshot::load(&GameSnapshot::save(&sim, 0, 0, "BUILDING-PRESENTATION", 0))
+            .unwrap()
+            .sim;
+        let retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
+            &crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let mut rebound = owner.project_saved_scenario_rules(&retained).unwrap();
+        rebound.install_art_data(ArtRegistry::from_ini(&fixed_art));
+        rebound.bind_anim_class_assets(&roots, &assets, "tem", "TEMPERATE");
+        // Reconstruct ordinary resources first, exactly as on the fresh path.
+        rebound.bind_effect_assets(&assets, "tem", "TEMPERATE");
+        bind_scenario_gameplay_resources(
+            &mut rebound,
+            &assets,
+            ScenarioGameplayProgram::Saved(&saved),
+            "tem",
+            "TEMPERATE",
+        )
+        .unwrap();
+        assert_eq!(
+            rebound.simulation_config_hash(),
+            rules.simulation_config_hash()
+        );
+        for kind in ["HALL", "STATUE"] {
+            assert!(
+                rebound
+                    .loaded_custom_palette_name(rebound.object(kind).unwrap())
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            saved
+                .anims()
+                .map(|(_, anim)| anim.remap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(saved.anims().all(|(_, anim)| anim.owner_house().is_none()));
+        assert_eq!(
+            crate::util::save_codec::serialize(rebound.external_mod.as_deref().unwrap()).unwrap(),
+            crate::util::save_codec::serialize(saved.external_mod.as_ref().unwrap()).unwrap()
+        );
+        install(&previous);
+        let changed =
+            crate::mod_sdk::open_active_assets(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .unwrap();
+        assert!(crate::mod_sdk::adopt_saved_program(&mut rebound, &saved, &changed).is_err());
+    }
+}

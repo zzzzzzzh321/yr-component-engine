@@ -271,6 +271,7 @@ mod tests {
             script_type_conversion: None,
             extended_ai_side_tokens: Some(true),
             registered_side_ui: None,
+            building_presentation: None,
         });
         assert!(rules.ai_side_token_admits(4, 3));
         assert!(!rules.ai_side_token_admits(4, 0));
