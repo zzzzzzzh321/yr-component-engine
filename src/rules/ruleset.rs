@@ -4395,6 +4395,8 @@ pub struct RuleSet {
     /// Read-only startup-selected ART, shared with the native Process owner.
     /// Rebound after saved-source admission; never part of guest config bytes.
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
+    /// Read-only projection of the startup-selected list buffer contract.
+    long_list_readers: Option<bool>,
     sdk_animation_names: Vec<String>,
     effect_resources: std::collections::BTreeMap<
         vera_mod_api::EffectResourceContext,
@@ -4726,6 +4728,10 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
+    pub(crate) fn long_list_read_capacity(&self) -> usize {
+        crate::rules::ini_value::long_list_read_capacity(self.long_list_readers)
+    }
+
     pub(crate) fn bind_external_mod_for_process(
         &mut self,
         assets: &crate::assets::asset_manager::AssetManager,
@@ -7043,6 +7049,7 @@ impl RuleSet {
             sdk_passes: processed.sdk_passes().to_vec(),
             sdk_registries: processed.sdk_registries().to_vec(),
             fixed_art_source: processed.fixed_art_source().cloned(),
+            long_list_readers: processed.long_list_readers(),
             sdk_animation_names: processed
                 .anim_type_reference_states()
                 .map(|(name, _)| name.to_owned())
@@ -7714,6 +7721,10 @@ impl RuleSet {
         if let Some(program) = &self.external_mod {
             b"vera-mod-config-v1".hash(&mut hasher);
             program.fold(&mut hasher);
+        }
+        if let Some(extended) = self.long_list_readers {
+            b"long-list-readers-v1".hash(&mut hasher);
+            extended.hash(&mut hasher);
         }
         // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);

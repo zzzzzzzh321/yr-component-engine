@@ -661,6 +661,7 @@ mod tests {
             crate::mod_sdk::open_active_assets(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
                 .unwrap();
         let frozen = assets.startup_resources().clone();
+        assert_eq!(frozen.long_list_readers, Some(true));
         let StartupComponentSource::Admitted {
             bytes: original, ..
         } = &frozen.component
@@ -686,6 +687,7 @@ mod tests {
         drop(process.lease_for_loading().unwrap());
         process.note_lease_ended_without_return();
         let recovered = process.reconstruct_manager(dir.path()).unwrap();
+        assert_eq!(recovered.startup_resources().long_list_readers, Some(true));
         let StartupComponentSource::Admitted { bytes, .. } =
             &recovered.startup_resources().component
         else {

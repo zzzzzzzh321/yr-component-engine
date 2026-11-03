@@ -88,7 +88,9 @@ impl AdmittedComponent {
     }
 
     pub(super) fn requires_early_admission(&self) -> bool {
-        self.has_startup_resources() || self.manifest.hooks.contains(&api::HookKind::EvaCatalog)
+        self.has_startup_resources()
+            || self.manifest.hooks.contains(&api::HookKind::EvaCatalog)
+            || self.manifest.hooks.contains(&api::HookKind::LongListReaders)
     }
 
     pub(super) fn startup_resource_policy(
@@ -108,6 +110,15 @@ impl AdmittedComponent {
             return Ok(None);
         }
         Ok(self.evaluate_startup(Context::EvaCatalog)?.eva_catalog)
+    }
+
+    pub(super) fn long_list_readers_policy(&self) -> Result<Option<api::LongListReadersPolicy>, String> {
+        if !self.manifest.hooks.contains(&api::HookKind::LongListReaders) {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate_startup(Context::LongListReaders)?
+            .long_list_readers)
     }
 
     fn evaluate_startup(&self, context: Context) -> Result<Plan, String> {

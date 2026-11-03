@@ -82,6 +82,14 @@ fn configured(assets: &AssetManager) -> (ProcessedRulesLayers, RuleSet) {
     (processed, rules)
 }
 
+fn long_list_owner(assets: &AssetManager) -> crate::rules::process_owner::NativeRulesProcessOwner {
+    let audio = crate::rules::audio_sources::AudioDefinitions::select(assets);
+    crate::rules::retail_sources::RetailRulesSources::select(assets)
+        .unwrap()
+        .into_owner(audio.sounds().clone(), audio.eva().clone())
+        .unwrap()
+}
+
 fn reload(rules: &RuleSet) -> i32 {
     rules
         .object("TANK")
@@ -91,6 +99,201 @@ fn reload(rules: &RuleSet) -> i32 {
         .reload
         .unwrap()
         .normal_amount
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_LONG_LIST_WASM and .18 VERA_SDK_LONG_LIST_PREVIOUS_WASM"]
+fn sdk_long_list_cold_mode_map_and_explicit_retail_preserve_native_reader_boundaries() {
+    use crate::rules::prerequisite::{Prerequisite, PrerequisiteGroup};
+    use crate::rules::process_owner::NativeScenarioRulesPrefix;
+    use vera_mod_api::{Context, HookKind, LongListReadersPolicy, ModuleManifest, Plan, Request};
+    let wasm = component("VERA_SDK_LONG_LIST_WASM");
+    let previous = component("VERA_SDK_LONG_LIST_PREVIOUS_WASM");
+    let request = Request {
+        api_version: 1,
+        context: Context::LongListReaders,
+        config: vec![],
+        state: vec![],
+    };
+    let unchanged = Plan::unchanged(&request);
+    let mut selected = unchanged.clone();
+    selected.long_list_readers = Some(LongListReadersPolicy::Retail128);
+    let retail = vera_mod_runtime::test_support::component_fixture_by_kind(
+        &ModuleManifest {
+            api_version: 1,
+            id: "long-list-retail".into(),
+            version: "1".into(),
+            state_version: 1,
+            config_version: 1,
+            hooks: vec![
+                HookKind::Configure,
+                HookKind::Attach,
+                HookKind::Damage,
+                HookKind::Tick,
+                HookKind::LongListReaders,
+            ],
+        },
+        &serde_json::to_vec(&unchanged).unwrap(),
+        &[("long_list_readers", &serde_json::to_vec(&selected).unwrap())],
+    );
+    let tail = format!("{},TAIL", "X".repeat(126));
+    let plain = format!("{},PLAIN", "X".repeat(126));
+    let root = format!(
+        "[VeraFeatures]\nAresProduction=no\n[General]\nPrerequisitePower={tail}\n\
+        [BuildingTypes]\n0=TAIL\n1=PLAIN\n[VehicleTypes]\n0=TANK\n\
+        [TAIL]\nStrength=100\n[PLAIN]\nStrength=100\n\
+        [TANK]\nStrength=100\nPrerequisite={tail}\nPrerequisiteOverride={tail}\n"
+    );
+    let mode = IniFile::from_str(&format!(
+        "[General]\nPrerequisitePower={plain}\n[TANK]\nPrerequisite={plain}\n"
+    ));
+    let map = IniFile::from_str(&format!(
+        "[General]\nPrerequisitePower={tail}\n[TANK]\nPrerequisiteOverride={tail}\n"
+    ));
+    for (label, module, extended) in [
+        ("long-new", Some(wasm.as_slice()), true),
+        ("long-none", None, false),
+        ("long-previous", Some(previous.as_slice()), false),
+        ("long-retail", Some(retail.as_slice()), false),
+    ] {
+        let dir = audio_test_install(label);
+        if let Some(module) = module {
+            early_component(&dir, module);
+        }
+        write(&dir, "rulesmd.ini", root.as_bytes());
+        write(&dir, "artmd.ini", b"");
+        let assets = open(&dir);
+        let mut owner = long_list_owner(&assets);
+        let cold =
+            RuleSet::from_processed_rules(&owner.startup_compatibility_projection().unwrap())
+                .unwrap();
+        let expected = if extended {
+            vec![Prerequisite::Building(0)]
+        } else {
+            vec![]
+        };
+        assert_eq!(cold.object("TANK").unwrap().prerequisite, expected);
+        assert_eq!(cold.object("TANK").unwrap().prerequisite_override, expected);
+        let (rules, ..) = owner
+            .load_scenario(NativeScenarioRulesPrefix::NonCampaign(Some(&mode)), &map)
+            .unwrap()
+            .into_parts();
+        assert_eq!(
+            rules.object("TANK").unwrap().prerequisite,
+            if extended {
+                vec![Prerequisite::Building(1)]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            rules.object("TANK").unwrap().prerequisite_override,
+            expected
+        );
+        assert!(
+            rules.prerequisite_list(PrerequisiteGroup::Power).is_empty(),
+            "late General reads stay128 even after TAIL and PLAIN are registered"
+        );
+    }
+    let late = audio_test_install("long-only-late");
+    declaration(&late, &retail);
+    archive(&late, "conqmd.mix", &[("gameplay.wasm".into(), retail)]);
+    let error = open_active_assets(late.path(), MediaArchiveMode::STOCK_DIGITAL)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("before resource selection"));
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_LONG_LIST_WASM and .18 VERA_SDK_LONG_LIST_PREVIOUS_WASM"]
+fn sdk_long_list_allies_and_saved_native_envelope_keep_the_admitted_selection() {
+    use crate::rules::prerequisite::Prerequisite;
+    use crate::rules::process_owner::NativeScenarioRulesPrefix;
+    use crate::sim::runtime::{ScenarioGameplayProgram, bind_scenario_gameplay_resources};
+    let wasm = component("VERA_SDK_LONG_LIST_WASM");
+    let dir = audio_test_install("long-saved-allies");
+    early_component(&dir, &wasm);
+    let root = format!(
+        "[VeraFeatures]\nAresProduction=no\n[Countries]\n0=Americans\n\
+        [Americans]\nParentCountry=Americans\n[Sides]\nGDI=Americans\n\
+        [BuildingTypes]\n0=TAIL\n[VehicleTypes]\n0=TANK\n[TAIL]\nStrength=100\n\
+        [TANK]\nStrength=100\nPrerequisite={},TAIL\n",
+        "X".repeat(126)
+    );
+    write(&dir, "rulesmd.ini", root.as_bytes());
+    write(&dir, "artmd.ini", b"");
+    let assets = open(&dir);
+    let mut owner = long_list_owner(&assets);
+    let map = IniFile::from_str(&format!(
+        "[Houses]\n0=A\n1=B\n[A]\nCountry=Americans\nAllies={},B\n[B]\nCountry=Americans\n",
+        "X".repeat(126)
+    ));
+    let (mut rules, ..) = owner
+        .load_scenario(NativeScenarioRulesPrefix::NonCampaign(None), &map)
+        .unwrap()
+        .into_parts();
+    let mut sim = Simulation::with_seed(53);
+    bind_scenario_gameplay_resources(
+        &mut rules,
+        &assets,
+        ScenarioGameplayProgram::Fresh {
+            simulation: &mut sim,
+            rules_owner: &mut owner,
+        },
+        crate::map::theater::theater_extension("TEMPERATE").unwrap(),
+        "TEMPERATE",
+    )
+    .unwrap();
+    let roster = crate::map::houses::parse_house_roster(&map, &[], Some(&rules));
+    crate::sim::scenario_bootstrap::initialize_map_roster_houses(
+        &mut sim,
+        &roster,
+        &rules,
+        Some(&map),
+    );
+    sim.install_house_alliances(
+        crate::sim::house_diplomacy::HouseAllianceAdmission::ScenarioInitialization {
+            roster: &roster,
+        },
+        &rules,
+    );
+    assert!(sim.house_alliances()["A"].contains("B"));
+    assert!(!sim.house_alliances()["B"].contains("A"));
+    let saved = GameSnapshot::load(&GameSnapshot::save(&sim, 0, 0, "LONG-LIST", 0))
+        .unwrap()
+        .sim;
+    let retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
+        &crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retained.long_list_readers(), Some(true));
+    write(
+        &dir,
+        "rulesmd.ini",
+        b"[VeraFeatures]\nAresProduction=no\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=100\n",
+    );
+    let current = open(&dir);
+    let current_owner = long_list_owner(&current);
+    let mut rebound = current_owner
+        .project_saved_scenario_rules(&retained)
+        .unwrap();
+    adopt_saved_program(&mut rebound, &saved, &current).unwrap();
+    assert_eq!(rebound.long_list_read_capacity(), 2048);
+    assert_eq!(
+        rebound.object("TANK").unwrap().prerequisite,
+        [Prerequisite::Building(0)]
+    );
+    assert_eq!(saved.house_alliances(), sim.house_alliances());
+    assert_eq!(
+        rebound.simulation_config_hash(),
+        rules.simulation_config_hash()
+    );
+    assert_eq!(
+        crate::util::save_codec::serialize(rebound.external_mod.as_deref().unwrap()).unwrap(),
+        crate::util::save_codec::serialize(saved.external_mod.as_ref().unwrap()).unwrap(),
+    );
+    early_component(&dir, &component("VERA_SDK_LONG_LIST_PREVIOUS_WASM"));
+    assert!(adopt_saved_program(&mut rebound, &saved, &open(&dir)).is_err());
 }
 
 #[test]

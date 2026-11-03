@@ -96,6 +96,9 @@ fn early_resources(assets: &AssetManager) -> Result<native::StartupResources, St
     resources.eva_registered_columns = admitted
         .eva_catalog_policy()?
         .map(|policy| policy == api::EvaCatalogPolicy::RegisteredVoiceColumns);
+    resources.long_list_readers = admitted
+        .long_list_readers_policy()?
+        .map(|policy| policy == api::LongListReadersPolicy::Extended2048);
     if !admitted.has_startup_resources() {
         return Ok(resources);
     }

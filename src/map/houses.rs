@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::rules::color_scheme::ColorSchemeEntry;
 use crate::rules::house_colors::{DEFAULT_SCHEME_ENTRY, HouseColorIndex};
 use crate::rules::ini_parser::{IniFile, IniSection};
-use crate::rules::ini_value::{crt_atoi, strtok};
+use crate::rules::ini_value::{crt_atoi, long_list_read_capacity, strtok};
 use crate::rules::ruleset::RuleSet;
 
 /// Ordered map-side BasePlan node, installed into House simulation state before
@@ -294,10 +294,14 @@ pub fn parse_house_roster(
     // ReadScenarioINI. Resolve 475260 against that same complete identity
     // table, through its sole typed reader. The original caller passes literal
     // zero (XOR EDI501089; PUSH EDI5010A3), independent of both stored masks.
+    let allies_capacity = rules.map_or_else(
+        || long_list_read_capacity(None),
+        RuleSet::long_list_read_capacity,
+    );
     for index in 0..roster.houses.len() {
         let allies = ini
             .section_or_empty(&roster.houses[index].name)
-            .read_houses_list("Allies", 0, |name| {
+            .read_houses_list("Allies", 0, allies_capacity, |name| {
                 find_house_index(roster.houses.iter().map(|house| house.name.as_str()), name)
             });
         roster.houses[index].allies = allies;

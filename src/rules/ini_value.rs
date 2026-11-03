@@ -71,6 +71,17 @@ const STRTRIM_MAX: u8 = 0x20;
 /// (`DAT_00817F70`).
 const COMMA: &[char] = &[','];
 
+/// Frozen buffer choice for Allies475260 (Ares47527C/475297) and the
+/// Techno Prerequisite/Override reads7141C5/71424B. Other lists keep their
+/// own native capacities; None preserves the original build profile.
+pub(crate) fn long_list_read_capacity(extended: Option<bool>) -> usize {
+    if extended.unwrap_or(crate::rules::ARES_ENABLED) {
+        0x800
+    } else {
+        0x80
+    }
+}
+
 /// ActionType names at7E4C50, in ReadAction474EE0's numeric order.
 /// The scan accepts these whole names only; unknown text is action0.
 const ACTION_NAMES: [&str; 73] = [
@@ -883,13 +894,9 @@ impl IniSection {
         &self,
         key: &str,
         default: u32,
+        capacity: usize,
         mut find_house: impl FnMut(&str) -> Option<usize>,
     ) -> u32 {
-        let capacity = if crate::rules::ARES_ENABLED {
-            0x800
-        } else {
-            0x80
-        };
         let Some(tokens) = self.read_list(key, capacity) else {
             return default;
         };
@@ -1812,7 +1819,7 @@ fn leading_float_token(s: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{crt_atoi, parse_leading_f32, strtok, truncate_native_bytes};
+    use super::{crt_atoi, long_list_read_capacity, parse_leading_f32, strtok, truncate_native_bytes};
     use crate::rules::ini_parser::{IniFile, IniSection};
 
     #[cfg(feature = "ares")]
@@ -2103,6 +2110,7 @@ mod tests {
             let actual = section.read_houses_list(
                 "Allies",
                 row["default"].as_u64().unwrap() as u32,
+                long_list_read_capacity(None),
                 |name| names.iter().position(|candidate| *candidate == name),
             );
             assert_eq!(actual, row["result"].as_u64().unwrap() as u32, "{row}");
@@ -2112,29 +2120,31 @@ mod tests {
     #[test]
     fn read_houses_list_matches_extended_native_buffer_controls() {
         let native = crate::test_fixture::json("tools/input_oracle/ares_allies_reader.json");
-        let feature = if crate::rules::ARES_ENABLED {
-            "ares"
-        } else {
-            "stock"
-        };
-        for row in native["extended_controls"].as_array().unwrap() {
-            // Exercise ReadString's buffer limit directly. Physical INI line
-            // admission belongs to the lexer, independently of this reader.
-            let mut ini = IniFile::empty();
-            let section = ini.projection_section_mut("Control");
-            section.set("Allies", row["value"].as_str().unwrap());
-            let names = row["registry"].as_array().unwrap();
-            let actual = section.read_houses_list("Allies", 0, |name| {
-                names
-                    .iter()
-                    .position(|candidate| candidate.as_str() == Some(name))
-            });
-            assert_eq!(
-                actual,
-                row["observations"][feature]["result"].as_u64().unwrap() as u32,
-                "{} ({feature})",
-                row["name"],
-            );
+        for (extended, feature) in [(false, "stock"), (true, "ares")] {
+            for row in native["extended_controls"].as_array().unwrap() {
+                // Exercise ReadString's buffer limit directly. Physical INI
+                // admission belongs to the lexer, independently of this reader.
+                let mut ini = IniFile::empty();
+                let section = ini.projection_section_mut("Control");
+                section.set("Allies", row["value"].as_str().unwrap());
+                let names = row["registry"].as_array().unwrap();
+                let actual = section.read_houses_list(
+                    "Allies",
+                    0,
+                    long_list_read_capacity(Some(extended)),
+                    |name| {
+                        names
+                            .iter()
+                            .position(|candidate| candidate.as_str() == Some(name))
+                    },
+                );
+                assert_eq!(
+                    actual,
+                    row["observations"][feature]["result"].as_u64().unwrap() as u32,
+                    "{} ({feature})",
+                    row["name"],
+                );
+            }
         }
     }
 

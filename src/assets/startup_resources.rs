@@ -64,6 +64,9 @@ pub struct StartupResources {
     pub hash_include: Option<bool>,
     /// Fixed speech-catalog layout, selected before its one reader runs.
     pub eva_registered_columns: Option<bool>,
+    /// Three early list readers only: true = 2048, false = 128. None keeps
+    /// the existing profile; retained with the same admitted component bytes.
+    pub long_list_readers: Option<bool>,
     pub audio: Option<AudioCatalogPolicy>,
     pub strings: Option<StringSupplementProvider>,
 }

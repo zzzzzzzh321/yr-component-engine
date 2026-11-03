@@ -1020,6 +1020,10 @@ impl ProcessedRulesLayers {
             .compatibility
     }
 
+    pub(crate) fn long_list_readers(&self) -> Option<bool> {
+        self.native_registry_state().long_list_readers()
+    }
+
     pub(crate) fn native_registry_state(&self) -> &NativeRulesRegistryState {
         self.native_type_construction_trace.registry_state()
     }
@@ -3390,6 +3394,10 @@ pub(crate) struct NativeRulesRegistryState {
     sdk_configuration_seed: Option<std::sync::Arc<crate::mod_sdk::Program>>,
     /// Build capability is retained with the Rules owner, never selected by INI.
     compatibility: RulesCompatibility,
+    /// Immutable startup buffer selection for House Allies and Techno lists.
+    /// None retains this build's original profile; explicit false selects128.
+    #[serde(default)]
+    long_list_readers: Option<bool>,
     /// Ares Clear/AddDefaults rebuilds these at a destructive scenario reset;
     /// ordinary Process passes and saves retain the reached list reads.
     ares_prerequisites: Option<GenericPrerequisites>,
@@ -3484,6 +3492,7 @@ impl Default for NativeRulesRegistryState {
             sdk_configuration_seed: None,
             fixed_art_source: None,
             compatibility: RulesCompatibility::default(),
+            long_list_readers: None,
             ares_prerequisites: crate::rules::ARES_ENABLED.then(GenericPrerequisites::default),
             ares_armors: crate::rules::ARES_ENABLED.then(ArmorCatalog::default),
             phobos_radiation_types: crate::rules::PHOBOS_ENABLED
@@ -3553,6 +3562,19 @@ impl Default for NativeRulesRegistryState {
 }
 
 impl NativeRulesRegistryState {
+    /// Install the admitted reader selection before any cold Process. Later
+    /// Process/reset/save transitions carry this same immutable input.
+    pub(crate) fn with_long_list_readers(long_list_readers: Option<bool>) -> Self {
+        Self {
+            long_list_readers,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn long_list_readers(&self) -> Option<bool> {
+        self.long_list_readers
+    }
+
     pub(crate) fn bind_fixed_art_source(&mut self, source: std::sync::Arc<IniFile>) {
         self.fixed_art_source = Some(source);
     }
@@ -3950,6 +3972,7 @@ impl NativeRulesRegistryState {
             sdk_configuration_steps: self.sdk_configuration_steps,
             sdk_configuration_seed: self.sdk_configuration_seed,
             fixed_art_source: self.fixed_art_source,
+            long_list_readers: self.long_list_readers,
             //6686C0..668BF0 has no RulesExt reconstruction. Early-map Process
             //686D35 precedes this TypeReset6876AC and its flags/phase survive.
             #[cfg(feature = "ares")]
@@ -4943,6 +4966,7 @@ struct RulesPassProcessor {
     fixed_art_hash: u64,
     image_theater: ImageTheater,
     compatibility: RulesCompatibility,
+    long_list_readers: Option<bool>,
     ares_prerequisites: Option<GenericPrerequisites>,
     /// Ordered Ares armor registry; Process retains it, destructive reset rebuilds it.
     ares_armors: Option<ArmorCatalog>,
@@ -5035,6 +5059,7 @@ impl RulesPassProcessor {
             fixed_art_hash,
             image_theater: ImageTheater::Uninitialized,
             compatibility: registry_state.compatibility,
+            long_list_readers: registry_state.long_list_readers,
             ares_prerequisites: registry_state.ares_prerequisites,
             ares_armors: registry_state.ares_armors,
             phobos_radiation_types: registry_state.phobos_radiation_types,
@@ -6787,11 +6812,8 @@ impl RulesPassProcessor {
                 // that can allocate a BuildingType, each with its current list
                 // as the default.
                 let member = &self.families[&family][index];
-                let prerequisite_capacity = if crate::rules::ARES_ENABLED {
-                    0x800
-                } else {
-                    0x80
-                };
+                let prerequisite_capacity =
+                    crate::rules::ini_value::long_list_read_capacity(self.long_list_readers);
                 let prerequisite = parse_prerequisites(
                     raw.read_list("Prerequisite", prerequisite_capacity),
                     &member.prerequisite,
@@ -8155,6 +8177,7 @@ impl RulesPassProcessor {
                     sdk_configuration_seed: self.sdk_configuration_seed,
                     fixed_art_source: self.fixed_art_source,
                     compatibility: self.compatibility,
+                    long_list_readers: self.long_list_readers,
                     ares_prerequisites: self.ares_prerequisites,
                     ares_armors: self.ares_armors,
                     phobos_radiation_types: self.phobos_radiation_types,

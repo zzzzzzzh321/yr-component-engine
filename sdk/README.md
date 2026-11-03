@@ -3,10 +3,20 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.18.0 development candidate**, config version **15**, state version **1**;
+is the **0.19.0 development candidate**, config version **15**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.19 adds the separate pure `long_list_readers` capability before cold
+Rules processing. `Extended2048` widens only House `Allies` and Techno
+`Prerequisite` / `PrerequisiteOverride`; explicit `Retail128` overrides the
+legacy profile, and an absent declaration retains it. General group buffers
+remain 128 bytes and physical INI lines retain their limit of 511 bytes. The Ares component
+declares this installed reader fix independently of its gameplay INI switches.
+Actual-component/save/recovery, reader, legacy and retail loading controls passed.
+New serialized resource fields still require the corresponding engine/save format;
+preserve older engine/component pairs for their complete saves.
 
 The faction increment adds four separate optional capabilities: `eva_catalog`
 selects the fixed speech reader before Rules; `configure_country_read` selects the
