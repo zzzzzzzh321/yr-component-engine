@@ -76,6 +76,9 @@ pub struct StartupResources {
     /// the existing profile; retained with the same admitted component bytes.
     pub long_list_readers: Option<bool>,
     pub spawn_identity: Option<SpawnIdentityPolicy>,
+    /// Default units at the sole Prism modifier reader: None keeps the host
+    /// profile, true normalizes the retained percent and false selects retail.
+    pub prism_support_defaults: Option<bool>,
     pub audio: Option<AudioCatalogPolicy>,
     pub strings: Option<StringSupplementProvider>,
 }

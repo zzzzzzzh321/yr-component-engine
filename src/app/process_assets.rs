@@ -677,6 +677,7 @@ mod tests {
             campaign_side_byte: true,
         };
         assert_eq!(frozen.spawn_identity, Some(identity));
+        assert_eq!(frozen.prism_support_defaults, Some(true));
         let StartupComponentSource::Admitted {
             bytes: original, ..
         } = &frozen.component
@@ -706,6 +707,10 @@ mod tests {
         let recovered = process.reconstruct_manager(dir.path()).unwrap();
         assert_eq!(recovered.startup_resources().long_list_readers, Some(true));
         assert_eq!(recovered.startup_resources().spawn_identity, Some(identity));
+        assert_eq!(
+            recovered.startup_resources().prism_support_defaults,
+            Some(true)
+        );
         let StartupComponentSource::Admitted { bytes, .. } =
             &recovered.startup_resources().component
         else {

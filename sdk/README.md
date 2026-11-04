@@ -3,10 +3,21 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.24.0 development candidate**, config version **17**, state version **1**;
+is the **0.25.0 development candidate**, config version **17**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.25 adds the pure `prism_support_defaults` declaration before the first
+Rules read. The reference component selects the existing default-unit correction
+without an INI switch; absence keeps the host profile and explicit false selects
+retail behavior. A present General section with an absent modifier key retains
+the intended percentage across layers. Numeric readers, support counts and firing
+remain with their existing owners. Actual-component layer/save/delayed-shot, legacy
+and retail loading checks passed. Config17/state1/API v1/WIT stay unchanged, but a
+matching host is required. The native rules save layout changed: retain old host
+and component pairs for old saves. This adds no PrismForwarding; no GUI or
+cross-platform run was performed.
 
 Version 0.24 adds the pure `spawn_identity` declaration for the existing
 CnCNet spawn.ini Country and campaign Side width gates. The component selects

@@ -97,6 +97,10 @@ impl AdmittedComponent {
                 .hooks
                 .contains(&api::HookKind::LongListReaders)
             || self.manifest.hooks.contains(&api::HookKind::SpawnIdentity)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::PrismSupportDefaults)
     }
 
     pub(super) fn startup_resource_policy(
@@ -140,6 +144,19 @@ impl AdmittedComponent {
         Ok(self
             .evaluate_startup(Context::SpawnIdentity)?
             .spawn_identity)
+    }
+
+    pub(super) fn prism_support_defaults_policy(&self) -> Result<Option<bool>, String> {
+        if !self
+            .manifest
+            .hooks
+            .contains(&api::HookKind::PrismSupportDefaults)
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate_startup(Context::PrismSupportDefaults)?
+            .prism_support_defaults)
     }
 
     fn evaluate_startup(&self, context: Context) -> Result<Plan, String> {

@@ -454,6 +454,7 @@ impl NativeRulesProcessOwner {
             personal_rules,
             None,
             None,
+            None,
         )
     }
 
@@ -467,6 +468,7 @@ impl NativeRulesProcessOwner {
         personal_rules: PersonalRules,
         configuration_seed: Option<Arc<crate::mod_sdk::Program>>,
         long_list_readers: Option<bool>,
+        prism_support_defaults: Option<bool>,
     ) -> Result<Self, RulesError> {
         let movies = crate::rules::movies::MovieRegistry::from_art(&fixed_art);
         let fixed_art = Arc::new(fixed_art);
@@ -485,8 +487,10 @@ impl NativeRulesProcessOwner {
             }
             None | Some(NativeLangRuleRead::Absent | NativeLangRuleRead::SelectionFailed) => None,
         };
-        let mut registry_state =
-            NativeRulesRegistryState::with_long_list_readers(long_list_readers);
+        let mut registry_state = NativeRulesRegistryState::with_startup_readers(
+            long_list_readers,
+            prism_support_defaults,
+        );
         registry_state.retain_sdk_configuration_program(configuration_seed);
         registry_state.bind_fixed_art_source(Arc::clone(&fixed_art));
         registry_state.bind_fixed_sound_source(Arc::clone(&fixed_sounds));
@@ -1013,12 +1017,14 @@ impl NativeRulesProcessOwner {
     }
 
     fn isolated_projection_registry(&self) -> NativeRulesRegistryState {
-        let mut state = NativeRulesRegistryState::with_long_list_readers(
-            self.registry
-                .as_ref()
-                .expect("Rules transition reentered")
-                .registry_state()
-                .long_list_readers(),
+        let retained = self
+            .registry
+            .as_ref()
+            .expect("Rules transition reentered")
+            .registry_state();
+        let mut state = NativeRulesRegistryState::with_startup_readers(
+            retained.long_list_readers(),
+            retained.prism_support_defaults(),
         );
         state.bind_fixed_sound_source(Arc::clone(&self.sources.fixed_sounds));
         if let Some(program) = self

@@ -568,61 +568,79 @@ fn sdk_startup_deferred_old_component_binds_but_new_startup_and_invalid_identity
     );
     drop(assets);
 
-    // An identity-only component still needs the early frontier, even though
-    // it has no StartupResources hook and no gameplay configuration.
-    let request = vera_mod_api::Request {
-        api_version: 1,
-        context: vera_mod_api::Context::SpawnIdentity,
-        config: vec![],
-        state: vec![],
-    };
-    let mut plan = vera_mod_api::Plan::unchanged(&request);
-    plan.spawn_identity = Some(vera_mod_api::SpawnIdentityPolicy {
-        extended_countries: true,
-        campaign_side_byte: false,
-    });
-    let identity_only = vera_mod_runtime::test_support::component_fixture_by_kind(
-        &vera_mod_api::ModuleManifest {
+    // Each pure reader needs the early frontier independently of the closed
+    // StartupResources stages. The four mandatory gameplay hooks stay inert.
+    for context in [
+        vera_mod_api::Context::SpawnIdentity,
+        vera_mod_api::Context::PrismSupportDefaults,
+    ] {
+        let hook = context.kind();
+        let label = hook.as_str();
+        let request = vera_mod_api::Request {
             api_version: 1,
-            id: "spawn-identity-only".into(),
-            version: "1".into(),
-            state_version: 1,
-            config_version: 1,
-            hooks: vec![
-                vera_mod_api::HookKind::Configure,
-                vera_mod_api::HookKind::Attach,
-                vera_mod_api::HookKind::Damage,
-                vera_mod_api::HookKind::Tick,
-                vera_mod_api::HookKind::SpawnIdentity,
-            ],
-        },
-        &serde_json::to_vec(&vera_mod_api::Plan::unchanged(&request)).unwrap(),
-        &[("spawn_identity", &serde_json::to_vec(&plan).unwrap())],
-    );
-    let identity_dir = audio_test_install("sdk-spawn-identity-only");
-    early_component(&identity_dir, &identity_only);
-    let identity_assets = open(&identity_dir);
-    assert_eq!(
-        identity_assets.startup_resources().spawn_identity,
-        Some(crate::assets::startup_resources::SpawnIdentityPolicy {
-            extended_countries: true,
-            campaign_side_byte: false,
-        })
-    );
-    let late_identity = audio_test_install("sdk-spawn-identity-only-late");
-    declaration(&late_identity, &identity_only);
-    archive(
-        &late_identity,
-        "conqmd.mix",
-        &[("gameplay.wasm".into(), identity_only)],
-    );
-    assert!(
-        open_active_assets(late_identity.path(), MediaArchiveMode::STOCK_DIGITAL)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("before resource selection")
-    );
+            context,
+            config: vec![],
+            state: vec![],
+        };
+        let mut plan = vera_mod_api::Plan::unchanged(&request);
+        match request.context {
+            vera_mod_api::Context::SpawnIdentity => {
+                plan.spawn_identity = Some(vera_mod_api::SpawnIdentityPolicy {
+                    extended_countries: true,
+                    campaign_side_byte: false,
+                })
+            }
+            vera_mod_api::Context::PrismSupportDefaults => {
+                plan.prism_support_defaults = Some(false)
+            }
+            _ => unreachable!(),
+        }
+        let pure = vera_mod_runtime::test_support::component_fixture_by_kind(
+            &vera_mod_api::ModuleManifest {
+                api_version: 1,
+                id: format!("pure-{label}"),
+                version: "1".into(),
+                state_version: 1,
+                config_version: 1,
+                hooks: vec![
+                    vera_mod_api::HookKind::Configure,
+                    vera_mod_api::HookKind::Attach,
+                    vera_mod_api::HookKind::Damage,
+                    vera_mod_api::HookKind::Tick,
+                    hook,
+                ],
+            },
+            &serde_json::to_vec(&vera_mod_api::Plan::unchanged(&request)).unwrap(),
+            &[(label, &serde_json::to_vec(&plan).unwrap())],
+        );
+        let early = audio_test_install(&format!("sdk-pure-{label}"));
+        early_component(&early, &pure);
+        let pure_assets = open(&early);
+        match request.context {
+            vera_mod_api::Context::SpawnIdentity => assert_eq!(
+                pure_assets.startup_resources().spawn_identity,
+                Some(crate::assets::startup_resources::SpawnIdentityPolicy {
+                    extended_countries: true,
+                    campaign_side_byte: false,
+                }),
+            ),
+            vera_mod_api::Context::PrismSupportDefaults => assert_eq!(
+                pure_assets.startup_resources().prism_support_defaults,
+                Some(false),
+            ),
+            _ => unreachable!(),
+        }
+        let late = audio_test_install(&format!("sdk-pure-{label}-late"));
+        declaration(&late, &pure);
+        archive(&late, "conqmd.mix", &[("gameplay.wasm".into(), pure)]);
+        assert!(
+            open_active_assets(late.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("before resource selection")
+        );
+    }
 
     declaration(&dir, &wasm);
     archive(

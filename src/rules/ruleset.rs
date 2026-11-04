@@ -2364,21 +2364,28 @@ impl PrismSupportRules {
     /// ftol (`0x007C5F00`), under the game's masked chop control word, which
     /// also chops ReadDouble's own percent product: a modded `35%` reads 34.
     /// Ares fixes the default's units before that read (see below).
-    pub(crate) fn read_pass(self, general: &crate::rules::ini_parser::IniSection) -> Self {
+    pub(crate) fn read_pass(
+        self,
+        general: &crate::rules::ini_parser::IniSection,
+        normalize_default: bool,
+    ) -> Self {
         use crate::util::native_x87::{MaskedX87Chop53 as X87, NativeF64Bits};
         let current = f64::from(self.modifier);
         // Ares RulesClass_Addition_General_PrismSupportModifier @ 0x1005D040,
         // hook0x00671152: FILD Rules+49C; FDIV 100.0; pass that fraction to
         // ReadDouble. Without this, each keyless map/mode multiplies the
         // retained percentage by another 100 (original ReadGeneral67114F).
-        #[cfg(feature = "ares")]
-        let current = f64::from_bits(
-            X87::store_f64_masked_chop(X87::div(
-                X87::load_f64(NativeF64Bits::from_bits(current.to_bits())),
-                X87::load_f64(NativeF64Bits::from_bits(100.0_f64.to_bits())),
-            ))
-            .bits(),
-        );
+        let current = if normalize_default {
+            f64::from_bits(
+                X87::store_f64_masked_chop(X87::div(
+                    X87::load_f64(NativeF64Bits::from_bits(current.to_bits())),
+                    X87::load_f64(NativeF64Bits::from_bits(100.0_f64.to_bits())),
+                ))
+                .bits(),
+            )
+        } else {
+            current
+        };
         let percent = general.read_double("PrismSupportModifier", current);
         let modifier = X87::ftol_i32_low_masked(X87::mul(
             X87::load_f64(NativeF64Bits::from_bits(percent.to_bits())),

@@ -106,6 +106,7 @@ fn early_resources(assets: &AssetManager) -> Result<native::StartupResources, St
                 extended_countries: policy.extended_countries,
                 campaign_side_byte: policy.campaign_side_byte,
             });
+    resources.prism_support_defaults = admitted.prism_support_defaults_policy()?;
     if !admitted.has_startup_resources() {
         return Ok(resources);
     }

@@ -203,6 +203,7 @@ pub struct RetailRulesSources {
     /// The live registry takes sole ownership before cold Rules processing.
     configuration_seed: Option<Arc<crate::mod_sdk::Program>>,
     long_list_readers: Option<bool>,
+    prism_support_defaults: Option<bool>,
 }
 
 impl RetailRulesSources {
@@ -223,6 +224,7 @@ impl RetailRulesSources {
             personal_rules: PersonalRules::default(),
             configuration_seed: crate::mod_sdk::early_configuration_seed(assets)?,
             long_list_readers: assets.startup_resources().long_list_readers,
+            prism_support_defaults: assets.startup_resources().prism_support_defaults,
         })
     }
 
@@ -262,6 +264,7 @@ impl RetailRulesSources {
             self.personal_rules,
             self.configuration_seed,
             self.long_list_readers,
+            self.prism_support_defaults,
         )
         .map_err(|error| format!("Native rules cold startup failed: {error}"))
     }

@@ -26,6 +26,7 @@ use serde_json::Value;
 use super::*;
 use crate::map::resolved_terrain::test_flat_ground_grid;
 use crate::rules::ini_parser::IniFile;
+#[cfg(not(feature = "ares"))]
 use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
 #[cfg(not(feature = "ares"))]
 use crate::rules::ruleset::PrismSupportRules;
@@ -64,7 +65,7 @@ fn rows<'a>(golden: &'a Value, set: &str) -> &'a [Value] {
 /// (EliteWeapon[1] of `elite_range` when given), the SpecialAnim `GAPRIS_A`
 /// and its Damaged `GAPRIS_AD`, `DelayedFireDelay=28` and MissionControl as
 /// building_guard_attack's cadence (AARate .016).
-fn rules(support_range: i32, elite_range: Option<i32>) -> RuleSet {
+fn rule_sources(support_range: i32, elite_range: Option<i32>) -> (String, &'static str) {
     let cells = |leptons: i32| f64::from(leptons) / 256.0;
     let elite = elite_range.map_or(String::new(), |range| {
         format!(
@@ -81,8 +82,8 @@ fn rules(support_range: i32, elite_range: Option<i32>) -> RuleSet {
         "Image=TWRART\nStrength=600\nArmor=steel\nFoundation=1x1\nPowered=yes\nPower=-75\n\
          Primary=PrismShot\nSecondary=PrismSupport\n{elite_key}"
     );
-    let rules_ini = crate::sim::arena_fixture::clear_ground_ini(&format!(
-        "[General]\nPrismType=TWR\nPrismSupportModifier=150%\nPrismSupportMax=8\n\
+    let rules_ini = format!(
+        "[Clear]\nBuildable=yes\n[General]\nPrismType=TWR\nPrismSupportModifier=150%\nPrismSupportMax=8\n\
          PrismSupportDelay=45\n\
          [Guard]\nRate=.030\nAARate=.016\n\
          [Attack]\nRate=.016\nAARate=.016\n\
@@ -97,20 +98,29 @@ fn rules(support_range: i32, elite_range: Option<i32>) -> RuleSet {
          [Beam]\nAG=yes\nInviso=yes\n\
          [Prism]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
         cells(support_range)
-    ));
-    let art_ini = IniFile::from_str(
-        "[TWRART]\nSpecialAnim=GAPRIS_A\nSpecialAnimDamaged=GAPRIS_AD\n\
+    );
+    let art_ini = "[TWRART]\nSpecialAnim=GAPRIS_A\nSpecialAnimDamaged=GAPRIS_AD\n\
          IsAnimDelayedFire=yes\nDelayedFireDelay=28\n\
          [GAPRIS_A]\nStart=0\nEnd=9\nRate=300\n\
-         [GAPRIS_AD]\nImage=GAPRIS_A\nStart=10\nEnd=19\nRate=300\n",
-    );
+         [GAPRIS_AD]\nImage=GAPRIS_A\nStart=10\nEnd=19\nRate=300\n";
+    (rules_ini, art_ini)
+}
+
+fn rules(support_range: i32, elite_range: Option<i32>) -> RuleSet {
+    let (rules_ini, art_ini) = rule_sources(support_range, elite_range);
+    let rules_ini = IniFile::from_str(&rules_ini);
+    let art_ini = IniFile::from_str(art_ini);
     let mut rules = RuleSet::from_ini_with_fixed_art_for_test(&rules_ini, &art_ini).unwrap();
-    let mut art = crate::rules::art_data::ArtRegistry::from_ini(&art_ini);
+    install_prism_fixture_art(&mut rules, &art_ini);
+    rules
+}
+
+fn install_prism_fixture_art(rules: &mut RuleSet, art_ini: &IniFile) {
+    let mut art = crate::rules::art_data::ArtRegistry::from_ini(art_ini);
     for name in ["GAPRIS_A", "GAPRIS_AD"] {
         art.bind_anim_frame_count_for_test(name, 20);
     }
     rules.install_art_data(art);
-    rules
 }
 
 fn mission_of(name: &str) -> MissionId {
@@ -158,7 +168,10 @@ impl Fixture {
                 .as_i64()
                 .map(|range| range as i32),
         );
-        let mut sim = Simulation::new();
+        Self::with_sim(input, first, rules, Simulation::new())
+    }
+
+    fn with_sim(input: &Value, first: &str, rules: RuleSet, mut sim: Simulation) -> Self {
         sim.install_resolved_terrain_for_new_map(test_flat_ground_grid(48));
         crate::sim::arena_fixture::supply_native_map_keyed(&mut sim, "prism flat ground 48");
         let owner = sim.interner.intern("Americans");
@@ -1074,47 +1087,392 @@ fn prism_general_reader_matches_the_original() {
     }
 }
 
-#[cfg(feature = "ares")]
+/// An admitted pure startup declaration reaches the first General read and
+/// remains the same input across isolated previews, reset and saved adoption.
+/// Both profiles run this case: explicit false must override a legacy host.
 #[test]
+#[ignore = "requires VERA_SDK_PRISM_DEFAULT_WASM / VERA_SDK_PRISM_DEFAULT_PREVIOUS_WASM"]
 fn ares_prism_modifier_retains_percent_across_map_layers_and_scales_one_shot() {
-    let mut layers =
-        RulesLayerStack::new(IniFile::from_str("[General]\nPrismSupportModifier=125%\n"));
-    layers.push(
-        RulesLayerKind::GameMode,
-        IniFile::from_str("[General]\nName=Mode without a prism override\n"),
-    );
-    layers.push(
-        RulesLayerKind::Scenario,
-        IniFile::from_str("[General]\nName=Map without a prism override\n"),
-    );
-    let rules = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
-    assert_eq!(rules.general.prism_support.modifier, 125);
+    use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
+    use crate::rules::{
+        audio_sources::AudioDefinitions, process_owner::NativeScenarioRulesPrefix,
+        retail_sources::RetailRulesSources,
+    };
+    use crate::sim::runtime::{ScenarioGameplayProgram, bind_scenario_gameplay_resources};
+    use crate::util::save_codec;
+    use vera_mod_api::{Context, HookKind, ModuleManifest, Plan, Request};
 
-    let mut fixture = Fixture::new(&serde_json::json!({}), "master");
-    let master = fixture.id("master");
-    fixture
-        .sim
-        .substrate
-        .entities
-        .get_mut(master)
-        .unwrap()
-        .prism_support_count
-        .set_for_test(1);
-    // ProcessDelayedFire4504A8: a single supporting tower adds 125%,
-    // rather than multiplying a map's retained value by another 100.
-    assert_eq!(
-        fixture.sim.substrate.take_support_bonus(master, &rules),
-        576
+    let component = std::fs::read(
+        std::env::var_os("VERA_SDK_PRISM_DEFAULT_WASM").expect("set VERA_SDK_PRISM_DEFAULT_WASM"),
+    )
+    .unwrap();
+    let previous = std::fs::read(
+        std::env::var_os("VERA_SDK_PRISM_DEFAULT_PREVIOUS_WASM")
+            .expect("set VERA_SDK_PRISM_DEFAULT_PREVIOUS_WASM"),
+    )
+    .unwrap();
+    let request = Request {
+        api_version: vera_mod_api::API_VERSION,
+        context: Context::PrismSupportDefaults,
+        config: vec![],
+        state: vec![],
+    };
+    let unchanged = Plan::unchanged(&request);
+    let mut selected = unchanged.clone();
+    selected.prism_support_defaults = Some(false);
+    let off = vera_mod_runtime::test_support::component_fixture_by_kind(
+        &ModuleManifest {
+            api_version: vera_mod_api::API_VERSION,
+            id: "test.prism-stock".into(),
+            version: "1".into(),
+            config_version: 1,
+            state_version: 1,
+            hooks: vec![
+                HookKind::Configure,
+                HookKind::Attach,
+                HookKind::Damage,
+                HookKind::Tick,
+                HookKind::PrismSupportDefaults,
+            ],
+        },
+        &serde_json::to_vec(&unchanged).unwrap(),
+        &[(
+            "prism_support_defaults",
+            &serde_json::to_vec(&selected).unwrap(),
+        )],
     );
-    assert_eq!(
-        fixture.sim.substrate.take_support_bonus(master, &rules),
-        256
-    );
+    let golden = golden();
+    let reader_modifier = |name: &str, pass: usize| -> i32 {
+        rows(golden, "reader")
+            .iter()
+            .find(|row| row["input"]["name"] == name)
+            .unwrap()["passes"][pass]["modifier"]
+            .as_i64()
+            .unwrap() as i32
+    };
+    let ctor = rows(golden, "reader")[0]["defaults"]["modifier"]
+        .as_i64()
+        .unwrap() as i32;
+    let explicit = IniFile::from_str("[General]\nPrismSupportModifier=150%\n");
+    let keyless = IniFile::from_str("[General]\nFixtureOnly=1\n");
+    let no_general = IniFile::from_str("[Fixture]\nName=No General section\n");
+    let mut controls = Vec::new();
+    for (label, module, declaration) in [
+        ("prism-current", Some(component.as_slice()), Some(true)),
+        ("prism-no-module", None, None),
+        ("prism-previous", Some(previous.as_slice()), None),
+        ("prism-explicit-stock", Some(off.as_slice()), Some(false)),
+    ] {
+        eprintln!("Prism default reader control: {label}");
+        let directory = audio_test_install(label);
+        let (root, art) = rule_sources(2048, None);
+        // Keep the original tower, projectile, mission and ART fixture. Only
+        // the Prism modifier key is absent from this physical root General.
+        let root = root.replace("PrismSupportModifier=150%\n", "");
+        for (name, bytes) in [
+            ("rulesmd.ini", root.as_bytes()),
+            ("artmd.ini", art.as_bytes()),
+            ("soundmd.ini", b"".as_slice()),
+            ("evamd.ini", b"".as_slice()),
+        ] {
+            std::fs::write(directory.path().join(name), bytes).unwrap();
+        }
+        if let Some(module) = module {
+            std::fs::write(directory.path().join("gameplay.wasm"), module).unwrap();
+            std::fs::write(directory.path().join("vera-mod.json"), serde_json::to_vec(&serde_json::json!({
+                "api_version": vera_mod_api::API_VERSION, "program": "gameplay.wasm", "sha256": crate::util::sha256::sha256_hex(module),
+            })).unwrap()).unwrap();
+        }
+        let assets =
+            crate::mod_sdk::open_active_assets(directory.path(), MediaArchiveMode::STOCK_DIGITAL)
+                .unwrap();
+        assert_eq!(
+            assets.startup_resources().prism_support_defaults,
+            declaration
+        );
+        let audio = AudioDefinitions::select(&assets);
+        let mut owner = RetailRulesSources::select(&assets)
+            .unwrap()
+            .into_owner(audio.sounds().clone(), audio.eva().clone())
+            .unwrap();
+        let normalized = declaration.unwrap_or(crate::rules::ARES_ENABLED);
+        let isolated = owner.startup_compatibility_projection().unwrap();
+        assert_eq!(isolated.prism_support_defaults(), declaration);
+        let isolated_rules = RuleSet::from_processed_rules(&isolated).unwrap();
+        assert_eq!(
+            isolated_rules.general.prism_support.modifier,
+            if normalized {
+                ctor
+            } else {
+                reader_modifier("general_without_keys_current_100", 0)
+            },
+            "the selector already owns an isolated cold root's missing-key default"
+        );
 
-    layers.push(
-        RulesLayerKind::Scenario,
-        IniFile::from_str("[General]\nPrismSupportModifier=150%\n"),
+        // Seed a reached native field with an explicit value. The next real
+        // RMG path performs keyless E_multi General, then keyless reset-root
+        // General; a map without General performs no third multiplication.
+        let seeded = owner
+            .load_scenario(NativeScenarioRulesPrefix::RandomMap(None), &explicit)
+            .unwrap();
+        assert_eq!(
+            seeded.into_parts().0.general.prism_support.modifier,
+            reader_modifier("modifier_150pct", 0)
+        );
+        let loaded = owner
+            .load_scenario(NativeScenarioRulesPrefix::RandomMap(None), &no_general)
+            .unwrap();
+        assert_eq!(
+            owner
+                .saved_scenario_rules()
+                .unwrap()
+                .prism_support_defaults(),
+            declaration
+        );
+        let actual = loaded.into_parts().0.general.prism_support.modifier;
+        assert_eq!(
+            actual,
+            if normalized {
+                reader_modifier("modifier_150pct", 0)
+            } else {
+                reader_modifier("retail_then_general_without_keys_twice", 2)
+            },
+            "RMG prepass and reset each use the same missing-key default; absent General does not read"
+        );
+        controls.push(actual);
+        if declaration != Some(true) {
+            continue;
+        }
+
+        // Preserve the existing Ares 125% retention regression, now through
+        // physical source admission and the actual root/mode/map owners.
+        owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::RandomMap(None),
+                &IniFile::from_str("[General]\nPrismSupportModifier=125%\n"),
+            )
+            .unwrap();
+        let (mut rules, _, art, _) = owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::RandomMap(Some(&keyless)),
+                &keyless,
+            )
+            .unwrap()
+            .into_parts();
+        assert_eq!(rules.general.prism_support.modifier, 125);
+        let preview = owner
+            .random_map_preview_projection(Some(&keyless), "TEMPERATE")
+            .unwrap();
+        assert_eq!(preview.prism_support_defaults(), Some(true));
+        assert_eq!(
+            RuleSet::from_processed_rules(&preview)
+                .unwrap()
+                .general
+                .prism_support
+                .modifier,
+            ctor,
+            "isolated RMG starts from constructor state, with the same frozen selector"
+        );
+        assert_eq!(
+            owner.saved_scenario_rules().unwrap().prism_support(),
+            rules.general.prism_support,
+            "preview cannot replace the continuing native registry"
+        );
+        install_prism_fixture_art(&mut rules, &art);
+        let mut simulation = Simulation::new();
+        bind_scenario_gameplay_resources(
+            &mut rules,
+            &assets,
+            ScenarioGameplayProgram::Fresh {
+                simulation: &mut simulation,
+                rules_owner: &mut owner,
+            },
+            "tem",
+            "TEMPERATE",
+        )
+        .unwrap();
+        let saved =
+            save_codec::serialize(&(owner.saved_scenario_rules().unwrap(), &simulation)).unwrap();
+        let (processed, restored): (
+            crate::rules::native_processing::ProcessedRulesLayers,
+            Simulation,
+        ) = save_codec::deserialize(&saved).unwrap();
+        assert_eq!(
+            processed.prism_support_defaults(),
+            Some(true),
+            "native envelope serializes the selector"
+        );
+        let mut restored_rules = owner.project_saved_scenario_rules(&processed).unwrap();
+        assert_eq!(
+            restored_rules.general.prism_support,
+            rules.general.prism_support
+        );
+        install_prism_fixture_art(&mut restored_rules, &art);
+        bind_scenario_gameplay_resources(
+            &mut restored_rules,
+            &assets,
+            ScenarioGameplayProgram::Saved(&restored),
+            "tem",
+            "TEMPERATE",
+        )
+        .unwrap();
+        owner.install_saved_scenario_rules(processed, Some(&restored_rules));
+        let after_reset = owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::RandomMap(Some(&keyless)),
+                &keyless,
+            )
+            .unwrap();
+        assert_eq!(
+            after_reset.into_parts().0.general.prism_support.modifier,
+            125,
+            "saved adoption and another real Type reset retain the same default units"
+        );
+        assert_eq!(
+            owner
+                .saved_scenario_rules()
+                .unwrap()
+                .prism_support_defaults(),
+            Some(true)
+        );
+
+        // The original live tower fixture recruits its support count and arms
+        // its delayed shot through the production Prism arm. No FireAt stub,
+        // synthetic support count or numeric multiplier supplies this result.
+        let input = &rows(golden, "cadence")
+            .iter()
+            .find(|row| row["input"]["name"] == "b_supporters_after_1")
+            .unwrap()["input"];
+        let mut fixture = Fixture::with_sim(input, "master", restored_rules, restored);
+        let master = fixture.id("master");
+        let supporter = fixture.id("s1");
+        fixture.apply(
+            master,
+            &serde_json::json!({"mission":"attack", "target":true}),
+        );
+        let obj = fixture.rules.object("TWR").unwrap().clone();
+        prism_arm(&mut fixture.sim, master, &fixture.rules, &obj);
+        assert_eq!(
+            fixture
+                .sim
+                .substrate
+                .entities
+                .get(master)
+                .unwrap()
+                .prism_support_count
+                .count(),
+            1
+        );
+        assert!(matches!(
+            fixture
+                .sim
+                .substrate
+                .entities
+                .get(supporter)
+                .unwrap()
+                .pending_building_fire
+                .pending()
+                .unwrap()
+                .fire(),
+            DelayedFire::SupportBeam { .. }
+        ));
+        prism_arm(&mut fixture.sim, master, &fixture.rules, &obj);
+        assert_eq!(
+            delayed_fire(fixture.sim.substrate.entities.get(master).unwrap()),
+            (1, DELAY)
+        );
+        for step in 0..DELAY {
+            fixture
+                .sim
+                .session
+                .set_binary_frame_for_test((FRAME + step) as u32);
+            for id in [master, supporter] {
+                process_delayed_fire(
+                    &mut fixture.sim,
+                    id,
+                    &fixture.rules,
+                    ObjectAiCtx::default(),
+                    &mut false,
+                );
+            }
+        }
+        let bullets: Vec<_> = fixture
+            .sim
+            .projectiles()
+            .iter()
+            .map(|(_, bullet)| bullet.payload().damage_multiplier())
+            .collect();
+        assert_eq!(
+            bullets,
+            [576],
+            "the existing 125% one-support result reaches a real bullet"
+        );
+        assert_eq!(
+            fixture
+                .sim
+                .substrate
+                .entities
+                .get(master)
+                .unwrap()
+                .prism_support_count
+                .count(),
+            0
+        );
+        assert_eq!(
+            fixture
+                .sim
+                .substrate
+                .take_support_bonus(master, &fixture.rules),
+            256,
+            "the support bonus is consumed once"
+        );
+        process_delayed_fire(
+            &mut fixture.sim,
+            master,
+            &fixture.rules,
+            ObjectAiCtx::default(),
+            &mut false,
+        );
+        assert_eq!(
+            fixture.sim.projectiles().len(),
+            1,
+            "an expired delayed fire cannot launch twice"
+        );
+
+        // Explicit values still use the unique original ReadDouble/x87 kernel.
+        // Every expected value comes from the pre-existing native reader rows.
+        for (value, row) in [
+            ("150%", "modifier_150pct"),
+            ("1.5", "modifier_1.5"),
+            ("150", "modifier_150"),
+            ("35%", "modifier_35pct"),
+        ] {
+            let map = IniFile::from_str(&format!("[General]\nPrismSupportModifier={value}\n"));
+            let result = owner
+                .load_scenario(NativeScenarioRulesPrefix::RandomMap(None), &map)
+                .unwrap();
+            assert_eq!(
+                result.into_parts().0.general.prism_support.modifier,
+                reader_modifier(row, 0),
+                "explicit {value}"
+            );
+        }
+    }
+    assert_eq!(
+        controls[1], controls[2],
+        "no hook preserves the compiled profile"
     );
-    let overridden = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
-    assert_eq!(overridden.general.prism_support.modifier, 150);
+    if crate::rules::ARES_ENABLED {
+        assert_eq!(controls[0], controls[1]);
+        assert_ne!(
+            controls[0], controls[3],
+            "explicit false overrides the legacy default"
+        );
+    } else {
+        assert_eq!(controls[1], controls[3]);
+        assert_ne!(
+            controls[0], controls[1],
+            "the ordinary engine uses the actual component declaration"
+        );
+    }
 }

@@ -1046,6 +1046,10 @@ impl ProcessedRulesLayers {
         self.native_registry_state().long_list_readers()
     }
 
+    pub(crate) fn prism_support_defaults(&self) -> Option<bool> {
+        self.native_registry_state().prism_support_defaults()
+    }
+
     pub(crate) fn native_registry_state(&self) -> &NativeRulesRegistryState {
         self.native_type_construction_trace.registry_state()
     }
@@ -3422,6 +3426,10 @@ pub(crate) struct NativeRulesRegistryState {
     /// None retains this build's original profile; explicit false selects128.
     #[serde(default)]
     long_list_readers: Option<bool>,
+    /// Immutable default-unit selection, installed before cold Rules reads.
+    /// The actual Prism values remain in rules_prism_support below.
+    #[serde(default)]
+    prism_support_defaults: Option<bool>,
     /// Ares Clear/AddDefaults rebuilds these at a destructive scenario reset;
     /// ordinary Process passes and saves retain the reached list reads.
     ares_prerequisites: Option<GenericPrerequisites>,
@@ -3518,6 +3526,7 @@ impl Default for NativeRulesRegistryState {
             fixed_sound_source: None,
             compatibility: RulesCompatibility::default(),
             long_list_readers: None,
+            prism_support_defaults: None,
             ares_prerequisites: crate::rules::ARES_ENABLED.then(GenericPrerequisites::default),
             ares_armors: crate::rules::ARES_ENABLED.then(ArmorCatalog::default),
             phobos_radiation_types: crate::rules::PHOBOS_ENABLED
@@ -3589,15 +3598,23 @@ impl Default for NativeRulesRegistryState {
 impl NativeRulesRegistryState {
     /// Install the admitted reader selection before any cold Process. Later
     /// Process/reset/save transitions carry this same immutable input.
-    pub(crate) fn with_long_list_readers(long_list_readers: Option<bool>) -> Self {
+    pub(crate) fn with_startup_readers(
+        long_list_readers: Option<bool>,
+        prism_support_defaults: Option<bool>,
+    ) -> Self {
         Self {
             long_list_readers,
+            prism_support_defaults,
             ..Self::default()
         }
     }
 
     pub(crate) fn long_list_readers(&self) -> Option<bool> {
         self.long_list_readers
+    }
+
+    pub(crate) fn prism_support_defaults(&self) -> Option<bool> {
+        self.prism_support_defaults
     }
 
     pub(crate) fn bind_fixed_art_source(&mut self, source: std::sync::Arc<IniFile>) {
@@ -4007,6 +4024,7 @@ impl NativeRulesRegistryState {
             fixed_art_source: self.fixed_art_source,
             fixed_sound_source: self.fixed_sound_source,
             long_list_readers: self.long_list_readers,
+            prism_support_defaults: self.prism_support_defaults,
             //6686C0..668BF0 has no RulesExt reconstruction. Early-map Process
             //686D35 precedes this TypeReset6876AC and its flags/phase survive.
             #[cfg(feature = "ares")]
@@ -5003,6 +5021,7 @@ struct RulesPassProcessor {
     image_theater: ImageTheater,
     compatibility: RulesCompatibility,
     long_list_readers: Option<bool>,
+    prism_support_defaults: Option<bool>,
     ares_prerequisites: Option<GenericPrerequisites>,
     /// Ordered Ares armor registry; Process retains it, destructive reset rebuilds it.
     ares_armors: Option<ArmorCatalog>,
@@ -5098,6 +5117,7 @@ impl RulesPassProcessor {
             image_theater: ImageTheater::Uninitialized,
             compatibility: registry_state.compatibility,
             long_list_readers: registry_state.long_list_readers,
+            prism_support_defaults: registry_state.prism_support_defaults,
             ares_prerequisites: registry_state.ares_prerequisites,
             ares_armors: registry_state.ares_armors,
             phobos_radiation_types: registry_state.phobos_radiation_types,
@@ -5830,7 +5850,11 @@ impl RulesPassProcessor {
             section.read_double_bits("ChargeToDrainRatio", self.rules_charge_to_drain_ratio);
         // ReadGeneral's Prism block (`0x0067114F..0x006711B8`), current values
         // as defaults; RulesClass keeps them across Full_Init's reset.
-        self.rules_prism_support = self.rules_prism_support.read_pass(section);
+        self.rules_prism_support = self.rules_prism_support.read_pass(
+            section,
+            self.prism_support_defaults
+                .unwrap_or(crate::rules::ARES_ENABLED),
+        );
         self.rules_spotlight.read_pass(section);
         // RulesCtor666DF8 starts TreeStrength at25. ReadGeneral671DD2..
         //671DEB retains the current signed dword; Process668EE8 reaches this
@@ -8242,6 +8266,7 @@ impl RulesPassProcessor {
                     fixed_sound_source: self.fixed_sound_source,
                     compatibility: self.compatibility,
                     long_list_readers: self.long_list_readers,
+                    prism_support_defaults: self.prism_support_defaults,
                     ares_prerequisites: self.ares_prerequisites,
                     ares_armors: self.ares_armors,
                     phobos_radiation_types: self.phobos_radiation_types,
