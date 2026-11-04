@@ -4880,6 +4880,18 @@ impl RuleSet {
             .map(|program| program.match_rules_policy())
             .transpose()?
             .flatten();
+        // CanTargetHouse10051B70 needs the retained Warhead relationships.
+        // Admit the candidate projection or the raw legacy reader, never a
+        // stale external binding or a silent stock fallback for explicit true.
+        if match_rules_policy.is_some_and(|policy| policy.warhead_house_filter == Some(true)) {
+            for (name, policy) in &emp.warheads {
+                if policy.is_none() && self.warheads[name].ares_rules().is_none() {
+                    return Err(format!(
+                        "Warhead House filtering requires relationship bindings: {name}"
+                    ));
+                }
+            }
+        }
         let names = self.weapon_names();
         let policies = names
             .into_iter()
@@ -5698,6 +5710,28 @@ impl RuleSet {
 
     pub(crate) const fn match_rules_policy(&self) -> Option<vera_mod_api::MatchRulesPolicy> {
         self.match_rules_policy
+    }
+
+    /// Ares TechnoClass_ReceiveDamage_Abilities1004AA5F..1004AA85 selects
+    /// CanTargetHouse10051B70 at the original late gate, independently of EMP.
+    /// Warhead relationships and live House identity keep their existing owners.
+    pub(crate) fn warhead_house_filter_enabled(&self) -> bool {
+        self.match_rules_policy
+            .and_then(|policy| policy.warhead_house_filter)
+            .unwrap_or(crate::rules::ARES_ENABLED)
+    }
+
+    /// BulletClass::DetonateAtCoord469EBA..46A290 is wholly replaced by
+    /// Ares1001A090, even with Splits=false. Preserve the explicit unported
+    /// boundary rather than silently executing the original fixed-nine fan.
+    pub(crate) fn airburst_tail_policy(&self) -> vera_mod_api::AirburstTailPolicy {
+        self.match_rules_policy
+            .and_then(|policy| policy.airburst_tail)
+            .unwrap_or(if crate::rules::ARES_ENABLED {
+                vera_mod_api::AirburstTailPolicy::UnsupportedReplacement
+            } else {
+                vera_mod_api::AirburstTailPolicy::RetailFixedNine
+            })
     }
 
     /// Ares1000B179/1000B1AF select existing Anim damage Warhead/House
@@ -7973,6 +8007,18 @@ impl RuleSet {
             b"anim-damage-v1".hash(&mut hasher);
             policy.use_source_house.hash(&mut hasher);
             policy.prefer_art_warhead.hash(&mut hasher);
+        }
+        if let Some(enabled) = self.match_rules_policy.and_then(|p| p.warhead_house_filter) {
+            b"warhead-house-filter-v1".hash(&mut hasher);
+            enabled.hash(&mut hasher);
+        }
+        if let Some(policy) = self.match_rules_policy.and_then(|p| p.airburst_tail) {
+            b"airburst-tail-v1".hash(&mut hasher);
+            match policy {
+                vera_mod_api::AirburstTailPolicy::RetailFixedNine => 0u8,
+                vera_mod_api::AirburstTailPolicy::UnsupportedReplacement => 1u8,
+            }
+            .hash(&mut hasher);
         }
         // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);

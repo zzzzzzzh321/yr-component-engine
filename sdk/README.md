@@ -3,10 +3,22 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.25.0 development candidate**, config version **17**, state version **1**;
+is the **0.26.0 development candidate**, config version **17**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.26 binds the ordinary Warhead House filter and existing Airburst
+boundary through `match_rules.warhead_house_filter` and `airburst_tail`.
+The reference declares the House filter independently of EMP activation; explicit
+true without effective Warhead relationships is rejected before publication.
+`unsupported_replacement` preserves the unimplemented replacement-fan boundary
+while parent damage still executes. Absence keeps the host profile; explicit
+false / `retail_fixed_nine` selects stock behavior. Actual component damage,
+formal firing, saved rebinding, legacy controls and real retail loading passed.
+Config17/state1/API v1/WIT are unchanged and require a matching host. This does
+not implement the replacement fan or claim GUI, audio-device, network,
+cross-platform or performance validation.
 
 Version 0.25 adds the pure `prism_support_defaults` declaration before the first
 Rules read. The reference component selects the existing default-unit correction

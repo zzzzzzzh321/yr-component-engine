@@ -2632,6 +2632,8 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
         registered_side_ui: None,
         building_presentation: Some(BuildingPresentationPolicy::default()),
         anim_damage: None,
+        warhead_house_filter: None,
+        airburst_tail: None,
     });
     let off = vera_mod_runtime::test_support::component_fixture_by_kind(
         &ModuleManifest {

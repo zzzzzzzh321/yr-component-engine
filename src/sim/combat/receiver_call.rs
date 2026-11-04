@@ -436,18 +436,19 @@ pub(super) fn resolve_receive_damage_with_input(
     // a live attacker's owner wins over arg7 sourceHouse. CanTargetHouse10051B70
     // replaces the stock ally gate after Poison and before Psychedelic, including
     // ignoreDefenses calls. Reuse the EMP/AttachEffect policy's retained owner.
-    #[cfg(feature = "ares")]
-    let ares_house_damage_allowed = warhead.ares_rules().map(|settings| {
-        let owner = source.map(|entity| entity.owner()).or(event.source_house);
-        settings.can_affect_house(
-            owner.is_some(),
-            owner == Some(target.owner()),
-            owner.is_some_and(|owner| allied(owner, target.owner())),
-            warhead.affects_allies,
-        )
-    });
-    #[cfg(not(feature = "ares"))]
-    let ares_house_damage_allowed = None;
+    let ares_house_damage_allowed = if rules.warhead_house_filter_enabled() {
+        warhead.emp_rules().map(|settings| {
+            let owner = source.map(|entity| entity.owner()).or(event.source_house);
+            settings.can_affect_house(
+                owner.is_some(),
+                owner == Some(target.owner()),
+                owner.is_some_and(|owner| allied(owner, target.owner())),
+                warhead.affects_allies,
+            )
+        })
+    } else {
+        None
+    };
 
     let target_view = damage::TargetDamageView {
         current_hp: target.health.current(),
@@ -785,5 +786,226 @@ mod house_damage_tests {
             receive("AffectsAllies=yes\nAffectsEnemies=no\n", true, true),
             if cfg!(feature = "ares") { 0 } else { 10 },
         );
+    }
+
+    #[test]
+    #[ignore = "requires VERA_SDK_COMBAT_TAIL_WASM and VERA_SDK_COMBAT_TAIL_PREVIOUS_WASM"]
+    fn sdk_warhead_house_gate_uses_frozen_flags_for_fresh_and_saved_receivers() {
+        use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
+        use crate::rules::native_processing::ProcessedRulesLayers;
+        use crate::rules::process_owner::NativeScenarioRulesPrefix;
+        use crate::rules::retail_sources::RetailRulesSources;
+        use crate::sim::runtime::{ScenarioGameplayProgram, bind_scenario_gameplay_resources};
+        use crate::sim::snapshot::GameSnapshot;
+        use vera_mod_api::{Context, HookKind, MatchRulesContext, ModuleManifest, Plan, Request};
+
+        let component = |key| std::fs::read(std::env::var_os(key).unwrap()).unwrap();
+        let current = component("VERA_SDK_COMBAT_TAIL_WASM");
+        let previous = component("VERA_SDK_COMBAT_TAIL_PREVIOUS_WASM");
+        let unchanged = Plan::unchanged(&Request {
+            api_version: 1,
+            context: Context::MatchRules(MatchRulesContext {}),
+            config: vec![],
+            state: vec![],
+        });
+        let selector_only = |enabled| {
+            let mut plan = unchanged.clone();
+            plan.match_rules = Some(
+                serde_json::from_value(serde_json::json!({
+                    "survival": "retail", "warhead_house_filter": enabled,
+                }))
+                .unwrap(),
+            );
+            vera_mod_runtime::test_support::component_fixture_by_kind(
+                &ModuleManifest {
+                    api_version: 1,
+                    id: "selector-only-wh-house".into(),
+                    version: "1".into(),
+                    state_version: 1,
+                    config_version: 1,
+                    hooks: vec![
+                        HookKind::Configure,
+                        HookKind::Attach,
+                        HookKind::Damage,
+                        HookKind::Tick,
+                        HookKind::MatchRules,
+                    ],
+                },
+                &serde_json::to_vec(&unchanged).unwrap(),
+                &[("match_rules", &serde_json::to_vec(&plan).unwrap())],
+            )
+        };
+        let off = selector_only(false);
+        let missing_relationships = selector_only(true);
+        let source = "[Clear]\nBuildable=yes\n[Countries]\n0=Americans\n1=Russians\n\
+            [VehicleTypes]\n0=TARGET\n[TARGET]\nStrength=1000\nArmor=light\n\
+            [Warheads]\n0=ALLY\n1=ENEMY\n2=OWNER\n\
+            [ALLY]\nAffectsAllies=no\n\
+            [ENEMY]\nAffectsAllies=yes\nAffectsEnemies=no\n\
+            [OWNER]\nAffectsAllies=yes\nAffectsOwner=no\n";
+        let hits = |sim: &mut crate::sim::world::Simulation,
+                    rules: &RuleSet,
+                    target,
+                    attacker,
+                    filtered,
+                    label: &str| {
+            for (name, invoker, forced) in [
+                ("ALLY", RAD_NO_ATTACKER, false),
+                ("ENEMY", attacker, true),
+                ("OWNER", RAD_NO_ATTACKER, false),
+            ] {
+                let before = sim.entities().get(target).unwrap().health.current();
+                let source = sim.interner.intern("Russians");
+                let wh = sim.interner.intern(name);
+                let event = EntityDamageEvent::direct_receiver(
+                    target,
+                    10,
+                    0,
+                    invoker,
+                    Some(source),
+                    wh,
+                    ReceiverCallFlags {
+                        ignore_defenses: forced,
+                        arg6: false,
+                    },
+                );
+                sim.commit_direct_damage_receiver(
+                    rules,
+                    Some(rules.overlay_registry()),
+                    event,
+                    crate::sim::world::FrameEffects::default(),
+                );
+                assert_eq!(
+                    before - sim.entities().get(target).unwrap().health.current(),
+                    if filtered { 0 } else { 10 },
+                    "{label}/{name}"
+                );
+            }
+        };
+        for (label, module, filtered, emp_off) in [
+            ("wh-current", Some(current.as_slice()), true, false),
+            ("wh-none", None, crate::rules::ARES_ENABLED, false),
+            (
+                "wh-previous",
+                Some(previous.as_slice()),
+                crate::rules::ARES_ENABLED,
+                false,
+            ),
+            ("wh-stock", Some(off.as_slice()), false, false),
+            ("wh-emp-off", Some(current.as_slice()), true, true),
+            (
+                "wh-missing-relationships",
+                Some(missing_relationships.as_slice()),
+                true,
+                false,
+            ),
+        ] {
+            let dir = audio_test_install(label);
+            let write =
+                |name: &str, bytes: &[u8]| std::fs::write(dir.path().join(name), bytes).unwrap();
+            if let Some(module) = module {
+                write("gameplay.wasm", module);
+                write(
+                    "vera-mod.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "api_version": 1, "program": "gameplay.wasm",
+                        "sha256": crate::util::sha256::sha256_hex(module),
+                    }))
+                    .unwrap(),
+                );
+            }
+            write(
+                "rulesmd.ini",
+                format!(
+                    "{source}{}",
+                    if emp_off {
+                        "[VeraFeatures]\nAresEMP=no\n"
+                    } else {
+                        ""
+                    }
+                )
+                .as_bytes(),
+            );
+            write("artmd.ini", b"");
+            let assets =
+                crate::mod_sdk::open_active_assets(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
+                    .unwrap();
+            let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
+            let mut owner = RetailRulesSources::select(&assets)
+                .unwrap()
+                .into_owner(audio.sounds().clone(), audio.eva().clone())
+                .unwrap();
+            let (mut rules, _, _, _) = owner
+                .load_scenario(
+                    NativeScenarioRulesPrefix::NonCampaign(None),
+                    &IniFile::empty(),
+                )
+                .unwrap()
+                .into_parts();
+            let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 17);
+            let admission = bind_scenario_gameplay_resources(
+                &mut rules,
+                &assets,
+                ScenarioGameplayProgram::Fresh {
+                    simulation: &mut sim,
+                    rules_owner: &mut owner,
+                },
+                "tem",
+                "TEMPERATE",
+            );
+            // A selector alone cannot supply ordinary-host WH relationships.
+            // Legacy may reuse its original reader; neither path may silently
+            // publish true and then let the receiver fall back to stock.
+            if label == "wh-missing-relationships" && !crate::rules::ARES_ENABLED {
+                assert!(
+                    admission
+                        .unwrap_err()
+                        .contains("Warhead House filtering requires relationship bindings")
+                );
+                assert!(rules.match_rules_policy().is_none());
+                assert!(sim.external_mod.is_none());
+                continue;
+            }
+            admission.unwrap();
+            assert_eq!(rules.warhead_house_filter_enabled(), filtered, "{label}");
+            if emp_off {
+                assert!(!rules.emp_enabled());
+            }
+            let target = sim
+                .spawn_object("TARGET", "Russians", 20, 20, 0, &rules)
+                .unwrap();
+            let attacker = sim
+                .spawn_object("TARGET", "Americans", 22, 20, 0, &rules)
+                .unwrap();
+            hits(&mut sim, &rules, target, attacker, filtered, label);
+            if label != "wh-current" {
+                continue;
+            }
+
+            let hash = rules.simulation_config_hash();
+            let mut saved = GameSnapshot::load(&GameSnapshot::save(&sim, 0, 0, "WH-HOUSE", 0))
+                .unwrap()
+                .sim;
+            let retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
+                &crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let mut rebound = owner.project_saved_scenario_rules(&retained).unwrap();
+            bind_scenario_gameplay_resources(
+                &mut rebound,
+                &assets,
+                ScenarioGameplayProgram::Saved(&saved),
+                "tem",
+                "TEMPERATE",
+            )
+            .unwrap();
+            assert_eq!(rebound.simulation_config_hash(), hash);
+            assert_eq!(
+                crate::util::save_codec::serialize(rebound.external_mod.as_deref().unwrap())
+                    .unwrap(),
+                crate::util::save_codec::serialize(saved.external_mod.as_ref().unwrap()).unwrap()
+            );
+            hits(&mut saved, &rebound, target, attacker, true, "wh-saved");
+        }
     }
 }

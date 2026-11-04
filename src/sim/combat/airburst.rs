@@ -12,8 +12,8 @@ use crate::sim::world::Simulation;
 pub(super) fn emit(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDetonation) {
     // Installed Ares replaces this entire tail with1001A090, including when
     // Splits=false. Its circular AirburstSpread consumer is a separate chain;
-    // never silently run the original fixed-nine implementation in that build.
-    if crate::rules::ARES_ENABLED {
+    // never silently run the original fixed-nine implementation for that policy.
+    if rules.airburst_tail_policy() == vera_mod_api::AirburstTailPolicy::UnsupportedReplacement {
         return;
     }
     // Native always has an actual `this` Bullet. Receiver-only packets (for

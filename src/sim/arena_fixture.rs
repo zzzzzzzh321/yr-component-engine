@@ -39,6 +39,43 @@ pub fn rival_arena(rules: &RuleSet, seed: u64) -> Simulation {
     rival_arena_with_size(rules, seed, 32)
 }
 
+/// Supply an arena with the existing empty map owners needed by saved-world
+/// admission, including Overlay/Smudge and the native Tiberium queues.
+pub fn prepare_empty_map_authority(sim: &mut Simulation, rules: &RuleSet) {
+    // The movement arena supplies terrain/navigation but no map OverlayPack.
+    // Install the same empty map owners and queue initialization that a real
+    // no-overlay/no-smudge map has before validating a saved-world continuation.
+    let terrain = sim.resolved_terrain.as_ref().unwrap();
+    let overlay = crate::sim::overlay_grid::OverlayGrid::new(terrain.width(), terrain.height());
+    let smudges = crate::sim::smudge_grid::SmudgeGrid::from_map_entries(
+        &[],
+        &rules.smudge_types,
+        terrain,
+        &overlay,
+        terrain.width(),
+        terrain.height(),
+    );
+    let (width, height) = sim.map_size_diamond().unwrap();
+    let overlays = crate::rules::overlay_types::OverlayTypeRegistry::empty();
+    crate::sim::runtime::initialize_native_tiberium_queues(
+        sim,
+        &Default::default(),
+        &Default::default(),
+        rules,
+        &overlays,
+        Some(&overlay),
+        (
+            u16::try_from(width).unwrap(),
+            u16::try_from(height).unwrap(),
+        ),
+    )
+    .expect("the supplied empty overlay owner initializes map queues");
+    sim.install_overlay_grid_for_load(overlay);
+    sim.install_smudge_grid(smudges);
+    sim.restore_map_authority_after_snapshot_load(rules, &overlays, None)
+        .expect("the source arena satisfies the complete map-authority contract");
+}
+
 /// The same two-house arena with enough room for a mechanism's footprint.
 pub fn rival_arena_with_size(rules: &RuleSet, seed: u64, size: u16) -> Simulation {
     let mut sim = Simulation::with_seed(seed);

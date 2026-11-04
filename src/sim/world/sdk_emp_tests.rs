@@ -249,41 +249,6 @@ fn scene_from_ini(
     (processed, rules, sim, target, source)
 }
 
-fn prepare_empty_map_authority(sim: &mut Simulation, rules: &RuleSet) {
-    // The movement arena supplies terrain/navigation but no map OverlayPack.
-    // Install the same empty map owners and queue initialization that a real
-    // no-overlay/no-smudge map has before validating a saved-world continuation.
-    let terrain = sim.resolved_terrain.as_ref().unwrap();
-    let overlay = crate::sim::overlay_grid::OverlayGrid::new(terrain.width(), terrain.height());
-    let smudges = crate::sim::smudge_grid::SmudgeGrid::from_map_entries(
-        &[],
-        &rules.smudge_types,
-        terrain,
-        &overlay,
-        terrain.width(),
-        terrain.height(),
-    );
-    let (width, height) = sim.map_size_diamond().unwrap();
-    let overlays = crate::rules::overlay_types::OverlayTypeRegistry::empty();
-    crate::sim::runtime::initialize_native_tiberium_queues(
-        sim,
-        &Default::default(),
-        &Default::default(),
-        rules,
-        &overlays,
-        Some(&overlay),
-        (
-            u16::try_from(width).unwrap(),
-            u16::try_from(height).unwrap(),
-        ),
-    )
-    .expect("the supplied empty overlay owner initializes map queues");
-    sim.install_overlay_grid_for_load(overlay);
-    sim.install_smudge_grid(smudges);
-    sim.restore_map_authority_after_snapshot_load(rules, &overlays, None)
-        .expect("the source arena satisfies the complete map-authority contract");
-}
-
 fn pulse(sim: &mut Simulation, rules: &RuleSet, source: u64, target: u64) {
     sim.commit_fire_visit(
         FireVisit::Direct {
@@ -331,7 +296,7 @@ fn sdk_emp_parent_bullet_tags_and_actual_visits_survive_frozen_program_restore()
     let wasm = component();
     let (processed, rules, mut sim, target, source) = scene(&wasm, "TANK", "Americans");
     install_tag(&mut sim, &rules, target, source);
-    prepare_empty_map_authority(&mut sim, &rules);
+    crate::sim::arena_fixture::prepare_empty_map_authority(&mut sim, &rules);
     assert!(sim.can_deploy_slash_unload(target, &rules));
     let health = sim.entities().get(target).unwrap().health.current();
     pulse(&mut sim, &rules, source, target);
