@@ -107,6 +107,7 @@ fn early_resources(assets: &AssetManager) -> Result<native::StartupResources, St
                 campaign_side_byte: policy.campaign_side_byte,
             });
     resources.prism_support_defaults = admitted.prism_support_defaults_policy()?;
+    resources.sound_sample_admission = admitted.sound_sample_admission_policy()?;
     if !admitted.has_startup_resources() {
         return Ok(resources);
     }

@@ -101,6 +101,10 @@ impl AdmittedComponent {
                 .manifest
                 .hooks
                 .contains(&api::HookKind::PrismSupportDefaults)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::SoundSampleAdmission)
     }
 
     pub(super) fn startup_resource_policy(
@@ -157,6 +161,19 @@ impl AdmittedComponent {
         Ok(self
             .evaluate_startup(Context::PrismSupportDefaults)?
             .prism_support_defaults)
+    }
+
+    pub(super) fn sound_sample_admission_policy(&self) -> Result<Option<bool>, String> {
+        if !self
+            .manifest
+            .hooks
+            .contains(&api::HookKind::SoundSampleAdmission)
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate_startup(Context::SoundSampleAdmission)?
+            .sound_sample_admission)
     }
 
     fn evaluate_startup(&self, context: Context) -> Result<Plan, String> {

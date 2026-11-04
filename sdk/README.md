@@ -3,10 +3,20 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.26.0 development candidate**, config version **17**, state version **1**;
+is the **0.27.0 development candidate**, config version **17**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.27 adds the pure `sound_sample_admission` declaration before the
+fixed SOUNDMD catalog is first read. The reference selects unindexed sample
+admission without an INI switch; absence keeps the host profile, while explicit
+false requires indexed names when an index exists. The original catalog, sample
+selection and WAV decoder remain host-owned. Reacquiring assets retains the same
+frozen catalog. An equal raw INI hash does not prove equal admission semantics;
+exact component identity and the fixed source recipe remain authoritative.
+Config17/state1/API v1/WIT are unchanged; the new declaration requires a matching
+host. Audio-device output and cross-platform execution were not tested.
 
 Version 0.26 binds the ordinary Warhead House filter and existing Airburst
 boundary through `match_rules.warhead_house_filter` and `airburst_tail`.

@@ -3501,6 +3501,144 @@ mod tests {
         assert!(play("Full"));
     }
 
+    #[test]
+    #[ignore = "requires VERA_SDK_SOUND_SAMPLE_WASM and VERA_SDK_SOUND_SAMPLE_PREVIOUS_WASM"]
+    fn sdk_sound_sample_app_index_admission_reaches_the_loose_wav_decoder() {
+        use crate::app::process_assets::ProcessAssets;
+        use crate::assets::{
+            asset_manager::{MediaArchiveMode, test_support::audio_test_install},
+            audio_bag::test_support::build_idx,
+        };
+        use vera_mod_api::{Context, HookKind, ModuleManifest, Plan, Request};
+        let current =
+            std::fs::read(std::env::var_os("VERA_SDK_SOUND_SAMPLE_WASM").unwrap()).unwrap();
+        let previous =
+            std::fs::read(std::env::var_os("VERA_SDK_SOUND_SAMPLE_PREVIOUS_WASM").unwrap())
+                .unwrap();
+        let request = Request {
+            api_version: 1,
+            context: Context::SoundSampleAdmission,
+            config: vec![],
+            state: vec![],
+        };
+        let unchanged = Plan::unchanged(&request);
+        let mut selected = unchanged.clone();
+        selected.sound_sample_admission = Some(false);
+        let stock = vera_mod_runtime::test_support::component_fixture_by_kind(
+            &ModuleManifest {
+                api_version: 1,
+                id: "indexed-samples".into(),
+                version: "1".into(),
+                state_version: 1,
+                config_version: 1,
+                hooks: vec![
+                    HookKind::Configure,
+                    HookKind::Attach,
+                    HookKind::Damage,
+                    HookKind::Tick,
+                    HookKind::SoundSampleAdmission,
+                ],
+            },
+            &serde_json::to_vec(&unchanged).unwrap(),
+            &[(
+                "sound_sample_admission",
+                &serde_json::to_vec(&selected).unwrap(),
+            )],
+        );
+        let wav = build_test_wav(44100, 16, 1, &[0, 1, 0, 2]);
+        let expected_wav = decode_wav(&wav, "unindexed.wav").unwrap();
+        let mut source_hash = None;
+        for (label, module, allows_loose) in [
+            ("current", Some(current.as_slice()), true),
+            ("none", None, crate::rules::ARES_ENABLED),
+            (
+                "previous",
+                Some(previous.as_slice()),
+                crate::rules::ARES_ENABLED,
+            ),
+            ("stock", Some(stock.as_slice()), false),
+        ] {
+            let dir = audio_test_install(&format!("sdk-sound-sample-{label}"));
+            let write = |name: &str, bytes: &[u8]| {
+                std::fs::write(dir.path().join(name), bytes).unwrap();
+            };
+            for (name, text) in [
+                ("rulesmd.ini", "[General]\nBuildSpeed=.7\n"),
+                ("artmd.ini", "[Animations]\n"),
+                ("aimd.ini", "[AI]\n"),
+                ("evamd.ini", "[DialogList]\n"),
+                (
+                    "soundmd.ini",
+                    "[SoundList]\n0=LooseCue\n1=IndexedCue\n\
+                     [LooseCue]\nSounds=unindexed\n[IndexedCue]\nSounds=indexed\n",
+                ),
+            ] {
+                write(name, text.as_bytes());
+            }
+            write("audio.idx", &build_idx(&[("indexed", 0, 4, 22050, 4)]));
+            write("audio.bag", &[0, 1, 0, 2]);
+            write("unindexed.wav", &wav);
+            if let Some(module) = module {
+                write("gameplay.wasm", module);
+                write(
+                    "vera-mod.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "api_version": 1, "program": "gameplay.wasm",
+                        "sha256": crate::util::sha256::sha256_hex(module),
+                    }))
+                    .unwrap(),
+                );
+            }
+            let assets =
+                crate::mod_sdk::open_active_assets(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
+                    .unwrap();
+            let mut process = ProcessAssets::new(MediaArchiveMode::STOCK_DIGITAL, true);
+            process.initialize_sources_if_needed(&assets).unwrap();
+            let audio = process.audio_catalog().unwrap();
+            let index = audio
+                .index()
+                .expect("the App must supply a real sample index");
+            assert!(index.find_sample_index("unindexed").is_none());
+            assert!(index.find_sample_index("indexed").is_some());
+            // This hash identifies the same physical INI, not equal admission semantics.
+            assert_eq!(
+                *source_hash.get_or_insert(audio.sounds().source_hash()),
+                audio.sounds().source_hash()
+            );
+            let mut arbiter = SoundArbiter::new(0);
+            for (cue, admitted) in [("LooseCue", allows_loose), ("IndexedCue", true)] {
+                let request = PlayRequest {
+                    key: registry_key(cue),
+                    facts: entry_facts(cue, audio.sounds()),
+                    volume_linear: VOLUME_SCALE,
+                    pan: VOLUME_SCALE / 2,
+                };
+                // AllocateFromPool405190 must admit before LoadSamples4048B0.
+                assert_eq!(
+                    arbiter.submit(&request, 0).is_some(),
+                    admitted,
+                    "{label}/{cue}"
+                );
+                if admitted {
+                    let decoded = resolve_entry_playback(
+                        audio.sounds().get(cue).unwrap(),
+                        &mut ScriptedRng::new(&[]),
+                        |name| load_sfx(name, &assets, Some(index)),
+                    )
+                    .unwrap()
+                    .decoded;
+                    assert!(!decoded.samples.is_empty());
+                    if cue == "LooseCue" {
+                        assert_eq!(decoded.sample_rate, expected_wav.sample_rate);
+                        assert_eq!(decoded.samples, expected_wav.samples);
+                    } else {
+                        assert_eq!(decoded.sample_rate, 22050);
+                    }
+                }
+            }
+        }
+    }
+
     /// `Control=random` over three samples: one `RandomRanged(0, 2)` draw and
     /// the equal-bounds pick that follows draws nothing.
     #[test]

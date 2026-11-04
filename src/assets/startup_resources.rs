@@ -79,6 +79,10 @@ pub struct StartupResources {
     /// Default units at the sole Prism modifier reader: None keeps the host
     /// profile, true normalizes the retained percent and false selects retail.
     pub prism_support_defaults: Option<bool>,
+    /// Fixed SOUNDMD admission: true retains unindexed sample names, false
+    /// uses the process index, and None preserves the existing reader profile.
+    /// Playback still uses the same index/BAG, VFS and decoder owners.
+    pub sound_sample_admission: Option<bool>,
     pub audio: Option<AudioCatalogPolicy>,
     pub strings: Option<StringSupplementProvider>,
 }

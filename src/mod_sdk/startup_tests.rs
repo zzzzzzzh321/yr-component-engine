@@ -573,6 +573,7 @@ fn sdk_startup_deferred_old_component_binds_but_new_startup_and_invalid_identity
     for context in [
         vera_mod_api::Context::SpawnIdentity,
         vera_mod_api::Context::PrismSupportDefaults,
+        vera_mod_api::Context::SoundSampleAdmission,
     ] {
         let hook = context.kind();
         let label = hook.as_str();
@@ -592,6 +593,9 @@ fn sdk_startup_deferred_old_component_binds_but_new_startup_and_invalid_identity
             }
             vera_mod_api::Context::PrismSupportDefaults => {
                 plan.prism_support_defaults = Some(false)
+            }
+            vera_mod_api::Context::SoundSampleAdmission => {
+                plan.sound_sample_admission = Some(false)
             }
             _ => unreachable!(),
         }
@@ -626,6 +630,10 @@ fn sdk_startup_deferred_old_component_binds_but_new_startup_and_invalid_identity
             ),
             vera_mod_api::Context::PrismSupportDefaults => assert_eq!(
                 pure_assets.startup_resources().prism_support_defaults,
+                Some(false),
+            ),
+            vera_mod_api::Context::SoundSampleAdmission => assert_eq!(
+                pure_assets.startup_resources().sound_sample_admission,
                 Some(false),
             ),
             _ => unreachable!(),

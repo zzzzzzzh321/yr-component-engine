@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::assets::asset_manager::AssetManager;
 use crate::assets::audio_bag::AudioIndex;
 use crate::rules::retail_sources::{IniSourceIdentity, select_ini};
-use crate::rules::sound_ini::{EvaReadMode, EvaRegistry, SoundRegistry};
+use crate::rules::sound_ini::{EvaReadMode, EvaRegistry, SoundRegistry, SoundSampleReadMode};
 
 #[derive(Debug)]
 pub struct AudioDefinitions {
@@ -52,6 +52,11 @@ impl AudioDefinitions {
         index: Option<&AudioIndex>,
         eva_mode: EvaReadMode,
     ) -> Self {
+        let sample_mode = match assets.startup_resources().sound_sample_admission {
+            Some(true) => SoundSampleReadMode::AllowUnindexed,
+            Some(false) => SoundSampleReadMode::IndexedOnly,
+            None => SoundSampleReadMode::profile_default(),
+        };
         let sound = select_ini(assets, "soundmd.ini")
             .map_err(|error| log::warn!("Audio definitions: {error}"))
             .ok();
@@ -59,7 +64,7 @@ impl AudioDefinitions {
             sound
                 .as_ref()
                 .map_or_else(SoundRegistry::default, |selected| {
-                    SoundRegistry::from_ini_admitting(&selected.ini, index)
+                    SoundRegistry::from_ini_admitting_with_mode(&selected.ini, index, sample_mode)
                 }),
         );
         let eva = select_ini(assets, "evamd.ini")

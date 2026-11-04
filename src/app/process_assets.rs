@@ -678,6 +678,7 @@ mod tests {
         };
         assert_eq!(frozen.spawn_identity, Some(identity));
         assert_eq!(frozen.prism_support_defaults, Some(true));
+        assert_eq!(frozen.sound_sample_admission, Some(true));
         let StartupComponentSource::Admitted {
             bytes: original, ..
         } = &frozen.component
@@ -692,6 +693,7 @@ mod tests {
         assert_eq!(process.spawn_identity_policy(), Some(identity));
         assert_eq!(process.csf.as_ref().unwrap().get("NAME"), Some("extension"));
         let audio = process.audio_catalog.as_ref().unwrap();
+        let sounds = Arc::clone(audio.definitions.sounds());
         let cue = audio.sounds().get("StartupCue").unwrap();
         assert!(cue.samples_resolved);
         let (entry, data) = audio.index().unwrap().get(&cue.sounds[0]).unwrap();
@@ -711,6 +713,10 @@ mod tests {
             recovered.startup_resources().prism_support_defaults,
             Some(true)
         );
+        assert_eq!(
+            recovered.startup_resources().sound_sample_admission,
+            Some(true)
+        );
         let StartupComponentSource::Admitted { bytes, .. } =
             &recovered.startup_resources().component
         else {
@@ -722,6 +728,10 @@ mod tests {
             recovered.startup_resources().strings.as_ref().unwrap(),
         ));
         process.initialize_sources_if_needed(&recovered).unwrap();
+        assert!(Arc::ptr_eq(
+            &sounds,
+            process.audio_catalog.as_ref().unwrap().definitions.sounds(),
+        ));
         assert_eq!(process.csf.as_ref().unwrap().get("NAME"), Some("extension"));
         let previous = std::fs::read(std::env::var_os("VERA_SDK_PREVIOUS_WASM").unwrap()).unwrap();
         install_component(&previous);

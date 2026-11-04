@@ -320,6 +320,23 @@ impl SoundEntry {
     }
 }
 
+/// Sample admission for the one fixed SOUNDMD catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SoundSampleReadMode {
+    IndexedOnly,
+    AllowUnindexed,
+}
+
+impl SoundSampleReadMode {
+    pub(crate) const fn profile_default() -> Self {
+        if crate::rules::ARES_ENABLED {
+            Self::AllowUnindexed
+        } else {
+            Self::IndexedOnly
+        }
+    }
+}
+
 /// Registry of all sound definitions, keyed by uppercase sound ID.
 #[derive(Debug, Clone, Default)]
 pub struct SoundRegistry {
@@ -364,6 +381,22 @@ impl SoundRegistry {
     /// index, as `AddSample @ 0x004064A0` does: startup builds the index
     /// (`52BBC7 -> 406CE8`) before Init_Game reads SOUNDMD (`52C796`).
     pub fn from_ini_admitting(ini: &IniFile, index: Option<&AudioIndex>) -> Self {
+        Self::from_ini_admitting_with_mode(ini, index, SoundSampleReadMode::profile_default())
+    }
+
+    /// Ares AddSample1005AFA0 tries its loose loader1005A810 after an IDX
+    /// miss (1005AFF4..1005AFFA), unlike stock406502..406510's unresolved
+    /// entry gate. Preserve VERA's existing lexical admission for that mode;
+    /// the playback owner still receives the actual process index.
+    pub(crate) fn from_ini_admitting_with_mode(
+        ini: &IniFile,
+        index: Option<&AudioIndex>,
+        mode: SoundSampleReadMode,
+    ) -> Self {
+        let index = match mode {
+            SoundSampleReadMode::IndexedOnly => index,
+            SoundSampleReadMode::AllowUnindexed => None,
+        };
         let source_hash = ini.content_hash();
         let mut entries: HashMap<String, SoundEntry> = HashMap::new();
         let mut native_order = Vec::new();
@@ -601,7 +634,8 @@ fn read_entry(
 /// Installed Ares replaces this function (`VocClassData_AddSample`
 /// `0x1005AFA0`, hook record in `tools/rules_oracle/ares_audio_bags.json`): a
 /// missed name goes to its loose-sample loader (`0x1005AFF4..0x1005AFFA`) and
-/// `+0x0C` is never cleared, so the Ares build keeps every name too.
+/// `+0x0C` is never cleared. The fixed catalog's selected mode keeps lexical
+/// names for that existing VERA fallback; it does not validate loose files.
 fn add_sample(
     sounds: &mut Vec<String>,
     samples_resolved: &mut bool,
@@ -612,8 +646,6 @@ fn add_sample(
         return;
     }
     let name = token.trim_start_matches(['$', '#']);
-    #[cfg(feature = "ares")]
-    let index = index.filter(|_| false);
     match index {
         Some(index) if index.find_sample_index(name).is_none() => *samples_resolved = false,
         _ if !name.is_empty() => sounds.push(name.to_string()),
