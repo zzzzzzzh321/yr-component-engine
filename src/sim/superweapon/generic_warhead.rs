@@ -15,7 +15,7 @@ use crate::sim::intern::InternedId;
 use crate::sim::projectile::ProjectileCoord;
 use crate::sim::world::{FrameEffects, SimSoundEvent, Simulation};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ares"))]
 #[path = "generic_warhead_tests.rs"]
 mod tests;
 
@@ -25,11 +25,13 @@ pub(super) fn can_launch(
     sw: &SuperWeaponType,
     (x, y): (u16, u16),
 ) -> bool {
-    sw.generic_warhead
-        .as_ref()
-        .and_then(|settings| settings.warhead.as_deref())
-        .and_then(|id| rules.warhead(id))
-        .is_some()
+    rules.superweapon_semantics().custom_payloads
+        && sw
+            .generic_warhead
+            .as_ref()
+            .and_then(|settings| settings.warhead.as_deref())
+            .and_then(|id| rules.warhead(id))
+            .is_some()
         && sim
             .resolved_terrain
             .as_ref()

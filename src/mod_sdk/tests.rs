@@ -32,7 +32,7 @@ fn entity() -> api::EntityContext {
 fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     let host = NativeHost::configuration(
         IniFile::from_str(
-            "[S]\nNumber=$12\nNegative=-255\nBad=garbage\nClear=<default>\nCppClear=<none>\nRate=0.125\nPrecise=0.10000000000000001\nName=none\nYes=  yes\nEmpty=\nMission=Hunt\nThreshold=inair\n",
+            "[S]\nNumber=$12\nNegative=-255\nBad=garbage\nClear=<default>\nCppClear=<none>\nRate=0.125\nPrecise=0.10000000000000001\nName=none\nYes=  yes\nEmpty=\nMission=Hunt\nThreshold=inair\nMask=land,water\nUnknownMask=land,bogus\nSpacedMask=land, water\nCommas=,,,\n",
         ),
         Vec::new(),
     );
@@ -90,6 +90,41 @@ fn sdk_native_nullable_readers_preserve_clear_and_failed_conversion_policy() {
     assert_eq!(read("Mission", "ares-nullable-mission", b"null"), 15);
     assert_eq!(read("Name", "ares-nullable-mission", b"15"), 15);
     assert_eq!(read("Number", "ares-nullable-mission", b"15"), 15);
+    // Native comma masks keep token spaces and fail the whole read on an
+    // unknown token; successful zero and an absent read remain distinct.
+    let tokens = br#"[["land",1],["LAND",8],["water",2],["none",0]]"#;
+    assert_eq!(read("Mask", "comma-mask:2048", tokens), 3);
+    assert_eq!(
+        read("UnknownMask", "comma-mask:2048", tokens),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        read("SpacedMask", "comma-mask:2048", tokens),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        read("Empty", "comma-mask:2048", tokens),
+        serde_json::Value::Null
+    );
+    assert_eq!(read("Commas", "comma-mask:2048", tokens), 0);
+    assert_eq!(read("Name", "comma-mask:2048", tokens), 0);
+    assert!(
+        host.config_read("S", "Mask", "comma-mask:2048", br#"{"land":1}"#)
+            .is_err()
+    );
+    let rejects_table = |tokens: Vec<(String, u32)>| {
+        host.config_read(
+            "S",
+            "Mask",
+            "comma-mask:2048",
+            &serde_json::to_vec(&tokens).unwrap(),
+        )
+        .is_err()
+    };
+    assert!(rejects_table(vec![("land".into(), 1); 257]));
+    assert!(rejects_table(vec![("x".repeat(129), 1)]));
+    assert!(rejects_table(vec![(String::new(), 1)]));
+    assert!(rejects_table(vec![("bad\nname".into(), 1)]));
 }
 
 #[test]
@@ -217,7 +252,9 @@ fn sdk_fixed_art_readers_use_the_frozen_source_and_explicit_capability() {
             .is_err()
     );
     assert!(
-        cameo_host.config_read("ART", "CameoPCX", "source-pcx-filename", &input).is_err()
+        cameo_host
+            .config_read("ART", "CameoPCX", "source-pcx-filename", &input)
+            .is_err()
     );
     assert!(
         NativeHost::simulation()

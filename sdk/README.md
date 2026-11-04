@@ -3,10 +3,27 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.27.0 development candidate**, config version **17**, state version **1**;
+is the **0.28.0 development candidate**, config version **18**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.28 moves the existing SuperWeapon extensions into
+`features/superweapons/`. `configure_super_read` runs at the original Rules
+visit, preserving first-visit initialization and SW.Warhead reference allocation;
+`superweapon_resource` publishes one immutable batch for providers, availability,
+initial/virtual charge, payments, GenericWarhead, UnitDelivery and presentation.
+Authors use the existing Ares INI keys without an extra enable tag. Shared Host
+readers and fixed audio catalogs remain authoritative; the original engine owns
+charge/history, money, two-stage selection and delivery queues, without per-frame
+Wasm mutations.
+
+This candidate uses config18/state1 and the same API v1/WIT name, with a matching
+newer host required for the new hooks. Absent declarations preserve the host
+profile; an explicit default policy selects stock behavior. Restore uses the
+exact saved component and frozen configuration; preserve old host/component
+pairs for old saves. Scope remains the previously implemented subset, excluding
+full charge-drain, additional payload kinds and additional AI targeting modes.
 
 Version 0.27 adds the pure `sound_sample_admission` declaration before the
 fixed SOUNDMD catalog is first read. The reference selects unindexed sample

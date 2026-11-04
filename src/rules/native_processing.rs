@@ -23,9 +23,7 @@ use crate::rules::sound_ini::{EvaRegistry, SoundRegistry};
 
 use crate::rules::missile_spawn::{MissileFamily, MissileSpawnRules};
 use crate::rules::object_image::{ImageTheater, ObjectImageKind, ObjectImageState};
-use crate::rules::object_type::{
-    InfantryInfiltration, InfantryPips, ObjectCategory, WEAPON_SLOT_COUNT,
-};
+use crate::rules::object_type::{InfantryInfiltration, InfantryPips, ObjectCategory, WEAPON_SLOT_COUNT};
 use crate::rules::powerups::{PowerupTable, PowerupsAccumulator};
 use crate::rules::prerequisite::{Prerequisite, PrerequisiteGroup, parse_prerequisites};
 use crate::rules::projectile_type::ProjectileArtState;
@@ -51,6 +49,8 @@ use std::hash::{Hash, Hasher};
 
 #[path = "native_faction.rs"]
 mod faction;
+#[path = "native_superweapon.rs"]
+mod superweapon;
 
 /// AbstractType constructor410800's stored byte ID. The INI store represents
 /// native bytes as characters, so this cut is shared by Type and Campaign
@@ -89,6 +89,38 @@ pub(crate) fn house_type_mask_from_indices(indices: impl Iterator<Item = i32>) -
     indices
         .filter(|&index| index != -1)
         .fold(0, |mask, index| mask | 1u32.wrapping_shl(index as u32))
+}
+
+/// ReadOwners4750D0/48DEB0 shares this bounded physical-list reader with the
+/// installed SWTypeExt Country-mask reader. Lookup stays with the live owner.
+fn read_country_mask(
+    section: &IniSection,
+    key: &str,
+    mut find: impl FnMut(&str) -> i32,
+) -> Option<u32> {
+    Some(house_type_mask_from_indices(
+        section
+            .read_list(key, 128)?
+            .into_iter()
+            .map(|token| find(token)),
+    ))
+}
+
+/// Ares pointer-vector10010850 and raw Super IndexLookup1000D4D0 use the same
+/// bounded token walk; their supplied Find owners preserve the none ordering.
+fn read_registered_index_list(
+    section: &IniSection,
+    key: &str,
+    capacity: usize,
+    find: impl FnMut(&str) -> Option<usize>,
+) -> Option<Vec<usize>> {
+    Some(
+        section
+            .read_list(key, capacity)?
+            .into_iter()
+            .filter_map(find)
+            .collect(),
+    )
 }
 
 /// Installed Ares Country Find1001BA90: reject none/<none> via10003950,
@@ -152,7 +184,8 @@ fn read_ares_registered_index<'a>(
 /// BuildingTypeExt's SuperWeapons IndexLookup1000D4D0: raw stored-ID
 /// comparison, including a registered sentinel-named entry. Unlike the
 /// pointer Find template, the none predicate runs only after a failed lookup.
-/// The immutable RuleSet array-index projection uses this same owner.
+/// The immutable RuleSet array-index projection and native raw family Find
+/// share this scan; callers that reject none do so before entering it.
 pub(crate) fn super_weapon_index_of_name<'a>(
     incoming: &str,
     mut ids: impl Iterator<Item = &'a str>,
@@ -741,6 +774,8 @@ pub(crate) struct SdkRegistryPass {
     production: vera_mod_api::ProductionRegistryView,
     foundation: vera_mod_api::FoundationRegistryView,
     cameo: vera_mod_api::CameoRegistryView,
+    superweapon: vera_mod_api::SuperWeaponRegistryView,
+    superweapon_reads: Vec<superweapon::SuperReadRecord>,
     fixed_art: Option<std::sync::Arc<IniFile>>,
     fixed_sound_source: Option<std::sync::Arc<SoundRegistry>>,
     fixed_art_hash: u64,
@@ -1238,13 +1273,54 @@ impl ProcessedRulesLayers {
         }
         #[cfg(not(feature = "ares"))]
         if registry.families.values().flatten().any(|member| {
-            member.super_weapon_building_requirements.is_some()
-                || member.generic_super_weapon_warhead.is_some()
-                || member.unit_delivery.is_some()
+            member.super_weapon_building_requirements.is_some() || member.unit_delivery.is_some()
         }) {
             return Err(RulesError::InvalidSavedState(
                 "saved Rules contain disabled Ares extension state",
             ));
+        }
+        #[cfg(not(feature = "ares"))]
+        if registry
+            .families
+            .values()
+            .flatten()
+            .any(|member| member.generic_super_weapon_warhead.is_some())
+        {
+            // This raw slot is written only by the bounded physical reference
+            // action. Saved loading first reattaches its exact validated
+            // Program; an arbitrary current plugin or absent seed is not
+            // authority to admit previously disabled native state.
+            let authorized = registry
+                .sdk_configuration_seed
+                .as_ref()
+                .is_some_and(|program| {
+                    program.has_super_read() && program.validate_restore().is_ok()
+                });
+            if !authorized {
+                return Err(RulesError::InvalidSavedState(
+                    "saved SuperWeapon references require their admitted component",
+                ));
+            }
+        }
+        for (&family, members) in &registry.families {
+            for member in members {
+                if let Some(warhead) = &member.generic_super_weapon_warhead {
+                    if family != RulesTypeFamily::SuperWeapon
+                        || !registry
+                            .families
+                            .get(&RulesTypeFamily::Warhead)
+                            .is_some_and(|values| {
+                                values
+                                    .iter()
+                                    .any(|value| value.native_stored_id == *warhead)
+                            })
+                    {
+                        return Err(RulesError::InvalidSavedState(
+                            "saved SuperWeapon Warhead reference is outside its registry",
+                        ));
+                    }
+                }
+            }
         }
         let families = &registry.families;
         if registry.ares_armors.is_some() != crate::rules::ARES_ENABLED {
@@ -4933,10 +5009,13 @@ fn find_existing_type(
     family: RulesTypeFamily,
     incoming: &str,
 ) -> Option<usize> {
-    families
-        .get(&family)?
-        .iter()
-        .position(|member| member.native_stored_id.eq_ignore_ascii_case(incoming))
+    super_weapon_index_of_name(
+        incoming,
+        families
+            .get(&family)?
+            .iter()
+            .map(|member| member.native_stored_id.as_str()),
+    )
 }
 
 fn find_or_construct_type(
@@ -5013,6 +5092,7 @@ struct RulesPassProcessor {
     sdk_production_reads: Vec<vera_mod_api::ProductionReadPoint>,
     sdk_foundation_reads: Vec<vera_mod_api::FoundationReadPoint>,
     sdk_cameo_reads: Vec<vera_mod_api::CameoReadPoint>,
+    sdk_superweapon_reads: Vec<superweapon::SuperReadRecord>,
     sdk_faction_reads: Vec<vera_mod_api::FactionReadPoint>,
     sdk_fixed_eva: Option<std::sync::Arc<EvaRegistry>>,
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
@@ -5109,6 +5189,7 @@ impl RulesPassProcessor {
             sdk_production_reads: Vec::new(),
             sdk_foundation_reads: Vec::new(),
             sdk_cameo_reads: Vec::new(),
+            sdk_superweapon_reads: Vec::new(),
             sdk_faction_reads: Vec::new(),
             sdk_fixed_eva: None,
             fixed_art_source: registry_state.fixed_art_source,
@@ -5204,6 +5285,7 @@ impl RulesPassProcessor {
         self.sdk_production_reads.clear();
         self.sdk_foundation_reads.clear();
         self.sdk_cameo_reads.clear();
+        self.sdk_superweapon_reads.clear();
         self.sdk_faction_reads.clear();
         self.sdk_fixed_eva = Some(std::sync::Arc::new(fixed_eva.clone()));
         self.record_sdk_production_read(vera_mod_api::ProductionReadSite::ProcessEntry);
@@ -5616,25 +5698,19 @@ impl RulesPassProcessor {
         family: RulesTypeFamily,
         capacity: usize,
     ) -> Option<Vec<usize>> {
-        Some(
-            section
-                .read_list(key, capacity)?
+        read_registered_index_list(section, key, capacity, |token| {
+            let ids = self
+                .families
+                .get(&family)
                 .into_iter()
-                .filter_map(|token| {
-                    let ids = self
-                        .families
-                        .get(&family)
-                        .into_iter()
-                        .flatten()
-                        .map(|member| member.native_stored_id.as_str());
-                    if family == RulesTypeFamily::SuperWeapon {
-                        super_weapon_index_of_name(token, ids)
-                    } else {
-                        ares_type_index_of_name(token, ids)
-                    }
-                })
-                .collect(),
-        )
+                .flatten()
+                .map(|member| member.native_stored_id.as_str());
+            if family == RulesTypeFamily::SuperWeapon {
+                super_weapon_index_of_name(token, ids)
+            } else {
+                ares_type_index_of_name(token, ids)
+            }
+        })
     }
 
     fn resolve_list_from(
@@ -6107,6 +6183,8 @@ impl RulesPassProcessor {
             cameo: vera_mod_api::CameoRegistryView {
                 reads: self.sdk_cameo_reads.clone(),
             },
+            superweapon: self.sdk_superweapon_view(),
+            superweapon_reads: self.sdk_superweapon_reads.clone(),
             fixed_art: self.fixed_art_source.clone(),
             fixed_sound_source: self.fixed_sound_source.clone(),
             fixed_art_hash: self.fixed_art_hash,
@@ -6293,7 +6371,7 @@ impl RulesPassProcessor {
             self.ares_prerequisites = Some(catalog);
         }
         self.process_house_family(pass, primary_rules)?;
-        self.process_super_weapon_family(pass);
+        self.process_super_weapon_family(pass)?;
         self.process_anim_family(fixed_art);
         self.process_techno_family(RulesTypeFamily::Building, pass, fixed_art);
         self.process_techno_family(RulesTypeFamily::Aircraft, pass, fixed_art);
@@ -6577,7 +6655,73 @@ impl RulesPassProcessor {
             .push(i32::try_from(country_index).expect("native Country index exceeds i32"));
     }
 
-    fn process_super_weapon_family(&mut self, pass: &IniFile) {
+    /// Prepare one synchronous SWTypeExt LoadFromINIFile10033250 read.
+    /// Only completed physical steps advance here; the current Process is
+    /// still executing. The original scalar owner below performs allocation.
+    fn prepare_super_reference_read(
+        &mut self,
+        pass: &IniFile,
+        index: usize,
+        body_read: bool,
+        effective_type: Option<String>,
+    ) -> Result<
+        (
+            Option<crate::mod_sdk::Program>,
+            Option<vera_mod_api::SuperReferenceRead>,
+        ),
+        RulesError,
+    > {
+        // Record every actual visit, including no-component and absent-body
+        // paths, before the synchronous callback observes this physical pass.
+        let read = self.record_sdk_superweapon_type_read(index, body_read, pass);
+        if self
+            .sdk_configuration_seed
+            .as_ref()
+            .is_none_or(|program| !program.has_super_read())
+        {
+            return Ok((None, None));
+        }
+        faction::advance_sdk_configuration(
+            &mut self.sdk_configuration_seed,
+            &mut self.sdk_configuration_steps,
+        )?;
+        let context = vera_mod_api::ConfigureSuperReadContext {
+            read,
+            ordinal: u32::try_from(index).expect("SuperWeapon ordinal exceeds u32"),
+            stored_id: self.families[&RulesTypeFamily::SuperWeapon][index]
+                .native_stored_id
+                .clone(),
+            body_read,
+            effective_type,
+        };
+        let error = |value| RulesError::InvalidValue {
+            section: "vera-mod".into(),
+            key: "configure_super_read".into(),
+            expected: "accepted physical SuperWeapon reference read".into(),
+            value,
+        };
+        let (candidate, policy) = self
+            .sdk_configuration_seed
+            .as_ref()
+            .expect("checked configuration seed")
+            .configure_super_read(pass, context, self.sdk_registry_pass())
+            .map_err(error)?;
+        if !body_read
+            && matches!(
+                policy,
+                Some(vera_mod_api::SuperReferenceRead::WarheadFromCurrentSection)
+            )
+        {
+            return Err(error(
+                "SuperWeapon reference read requires its actual Rules body".into(),
+            ));
+        }
+        // Publishing is deliberately left to the caller, after the selected
+        // original read succeeds. A refused plan never replaces this seed.
+        Ok((Some(candidate), policy))
+    }
+
+    fn process_super_weapon_family(&mut self, pass: &IniFile) -> Result<(), RulesError> {
         let mut index = 0;
         while index < self.family_len(RulesTypeFamily::SuperWeapon) {
             if let Some((_id, raw, effective)) =
@@ -6619,15 +6763,26 @@ impl RulesPassProcessor {
                     self.family_mut(RulesTypeFamily::SuperWeapon)[index]
                         .super_weapon_phobos_availability = availability;
                 }
+                // Retained Type text is a source fact, not a host-selected
+                // handler. Keep ordinary no-component reads unchanged.
+                let kind = if crate::rules::ARES_ENABLED
+                    || self
+                        .sdk_configuration_seed
+                        .as_ref()
+                        .is_some_and(|program| program.has_super_read())
+                {
+                    effective.read_name("Type", 0x28)
+                } else {
+                    None
+                };
+                let (candidate, reference_read) =
+                    self.prepare_super_reference_read(pass, index, true, kind.map(str::to_owned))?;
                 #[cfg(feature = "ares")]
                 {
                     let animation = self.resolve_existing_anim_from(&raw, "SW.Animation");
                     self.family_mut(RulesTypeFamily::SuperWeapon)[index]
                         .super_weapon_presentation
                         .read_pass(&raw, animation);
-                    let kind = effective.read_name("Type", 0x28);
-                    let generic_warhead =
-                        kind.is_some_and(|kind| kind.eq_ignore_ascii_case("GenericWarhead"));
                     self.family_mut(RulesTypeFamily::SuperWeapon)[index]
                         .super_weapon_targeting
                         .read_pass(
@@ -6644,13 +6799,8 @@ impl RulesPassProcessor {
                         .clone();
                     availability.read_allowance_pass(&raw);
                     availability.read_house_pass(|key, prior| {
-                        raw.read_list(key, 128).map_or(prior, |tokens| {
-                            house_type_mask_from_indices(
-                                tokens
-                                    .into_iter()
-                                    .map(|token| self.country_index_of_name(token)),
-                            )
-                        })
+                        read_country_mask(&raw, key, |token| self.country_index_of_name(token))
+                            .unwrap_or(prior)
                     });
                     // Ares ValueableVector<BuildingTypeClass*> uses Find, not
                     // FindOrAllocate (Utilities/TemplateDef.h::parse_values and
@@ -6685,17 +6835,30 @@ impl RulesPassProcessor {
                         .read_pass(&raw);
                     self.family_mut(RulesTypeFamily::SuperWeapon)[index]
                         .super_weapon_availability = availability;
-                    if generic_warhead
-                        && let Some(warhead) = self.resolve_scalar_from(
-                            &raw,
-                            "SW.Warhead",
-                            RulesTypeFamily::Warhead,
-                            0x80,
-                        )
-                    {
-                        self.family_mut(RulesTypeFamily::SuperWeapon)[index]
-                            .generic_super_weapon_warhead = warhead;
+                }
+                let read_warhead = match reference_read {
+                    Some(vera_mod_api::SuperReferenceRead::Retain) => false,
+                    Some(vera_mod_api::SuperReferenceRead::WarheadFromCurrentSection) => true,
+                    None => {
+                        crate::rules::ARES_ENABLED
+                            && kind.is_some_and(|kind| kind.eq_ignore_ascii_case("GenericWarhead"))
                     }
+                };
+                // Same SW.Warhead scalar slot and FindOrAllocate owner as the
+                // existing Ares GenericWarhead.cpp reader: no final lookup or
+                // preliminary INI scan may replace this physical allocation.
+                if read_warhead
+                    && let Some(warhead) =
+                        self.resolve_scalar_from(&raw, "SW.Warhead", RulesTypeFamily::Warhead, 0x80)
+                {
+                    self.family_mut(RulesTypeFamily::SuperWeapon)[index]
+                        .generic_super_weapon_warhead = warhead;
+                }
+                if let Some(candidate) = candidate {
+                    self.sdk_configuration_seed = Some(std::sync::Arc::new(candidate));
+                }
+                #[cfg(feature = "ares")]
+                {
                     if raw
                         .read_name("Type", 0x28)
                         .is_some_and(|kind| kind.eq_ignore_ascii_case("UnitDelivery"))
@@ -6763,9 +6926,13 @@ impl RulesPassProcessor {
                         ordinal: u32::try_from(index).expect("SuperWeapon ordinal exceeds u32"),
                         section: raw.name.clone(),
                     });
-                #[cfg(not(feature = "ares"))]
-                let _ = effective;
             } else {
+                // LoadFromINIFile10033284 ->10033347 still consumes the first
+                // visit without a Rules section. It cannot allocate a payload.
+                let (candidate, _) = self.prepare_super_reference_read(pass, index, false, None)?;
+                if let Some(candidate) = candidate {
+                    self.sdk_configuration_seed = Some(std::sync::Arc::new(candidate));
+                }
                 #[cfg(feature = "ares")]
                 self.family_mut(RulesTypeFamily::SuperWeapon)[index]
                     .super_weapon_targeting
@@ -6773,6 +6940,7 @@ impl RulesPassProcessor {
             }
             index += 1;
         }
+        Ok(())
     }
 
     fn process_anim_family(&mut self, fixed_art: &IniFile) {
@@ -7019,6 +7187,9 @@ impl RulesPassProcessor {
                 }
                 match family {
                     RulesTypeFamily::Building => {
+                        // BuildingTypeExt1000E71B ->1000EC70: capture the
+                        // actual SuperWeapons reader, not a later body sweep.
+                        self.record_sdk_superweapon_building_read(index, &raw.name);
                         #[cfg(feature = "ares")]
                         if let Some(supers) = self.resolve_existing_list_from(
                             &raw,

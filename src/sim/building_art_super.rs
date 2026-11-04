@@ -80,20 +80,7 @@ impl Simulation {
         let Some(entity) = self.substrate.entities.get(id) else {
             return;
         };
-        #[cfg(not(feature = "ares"))]
-        let owner = entity.owner();
-        #[cfg(not(feature = "ares"))]
-        let Some(index) = self
-            .object_type(entity.type_ref(), rules)
-            .and_then(|object| super_weapon_index(object, rules))
-        else {
-            return;
-        };
-        #[cfg(not(feature = "ares"))]
-        let remaining =
-            crate::sim::superweapon::supers_of_kind_remaining(self, rules, owner, index);
-        #[cfg(feature = "ares")]
-        let remaining = {
+        let remaining = if rules.superweapon_semantics().definition_building_animation {
             // Installed Ares4463F0 ->10034A60 replaces the retail Type-vs-
             // definition-index scan. No eligible Super still creates14 when
             // the primary definition exists (10034A91..10034ACD).
@@ -112,6 +99,14 @@ impl Simulation {
                 }
                 return;
             }
+        } else {
+            let Some(index) = self
+                .object_type(entity.type_ref(), rules)
+                .and_then(|object| super_weapon_index(object, rules))
+            else {
+                return;
+            };
+            crate::sim::superweapon::supers_of_kind_remaining(self, rules, entity.owner(), index)
         };
         for remaining in remaining {
             let slot = if opens_charged(remaining) {
@@ -138,8 +133,6 @@ impl Simulation {
         let Some(entity) = self.substrate.entities.get(id) else {
             return;
         };
-        #[cfg(not(feature = "ares"))]
-        let owner = entity.owner();
         let health = entity.health;
         if matches!(
             entity.mission.current().known(),
@@ -150,20 +143,12 @@ impl Simulation {
         let Some(object) = self.object_type(entity.type_ref(), rules) else {
             return;
         };
-        #[cfg(not(feature = "ares"))]
-        let Some(index) = super_weapon_index(object, rules) else {
-            return;
-        };
         let charged_anim_time = object.charged_anim_time;
         if charged_anim_time > CHARGED_ANIM_TIME_LIMIT {
             return;
         }
         let strength = object.strength;
-        #[cfg(not(feature = "ares"))]
-        let remaining =
-            crate::sim::superweapon::supers_of_kind_remaining(self, rules, owner, index);
-        #[cfg(feature = "ares")]
-        let remaining = {
+        let remaining = if rules.superweapon_semantics().definition_building_animation {
             // Ares450F9E ->10034AF0: unavailable returns451145; only an
             // actual selected instance reaches the shared retail timer body.
             let Some(instance) =
@@ -171,7 +156,12 @@ impl Simulation {
             else {
                 return;
             };
-            [instance.charge_remaining(self.session.binary_frame() as i32)]
+            vec![instance.charge_remaining(self.session.binary_frame() as i32)]
+        } else {
+            let Some(index) = super_weapon_index(object, rules) else {
+                return;
+            };
+            crate::sim::superweapon::supers_of_kind_remaining(self, rules, entity.owner(), index)
         };
         for remaining in remaining {
             let (occupied, replacement) = if near_charged(remaining, charged_anim_time) {

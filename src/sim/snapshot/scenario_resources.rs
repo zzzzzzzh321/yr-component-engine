@@ -81,6 +81,26 @@ impl<'a> SavedScenarioResourcesRef<'a> {
 }
 
 impl SavedScenarioResources {
+    /// Reattach only the immutable component carried by this same saved world,
+    /// before projecting fields whose original reader required its authority.
+    /// No Configure callback or native allocation is replayed on this path.
+    pub fn admit_configuration_program(
+        &mut self,
+        sim: &crate::sim::world::Simulation,
+    ) -> Result<(), String> {
+        if let Some(program) = &sim.external_mod {
+            program.validate_restore()?;
+        }
+        self.processed_rules.retain_sdk_configuration_program(
+            sim.external_mod
+                .as_ref()
+                .map(|program| std::sync::Arc::new(program.clone())),
+        );
+        self.processed_rules
+            .validate_saved_state()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn processed_rules(&self) -> &ProcessedRulesLayers {
         &self.processed_rules
     }

@@ -870,6 +870,28 @@ impl IniSection {
             .map(|value| strtok(value, COMMA).collect())
     }
 
+    /// Ares mask readers100341D0/10034290/10034430: ReadString2048
+    /// (10007860), then comma-only strtok10007920 and stricmp7C8D20.
+    /// Tokens keep their spaces. An empty read or any unknown token writes
+    /// nothing (100341E8/10034231); a comma-only list successfully stores zero.
+    /// The caller owns the ordered vocabulary and retained/nullable state.
+    pub(crate) fn read_comma_mask<N, T>(&self, key: &str, tokens: &[(N, T)]) -> Option<T>
+    where
+        N: AsRef<str>,
+        T: Copy + Default + std::ops::BitOr<Output = T>,
+    {
+        self.read_list(key, 0x800)?
+            .into_iter()
+            .try_fold(T::default(), |bits, name| {
+                tokens.iter().find_map(|(token, value)| {
+                    token
+                        .as_ref()
+                        .eq_ignore_ascii_case(name)
+                        .then_some(bits | *value)
+                })
+            })
+    }
+
     /// Ares tokenizer1002A180: at most three bools, written to slots2/1/0.
     /// Stop at the first invalid token; untouched suffix slots retain current.
     pub(crate) fn read_bool_prefix_reverse3(&self, key: &str, mut current: [bool; 3]) -> [bool; 3] {

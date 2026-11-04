@@ -1,0 +1,474 @@
+//! One atomic projection of immutable Super resources into the existing types.
+//! Allocation, physical reader history and all live Super state stay with their
+//! original owners; this binder does not read new INI or allocate references.
+use super::RuleSet;
+use crate::rules::ini_parser::IniSection;
+use crate::rules::native_processing::ProcessedRulesLayers;
+use crate::rules::superweapon_targeting::{
+    HouseMask, SuperWeaponTargeting, TargetConstraints, TargetMask, TargetRequirements,
+};
+use crate::rules::superweapon_type::{
+    AresSuperWeaponAvailability, AresSuperWeaponCharge, AresSuperWeaponMetadata,
+    AresSuperWeaponPresentation, DeliveryOwner, DeliveryType, GenericWarheadAiTargeting,
+    GenericWarheadSettings, SuperWeaponBuildingRequirements, SuperWeaponKind, SuperWeaponType,
+    UnitDeliveryRules,
+};
+use crate::util::native_x87::NativeF64Bits;
+use std::collections::{BTreeMap, HashMap};
+use vera_mod_api::{
+    NullableResourceName, SuperWeaponDeliveryOwner, SuperWeaponPayloadPolicy,
+    SuperWeaponResourcePolicy, SuperWeaponSemantics,
+};
+
+/// Derived immutable binding inputs from the same ordered Process registry.
+/// The profile copy preserves resolved native references and the old component
+/// fallback. The body preserves the stock reader's retained enum history.
+#[derive(Debug, Clone)]
+pub(super) struct SdkSuperWeaponSource {
+    stored_id: String,
+    projected_id: String,
+    body: Option<IniSection>,
+    profile: Option<SuperWeaponType>,
+    warhead: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct FrozenSuperWeaponBindings {
+    policy: SuperWeaponResourcePolicy,
+    pub(super) metadata: BTreeMap<String, AresSuperWeaponMetadata>,
+    providers: Vec<Vec<u32>>,
+    /// The stock Type reader may retain an earlier valid kind after a later
+    /// extension name. Hash its effective dispatch, not just the final text.
+    dispatch: BTreeMap<String, (SuperWeaponKind, Option<String>, bool, bool, i32)>,
+}
+
+pub(super) struct SuperWeaponResourceBindings {
+    frozen: Option<FrozenSuperWeaponBindings>,
+    types: Option<HashMap<String, SuperWeaponType>>,
+}
+
+impl RuleSet {
+    pub(super) fn capture_superweapon_resource_sources(
+        &mut self,
+        processed: &ProcessedRulesLayers,
+    ) {
+        self.sdk_superweapon_sources = processed
+            .generic_super_weapon_warhead_states()
+            .map(|(name, warhead)| SdkSuperWeaponSource {
+                stored_id: name.to_owned(),
+                projected_id: self
+                    .super_weapon_order
+                    .iter()
+                    .find(|id| id.eq_ignore_ascii_case(name))
+                    .cloned()
+                    .unwrap_or_else(|| name.to_owned()),
+                body: processed.ini().section(name).cloned(),
+                profile: self.super_weapon(name).cloned(),
+                // This is the original SW.Warhead slot after its physical
+                // FindOrAllocate. Never resolve the declaration's Type name.
+                warhead: warhead.map(str::to_owned),
+            })
+            .collect();
+    }
+
+    /// The original audio binders run before resource admission. Keep their
+    /// canonical profile inputs for a later explicit stock/profile rebind.
+    pub(super) fn capture_superweapon_profile_audio(&mut self) {
+        let profile_active = self.external_superweapons.is_none();
+        for source in &mut self.sdk_superweapon_sources {
+            let Some(profile) = source.profile.as_mut() else {
+                continue;
+            };
+            let Some(current) = self.super_weapons.get(&source.projected_id) else {
+                continue;
+            };
+            profile.special_sound = current.special_sound.clone();
+            profile.start_sound = current.start_sound.clone();
+            if profile_active {
+                profile.presentation.sound = current.presentation.sound.clone();
+                profile.insufficient_funds_eva = current.insufficient_funds_eva.clone();
+                if let Some(delivery) = profile.unit_delivery.as_mut() {
+                    delivery.activation_sound = current
+                        .unit_delivery
+                        .as_ref()
+                        .and_then(|current| current.activation_sound.clone());
+                }
+            }
+        }
+    }
+
+    /// One installed semantic selection, shared by app and simulation. Neither
+    /// hook presence nor individual nonempty lists establish this selection.
+    pub fn superweapon_semantics(&self) -> SuperWeaponSemantics {
+        self.external_superweapons.as_ref().map_or_else(
+            crate::rules::superweapon_type::profile_semantics,
+            |catalog| catalog.policy.semantics,
+        )
+    }
+
+    /// Some(empty) suppresses the old profile vector for this Building. None
+    /// leaves the existing object-owned legacy vector and its original order.
+    pub(crate) fn additional_super_weapon_indices(&self, building: usize) -> Option<&[u32]> {
+        self.external_superweapons
+            .as_ref()?
+            .providers
+            .get(building)
+            .map(Vec::as_slice)
+    }
+
+    pub(super) fn collect_superweapon_resource_bindings(
+        &self,
+    ) -> Result<SuperWeaponResourceBindings, String> {
+        let policy = self
+            .external_mod
+            .as_deref()
+            .filter(|program| program.has_superweapon_resource())
+            .map(|program| program.superweapon_resource_policy())
+            .transpose()?
+            .flatten();
+        let Some(mut policy) = policy else {
+            let types = self.external_superweapons.as_ref().map(|_| {
+                self.sdk_superweapon_sources
+                    .iter()
+                    .filter_map(|source| {
+                        source
+                            .profile
+                            .clone()
+                            .map(|profile| (source.projected_id.clone(), profile))
+                    })
+                    .collect()
+            });
+            return Ok(SuperWeaponResourceBindings {
+                frozen: None,
+                types,
+            });
+        };
+        policy.validate()?;
+        // This existing native construction-order projection is reconstructed
+        // from retained members on fresh and saved loads. Readpoint logs are
+        // skipped by save and must never be used as the final type directory.
+        let native_type_name = |category, ordinal: u32| {
+            self.native_techno_type_order
+                .iter()
+                .filter(|(kind, _, _)| *kind == category)
+                .nth(ordinal as usize)
+                .map(|(_, name, _)| name)
+        };
+        let sounds = self.fixed_sound_source.as_deref();
+        let eva = self.fixed_eva_source.as_deref();
+        if let Some(expected) = policy.sound_source_hash
+            && sounds.is_none_or(|source| source.source_hash() != expected)
+        {
+            return Err(
+                "SuperWeapon sounds differ from the process-selected SOUNDMD catalog".into(),
+            );
+        }
+        if let Some(expected) = policy.eva_source_hash
+            && eva.is_none_or(|source| source.source_hash() != expected)
+        {
+            return Err("SuperWeapon EVA differs from the process-selected EVAMD catalog".into());
+        }
+        let resolve_sound = |name: &mut NullableResourceName| -> Result<(), String> {
+            if let NullableResourceName::Named(value) = name {
+                *value = sounds
+                    .and_then(|sounds| sounds.get(value))
+                    .ok_or_else(|| format!("unregistered SuperWeapon sound: {value}"))?
+                    .id
+                    .clone();
+            }
+            Ok(())
+        };
+        let resolve_eva = |name: &mut NullableResourceName| -> Result<(), String> {
+            if let NullableResourceName::Named(value) = name {
+                *value = eva
+                    .and_then(|eva| eva.entry(value))
+                    .ok_or_else(|| format!("unregistered SuperWeapon EVA: {value}"))?
+                    .name
+                    .clone();
+            }
+            Ok(())
+        };
+        let building_name = |ordinal: u32| -> Result<String, String> {
+            native_type_name(crate::rules::object_type::ObjectCategory::Building, ordinal)
+                .cloned()
+                .ok_or_else(|| "SuperWeapon Building reference is outside its native array".into())
+        };
+        // Native array order is the publication order, even if a component
+        // serializes its independent declarations in another order.
+        policy
+            .definitions
+            .sort_by_key(|definition| definition.ordinal);
+        policy.providers.sort_by_key(|provider| provider.object);
+        let mut definitions = BTreeMap::new();
+        let mut metadata_by_ordinal = BTreeMap::new();
+        for definition in &mut policy.definitions {
+            let source = self
+                .sdk_superweapon_sources
+                .get(definition.ordinal as usize)
+                .filter(|source| source.stored_id == definition.stored_id)
+                .ok_or("SuperWeapon declaration does not match its native ordinal and stored ID")?;
+            resolve_sound(&mut definition.presentation.sound)?;
+            resolve_eva(&mut definition.insufficient_funds_eva)?;
+            if let NullableResourceName::Named(name) = &mut definition.presentation.animation {
+                *name = self
+                    .sdk_animation_names
+                    .iter()
+                    .find(|id| id.eq_ignore_ascii_case(name))
+                    .ok_or_else(|| format!("unregistered SuperWeapon animation: {name}"))?
+                    .clone();
+            }
+            let buildings = SuperWeaponBuildingRequirements {
+                auxiliary: definition
+                    .availability
+                    .auxiliary
+                    .iter()
+                    .map(|&index| building_name(index))
+                    .collect::<Result<_, _>>()?,
+                negative: definition
+                    .availability
+                    .negative
+                    .iter()
+                    .map(|&index| building_name(index))
+                    .collect::<Result<_, _>>()?,
+            };
+            let mut candidate = stock_type(source);
+            candidate.building_requirements = Some(buildings.clone());
+            candidate.target_constraints =
+                TargetConstraints::from_bits(u32::from(definition.constraints))
+                    .ok_or("invalid SuperWeapon constraint bits")?;
+            candidate.use_ai_targeting = definition.use_ai_targeting;
+            candidate.money_amount = definition.money_amount;
+            candidate.insufficient_funds_eva =
+                nullable_name(&definition.insufficient_funds_eva).flatten();
+            candidate.presentation = AresSuperWeaponPresentation {
+                animation: nullable_name(&definition.presentation.animation),
+                height: definition.presentation.height,
+                visibility: HouseMask::from_bits(u32::from(definition.presentation.visibility))
+                    .ok_or("invalid SuperWeapon presentation house bits")?,
+                sound: nullable_name(&definition.presentation.sound),
+            };
+            // Validate the entire batch, including references in a currently
+            // disabled mechanism, before publishing any effective field.
+            match &mut definition.payload {
+                SuperWeaponPayloadPolicy::Retail => {}
+                SuperWeaponPayloadPolicy::GenericWarhead { damage, targeting } => {
+                    let requirements = |target, house| -> Result<TargetRequirements, String> {
+                        Ok(TargetRequirements {
+                            target: TargetMask::from_bits(u32::from(target))
+                                .ok_or("invalid SuperWeapon target bits")?,
+                            house: HouseMask::from_bits(u32::from(house))
+                                .ok_or("invalid SuperWeapon house bits")?,
+                        })
+                    };
+                    let settings = GenericWarheadSettings {
+                        warhead: source.warhead.clone(),
+                        damage: *damage,
+                        ai_targeting: if targeting.offensive_ai {
+                            GenericWarheadAiTargeting::Offensive
+                        } else {
+                            GenericWarheadAiTargeting::None
+                        },
+                        targeting: SuperWeaponTargeting {
+                            manual: requirements(targeting.manual_target, targeting.manual_house)?,
+                            automatic: requirements(
+                                targeting.automatic_target,
+                                targeting.automatic_house,
+                            )?,
+                            fire_into_shroud: targeting.fire_into_shroud,
+                            range_minimum: NativeF64Bits::from_bits(targeting.range_minimum),
+                            range_maximum: NativeF64Bits::from_bits(targeting.range_maximum),
+                        },
+                    };
+                    if policy.semantics.custom_payloads {
+                        candidate.kind = SuperWeaponKind::GenericWarhead;
+                        candidate.generic_warhead = Some(settings);
+                        candidate.action = Some("Attack".into());
+                        candidate.pre_click = false;
+                        candidate.post_click = false;
+                        candidate.pre_dependent = -1;
+                    }
+                }
+                SuperWeaponPayloadPolicy::UnitDelivery {
+                    types,
+                    deferment,
+                    owner,
+                    base_normal,
+                    action,
+                    activation_sound,
+                } => {
+                    resolve_sound(activation_sound)?;
+                    let types = types
+                        .iter()
+                        .map(|identity| {
+                            let category = crate::rules::prerequisite::production_category(
+                                identity.category,
+                            );
+                            let id = native_type_name(category, identity.ordinal)
+                                .ok_or("SuperWeapon delivery reference is outside its native Type array")?
+                                .clone();
+                            Ok(DeliveryType { category, id })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    if policy.semantics.custom_payloads {
+                        candidate.kind = SuperWeaponKind::UnitDelivery;
+                        candidate.unit_delivery = Some(UnitDeliveryRules {
+                            types,
+                            deferment: *deferment,
+                            owner: match owner {
+                                SuperWeaponDeliveryOwner::Invoker => DeliveryOwner::Invoker,
+                                SuperWeaponDeliveryOwner::Neutral => DeliveryOwner::Neutral,
+                                SuperWeaponDeliveryOwner::Special => DeliveryOwner::Special,
+                                SuperWeaponDeliveryOwner::Civilian => DeliveryOwner::Civilian,
+                            },
+                            base_normal: *base_normal,
+                            activation_sound: nullable_name(activation_sound).flatten(),
+                        });
+                        candidate.action = Some(action.clone());
+                        candidate.pre_click = false;
+                        candidate.post_click = false;
+                        candidate.pre_dependent = -1;
+                    }
+                }
+            }
+            let availability = AresSuperWeaponAvailability::from_config(
+                definition.availability.allow_player,
+                definition.availability.allow_ai,
+                definition.availability.required_houses,
+                definition.availability.forbidden_houses,
+                definition.availability.shots,
+            );
+            let charge = AresSuperWeaponCharge {
+                initial_ready: definition.charge.initial_ready,
+                virtual_charge: definition.charge.virtual_charge,
+            };
+            metadata_by_ordinal.insert(
+                definition.ordinal,
+                AresSuperWeaponMetadata::project(
+                    &availability,
+                    candidate.aux_building.as_deref(),
+                    Some(&buildings),
+                    &charge,
+                ),
+            );
+            definitions.insert(definition.ordinal, candidate);
+        }
+        let mut provider_declarations = BTreeMap::new();
+        for provider in &policy.providers {
+            building_name(provider.object.ordinal)?;
+            let mut indices = Vec::new();
+            for &index in &provider.additional {
+                let source = self
+                    .sdk_superweapon_sources
+                    .get(index as usize)
+                    .ok_or("SuperWeapon provider reference is outside the native Super array")?;
+                let projected = self
+                    .super_weapon_index(&source.stored_id)
+                    .ok_or("registered SuperWeapon has no runtime projection")?;
+                indices.push(
+                    u32::try_from(projected)
+                        .map_err(|_| "SuperWeapon projected ordinal exceeds u32")?,
+                );
+            }
+            provider_declarations.insert(provider.object.ordinal, indices);
+        }
+        let mut providers = vec![Vec::new(); self.building_ids.len()];
+        for (ordinal, (_, building, _)) in self
+            .native_techno_type_order
+            .iter()
+            .filter(|(category, _, _)| {
+                *category == crate::rules::object_type::ObjectCategory::Building
+            })
+            .enumerate()
+        {
+            let projected = self
+                .building_type_index(building)
+                .and_then(|index| usize::try_from(index).ok())
+                .ok_or("registered SuperWeapon provider has no Building projection")?;
+            // Preserve the old name-keyed owner's last member overwrite,
+            // including an omitted later duplicate's explicit stock vector.
+            *providers
+                .get_mut(projected)
+                .ok_or("invalid projected Building ordinal")? = provider_declarations
+                .remove(&(ordinal as u32))
+                .unwrap_or_default();
+        }
+        let mut types = HashMap::new();
+        let mut metadata = BTreeMap::new();
+        for (ordinal, source) in self.sdk_superweapon_sources.iter().enumerate() {
+            if let Some(value) = metadata_by_ordinal.remove(&(ordinal as u32)) {
+                metadata.insert(source.stored_id.to_ascii_uppercase(), value);
+            } else {
+                metadata.remove(&source.stored_id.to_ascii_uppercase());
+            }
+            let candidate = definitions
+                .remove(&(ordinal as u32))
+                .or_else(|| source.profile.as_ref().map(|_| stock_type(source)));
+            if let Some(candidate) = candidate {
+                // Retain the existing name-keyed projection's last-ordinal
+                // overwrite for duplicate/truncated IDs. This is not a new
+                // runtime identity model; admission above still checks every ID.
+                types.insert(source.projected_id.clone(), candidate);
+            }
+        }
+        let dispatch = types
+            .iter()
+            .map(|(id, sw)| {
+                (
+                    id.to_ascii_uppercase(),
+                    (
+                        sw.kind,
+                        sw.action.clone(),
+                        sw.pre_click,
+                        sw.post_click,
+                        sw.pre_dependent,
+                    ),
+                )
+            })
+            .collect();
+        Ok(SuperWeaponResourceBindings {
+            frozen: Some(FrozenSuperWeaponBindings {
+                policy,
+                metadata,
+                providers,
+                dispatch,
+            }),
+            types: Some(types),
+        })
+    }
+
+    pub(super) fn publish_superweapon_resource_bindings(
+        &mut self,
+        bindings: SuperWeaponResourceBindings,
+    ) {
+        if let Some(types) = bindings.types {
+            self.super_weapons = types;
+        }
+        self.external_superweapons = bindings.frozen;
+    }
+}
+
+fn nullable_name(value: &NullableResourceName) -> Option<Option<String>> {
+    match value {
+        NullableResourceName::Inherit => None,
+        NullableResourceName::Clear => Some(None),
+        NullableResourceName::Named(name) => Some(Some(name.clone())),
+    }
+}
+
+fn stock_type(source: &SdkSuperWeaponSource) -> SuperWeaponType {
+    // SuperWeaponType::ReadINI6CEA20 uses the original ordered typed-reader
+    // body. A later unsupported Type keeps its earlier stock kind; replacing
+    // a final custom kind with NoEffect would lose that history.
+    let mut stock = SuperWeaponType::from_ini_section_with_profile(
+        &source.projected_id,
+        source.body.as_ref().unwrap_or(IniSection::empty()),
+        false,
+    );
+    if let Some(profile) = &source.profile {
+        stock.weapon_type = profile.weapon_type.clone();
+        stock.aux_building = profile.aux_building.clone();
+        stock.special_sound = profile.special_sound.clone();
+        stock.start_sound = profile.start_sound.clone();
+    }
+    stock
+}

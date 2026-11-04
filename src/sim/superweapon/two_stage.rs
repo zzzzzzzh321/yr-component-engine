@@ -4,7 +4,6 @@
 //! sequence guard is VERA's deterministic command/replay safety, not a native ABI.
 
 use crate::rules::ruleset::RuleSet;
-#[cfg(feature = "ares")]
 use crate::rules::superweapon_type::SuperWeaponType;
 use crate::sim::intern::InternedId;
 use crate::sim::superweapon::SuperWeapons;
@@ -31,14 +30,17 @@ pub struct PaidSuperWeaponSelection {
     pub sequence: u64,
 }
 
-#[cfg(feature = "ares")]
 pub(super) fn destination_for_source(
     sim: &Simulation,
     rules: &RuleSet,
     source: InternedId,
     sw: &SuperWeaponType,
 ) -> Option<InternedId> {
-    if !sw.pre_click || sw.post_click || sw.use_charge_drain {
+    if !rules.superweapon_semantics().paid_launches
+        || !sw.pre_click
+        || sw.post_click
+        || sw.use_charge_drain
+    {
         return None;
     }
     let source = sim.interner.resolve(source);
@@ -61,13 +63,19 @@ impl SuperWeapons {
 }
 
 impl Simulation {
-    pub(crate) fn validate_paid_super_weapon_selections(&self) -> Result<(), &'static str> {
+    pub(crate) fn validate_paid_super_weapon_selections(
+        &self,
+        paid_launches: bool,
+    ) -> Result<(), &'static str> {
         for (owner, weapons) in self.super_weapons.iter() {
             let mut pending = false;
             for (source, instance) in weapons {
-                #[cfg(not(feature = "ares"))]
-                if instance.paid_sequence != 0 || instance.paid_selection.is_some() {
-                    return Err("paid selections require a build with the ares feature");
+                if !paid_launches
+                    && (instance.paid_sequence != 0 || instance.paid_selection.is_some())
+                {
+                    return Err(
+                        "paid selections require the restored SuperWeapon paid-launch semantics",
+                    );
                 }
                 let Some(ticket) = instance.paid_selection else {
                     continue;
@@ -100,15 +108,7 @@ impl Simulation {
         &self,
         owner: InternedId,
     ) -> Option<PaidSuperWeaponSelection> {
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = owner;
-            None
-        }
-        #[cfg(feature = "ares")]
-        {
-            self.super_weapons.paid_selection(owner)
-        }
+        self.super_weapons.paid_selection(owner)
     }
 
     pub fn next_paid_super_weapon_selection(
@@ -117,25 +117,17 @@ impl Simulation {
         owner: InternedId,
         source: InternedId,
     ) -> Option<PaidSuperWeaponSelection> {
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = (rules, owner, source);
-            None
-        }
-        #[cfg(feature = "ares")]
-        {
-            let sw = rules.super_weapon(self.interner.resolve(source))?;
-            Some(PaidSuperWeaponSelection {
-                source,
-                destination: destination_for_source(self, rules, source, sw)?,
-                sequence: self
-                    .super_weapons
-                    .get(&owner)?
-                    .get(&source)?
-                    .paid_sequence
-                    .checked_add(1)?,
-            })
-        }
+        let sw = rules.super_weapon(self.interner.resolve(source))?;
+        Some(PaidSuperWeaponSelection {
+            source,
+            destination: destination_for_source(self, rules, source, sw)?,
+            sequence: self
+                .super_weapons
+                .get(&owner)?
+                .get(&source)?
+                .paid_sequence
+                .checked_add(1)?,
+        })
     }
 
     /// Cancellation travels through Command like final activation. A stale
@@ -144,39 +136,33 @@ impl Simulation {
         substrate: &mut ObjectSubstrate,
         sound_events: &mut FrameChannel<SimSoundEvent>,
         super_weapons: &mut SuperWeapons,
-        _rules: &RuleSet,
+        rules: &RuleSet,
         owner: InternedId,
         selection: PaidSuperWeaponSelection,
     ) -> bool {
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = (substrate, sound_events, super_weapons, owner, selection);
-            false
+        if !rules.superweapon_semantics().paid_launches {
+            return false;
         }
-        #[cfg(feature = "ares")]
-        {
-            let Some(instance) = super_weapons.instance_mut(&owner, &selection.source) else {
-                return false;
-            };
-            if instance.paid_selection != Some(selection) {
-                return false;
-            }
-            instance.paid_selection = None;
-            if instance.is_active && !instance.is_suspended {
-                instance.is_ready = true;
-            }
-            Self::release_super_anim(substrate, super_weapons, owner, selection.source);
-            sound_events.emit(SimSoundEvent::SuperWeaponStatusChanged {
-                owner,
-                sw_type: selection.destination,
-            });
-            // The recharge was not consumed by source selection. A later final
-            // activation, rather than cancellation, owns restart/one-time loss.
-            true
+        let Some(instance) = super_weapons.instance_mut(&owner, &selection.source) else {
+            return false;
+        };
+        if instance.paid_selection != Some(selection) {
+            return false;
         }
+        instance.paid_selection = None;
+        if instance.is_active && !instance.is_suspended {
+            instance.is_ready = true;
+        }
+        Self::release_super_anim(substrate, super_weapons, owner, selection.source);
+        sound_events.emit(SimSoundEvent::SuperWeaponStatusChanged {
+            owner,
+            sw_type: selection.destination,
+        });
+        // The recharge was not consumed by source selection. A later final
+        // activation, rather than cancellation, owns restart/one-time loss.
+        true
     }
 
-    #[cfg(feature = "ares")]
     pub(super) fn retire_paid_selections(
         substrate: &mut ObjectSubstrate,
         sound_events: &mut FrameChannel<SimSoundEvent>,
@@ -199,7 +185,6 @@ impl Simulation {
 
 /// Whether a paid pair's source still holds its selection: active, not held,
 /// and kept so by the House hold pass ([`super::super_hold`]) as it stands now.
-#[cfg(feature = "ares")]
 pub(super) fn source_available(
     sim: &Simulation,
     rules: &RuleSet,

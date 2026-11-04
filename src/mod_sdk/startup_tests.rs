@@ -12,7 +12,7 @@ use crate::assets::csf_file::{
 };
 use crate::assets::startup_resources::StartupComponentSource;
 use crate::rules::ini_parser::IniFile;
-use crate::rules::native_processing::{ProcessedRulesLayers, RulesLayerStack};
+use crate::rules::native_processing::ProcessedRulesLayers;
 use crate::rules::retail_sources::select_ini;
 use crate::rules::ruleset::RuleSet;
 use crate::rules::sound_ini::SoundRegistry;
@@ -73,8 +73,11 @@ fn open(dir: &TestDirectory) -> AssetManager {
 }
 
 fn configured(assets: &AssetManager) -> (ProcessedRulesLayers, RuleSet) {
-    let selected = select_ini(assets, "rulesmd.ini").unwrap();
-    let processed = RulesLayerStack::new(selected.ini).process().unwrap();
+    // Follow the shell's actual cold-start projection, including its early
+    // component seed and fixed audio sources, rather than late admission.
+    let processed = long_list_owner(assets)
+        .startup_compatibility_projection()
+        .unwrap();
     let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
     rules
         .bind_external_mod_for_process(assets, &processed)
@@ -304,6 +307,7 @@ fn sdk_startup_sources_audio_consumers_and_saved_adoption_share_one_component_id
     early_component(&dir, &wasm);
     let root = b"[#include]\n0=child.ini\n1=CHILD.INI\n2=absent.ini\n[VehicleTypes]\n0=TANK\n[TANK]\nStrength=100\nAmmo=6\n";
     write(&dir, "rulesmd.ini", root);
+    write(&dir, "artmd.ini", b"");
     write(&dir, "child.ini", b"[TANK]\nReloadAmount=5\n");
     let map = b"[#include]\n0=map-extra.ini\n[Basic]\nName=Physical Map\n";
     write(&dir, "Arena.map", map);
@@ -413,7 +417,7 @@ fn sdk_startup_sources_audio_consumers_and_saved_adoption_share_one_component_id
     let saved = GameSnapshot::load(&GameSnapshot::save(&sim, 0, 0, "SDK-STARTUP", 0))
         .unwrap()
         .sim;
-    let retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
+    let mut retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
         &crate::util::save_codec::serialize(&processed).unwrap(),
     )
     .unwrap();
@@ -424,7 +428,12 @@ fn sdk_startup_sources_audio_consumers_and_saved_adoption_share_one_component_id
         9,
         "a fresh configuration really sees the changed input"
     );
-    let mut rebound = RuleSet::from_processed_rules(&retained).unwrap();
+    let program = saved.external_mod.as_ref().unwrap();
+    program.validate_restore().unwrap();
+    retained.retain_sdk_configuration_program(Some(std::sync::Arc::new(program.clone())));
+    let mut rebound = long_list_owner(&current)
+        .project_saved_scenario_rules(&retained)
+        .unwrap();
     adopt_saved_program(&mut rebound, &saved, &current).unwrap();
     assert_eq!(
         reload(&rebound),
@@ -540,6 +549,7 @@ fn sdk_startup_deferred_old_component_binds_but_new_startup_and_invalid_identity
     let previous = component("VERA_SDK_PREVIOUS_WASM");
     let wasm = component("VERA_SDK_STARTUP_WASM");
     let dir = audio_test_install("sdk-startup-deferred");
+    write(&dir, "artmd.ini", b"");
     declaration(&dir, &previous);
     archive(
         &dir,

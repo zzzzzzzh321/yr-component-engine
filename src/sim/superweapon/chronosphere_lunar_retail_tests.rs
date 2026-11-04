@@ -61,9 +61,23 @@ fn advance(scene: &mut HeadlessScenario, command: Option<Command>) {
             )
         })
         .collect();
+    // As in the paid Industrial Plant fixture, a headless frame supplies the
+    // local Strip links; its original owner emits mobile PLACE on completion.
+    let owner = scene.sim().interner.get(OWNER).unwrap();
+    let visits = scene
+        .runtime
+        .simulation
+        .production
+        .factories()
+        .strip_visits_for_test(owner);
     scene
         .runtime
-        .advance_frame(&commands, 22, TickLane::Ordinary, FrameEffects::default())
+        .advance_frame(
+            &commands,
+            22,
+            TickLane::Ordinary,
+            FrameEffects::default().with_production_strip(&visits, &|_| {}),
+        )
         .expect("ordinary bound-resource frame");
 }
 

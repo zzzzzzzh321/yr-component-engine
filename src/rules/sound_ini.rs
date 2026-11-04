@@ -1040,6 +1040,9 @@ impl EvaEntry {
 /// and calls `VoxClass::ReadINI` on the section of the same name.
 #[derive(Debug, Clone, Default)]
 pub struct EvaRegistry {
+    /// Identity of the fixed EVAMD input; interpretation mode is retained by
+    /// the same registry and selected startup recipe, not inferred from this.
+    source_hash: u64,
     /// Native registration order is authoritative: TAction21 stores this
     /// ordinal in +0x90 and passes it directly to QueueVoice752480.
     entries: Vec<EvaEntry>,
@@ -1114,7 +1117,12 @@ impl EvaRegistry {
             entries,
             names,
             extra_tags,
+            source_hash: ini.content_hash(),
         }
+    }
+
+    pub fn source_hash(&self) -> u64 {
+        self.source_hash
     }
 
     /// Ares1002EC00 resolves stock names to 0/1/2, then registered EVATypes
@@ -1173,7 +1181,19 @@ impl EvaRegistry {
         let Some(section) = section else {
             return default;
         };
-        section.read_string_with(key, 2048, default, |current, name| {
+        self.read_ares_reference(section, key, default)
+    }
+
+    /// Same ValueableIdx<VoxClass> read, with an already retained index. The
+    /// caller supplies its constructor default; the catalog owns lookup and
+    /// registered-name-before-none semantics for both built-in and SDK users.
+    pub(crate) fn read_ares_reference(
+        &self,
+        section: &IniSection,
+        key: &str,
+        current: Option<String>,
+    ) -> Option<String> {
+        section.read_string_with(key, 2048, current, |current, name| {
             if let Some(entry) = self.entry(name) {
                 Some(entry.name.clone())
             } else if crate::rules::ini_parser::is_native_none_type_name(name) {

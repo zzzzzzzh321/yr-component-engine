@@ -510,8 +510,13 @@ fn default_build_refuses_forged_paid_commands_and_saved_selection_state() {
     instance.paid_sequence = selection.sequence;
     instance.paid_selection = Some(selection);
     let before = sim.state_hash();
-    assert!(sim.validate_paid_super_weapon_selections().is_err());
-    assert_eq!(sim.paid_super_weapon_selection(owner), None);
+    assert!(
+        sim.validate_paid_super_weapon_selections(crate::rules::ARES_ENABLED)
+            .is_err()
+    );
+    // This is a projection of the retained store, not a second admission gate.
+    // The snapshot validator and every mutation reject the forged state.
+    assert_eq!(sim.paid_super_weapon_selection(owner), Some(selection));
     assert_eq!(
         sim.next_paid_super_weapon_selection(&rules, owner, sw_type),
         None

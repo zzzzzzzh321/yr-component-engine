@@ -7,9 +7,7 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use vera_mod_api::{
-    API_VERSION, DamageKernelInput, MAX_MESSAGE_BYTES, ModuleManifest, Plan, Request,
-};
+use vera_mod_api::{API_VERSION, DamageKernelInput, MAX_MESSAGE_BYTES, ModuleManifest, Plan, Request};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -83,7 +81,10 @@ impl Default for RuntimeLimits {
 
 impl RuntimeLimits {
     fn fuel_for(&self, kind: &str, input_bytes: usize) -> u64 {
-        let base = if matches!(kind, "configure" | "configure_boundary") {
+        let base = if matches!(
+            kind,
+            "configure" | "configure_boundary" | "configure_super_read"
+        ) {
             self.configure_fuel
         } else {
             self.fuel
@@ -385,7 +386,10 @@ impl ComponentRuntime {
             .table_elements(65_536)
             .trap_on_grow_failure(true)
             .build();
-        let configuration_bytes = if matches!(kind, "configure" | "configure_boundary") {
+        let configuration_bytes = if matches!(
+            kind,
+            "configure" | "configure_boundary" | "configure_super_read"
+        ) {
             host.configuration_input_bytes()
         } else {
             0

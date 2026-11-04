@@ -241,6 +241,16 @@ pub(crate) fn gameplay_effect_anim_roots(rules: &RuleSet) -> Vec<String> {
             insert(name);
         }
     }
+    // Ares common Launch10033068..100330AA constructs SW.Animation through
+    // the same AnimClass owner even when hidden. Late SDK admission must add
+    // its effective root through this same atlas/bounds refresh closure.
+    if rules.superweapon_semantics().launch_presentation {
+        for sw in rules.super_weapons.values() {
+            if let Some(Some(animation)) = &sw.presentation.animation {
+                insert(animation);
+            }
+        }
+    }
     roots.into_iter().collect()
 }
 
@@ -273,14 +283,6 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     };
     for name in gameplay_effect_anim_roots(rules) {
         insert(&name);
-    }
-    // Ares common Launch10033068..100330AA constructs SW.Animation through
-    // the same AnimClass owner as other effects, even when it is hidden.
-    #[cfg(feature = "ares")]
-    for sw in rules.super_weapons.values() {
-        if let Some(Some(animation)) = &sw.presentation.animation {
-            insert(animation);
-        }
     }
     for warhead in rules.warheads_iter() {
         for name in &warhead.anim_list {

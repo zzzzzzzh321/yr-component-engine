@@ -110,8 +110,9 @@ pub(super) fn follow_selection_writes(
             .super_weapon(sim.interner().resolve(*sw_type))
             .map(|sw| sw.kind)
         {
-            #[cfg(feature = "ares")]
-            Some(SuperWeaponKind::GenericWarhead | SuperWeaponKind::UnitDelivery) => {
+            Some(SuperWeaponKind::GenericWarhead | SuperWeaponKind::UnitDelivery)
+                if rules.superweapon_semantics().custom_payloads =>
+            {
                 // Ares new-type cleanup only clears the fired selection:
                 // an automatic launch must not disarm a different SW.
                 if selected

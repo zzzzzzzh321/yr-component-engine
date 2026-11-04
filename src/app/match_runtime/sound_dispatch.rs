@@ -696,11 +696,9 @@ pub(super) fn dispatch_sim_sound_events(
                     type_override: None,
                 }
             }
-            #[cfg(not(feature = "ares"))]
-            SimSoundEvent::SuperWeaponInsufficientFunds { .. } => continue,
-            #[cfg(feature = "ares")]
             SimSoundEvent::SuperWeaponInsufficientFunds { owner, sw_type } => {
-                if !owner_is_local(sim.interner(), owner, local_owner_name) {
+                if !rules.superweapon_semantics().paid_launches
+                    || !owner_is_local(sim.interner(), owner, local_owner_name) {
                     continue;
                 }
                 let Some(event) = sim
@@ -882,13 +880,13 @@ pub(super) fn dispatch_sim_sound_events(
                 // the building's own house owns one
                 // (`CountOwnedInstances` on `Owner+0x5550`).
                 // Optional Ares lists use the same grant availability owner.
-                #[cfg(not(feature = "ares"))]
-                let aux_satisfied = rules.super_weapon(&type_name).is_none_or(|sw| {
-                    crate::sim::superweapon::super_weapon_available(sim, rules, owner, &sw.id)
-                });
-                #[cfg(feature = "ares")]
-                let aux_satisfied =
-                    crate::sim::superweapon::super_weapon_available(sim, rules, owner, &type_name);
+                let aux_satisfied = if rules.superweapon_semantics().extended_availability {
+                    crate::sim::superweapon::super_weapon_available(sim, rules, owner, &type_name)
+                } else {
+                    rules.super_weapon(&type_name).is_none_or(|sw| {
+                        crate::sim::superweapon::super_weapon_available(sim, rules, owner, &sw.id)
+                    })
+                };
                 if !eva_producers::super_weapon_detected_allowed(
                     sim.house_alliances(),
                     &owner_name,
@@ -1310,6 +1308,132 @@ mod tests {
                 })
                 .collect();
             assert_eq!(cues, expected.into_iter().collect::<Vec<_>>());
+        }
+    }
+
+    #[cfg(not(feature = "ares"))]
+    #[test]
+    #[ignore = "requires VERA20K_ARES_COMPONENT; exercises the ordinary host"]
+    fn sdk_superweapon_money_refusal_dispatch_uses_fixed_eva_and_local_owner() {
+        use crate::assets::asset_manager::{MediaArchiveMode, test_support::audio_test_install};
+        use crate::rules::{
+            art_data::ArtRegistry, audio_sources::AudioDefinitions, ini_parser::IniFile,
+            process_owner::NativeScenarioRulesPrefix, retail_sources::RetailRulesSources,
+        };
+        use crate::sim::runtime::{ScenarioGameplayProgram, bind_scenario_gameplay_resources};
+        let component = std::fs::read(
+            std::env::var_os("VERA20K_ARES_COMPONENT").expect("set VERA20K_ARES_COMPONENT"),
+        )
+        .unwrap();
+        for (label, module) in [("component", Some(component.as_slice())), ("stock", None)] {
+            let directory = audio_test_install(&format!("sdk-super-funds-{label}"));
+            let write = |name: &str, bytes: &[u8]| {
+                std::fs::write(directory.path().join(name), bytes).unwrap();
+            };
+            for (name, contents) in [
+                (
+                    "rulesmd.ini",
+                    "[Countries]\n0=Americans\n1=Russians\n\
+                 [SuperWeaponTypes]\n0=Default\n1=Custom\n2=Silent\n\
+                 [Default]\nType=PsychicReveal\nMoney.Amount=-500\n\
+                 [Custom]\nType=PsychicReveal\nMoney.Amount=-500\nEVA.InsufficientFunds=CustomFunds\n\
+                 [Silent]\nType=PsychicReveal\nMoney.Amount=-500\nEVA.InsufficientFunds=none\n",
+                ),
+                ("artmd.ini", ""),
+                ("soundmd.ini", "[SoundList]\n"),
+                (
+                    "evamd.ini",
+                    "[DialogList]\n0=EVA_InsufficientFunds\n1=CustomFunds\n",
+                ),
+            ] {
+                write(name, contents.as_bytes());
+            }
+            if let Some(module) = module {
+                write("gameplay.wasm", module);
+                write(
+                    "vera-mod.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "api_version": vera_mod_api::API_VERSION, "program": "gameplay.wasm",
+                        "sha256": crate::util::sha256::sha256_hex(module),
+                    }))
+                    .unwrap(),
+                );
+            }
+            let assets = crate::mod_sdk::open_active_assets(
+                directory.path(),
+                MediaArchiveMode::STOCK_DIGITAL,
+            )
+            .unwrap();
+            let audio = AudioDefinitions::select(&assets);
+            let mut owner = RetailRulesSources::select(&assets)
+                .unwrap()
+                .into_owner(audio.sounds().clone(), audio.eva().clone())
+                .unwrap();
+            let (mut rules, _, art, _) = owner
+                .load_scenario(
+                    NativeScenarioRulesPrefix::NonCampaign(None),
+                    &IniFile::empty(),
+                )
+                .unwrap()
+                .into_parts();
+            rules.install_art_data(ArtRegistry::from_ini(&art));
+            let mut sim = Simulation::new();
+            bind_scenario_gameplay_resources(
+                &mut rules,
+                &assets,
+                ScenarioGameplayProgram::Fresh {
+                    simulation: &mut sim,
+                    rules_owner: &mut owner,
+                },
+                "tem",
+                "TEMPERATE",
+            )
+            .unwrap();
+            let local = sim.intern("Americans");
+            let other = sim.intern("Russians");
+            let custom = sim.intern("Custom");
+            let silent = sim.intern("Silent");
+            let default = sim.intern("Default");
+            let hash = sim.state_hash();
+            let mut output = SoundEventQueue::new();
+            dispatch_sim_sound_events(
+                [
+                    (local, custom),
+                    (other, custom),
+                    (local, silent),
+                    (other, default),
+                    (local, default),
+                ]
+                .map(|(owner, sw_type)| {
+                    SimSoundEvent::SuperWeaponInsufficientFunds { owner, sw_type }
+                }),
+                &sim,
+                &rules,
+                Some("Americans"),
+                &mut |_| panic!("money refusal has no radar gate"),
+                &mut output,
+            );
+            assert_eq!(sim.state_hash(), hash, "dispatch is presentation only");
+            let events = output.drain();
+            let cues: Vec<_> = events
+                .iter()
+                .map(|event| match event {
+                    GameSoundEvent::Eva {
+                        event,
+                        type_override: None,
+                    } => event.as_str(),
+                    other => panic!("unexpected funds feedback {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                cues,
+                if module.is_some() {
+                    vec!["CustomFunds", "EVA_InsufficientFunds"]
+                } else {
+                    vec![]
+                },
+                "{label}"
+            );
         }
     }
 

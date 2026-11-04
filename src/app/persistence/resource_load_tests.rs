@@ -58,6 +58,19 @@ fn bound_saved_world(
     );
     let overlay_registry = rules.overlay_registry().clone();
     let mut simulation = super::super::tests::load_fixture_simulation(false);
+    if assets.contains("vera-mod.json") {
+        crate::sim::runtime::bind_scenario_gameplay_resources(
+            &mut rules,
+            assets,
+            crate::sim::runtime::ScenarioGameplayProgram::Fresh {
+                simulation: &mut simulation,
+                rules_owner: owner,
+            },
+            theater.extension,
+            &map.header.theater,
+        )
+        .expect("fresh saved-world component resources");
+    }
     let terrain = {
         let main_rng = simulation.main_rng().draws();
         let mut main_draw = || main_rng.next_u32();
@@ -511,6 +524,13 @@ struct IncomingSave {
 
 fn incoming_save(theater: &str, extra_rules: &str) -> Option<IncomingSave> {
     let (root, mut assets) = retail_assets()?;
+    if assets.contains("vera-mod.json") {
+        assets = crate::mod_sdk::open_active_assets(
+            &root,
+            crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
+        )
+        .expect("admit the same memory-only work before startup");
+    }
     let mut owner = retail_rules_owner(&assets);
     assets
         .register_neutral_archives()
@@ -1032,6 +1052,130 @@ fn retail_saved_resources_prepare_cold() {
         "uncommitted candidate cannot warm the process cache"
     );
     assert!(cold_owner.saved_scenario_rules().is_none());
+}
+
+#[test]
+#[cfg(not(feature = "ares"))]
+#[ignore = "requires actual component and retail assets; isolated process owns community snapshot"]
+fn sdk_super_saved_resources_prepare_cold() {
+    const TEST: &str =
+        "app::persistence::resource_load::tests::sdk_super_saved_resources_prepare_cold";
+    const CHILD: &str = "VERA_SUPER_SAVED_RESOURCES_CHILD";
+    if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                TEST,
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run the sole community-snapshot test in its own process");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
+            "child must execute the requested case, not an empty filter: {stdout}"
+        );
+        return;
+    }
+    let module = std::fs::read(
+        std::env::var_os("VERA20K_ARES_COMPONENT")
+            .expect("set VERA20K_ARES_COMPONENT to the actual .28 component"),
+    )
+    .unwrap();
+    assert!(module.len() <= 16 * 1024 * 1024);
+    let digest = crate::util::sha256::sha256_hex(&module);
+    let declaration = serde_json::to_vec(&serde_json::json!({
+        "api_version": vera_mod_api::API_VERSION,
+        "program": "sdk-restore.wasm", "sha256": digest,
+    }))
+    .unwrap();
+    crate::assets::community::install(
+        crate::assets::community::Snapshot::new(
+            "sdk-super-saved-resources".into(),
+            vec![
+                ("vera-mod.json".into(), declaration),
+                ("sdk-restore.wasm".into(), module),
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut save = incoming_save(
+        "TEMPERATE",
+        "\
+[SuperWeaponTypes]\nSDKRestore=SDKRestoreStrike\n\
+[SDKRestoreStrike]\nType=GenericWarhead\nSW.Warhead=SDKRestorePayload\nMoney.Amount=-333\n\
+[SDKRestorePayload]\nCellSpread=0.5\nPercentAtMax=1\n",
+    )
+    .expect("actual component restore requires retail assets");
+    assert!(
+        !save.source_path.exists(),
+        "cold restore cannot reopen the authored map"
+    );
+    let incoming_hash = save.incoming.resources.rules.simulation_config_hash();
+    let mut raw = GameSnapshot::load_with_resources(&save.bytes).unwrap();
+    assert_eq!(raw.rules_hash, incoming_hash);
+    // Navigation Load rebuilds hierarchy history, so a full-world hash can
+    // legitimately change. App preparation validates the frozen rules/Program
+    // configuration hash below, before publishing any restored resources.
+    let resources = raw.take_scenario_resources().unwrap();
+    let error = crate::rules::ruleset::RuleSet::from_processed_rules(resources.processed_rules())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("saved SuperWeapon references require their admitted component"),
+        "the original WH slot must require the new App admission before projection: {error}"
+    );
+
+    let cold_owner = retail_rules_owner(&save.assets);
+    let cold_cache = TileVariantSelectorCache::default();
+    let frontend = frontend_main();
+    let frontend_before = frontend.logical_state();
+    let clock = || LOAD_CLOCK_MS;
+    let view = SavedGamePreparationView {
+        repository: &save.repository,
+        current_simulation: None,
+        frontend_main: &frontend,
+        rules_owner: &cold_owner,
+        tile_cache: &cold_cache,
+        lighting: &crate::app::presentation::lighting::MatchLighting::default(),
+        load_clock: &clock,
+    };
+    // The production App entry must admit this same frozen Program before its
+    // native WH-slot validation; no manual reattachment is used here.
+    let prepared = save
+        .assets
+        .prepare_saved_load(|assets| {
+            PreparedSavedGame::prepare_resources(&save.bytes, &view, assets)
+        })
+        .unwrap();
+    assert_incoming_resources(&prepared, &save.incoming, &save.map);
+    for rules in [&save.incoming.resources.rules, &prepared.resources.rules] {
+        let strike = rules.super_weapon("SDKRestoreStrike").unwrap();
+        assert_eq!(strike.money_amount, -333);
+        assert_eq!(
+            strike.generic_warhead.as_ref().unwrap().warhead.as_deref(),
+            Some("SDKRestorePayload")
+        );
+        assert_eq!(
+            rules.warhead("SDKRestorePayload").unwrap().cell_spread_f64,
+            0.5
+        );
+    }
+    assert_eq!(frontend.logical_state(), frontend_before);
+    assert!(
+        !cold_cache.is_initialized(),
+        "uncommitted candidate cannot warm the process cache"
+    );
+    assert!(
+        cold_owner.saved_scenario_rules().is_none(),
+        "candidate cannot install its Rules into the cold owner"
+    );
 }
 
 #[test]

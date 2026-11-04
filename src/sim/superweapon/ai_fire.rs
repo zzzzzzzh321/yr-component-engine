@@ -88,7 +88,6 @@ pub(crate) enum AiFireArm {
     /// `0x00509A3E`: [`force_shield_target`].
     ForceShield,
     /// Ares default `SW.AITargeting=Offensive` (or disabled with `None`).
-    #[cfg(feature = "ares")]
     GenericWarhead,
     /// `0x00509AD2`: Iron Curtain and the Chronosphere pair are left to team
     /// scripts.
@@ -104,14 +103,10 @@ impl AiFireArm {
             | SuperWeaponKind::AmerParaDrop
             | SuperWeaponKind::SpyPlane
             | SuperWeaponKind::PsychicReveal => Self::GroundRallyPoint,
-            #[cfg(feature = "ares")]
             SuperWeaponKind::UnitDelivery => Self::GroundRallyPoint,
-            #[cfg(not(feature = "ares"))]
-            SuperWeaponKind::UnitDelivery | SuperWeaponKind::GenericWarhead => Self::None,
             SuperWeaponKind::PsychicDominator => Self::PsychicDominator,
             SuperWeaponKind::GeneticConverter => Self::GeneticMutator,
             SuperWeaponKind::ForceShield => Self::ForceShield,
-            #[cfg(feature = "ares")]
             SuperWeaponKind::GenericWarhead => Self::GenericWarhead,
             SuperWeaponKind::IronCurtain
             | SuperWeaponKind::ChronoSphere
@@ -182,12 +177,21 @@ pub(crate) fn try_fire(
         if !super::is_charged(sim, owner, sw_type_id) {
             continue;
         }
-        // Reject extension-gated types before target search can consume RNG.
-        #[cfg(any(feature = "ares", feature = "phobos"))]
-        if !super::super_weapon_available(sim, rules, owner, &sw.id) {
+        let semantics = rules.superweapon_semantics();
+        if !semantics.custom_payloads
+            && matches!(
+                sw.kind,
+                SuperWeaponKind::GenericWarhead | SuperWeaponKind::UnitDelivery
+            )
+        {
             continue;
         }
-        #[cfg(feature = "ares")]
+        // Reject extension-gated types before target search can consume RNG.
+        if (semantics.extended_availability || cfg!(feature = "phobos"))
+            && !super::super_weapon_available(sim, rules, owner, &sw.id)
+        {
+            continue;
+        }
         if sw.kind == SuperWeaponKind::UnitDelivery
             && !super::unit_delivery::configured(sim, rules, owner, sw)
         {
@@ -195,9 +199,9 @@ pub(crate) fn try_fire(
         }
         // Do not spend targeting RNG or attempt an unaffordable paid launch.
         // The Fire_SW transaction checks the current wallet again.
-        #[cfg(feature = "ares")]
-        if !super::money::configuration_supported(sw)
-            || !super::money::can_afford(&sim.houses, owner, sw)
+        if semantics.paid_launches
+            && (!super::money::configuration_supported(sw)
+                || !super::money::can_afford(&sim.houses, owner, sw))
         {
             continue;
         }
@@ -217,7 +221,6 @@ pub(crate) fn try_fire(
             AiFireArm::GroundRallyPoint => ground_rally_point(sim, rules, owner, registry),
             AiFireArm::PsychicDominator => psychic_dominator_target(sim, rules, owner),
             AiFireArm::GeneticMutator => genetic_mutator_target(sim, rules, owner),
-            #[cfg(feature = "ares")]
             AiFireArm::GenericWarhead => {
                 use crate::rules::superweapon_type::GenericWarheadAiTargeting;
                 sw.generic_warhead
@@ -350,7 +353,6 @@ fn find_best_rally_target(
 /// Ares Hooks.Targeting.cpp: OffensiveTargetSelector/ PickIonCannonTarget.
 /// Shares native eligibility and values, but ignores cloaked objects and
 /// scripted target preferences. Only a final tie selection draws Scenario RNG.
-#[cfg(feature = "ares")]
 fn offensive_target(
     sim: &mut Simulation,
     rules: &RuleSet,

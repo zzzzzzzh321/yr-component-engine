@@ -58,7 +58,9 @@ impl AdmittedComponent {
                 .hooks
                 .contains(&api::HookKind::LoadingThemeResource)
             || manifest.hooks.contains(&api::HookKind::CameoResource)
-            || manifest.hooks.contains(&api::HookKind::TypeSoundResource))
+            || manifest.hooks.contains(&api::HookKind::TypeSoundResource)
+            || manifest.hooks.contains(&api::HookKind::SuperWeaponResource)
+            || manifest.hooks.contains(&api::HookKind::ConfigureSuperRead))
             && !manifest.hooks.contains(&api::HookKind::ConfigureBoundary)
         {
             return Err(
@@ -105,6 +107,10 @@ impl AdmittedComponent {
                 .manifest
                 .hooks
                 .contains(&api::HookKind::SoundSampleAdmission)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::ConfigureSuperRead)
     }
 
     pub(super) fn startup_resource_policy(
@@ -317,6 +323,12 @@ impl Program {
             .contains(&api::HookKind::ConfigureCountryRead)
     }
 
+    pub(crate) fn has_super_read(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::ConfigureSuperRead)
+    }
+
     pub(crate) fn has_loading_theme_resource(&self) -> bool {
         self.manifest
             .hooks
@@ -325,6 +337,7 @@ impl Program {
 
     pub(crate) fn has_early_configuration(&self) -> bool {
         self.has_country_read()
+            || self.has_super_read()
             || self.has_loading_theme_resource()
             || self.has_cameo_resource()
             || self.has_type_sound_resource()
@@ -410,6 +423,34 @@ impl Program {
             candidate.config = config;
         }
         Ok((candidate, plan.country_read))
+    }
+
+    /// The native registry executes the returned action at its current visit,
+    /// then publishes this candidate. Configuration has no mutable registry
+    /// import and cannot replay the allocation after the pass is complete.
+    pub(crate) fn configure_super_read(
+        &self,
+        pass: &IniFile,
+        context: api::ConfigureSuperReadContext,
+        registry: crate::rules::native_processing::SdkRegistryPass,
+    ) -> Result<(Self, Option<api::SuperReferenceRead>), String> {
+        if !self.has_super_read() {
+            return Ok((self.clone(), None));
+        }
+        let plan = self.configuration_plan(
+            self.executor()?,
+            Context::ConfigureSuperRead(context),
+            NativeHost::configuration(pass.clone(), Vec::new())
+                .with_registries(registry)
+                .enable_superweapon_inputs()
+                .enable_type_sound_inputs(),
+            "SuperWeapon reference configuration",
+        )?;
+        let mut candidate = self.clone();
+        if let Some(config) = plan.config {
+            candidate.config = config;
+        }
+        Ok((candidate, plan.super_reference_read))
     }
 
     /// Finish an isolated receipt with its own already-admitted identity and
@@ -624,6 +665,9 @@ impl Program {
         if self.has_faction_resource() {
             host = host.enable_faction_inputs();
         }
+        if self.has_super_read() {
+            host = host.enable_superweapon_inputs().enable_type_sound_inputs();
+        }
         self.configure(
             executor,
             context,
@@ -702,6 +746,26 @@ impl Program {
         self.manifest
             .hooks
             .contains(&api::HookKind::TypeSoundResource)
+    }
+
+    pub(crate) fn has_superweapon_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::SuperWeaponResource)
+    }
+
+    pub(crate) fn superweapon_resource_policy(
+        &self,
+    ) -> Result<Option<api::SuperWeaponResourcePolicy>, String> {
+        if !self.has_superweapon_resource() {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate(
+                Context::SuperWeaponResource(api::SuperWeaponResourceContext {}),
+                &[],
+            )?
+            .superweapon_resource)
     }
 
     pub(crate) fn type_sound_resource_policy(

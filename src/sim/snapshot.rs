@@ -349,9 +349,10 @@ pub enum SnapshotRestoreError {
     InvalidUnitDelivery(&'static str),
     #[error("invalid paid two-stage selection: {0}")]
     InvalidPaidSuperWeaponSelection(&'static str),
-    #[cfg(feature = "ares")]
     #[error("invalid superweapon launch history: {0}")]
     InvalidSuperWeaponLaunchHistory(&'static str),
+    #[error("invalid saved SuperWeapon presentation: {0}")]
+    InvalidSuperWeaponPresentation(&'static str),
     #[error("invalid detached Particle {object_id}: {reason}")]
     InvalidDetachedParticleState {
         object_id: u64,
@@ -1745,6 +1746,18 @@ impl Simulation {
                 .validate_restore()
                 .map_err(SnapshotRestoreError::InvalidExternalMod)?;
         }
+        // Query only the exact restored immutable Program/configuration after
+        // its module identity has passed validation. No local INI or current
+        // replacement component may authorize retained extension effects.
+        let superweapon_semantics = self
+            .external_mod
+            .as_ref()
+            .map(|program| program.superweapon_resource_policy())
+            .transpose()
+            .map_err(SnapshotRestoreError::InvalidExternalMod)?
+            .flatten()
+            .map(|policy| policy.semantics)
+            .unwrap_or_else(crate::rules::superweapon_type::profile_semantics);
         for (_, entity) in self.substrate.entities.iter_sorted() {
             if entity.mod_component().len() > vera_mod_api::MAX_STATE_BYTES
                 || (self.external_mod.is_none() && !entity.mod_component().is_empty())
@@ -1762,18 +1775,21 @@ impl Simulation {
                 });
             }
             entity
-                .validate_ares_build_compatibility()
+                .validate_unit_delivery_authority(superweapon_semantics.custom_payloads)
                 .map_err(SnapshotRestoreError::InvalidUnitDelivery)?;
         }
-        self.validate_paid_super_weapon_selections()
+        self.validate_paid_super_weapon_selections(superweapon_semantics.paid_launches)
             .map_err(SnapshotRestoreError::InvalidPaidSuperWeaponSelection)?;
-        #[cfg(feature = "ares")]
         self.super_weapons
-            .validate_ares_launch_history()
+            .validate_ares_launch_history(superweapon_semantics.grant_charge_history)
             .map_err(SnapshotRestoreError::InvalidSuperWeaponLaunchHistory)?;
         self.unit_deliveries
-            .validate(self)
+            .validate(self, superweapon_semantics.custom_payloads)
             .map_err(SnapshotRestoreError::InvalidUnitDelivery)?;
+        for (_, anim) in self.substrate.anims.iter() {
+            anim.validate_viewer_presentation_authority(superweapon_semantics.launch_presentation)
+                .map_err(SnapshotRestoreError::InvalidSuperWeaponPresentation)?;
+        }
         self.validate_restored_spotlights()
             .map_err(
                 |(object_id, reason)| SnapshotRestoreError::InvalidSpotlightState {

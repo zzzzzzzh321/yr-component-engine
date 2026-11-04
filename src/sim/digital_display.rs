@@ -225,28 +225,17 @@ pub fn values_for_display(
             if entity.category() != crate::map::entities::EntityCategory::Structure {
                 return None;
             }
-            // `SuperWeapons=` is the Ares list; a Phobos-only build has the
-            // two stock slots and no additional entries.
-            #[cfg(feature = "ares")]
-            let additional = object.additional_super_weapons();
-            #[cfg(not(feature = "ares"))]
-            let additional: &[String] = &[];
             // `getSuperTimer`: an index within `GetSuperWeaponCount()` (the two
             // stock slots plus the list) selects that slot, even an empty one;
             // zero or an index past the end falls back to the first set slot.
-            let count = 2 + additional.len();
-            let selected = if info_index > 0 && info_index as usize <= count {
-                match info_index {
-                    1 => object.super_weapon.as_deref(),
-                    2 => object.super_weapon2.as_deref(),
-                    _ => additional.get(info_index as usize - 3).map(String::as_str),
-                }
+            // Use the unfiltered provider projection: availability must not
+            // remove an entry and silently renumber these display indices.
+            let mut slots =
+                crate::sim::superweapon::building_super_weapon_slots(rules, Some(object));
+            let selected = if info_index > 0 && info_index as usize <= slots.clone().count() {
+                slots.nth(info_index as usize - 1).flatten()
             } else {
-                object
-                    .super_weapon
-                    .as_deref()
-                    .or(object.super_weapon2.as_deref())
-                    .or_else(|| additional.first().map(String::as_str))
+                slots.flatten().next()
             };
             let name = selected?;
             let type_id = sim.interner().get(name)?;

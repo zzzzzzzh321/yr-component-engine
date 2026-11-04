@@ -88,6 +88,8 @@ pub(super) struct NativeHost {
     type_sound_inputs: bool,
     faction_inputs: bool,
     faction_message: OnceLock<Result<Vec<u8>, String>>,
+    superweapon_inputs: bool,
+    superweapon_message: OnceLock<Result<Vec<u8>, String>>,
 }
 
 impl NativeHost {
@@ -104,6 +106,8 @@ impl NativeHost {
             type_sound_inputs: false,
             faction_inputs: false,
             faction_message: OnceLock::new(),
+            superweapon_inputs: false,
+            superweapon_message: OnceLock::new(),
         }
     }
 
@@ -116,6 +120,7 @@ impl NativeHost {
         self.fixed_art_message = OnceLock::new();
         self.cameo_message = OnceLock::new();
         self.faction_message = OnceLock::new();
+        self.superweapon_message = OnceLock::new();
         self
     }
 
@@ -139,6 +144,11 @@ impl NativeHost {
         self
     }
 
+    pub(super) fn enable_superweapon_inputs(mut self) -> Self {
+        self.superweapon_inputs = true;
+        self
+    }
+
     pub(super) fn simulation() -> Self {
         Self {
             ini: None,
@@ -152,6 +162,8 @@ impl NativeHost {
             type_sound_inputs: false,
             faction_inputs: false,
             faction_message: OnceLock::new(),
+            superweapon_inputs: false,
+            superweapon_message: OnceLock::new(),
         }
     }
 
@@ -236,6 +248,38 @@ impl NativeHost {
             .map_err(Clone::clone)
     }
 
+    fn superweapon_view_bytes(&self) -> Result<&[u8], String> {
+        if !self.superweapon_inputs || self.ini.is_none() {
+            return Err("SuperWeapon configuration is unavailable".into());
+        }
+        self.superweapon_message
+            .get_or_init(|| {
+                let registry = self
+                    .registries
+                    .as_ref()
+                    .ok_or("missing SuperWeapon read points")?;
+                registry.superweapon_effective_input_bytes()?;
+                serde_json::to_vec(registry.superweapon_view()).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
+    }
+
+    fn superweapon_source_bytes(&self) -> usize {
+        if !self.superweapon_inputs || self.ini.is_none() {
+            return 0;
+        }
+        // An unencodable source is rejected by the view/read services. Until
+        // then charge the capped maximum, rather than silently treating it as
+        // an empty configuration and granting a smaller execution budget.
+        self.registries.as_ref().map_or(usize::MAX, |registry| {
+            registry
+                .superweapon_effective_input_bytes()
+                .unwrap_or(usize::MAX)
+        })
+    }
+
     fn cameo_view_bytes(&self) -> Result<&[u8], String> {
         if !self.cameo_inputs || self.ini.is_none() {
             return Err("cameo configuration is unavailable".into());
@@ -260,6 +304,8 @@ impl HostServices for NativeHost {
             .map_or(0, <[u8]>::len)
             .saturating_add(self.fixed_art_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.cameo_view_bytes().map_or(0, <[u8]>::len))
+            .saturating_add(self.superweapon_view_bytes().map_or(0, <[u8]>::len))
+            .saturating_add(self.superweapon_source_bytes())
     }
 
     fn config(&self, section: &str, key: &str) -> Option<String> {
@@ -278,6 +324,25 @@ impl HostServices for NativeHost {
     ) -> Result<Vec<u8>, String> {
         if reader == "sound-source-hash" {
             return serde_json::to_vec(&self.fixed_sounds()?.source_hash())
+                .map_err(|e| e.to_string());
+        }
+        if matches!(reader, "eva-source-hash" | "eva-find") {
+            if !self.superweapon_inputs || self.ini.is_none() {
+                return Err("fixed EVA configuration is unavailable".into());
+            }
+            let eva = self
+                .registries
+                .as_ref()
+                .and_then(|registry| registry.superweapon_eva_source())
+                .ok_or("missing process-selected EVA catalog")?;
+            if reader == "eva-source-hash" {
+                return serde_json::to_vec(&eva.source_hash()).map_err(|e| e.to_string());
+            }
+            let name: String = serde_json::from_slice(current).map_err(|e| e.to_string())?;
+            if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+                return Err("invalid fixed EVA lookup name".into());
+            }
+            return serde_json::to_vec(&eva.entry(&name).map(|entry| &entry.name))
                 .map_err(|e| e.to_string());
         }
         if reader == "sound-reference" {
@@ -308,6 +373,29 @@ impl HostServices for NativeHost {
         }
         if reader == "faction-registry-view" {
             return self.faction_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader == "superweapon-registry-view" {
+            return self.superweapon_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader.starts_with("super-") && !reader.starts_with("super-effective:") {
+            if !self.superweapon_inputs {
+                return Err("component has no SuperWeapon configuration capability".into());
+            }
+            let ini = self
+                .ini
+                .as_ref()
+                .ok_or("SuperWeapon input is unavailable during simulation")?;
+            return self
+                .registries
+                .as_ref()
+                .ok_or("missing SuperWeapon read points")?
+                .read_superweapon_value(
+                    reader,
+                    section,
+                    ini.section_or_empty(section),
+                    key,
+                    current,
+                );
         }
         if reader.starts_with("faction-") {
             if !self.faction_inputs {
@@ -380,11 +468,58 @@ impl HostServices for NativeHost {
             .as_ref()
             .ok_or("configuration is unavailable during simulation")?;
         let owner = section;
-        let section = ini.section_or_empty(section);
-        let value: serde_json::Value =
-            serde_json::from_slice(current).map_err(|e| e.to_string())?;
+        let (section, reader, value) = if let Some(reader) = reader.strip_prefix("super-effective:")
+        {
+            if !self.superweapon_inputs {
+                return Err("component has no SuperWeapon configuration capability".into());
+            }
+            // Only scalar native readers may use this retained physical source.
+            // Registry, fixed-source and recursive adapters cannot be smuggled
+            // through it; they have their own source authority above.
+            if !matches!(
+                reader,
+                "presence"
+                    | "int"
+                    | "ares-int"
+                    | "bool"
+                    | "ares-bool"
+                    | "double-bits"
+                    | "ares-double-bits"
+            ) && !reader.starts_with("name:")
+                && !reader.starts_with("string:")
+            {
+                return Err("unsupported retained SuperWeapon scalar reader".into());
+            }
+            let input: api::SuperReadValue<serde_json::Value> =
+                serde_json::from_slice(current).map_err(|e| e.to_string())?;
+            let section = self
+                .registries
+                .as_ref()
+                .ok_or("missing SuperWeapon read points")?
+                .superweapon_effective_section(input.read, owner)?;
+            (section, reader, input.current)
+        } else {
+            (
+                ini.section_or_empty(section),
+                reader,
+                serde_json::from_slice(current).map_err(|e| e.to_string())?,
+            )
+        };
         let bad = || format!("invalid config reader/default: {reader}");
         let result = match reader {
+            "presence" => serde_json::json!(section.is_present(key)),
+            "comma-mask:2048" => {
+                let tokens: Vec<(String, u32)> =
+                    serde_json::from_value(value).map_err(|e| e.to_string())?;
+                if tokens.len() > 256
+                    || tokens.iter().any(|(name, _)| {
+                        name.is_empty() || name.len() > 128 || name.chars().any(char::is_control)
+                    })
+                {
+                    return Err("invalid comma-mask token table".into());
+                }
+                serde_json::json!(section.read_comma_mask(key, &tokens))
+            }
             "pcx-filename" => serde_json::json!(section.read_ares_pcx_filename(key)),
             "bool-prefix-reverse3" => serde_json::json!(section.read_bool_prefix_reverse3(
                 key,

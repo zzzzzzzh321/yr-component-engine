@@ -34,11 +34,9 @@ mod chronosphere_lunar_retail_tests;
 pub mod chronosphere_tests;
 mod fire;
 pub mod force_shield;
-#[cfg(feature = "ares")]
 mod generic_warhead;
 #[cfg(all(test, feature = "ares"))]
 mod ares_charge_tests;
-#[cfg(feature = "ares")]
 mod ares_presentation;
 pub mod genetic_converter;
 pub mod invulnerability;
@@ -46,7 +44,6 @@ pub mod iron_curtain;
 pub mod lightning_storm;
 #[cfg(test)]
 pub(crate) mod lightning_storm_tests;
-#[cfg(feature = "ares")]
 mod money;
 pub(crate) mod nuke;
 #[cfg(test)]
@@ -67,6 +64,8 @@ mod targeting;
 pub(crate) mod unit_delivery;
 #[cfg(test)]
 mod view_admission_tests;
+#[cfg(test)]
+mod sdk_tests;
 
 use crate::rules::ruleset::RuleSet;
 use crate::rules::superweapon_type::SuperWeaponType;
@@ -79,9 +78,7 @@ use crate::sim::world::FrameChannel;
 use crate::sim::world::FrameEffects;
 use crate::sim::world::ObjectSubstrate;
 use crate::sim::world::{SimSoundEvent, Simulation};
-use crate::util::native_x87::{
-    MaskedX87Chop53, NativeF32Bits, NativeF64Bits, X87Chop53, X87Ordering,
-};
+use crate::util::native_x87::{MaskedX87Chop53, NativeF32Bits, NativeF64Bits, X87Chop53, X87Ordering};
 
 /// The `[SuperWeaponTypes]` entry at a type's `PreDependent=` index: the
 /// Super Fire_SW pairs a `PostClick=` type with (`HouseClass+0x258` indexed by
@@ -103,19 +100,10 @@ pub fn paid_pair_source<'r>(
     rules: &'r RuleSet,
     sw: &SuperWeaponType,
 ) -> Option<(&'r str, &'r SuperWeaponType)> {
-    #[cfg(not(feature = "ares"))]
-    {
-        let _ = (rules, sw);
-        None
+    if !rules.superweapon_semantics().paid_launches || !sw.post_click {
+        return None;
     }
-    #[cfg(feature = "ares")]
-    {
-        if !sw.post_click {
-            return None;
-        }
-        pre_dependent(rules, sw)
-            .filter(|(_, source)| source.money_amount != 0 || sw.money_amount != 0)
-    }
+    pre_dependent(rules, sw).filter(|(_, source)| source.money_amount != 0 || sw.money_amount != 0)
 }
 
 /// The type whose money/refusal settings final activation uses. PostClick
@@ -306,8 +294,21 @@ impl SuperWeapons {
     /// Native 100226D0 always writes the count and frame together. A restored
     /// nonzero count cannot omit the frame used to hash that retained pair.
     /// Signed counts may wrap; their sign is not an admission constraint.
-    #[cfg(feature = "ares")]
-    pub(crate) fn validate_ares_launch_history(&self) -> Result<(), &'static str> {
+    pub(crate) fn validate_ares_launch_history(
+        &self,
+        grant_charge_history: bool,
+    ) -> Result<(), &'static str> {
+        if !grant_charge_history
+            && self
+                .by_house
+                .values()
+                .flat_map(|weapons| weapons.values())
+                .any(|instance| {
+                    instance.ares_launch_count != 0 || instance.ares_charge_origin_frame.is_some()
+                })
+        {
+            return Err("launch history requires the restored SuperWeapon grant-charge semantics");
+        }
         if self
             .by_house
             .values()
@@ -429,10 +430,9 @@ pub struct SuperWeaponInstance {
     /// and launches. Grant10022710 records the first recharge origin; successful
     /// Launch100226D0 replaces it. The existing Super remains the sole owner
     /// across grant, revoke, snapshot restoration and charge changes.
-    #[cfg(feature = "ares")]
+    #[serde(default)]
     ares_launch_count: i32,
-    #[cfg(feature = "ares")]
-    #[serde(rename = "ares_last_launch_frame")]
+    #[serde(default, rename = "ares_last_launch_frame")]
     ares_charge_origin_frame: Option<i32>,
 }
 
@@ -450,16 +450,12 @@ fn default_can_lose() -> bool {
 
 impl SuperWeaponInstance {
     /// 100226D0: called only after an admitted Ares Activate returned true.
-    #[cfg(feature = "ares")]
     fn record_ares_launch(&mut self, frame: i32) {
         self.ares_launch_count = self.ares_launch_count.wrapping_add(1);
         self.ares_charge_origin_frame = Some(frame);
     }
 
     pub(crate) fn hash_ares_launch_history(&self, hasher: &mut impl std::hash::Hasher) {
-        #[cfg(not(feature = "ares"))]
-        let _ = hasher;
-        #[cfg(feature = "ares")]
         if let Some(frame) = self.ares_charge_origin_frame {
             std::hash::Hash::hash(b"ares-super-launch-history-v1", hasher);
             std::hash::Hash::hash(&(self.ares_launch_count, frame), hasher);
@@ -648,9 +644,7 @@ impl SuperWeaponInstance {
             timer_place: None,
             paid_sequence: 0,
             paid_selection: None,
-            #[cfg(feature = "ares")]
             ares_launch_count: 0,
-            #[cfg(feature = "ares")]
             ares_charge_origin_frame: None,
         }
     }
@@ -714,8 +708,6 @@ impl SuperWeaponInstance {
         one_time: bool,
         on_hold: bool,
     ) -> bool {
-        #[cfg(not(feature = "ares"))]
-        let _ = rules;
         if self.is_active {
             return false;
         }
@@ -741,12 +733,13 @@ impl SuperWeaponInstance {
             if sw.use_charge_drain {
                 self.charge_drain_state = 0;
             }
-            #[cfg(feature = "ares")]
-            if matches!(
-                sw.kind,
-                crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
-                    | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
-            ) && let Some(metadata) = rules.super_weapon_metadata(&sw.id)
+            if rules.superweapon_semantics().grant_charge_history
+                && matches!(
+                    sw.kind,
+                    crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
+                        | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
+                )
+                && let Some(metadata) = rules.super_weapon_metadata(&sw.id)
             {
                 // These handlers already retain successful launch history.
                 // Stock redirects need their own success boundary before using
@@ -770,7 +763,6 @@ impl SuperWeaponInstance {
     /// before Grant's on-hold and one-time tails. HouseExt10021480 reads
     /// (shots,origin);10022710 records an initial recharge origin if unset.
     /// Launch100226D0 later updates this same pair. No second cooldown exists.
-    #[cfg(feature = "ares")]
     fn apply_ares_grant_charge(
         &mut self,
         sw: &SuperWeaponType,
@@ -1227,7 +1219,6 @@ pub(crate) fn charge_nearly_full(remaining: i32, recharge: i32, percent: NativeF
 /// the two name the same weapon. A Super the house was never granted keeps
 /// the constructor's timer, started with no duration
 /// (`SuperClass::SuperClass @ 0x006CAF90`): nothing remains.
-#[cfg(not(feature = "ares"))]
 pub(crate) fn supers_of_kind_remaining(
     sim: &Simulation,
     rules: &RuleSet,
@@ -1416,7 +1407,6 @@ pub fn superweapon_views_for_owner(
             continue;
         };
         let paid_source = paid_pair_source(rules, sw_type);
-        #[cfg(feature = "ares")]
         let money_type = financial_type(rules, sw_type);
         let display =
             inst.sidebar_display(sw_type, current_frame, rules.general.charge_to_drain_ratio);
@@ -1434,32 +1424,16 @@ pub fn superweapon_views_for_owner(
             } else {
                 inst.can_fire(sw_type)
             },
-            can_afford: {
-                #[cfg(feature = "ares")]
-                {
-                    money::can_afford(&sim.houses, *owner, money_type)
-                }
-                #[cfg(not(feature = "ares"))]
-                {
-                    true
-                }
-            },
-            constraints_blocked: {
-                #[cfg(feature = "ares")]
-                {
-                    sw_type.use_ai_targeting
-                        && !sw_type.target_constraints().allows_manual_fire(
-                            sim.houses
-                                .get(owner)
-                                .map(|house| house.target_constraints_observations())
-                                .unwrap_or_default(),
-                        )
-                }
-                #[cfg(not(feature = "ares"))]
-                {
-                    false
-                }
-            },
+            can_afford: !rules.superweapon_semantics().paid_launches
+                || money::can_afford(&sim.houses, *owner, money_type),
+            constraints_blocked: rules.superweapon_semantics().custom_payloads
+                && sw_type.use_ai_targeting
+                && !sw_type.target_constraints().allows_manual_fire(
+                    sim.houses
+                        .get(owner)
+                        .map(|house| house.target_constraints_observations())
+                        .unwrap_or_default(),
+                ),
         });
     }
     views
@@ -1603,7 +1577,6 @@ pub(crate) fn tick_active_superweapon_effects(
     let chrono = sim.session.process_chrono_screen_effect();
     sim.publish_trigger_effects(chrono);
     let storm = lightning_storm::process(sim, rules, overlay_registry, frame_effects);
-    #[cfg(feature = "ares")]
     unit_delivery::tick(sim, rules, overlay_registry, frame_effects);
     dominator || storm
 }
@@ -1636,7 +1609,6 @@ fn owned_live_buildings(
 /// none, or the house has a building of that type on the map
 /// (`HouseClass+0x5550`). The provider test (`0x00457630`) and the
 /// detection EVA (`0x004468FA..0x00446935`) read it. Retail names none.
-#[cfg(not(feature = "ares"))]
 fn aux_building_present(
     sim: &Simulation,
     rules: &RuleSet,
@@ -1681,16 +1653,9 @@ pub fn super_weapon_available(
         return false;
     }
 
-    #[cfg(not(feature = "ares"))]
-    let allowed = rules
-        .super_weapon(name)
-        .is_some_and(|sw| aux_building_present(sim, rules, owner, sw));
-
-    #[cfg(feature = "ares")]
-    let allowed = {
-        let Some(metadata) = rules.super_weapon_metadata(name) else {
-            return false;
-        };
+    let allowed = if rules.superweapon_semantics().extended_availability
+        && let Some(metadata) = rules.super_weapon_metadata(name)
+    {
         let policy = metadata.availability();
         let count = sim
             .interner
@@ -1722,6 +1687,10 @@ pub fn super_weapon_available(
             && metadata.building_requirements().is_none_or(|requirements| {
                 requirements.allows(|id| owned_building_present(sim, rules, owner, id))
             })
+    } else {
+        rules
+            .super_weapon(name)
+            .is_some_and(|sw| aux_building_present(sim, rules, owner, sw))
     };
 
     #[cfg(feature = "phobos")]
@@ -1813,30 +1782,63 @@ pub(crate) fn provided_supers<'r>(
     rules: &'r RuleSet,
     building: &crate::sim::game_entity::GameEntity,
 ) -> impl Iterator<Item = &'r str> + use<'r> {
-    let object = sim.object_type(building.type_ref(), rules);
     let owner = building.owner();
-    let provides = move |sw_id: &str| super_weapon_available(sim, rules, owner, sw_id);
+    building_super_weapon_slots(rules, sim.object_type(building.type_ref(), rules))
+        .flatten()
+        .filter(move |name| super_weapon_available(sim, rules, owner, name))
+}
+
+/// Stock primary/secondary order consumed by Building457630/457690, followed
+/// by the admitted additional definitions. Keep both empty stock slots:
+/// Phobos GetSuperWeaponCount/getSuperTimer indexes them before availability.
+/// Grant/hold filters this same borrowed projection; no provider cache exists.
+/// ObjectType retains authored names, while Building457630/457690 consumes
+/// resolved slots. Resolve through the existing registry order, including a
+/// registered type without a Rules body; unregistered names leave an empty slot.
+pub(crate) fn building_super_weapon_slots<'r>(
+    rules: &'r RuleSet,
+    object: Option<&'r crate::rules::object_type::ObjectType>,
+) -> impl Iterator<Item = Option<&'r str>> + Clone + use<'r> {
     let primary = [
         object.and_then(|object| object.super_weapon.as_deref()),
         object.and_then(|object| object.super_weapon2.as_deref()),
     ]
-    .into_iter()
-    .flatten();
+    .into_iter();
+    // SDK indices refer to the existing definition registry. `Some(empty)`
+    // explicitly replaces a legacy provider list; `None` retains that profile.
+    let additional = rules.superweapon_semantics().additional_providers;
+    let sdk = additional
+        .then(|| {
+            object
+                .and_then(|object| rules.building_type_index(&object.id))
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| rules.additional_super_weapon_indices(index))
+        })
+        .flatten();
     #[cfg(feature = "ares")]
-    let names = primary.chain(
-        object
-            .into_iter()
-            .flat_map(|object| object.additional_super_weapons().iter().map(String::as_str)),
-    );
+    let legacy = object
+        .filter(|_| additional && sdk.is_none())
+        .map_or(&[][..], |object| object.additional_super_weapons());
     #[cfg(not(feature = "ares"))]
-    let names = primary;
-    names.filter(move |name| provides(name))
+    let legacy: &[String] = &[];
+    primary
+        .chain(sdk.into_iter().flatten().map(move |&index| {
+            rules
+                .super_weapon_order
+                .get(index as usize)
+                .map(String::as_str)
+        }))
+        .chain(legacy.iter().map(|name| Some(name.as_str())))
+        .map(move |name| {
+            name.and_then(|name| rules.super_weapon_index(name))
+                .and_then(|index| rules.super_weapon_order.get(index))
+                .map(String::as_str)
+        })
 }
 
 /// BuildingTypeExt::GetSuperWeapon1000D610: primary, secondary and additional
 /// definitions, first available instance; no granted/charge admission and no
 /// second Super store. The House constructor owns every retained instance.
-#[cfg(feature = "ares")]
 pub(crate) fn first_available_building_super<'a>(
     sim: &'a Simulation,
     rules: &RuleSet,
@@ -1849,7 +1851,6 @@ pub(crate) fn first_available_building_super<'a>(
 
 /// Accepted Ares handler -> HouseExt100226D0. Do not call this for merely
 /// selected, refused or unsupported stock-redirected Activate paths.
-#[cfg(feature = "ares")]
 fn finish_ares_launch(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -1858,16 +1859,20 @@ fn finish_ares_launch(
     cell: (u16, u16),
 ) {
     let frame = sim.session.binary_frame() as i32;
-    let recheck = if let Some(instance) = sim.super_weapons.instance_mut(&owner, &typ) {
+    let semantics = rules.superweapon_semantics();
+    let recheck = if semantics.grant_charge_history
+        && let Some(instance) = sim.super_weapons.instance_mut(&owner, &typ)
+    {
         instance.record_ares_launch(frame);
         instance.one_time
-            || rules
-                .super_weapon_metadata(sim.interner.resolve(typ))
-                .is_some_and(|metadata| {
-                    !metadata
-                        .availability()
-                        .allows_shots(instance.ares_launch_count)
-                })
+            || (semantics.extended_availability
+                && rules
+                    .super_weapon_metadata(sim.interner.resolve(typ))
+                    .is_some_and(|metadata| {
+                        !metadata
+                            .availability()
+                            .allows_shots(instance.ares_launch_count)
+                    }))
     } else {
         false
     };
@@ -1877,7 +1882,9 @@ fn finish_ares_launch(
     if recheck && let Some(house) = sim.houses.get_mut(&owner) {
         house.request_tech_recheck();
     }
-    ares_presentation::on_launch(sim, rules, owner, typ, cell);
+    if semantics.launch_presentation {
+        ares_presentation::on_launch(sim, rules, owner, typ, cell);
+    }
 }
 
 /// Shared provider facts for one reached House pass. Source authority is the

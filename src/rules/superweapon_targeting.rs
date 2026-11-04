@@ -28,7 +28,12 @@ impl TargetMask {
     pub const ALL_CONTENTS: Self = Self(60);
     pub const ALL: Self = Self(255);
 
-    #[cfg(feature = "ares")]
+    /// Preserve the full byte mask, including the high bits of native ALL.
+    /// Reject a wider SDK value instead of truncating it into another policy.
+    pub(crate) fn from_bits(bits: u32) -> Option<Self> {
+        u8::try_from(bits).ok().map(Self)
+    }
+
     fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
@@ -37,7 +42,7 @@ impl TargetMask {
     /// comma-only list and keep-on-failure rules as [`HouseMask::read_ares`].
     #[cfg(feature = "ares")]
     pub(crate) fn read_ares(section: &IniSection, key: &str) -> Option<Self> {
-        read_native_mask(section, key, &TARGET_TOKENS).map(Self)
+        section.read_comma_mask(key, &TARGET_TOKENS).map(Self)
     }
 }
 
@@ -52,7 +57,11 @@ impl HouseMask {
     pub const TEAM: Self = Self(3);
     pub const ALL: Self = Self(7);
 
-    #[cfg(feature = "ares")]
+    /// Ares AffectedHouse100341D0 admits only its three relationship bits.
+    pub(crate) fn from_bits(bits: u32) -> Option<Self> {
+        (bits <= u32::from(Self::ALL.0)).then_some(Self(bits as u8))
+    }
+
     pub(crate) fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
@@ -61,7 +70,7 @@ impl HouseMask {
     /// native comma-only lists replace; absent or unknown keeps the prior.
     #[cfg(feature = "ares")]
     pub(crate) fn read_ares(section: &IniSection, key: &str) -> Option<Self> {
-        read_native_mask(section, key, &HOUSE_TOKENS).map(Self)
+        section.read_comma_mask(key, &HOUSE_TOKENS).map(Self)
     }
 }
 
@@ -91,26 +100,6 @@ const TARGET_TOKENS: [(&str, u8); 8] = [
     ("none", 0),
 ];
 
-/// Both Ares mask readers: ReadString into the shared 0x800 buffer
-/// (10007860), then a comma-only strtok (10007920) whose tokens keep their
-/// spaces and must each `_strcmpi` (7C8D20) a table name. An empty read or
-/// any unknown token writes nothing (100341E8/10034231), so the caller keeps
-/// its prior mask; a present list without tokens stores 0.
-#[cfg(feature = "ares")]
-fn read_native_mask<T>(section: &IniSection, key: &str, tokens: &[(&str, T)]) -> Option<T>
-where
-    T: Copy + Default + std::ops::BitOr<Output = T>,
-{
-    section
-        .read_list(key, 0x800)?
-        .into_iter()
-        .try_fold(T::default(), |bits, name| {
-            tokens.iter().find_map(|(token, value)| {
-                token.eq_ignore_ascii_case(name).then_some(bits | *value)
-            })
-        })
-}
-
 /// Ares targeting-constraint names1009B9A0..1009B9F0, read by10034290 with
 /// the same comma-only list and keep-on-failure rules as the masks above.
 #[cfg(feature = "ares")]
@@ -127,27 +116,26 @@ const CONSTRAINT_TOKENS: [(&str, u16); 10] = [
     ("defensive_cell_set", DEFENSIVE_CELL_SET),
 ];
 
-#[cfg(feature = "ares")]
 const OFFENSIVE_CELL_CLEAR: u16 = 0x1;
-#[cfg(feature = "ares")]
 const DEFENSIVE_CELL_CLEAR: u16 = 0x2;
-#[cfg(feature = "ares")]
 const ENEMY: u16 = 0x4;
-#[cfg(feature = "ares")]
 const OFFENSIVE_CELL_SET: u16 = 0x80;
-#[cfg(feature = "ares")]
 const DEFENSIVE_CELL_SET: u16 = 0x100;
 
 /// SWTypeExt's effective AI-targeting constraints: the explicit
 /// `SW.AITargeting.Constraints` or the mode row's default.
-#[cfg(feature = "ares")]
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct TargetConstraints(u16);
 
-#[cfg(feature = "ares")]
 impl TargetConstraints {
+    /// Reader10034290's nine bits include both cell-set constraints (0x80,
+    /// 0x100), beyond the lower seven flags used by the default mode rows.
+    pub(crate) fn from_bits(bits: u32) -> Option<Self> {
+        (bits <= 0x1ff).then_some(Self(bits as u16))
+    }
+
     /// `IsTargetConstraintsEligible`10032110 with its manual argument set, as
     /// Phobos's SWButtonClass and Ares's sidebar hooks (10034E88, 10034F52)
     /// call it: the offensive-cell (+0x54F0), defensive-cell (+0x54F8) and
@@ -305,7 +293,7 @@ impl AresSuperWeaponTargetingState {
             self.mode = mode as u8;
         }
         if let Some(bits) =
-            read_native_mask(section, "SW.AITargeting.Constraints", &CONSTRAINT_TOKENS)
+            section.read_comma_mask("SW.AITargeting.Constraints", &CONSTRAINT_TOKENS)
         {
             self.constraints = Some(bits);
         }
@@ -372,10 +360,10 @@ pub struct SuperWeaponTargeting {
     pub range_maximum: NativeF64Bits,
 }
 
-#[cfg(feature = "ares")]
 impl SuperWeaponTargeting {
     /// The masks start as a freshly initialized GenericWarhead's; RuleSet
     /// installs the ordered [`AresSuperWeaponTargetingState`] reads.
+    #[cfg(feature = "ares")]
     pub fn from_ini(section: &IniSection) -> Self {
         let range = |key| {
             let value = if section.is_present(key) {
@@ -432,7 +420,6 @@ pub struct LaunchSite {
     pub range_maximum_override: Option<f64>,
 }
 
-#[cfg(feature = "ares")]
 impl LaunchSite {
     pub fn admits(self, target: (i32, i32), range: (f64, f64)) -> bool {
         let minimum = self.range_minimum_override.unwrap_or(range.0);
@@ -450,7 +437,6 @@ impl LaunchSite {
     }
 }
 
-#[cfg(feature = "ares")]
 fn valid_range((minimum, maximum): (f64, f64)) -> bool {
     minimum.is_finite()
         && maximum.is_finite()
@@ -461,7 +447,6 @@ fn valid_range((minimum, maximum): (f64, f64)) -> bool {
 /// manual return. The second defensive cell (+0x54F8/+0x54FA) has no writer
 /// in VERA (see `sim::superweapon::ai_fire`'s residuals), so it is always
 /// (0, 0) here.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HouseTargetingObservations {
     /// `House+0x5600` is not -1.
@@ -486,7 +471,6 @@ pub struct TargetPreflightInput<'a> {
 
 /// Port of Evaluate: same ordered gates and rejection categories. A missing
 /// terrain/visibility observation is not invented as water or shroud.
-#[cfg(feature = "ares")]
 pub fn evaluate_target(input: &TargetPreflightInput<'_>) -> Result<(), TargetReject> {
     let TargetRequirements {
         target: target_mask,
@@ -568,3 +552,30 @@ pub fn evaluate_target(input: &TargetPreflightInput<'_>) -> Result<(), TargetRej
 #[cfg(all(test, feature = "ares"))]
 #[path = "superweapon_targeting_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod sdk_admission_tests {
+    use super::*;
+
+    #[test]
+    fn admitted_masks_keep_high_constraint_bits_without_truncating_unknown_bits() {
+        assert_eq!(TargetMask::from_bits(0xff), Some(TargetMask::ALL));
+        assert!(TargetMask::from_bits(0x100).is_none());
+        assert_eq!(HouseMask::from_bits(7), Some(HouseMask::ALL));
+        assert!(HouseMask::from_bits(8).is_none());
+        let offensive = TargetConstraints::from_bits(0x80).unwrap();
+        let mut observation = HouseTargetingObservations::default();
+        assert!(!offensive.allows_manual_fire(observation));
+        observation.offensive_cell = (5, 6);
+        assert!(offensive.allows_manual_fire(observation));
+        // The existing defensive-cell owner remains constructor-zero. Its
+        // explicit set requirement must not be truncated to an empty mask.
+        assert!(
+            !TargetConstraints::from_bits(0x100)
+                .unwrap()
+                .allows_manual_fire(observation)
+        );
+        assert!(TargetConstraints::from_bits(0x1ff).is_some());
+        assert!(TargetConstraints::from_bits(0x200).is_none());
+    }
+}

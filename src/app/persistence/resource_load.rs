@@ -97,6 +97,9 @@ impl PreparedSavedGame {
         let mut saved = snapshot
             .take_scenario_resources()
             .ok_or(SnapshotError::MissingScenarioResources)?;
+        saved
+            .admit_configuration_program(&snapshot.sim)
+            .map_err(PreparedLoadError::Resources)?;
         let elapsed_clock =
             crate::app::match_runtime::frame_pacer::ScenarioElapsedClock::from_saved_accumulator(
                 saved.map().elapsed_buckets(),

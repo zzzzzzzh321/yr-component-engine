@@ -29,6 +29,9 @@ const AMMO_UNIT_INI: &str = "Ammo=5\r\nInitialAmmo=5\r\nReload=1000\r\nPrimary=S
 const AMMO_PROBE_INI: &str = "\r\n[SDKAmmoGun]\r\nDamage=1\r\nROF=15\r\nRange=6\r\nSpeed=100\r\nProjectile=InvisibleLow\r\nWarhead=SDKProbeWH\r\nAmmo=2\r\n";
 
 const PROBE_MAP: &str = "sdk-probe.map";
+// The default-installation probe also retains a real, originally unlisted WH
+// through the same-pass Super reference reader and the saved resource envelope.
+const SUPER_PROBE_INI: &str = "\r\n[SuperWeaponTypes]\r\nSDKProbe=SDKSuperStrike\r\n[SDKSuperStrike]\r\nType=GenericWarhead\r\nSW.Warhead=SDKSuperPayload\r\nSW.Damage=1\r\nMoney.Amount=-333\r\n[SDKSuperPayload]\r\nCellSpread=0.5\r\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\r\n";
 // An authored demonstration layer, never a host implementation of shield rules.
 // A 100% receiver for every retail armor isolates the component from unrelated
 // weapon/armor tuning. Only the authored feature selection differs by mode.
@@ -208,9 +211,12 @@ fn probe_saved_snapshot(path: &Path, retail: &Path, module_path: Option<&Path>) 
             files,
         )?)?;
         let assets = super::open_active_assets(retail, MediaArchiveMode::STOCK_DIGITAL)?;
-        let resources = loaded
+        let mut resources = loaded
             .take_scenario_resources()
             .context("saved resources missing")?;
+        resources
+            .admit_configuration_program(&loaded.sim)
+            .map_err(anyhow::Error::msg)?;
         let mut rules =
             crate::rules::ruleset::RuleSet::from_processed_rules(resources.processed_rules())
                 .map_err(anyhow::Error::msg)?;
@@ -363,6 +369,14 @@ fn run_probe(
             && selected.map.ini.section("SDKShield").is_none(),
         "test map reserves SDK probe identities"
     );
+    if full_ares {
+        ensure!(
+            selected.map.ini.section("SuperWeaponTypes").is_none()
+                && selected.map.ini.section("SDKSuperStrike").is_none()
+                && selected.map.ini.section("SDKSuperPayload").is_none(),
+            "test map reserves the SDK SuperWeapon probe sections"
+        );
+    }
     let original_source = selected.source;
     drop(selected.map);
     // Keep one physical MTNK section: duplicate INI headers do not merge.
@@ -388,6 +402,9 @@ fn run_probe(
     bytes.extend_from_slice(probe_ini.as_bytes());
     if tests_ammo {
         bytes.extend_from_slice(AMMO_PROBE_INI.as_bytes());
+    }
+    if full_ares {
+        bytes.extend_from_slice(SUPER_PROBE_INI.as_bytes());
     }
     // The default-installation case writes NO VeraFeatures section. Other
     // modes explicitly select every module to retain isolated comparisons.
@@ -449,6 +466,33 @@ fn run_probe(
         .external_mod
         .as_ref()
         .map(|p| json!({"sha256":p.sha256(),"manifest":p.manifest()}));
+    let super_resources = if full_ares
+        && scenario
+            .runtime
+            .resources
+            .rules
+            .superweapon_semantics()
+            .custom_payloads
+    {
+        let rules = &scenario.runtime.resources.rules;
+        let sw = rules
+            .super_weapon("SDKSuperStrike")
+            .context("configured SuperWeapon missing")?;
+        ensure!(
+            sw.generic_warhead
+                .as_ref()
+                .and_then(|payload| payload.warhead.as_deref())
+                == Some("SDKSuperPayload")
+                && sw.money_amount == -333
+                && rules
+                    .warhead("SDKSuperPayload")
+                    .is_some_and(|wh| wh.cell_spread_f64 == 0.5),
+            "SuperWeapon did not retain its original unlisted Warhead allocation"
+        );
+        Some(json!({"unlistedWarheadBound":true,"moneyAmount":sw.money_amount}))
+    } else {
+        None
+    };
     match mode {
         "none" => ensure!(identity.is_none(), "no-module mode admitted a module"),
         _ => {
@@ -631,7 +675,7 @@ fn run_probe(
         "restored frozen manual input projection differs"
     );
     Ok(
-        json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"ammunition":ammunition,"defaultPolicies":default_policies,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
+        json!({"ok":true,"kind":"mod_sdk_probe","mode":mode,"apiVersion":vera_mod_api::API_VERSION,"originalSource":original_source,"scenarioSource":scenario.source,"module":identity,"target":target,"initialHealth":initial,"samples":samples,"ammunition":ammunition,"defaultPolicies":default_policies,"superweaponResources":super_resources,"nativeChecksum":{"value":crc.value,"diagnosticRngSample":crc.diagnostic_rng_sample},"snapshot":snapshot,"final":sample(&scenario,target,"restored-frame")?,"scope":"production retail load/constructor/ReceiveDamage/frame; resource-admitted snapshot continuation, no GUI or transport"}),
     )
 }
 
@@ -841,9 +885,12 @@ fn snapshot_roundtrip(
             == type_policy_before,
         "saved type policies were not rebound"
     );
-    let resources = loaded
+    let mut resources = loaded
         .take_scenario_resources()
         .context("saved resource owner absent")?;
+    resources
+        .admit_configuration_program(&loaded.sim)
+        .map_err(anyhow::Error::msg)?;
     let saved_land = resources.terrain().user_load_land_values()?;
     let dummy = crate::map::resolved_terrain::SharedCellDummy::fresh();
     let terrain = resources.terrain().clone().restore_values(dummy.clone())?;

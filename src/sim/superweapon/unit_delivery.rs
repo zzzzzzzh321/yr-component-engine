@@ -8,26 +8,17 @@
 //! existing Object entry/Unlimbo transactions, and VERA frame/identity-based
 //! deterministic placement seeds. This is not an Ares RNG/order oracle.
 
-#[cfg(feature = "ares")]
 use super::targeting::on_map;
-#[cfg(feature = "ares")]
 use crate::rules::object_type::ObjectCategory;
-#[cfg(feature = "ares")]
 use crate::rules::overlay_types::OverlayTypeRegistry;
-#[cfg(feature = "ares")]
 use crate::rules::ruleset::RuleSet;
 use crate::rules::superweapon_type::DeliveryType;
-#[cfg(feature = "ares")]
 use crate::rules::superweapon_type::{DeliveryOwner, SuperWeaponType};
-#[cfg(feature = "ares")]
 use crate::sim::components::DriveCoord;
 use crate::sim::intern::InternedId;
-#[cfg(feature = "ares")]
 use crate::sim::mission::{MissionId, MissionType};
-#[cfg(feature = "ares")]
 use crate::sim::state_hasher::StateHasher;
 use crate::sim::world::Simulation;
-#[cfg(feature = "ares")]
 use crate::sim::world::{FrameEffects, SimSoundEvent};
 use std::hash::{Hash, Hasher};
 
@@ -60,10 +51,15 @@ impl UnitDeliveryState {
         }
     }
 
-    pub(crate) fn validate(&self, sim: &Simulation) -> Result<(), &'static str> {
-        #[cfg(not(feature = "ares"))]
-        if !self.pending.is_empty() {
-            return Err("pending deliveries require a build with the ares feature");
+    pub(crate) fn validate(
+        &self,
+        sim: &Simulation,
+        custom_payloads: bool,
+    ) -> Result<(), &'static str> {
+        if !custom_payloads && !self.pending.is_empty() {
+            return Err(
+                "pending deliveries require the restored SuperWeapon custom-payload semantics",
+            );
         }
         if self.pending.iter().any(|delivery| {
             !sim.houses.contains_key(&delivery.owner)
@@ -90,7 +86,7 @@ fn default_build_rejects_pending_unit_delivery_state() {
             owner, 0, None, true, 0, 10,
         ));
     let mut state = UnitDeliveryState::default();
-    assert!(state.validate(&sim).is_ok());
+    assert!(state.validate(&sim, false).is_ok());
     state.pending.push(PendingDelivery {
         sw_type,
         owner,
@@ -105,12 +101,11 @@ fn default_build_rejects_pending_unit_delivery_state() {
         activation_sound: None,
     });
     assert_eq!(
-        state.validate(&sim),
-        Err("pending deliveries require a build with the ares feature")
+        state.validate(&sim, false),
+        Err("pending deliveries require the restored SuperWeapon custom-payload semantics")
     );
 }
 
-#[cfg(feature = "ares")]
 fn delivery_owner(
     sim: &Simulation,
     rules: &RuleSet,
@@ -136,7 +131,6 @@ fn delivery_owner(
 
 /// Reject malformed extension requests before the common Fire_SW transaction.
 /// Lack of a free landing site is an effect-time outcome, not this admission.
-#[cfg(feature = "ares")]
 pub(crate) fn admits(
     sim: &Simulation,
     rules: &RuleSet,
@@ -148,14 +142,14 @@ pub(crate) fn admits(
 }
 
 /// Target-independent preflight is also shared with the AI before search/RNG.
-#[cfg(feature = "ares")]
 pub(crate) fn configured(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,
     sw: &SuperWeaponType,
 ) -> bool {
-    !sw.pre_click
+    rules.superweapon_semantics().custom_payloads
+        && !sw.pre_click
         && !sw.post_click
         && !sw.use_charge_drain
         && sw.unit_delivery.as_ref().is_some_and(|delivery| {
@@ -169,7 +163,6 @@ pub(crate) fn configured(
         })
 }
 
-#[cfg(feature = "ares")]
 pub(crate) fn launch(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -180,6 +173,9 @@ pub(crate) fn launch(
     registry: Option<&OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> bool {
+    if !rules.superweapon_semantics().custom_payloads {
+        return false;
+    }
     let Some(config) = sw.unit_delivery.as_ref() else {
         return false;
     };
@@ -217,7 +213,6 @@ pub(crate) fn launch(
     true
 }
 
-#[cfg(feature = "ares")]
 pub(crate) fn tick(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -239,7 +234,6 @@ pub(crate) fn tick(
     sim.unit_deliveries.pending = retained;
 }
 
-#[cfg(feature = "ares")]
 fn apply(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -273,7 +267,6 @@ fn apply(
     }
 }
 
-#[cfg(feature = "ares")]
 fn place(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -425,7 +418,6 @@ fn place(
 
 /// Contributor-reported ResolveSupportSpawnRingOffset order, retained as
 /// VERA's deterministic placement policy; not an executed donor/Ares oracle.
-#[cfg(feature = "ares")]
 fn ring_offset(step: i32, radius: i32) -> (i32, i32) {
     if radius == 0 {
         return (0, 0);

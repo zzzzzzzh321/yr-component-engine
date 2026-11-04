@@ -369,7 +369,6 @@ pub struct AnimObject {
     draw_runtime: AnimDrawRuntime,
     /// Per-viewer snapshots of native Anim+19D for a presentation producer.
     /// Every ordinary hidden-byte writer replaces this with a uniform value.
-    #[cfg(feature = "ares")]
     #[serde(default)]
     viewer_hidden: Option<AnimViewerHidden>,
     /// AnimClass `+0x196`: use the containing CellClass draw/palette authority.
@@ -437,7 +436,6 @@ pub struct AnimObject {
     attached_bullet: Option<u64>,
 }
 
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct AnimViewerHidden {
     viewers: Vec<(InternedId, bool)>,
@@ -445,10 +443,21 @@ struct AnimViewerHidden {
 }
 
 impl AnimObject {
+    pub(crate) fn validate_viewer_presentation_authority(
+        &self,
+        enabled: bool,
+    ) -> Result<(), &'static str> {
+        if self.viewer_hidden.is_some() && !enabled {
+            return Err(
+                "saved per-viewer animation requires an admitted launch presentation policy",
+            );
+        }
+        Ok(())
+    }
+
     /// Read the same hidden byte for a particular client without making
     /// simulation state depend on which house this process is displaying.
     pub fn hidden_for(&self, _viewer: Option<InternedId>) -> bool {
-        #[cfg(feature = "ares")]
         if let Some(snapshot) = &self.viewer_hidden {
             return _viewer
                 .and_then(|viewer| snapshot.viewers.iter().find(|(id, _)| *id == viewer))
@@ -722,7 +731,6 @@ impl AnimObject {
             effective_loop_end: 1,
             runtime,
             draw_runtime: AnimDrawRuntime::default(),
-            #[cfg(feature = "ares")]
             viewer_hidden: None,
             use_cell_drawer: false,
             terrain_attached: false,
@@ -779,7 +787,6 @@ impl AnimObject {
         self.effective_loop_end.hash(hasher);
         self.runtime.hash(hasher);
         self.draw_runtime.hash(hasher);
-        #[cfg(feature = "ares")]
         if let Some(snapshot) = &self.viewer_hidden {
             "Ares.AnimViewerHidden".hash(hasher);
             snapshot.hash(hasher);
@@ -1607,7 +1614,6 @@ impl Simulation {
                 temporal_paused: false,
             },
             draw_runtime: descriptor.draw_runtime,
-            #[cfg(feature = "ares")]
             viewer_hidden: None,
             use_cell_drawer: descriptor.use_cell_drawer,
             terrain_attached: descriptor.terrain_attached,
@@ -3486,7 +3492,6 @@ impl crate::sim::world::ObjectSubstrate {
             return false;
         };
         anim.draw_runtime.hidden = hidden;
-        #[cfg(feature = "ares")]
         {
             anim.viewer_hidden = None;
         }
@@ -3495,7 +3500,6 @@ impl crate::sim::world::ObjectSubstrate {
 
     /// Ares common Launch100330DC writes Anim+19D once, using the alliance
     /// relation at construction, not a live visibility query on later frames.
-    #[cfg(feature = "ares")]
     pub(crate) fn set_anim_viewer_hidden(
         &mut self,
         id: AnimId,

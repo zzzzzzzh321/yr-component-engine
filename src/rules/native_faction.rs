@@ -460,6 +460,7 @@ impl RulesPassProcessor {
         self.sdk_production_reads.clear();
         self.sdk_foundation_reads.clear();
         self.sdk_cameo_reads.clear();
+        self.sdk_superweapon_reads.clear();
         self.sdk_faction_reads.clear();
         let result = self.process_house_family(pass, primary_rules);
         if self.external_faction_owner() {

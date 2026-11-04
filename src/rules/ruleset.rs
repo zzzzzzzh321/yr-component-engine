@@ -23,6 +23,9 @@ use std::hash::{Hash, Hasher};
 #[path = "sdk_factions.rs"]
 mod sdk_factions;
 use sdk_factions::FrozenFactionBindings;
+#[path = "sdk_superweapons.rs"]
+mod sdk_superweapons;
+use sdk_superweapons::{FrozenSuperWeaponBindings, SdkSuperWeaponSource};
 
 use crate::rules::ares_prerequisites::{GenericPrerequisite, GenericPrerequisites};
 use crate::rules::combat_damage::CombatDamageDefaults;
@@ -4404,6 +4407,8 @@ pub struct RuleSet {
     match_rules_policy: Option<vera_mod_api::MatchRulesPolicy>,
     /// None keeps the legacy profile; Some(empty) explicitly selects stock art.
     cameo_resources: Option<FrozenCameoResources>,
+    /// One accepted Super catalog; None retains the original build profile.
+    external_superweapons: Option<FrozenSuperWeaponBindings>,
     /// Canonical identity projection from the frozen armor component. None
     /// retains the native profile catalog; this never mutates its history.
     external_armor_names: Option<Vec<String>>,
@@ -4414,9 +4419,15 @@ pub struct RuleSet {
     fixed_art_source: Option<std::sync::Arc<IniFile>>,
     /// Same immutable SOUNDMD registry selected by the process audio owner.
     fixed_sound_source: Option<std::sync::Arc<crate::rules::sound_ini::SoundRegistry>>,
+    /// Same process-selected EVAMD snapshot, installed by the ordinary audio
+    /// binder for both a fresh projection and saved-source admission.
+    fixed_eva_source: Option<std::sync::Arc<crate::rules::sound_ini::EvaRegistry>>,
     /// Read-only projection of the startup-selected list buffer contract.
     long_list_readers: Option<bool>,
     sdk_animation_names: Vec<String>,
+    /// Immutable inputs from the same processed registry, before publishing
+    /// effective Super resources. This is not a second runtime registry.
+    sdk_superweapon_sources: Vec<SdkSuperWeaponSource>,
     effect_resources: std::collections::BTreeMap<
         vera_mod_api::EffectResourceContext,
         vera_mod_api::EffectDescriptor,
@@ -4843,6 +4854,7 @@ impl RuleSet {
         let armor = self.collect_armor_resource_bindings()?;
         let emp = self.collect_emp_resource_bindings()?;
         let factions = self.collect_faction_resource_bindings()?;
+        let superweapons = self.collect_superweapon_resource_bindings()?;
         let (production, production_objects) = self.collect_production_resource_bindings()?;
         let mut effect_resources = std::collections::BTreeMap::new();
         if let Some(program) = self
@@ -4978,6 +4990,7 @@ impl RuleSet {
         }
         self.match_rules_policy = match_rules_policy;
         self.external_factions = factions;
+        self.publish_superweapon_resource_bindings(superweapons);
         self.external_emp = emp.rules;
         for (object, policy) in self.object_list.iter_mut().zip(emp.objects) {
             object.bind_external_emp(policy);
@@ -6520,6 +6533,7 @@ impl RuleSet {
             }
         }
         processed.rules_type_references().apply_to(&mut rules);
+        rules.capture_superweapon_resource_sources(processed);
         Ok(rules)
     }
 
@@ -6728,7 +6742,7 @@ impl RuleSet {
         for sw in self.super_weapons.values_mut() {
             let section = ini.section(&sw.id);
             #[cfg(feature = "ares")]
-            {
+            if self.external_superweapons.is_none() {
                 // SWTypeExt::LoadFromINI10033522 -> NullableIdx<Voc>
                 // 1000E9D0: successful names/none set presence; unknown
                 // retains. Read against fixed SOUNDMD, in rules-pass order.
@@ -6742,7 +6756,9 @@ impl RuleSet {
             sw.start_sound =
                 section.and_then(|section| sounds.read_rules_reference(section, "StartSound"));
             #[cfg(feature = "ares")]
-            if let Some(delivery) = sw.unit_delivery.as_mut() {
+            if self.external_superweapons.is_none()
+                && let Some(delivery) = sw.unit_delivery.as_mut()
+            {
                 // Ares NullableIdx<VocClass>: unknown retains the previous
                 // resolved cue; an explicit none sentinel clears it. The
                 // retained type INI owns the ordered read history.
@@ -6825,6 +6841,7 @@ impl RuleSet {
                 object.bind_sequence_sounds(|name| sounds.get(name).map(|entry| entry.id.clone()));
             }
         }
+        self.capture_superweapon_profile_audio();
     }
 
     pub(crate) fn bind_terrain_type_sound_references(
@@ -6849,16 +6866,20 @@ impl RuleSet {
         ini: &IniFile,
         eva: &crate::rules::sound_ini::EvaRegistry,
     ) {
+        self.fixed_eva_source = Some(std::sync::Arc::new(eva.clone()));
         #[cfg(not(feature = "ares"))]
         let _ = (ini, eva);
         #[cfg(feature = "ares")]
-        for sw in self.super_weapons.values_mut() {
-            sw.insufficient_funds_eva = eva.read_rules_reference(
-                ini.section(&sw.id),
-                "EVA.InsufficientFunds",
-                "EVA_InsufficientFunds",
-            );
+        if self.external_superweapons.is_none() {
+            for sw in self.super_weapons.values_mut() {
+                sw.insufficient_funds_eva = eva.read_rules_reference(
+                    ini.section(&sw.id),
+                    "EVA.InsufficientFunds",
+                    "EVA_InsufficientFunds",
+                );
+            }
         }
+        self.capture_superweapon_profile_audio();
     }
 
     /// Parse a complete RuleSet from a rules.ini IniFile.
@@ -7306,6 +7327,7 @@ impl RuleSet {
             external_factions: FrozenFactionBindings::default(),
             match_rules_policy: None,
             cameo_resources: None,
+            external_superweapons: None,
             external_armor_names: None,
             external_production: None,
             external_emp: None,
@@ -7313,11 +7335,13 @@ impl RuleSet {
             sdk_registries: processed.sdk_registries().to_vec(),
             fixed_art_source: processed.fixed_art_source().cloned(),
             fixed_sound_source: processed.fixed_sound_source().cloned(),
+            fixed_eva_source: None,
             long_list_readers: processed.long_list_readers(),
             sdk_animation_names: processed
                 .anim_type_reference_states()
                 .map(|(name, _)| name.to_owned())
                 .collect(),
+            sdk_superweapon_sources: Vec::new(),
             effect_resources: Default::default(),
             object_list,
             object_index,
@@ -7987,6 +8011,10 @@ impl RuleSet {
             b"cameo-resources-v1".hash(&mut hasher);
             catalog.hash(&mut hasher);
         }
+        if let Some(catalog) = &self.external_superweapons {
+            b"superweapon-resources-v1".hash(&mut hasher);
+            catalog.hash(&mut hasher);
+        }
         if let Some(program) = &self.external_mod {
             b"vera-mod-config-v1".hash(&mut hasher);
             program.fold(&mut hasher);
@@ -8104,14 +8132,16 @@ impl RuleSet {
         #[cfg(feature = "ares")]
         {
             b"ares-side-defaults-v1".hash(&mut hasher);
-            b"ares-super-availability-v1".hash(&mut hasher);
-            self.ares_super_weapon_metadata.hash(&mut hasher);
-            self.object_list
-                .iter()
-                .filter(|object| !object.additional_super_weapons().is_empty())
-                .map(|object| (&object.id, object.additional_super_weapons()))
-                .collect::<Vec<_>>()
-                .hash(&mut hasher);
+            if self.external_superweapons.is_none() {
+                b"ares-super-availability-v1".hash(&mut hasher);
+                self.ares_super_weapon_metadata.hash(&mut hasher);
+                self.object_list
+                    .iter()
+                    .filter(|object| !object.additional_super_weapons().is_empty())
+                    .map(|object| (&object.id, object.additional_super_weapons()))
+                    .collect::<Vec<_>>()
+                    .hash(&mut hasher);
+            }
             self.side_ids.hash(&mut hasher);
             self.side_extensions.hash(&mut hasher);
         }
@@ -9979,13 +10009,22 @@ impl RuleSet {
         Self::lookup_ci(&self.super_weapons, id)
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn super_weapon_metadata(
         &self,
         id: &str,
     ) -> Option<&crate::rules::superweapon_type::AresSuperWeaponMetadata> {
-        self.ares_super_weapon_metadata
-            .get(&id.to_ascii_uppercase())
+        if let Some(catalog) = &self.external_superweapons {
+            return catalog.metadata.get(&id.to_ascii_uppercase());
+        }
+        #[cfg(feature = "ares")]
+        return self
+            .ares_super_weapon_metadata
+            .get(&id.to_ascii_uppercase());
+        #[cfg(not(feature = "ares"))]
+        {
+            let _ = id;
+            None
+        }
     }
 
     /// The Phobos techno gates for a superweapon, if the capability is

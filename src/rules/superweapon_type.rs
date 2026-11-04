@@ -24,6 +24,21 @@ use crate::rules::ini_value::truncate_native_bytes;
 /// at `0x006CE5E9`.
 const CTOR_RECHARGE_FRAMES: i32 = 4500;
 
+/// The retained build profile is the fallback only when no component supplies
+/// an explicit SuperWeapon policy. Rules binding and early save admission share it.
+pub(crate) fn profile_semantics() -> vera_mod_api::SuperWeaponSemantics {
+    let installed = crate::rules::ARES_ENABLED;
+    vera_mod_api::SuperWeaponSemantics {
+        additional_providers: installed,
+        extended_availability: installed,
+        definition_building_animation: installed,
+        grant_charge_history: installed,
+        paid_launches: installed,
+        custom_payloads: installed,
+        launch_presentation: installed,
+    }
+}
+
 /// Maps the INI `Type=` string to an enum for launch dispatch.
 ///
 /// Stock values match gamemd.exe's SuperWeaponType enum (0x006CEA20).
@@ -88,6 +103,10 @@ impl SuperWeaponKind {
 
     /// Parse from the INI `Type=` string value. Case-insensitive.
     pub fn from_ini_str(s: &str) -> Option<Self> {
+        Self::from_ini_str_with_profile(s, crate::rules::ARES_ENABLED)
+    }
+
+    pub(crate) fn from_ini_str_with_profile(s: &str, ares: bool) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "multimissile" => Some(Self::MultiMissile),
             "ironcurtain" => Some(Self::IronCurtain),
@@ -101,10 +120,8 @@ impl SuperWeaponKind {
             "geneticconverter" => Some(Self::GeneticConverter),
             "forceshield" => Some(Self::ForceShield),
             "psychicreveal" => Some(Self::PsychicReveal),
-            #[cfg(feature = "ares")]
-            "unitdelivery" => Some(Self::UnitDelivery),
-            #[cfg(feature = "ares")]
-            "genericwarhead" => Some(Self::GenericWarhead),
+            "unitdelivery" if ares => Some(Self::UnitDelivery),
+            "genericwarhead" if ares => Some(Self::GenericWarhead),
             _ => None,
         }
     }
@@ -153,7 +170,6 @@ impl GenericWarheadSettings {
 
 /// Common Ares launch presentation, retained by the ordered SWType reader.
 /// Nullable references distinguish an omitted default from an explicit none.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AresSuperWeaponPresentation {
     pub(crate) animation: Option<Option<String>>,
@@ -162,7 +178,6 @@ pub(crate) struct AresSuperWeaponPresentation {
     pub(crate) sound: Option<Option<String>>,
 }
 
-#[cfg(feature = "ares")]
 impl Default for AresSuperWeaponPresentation {
     fn default() -> Self {
         // SWTypeExt ctor10031701/10031721/10031733: unset Sound/Anim,
@@ -202,7 +217,6 @@ impl AresSuperWeaponPresentation {
 /// tracked per-house in `sim/superweapon/`.
 #[derive(Debug, Clone)]
 pub struct SuperWeaponType {
-    #[cfg(feature = "ares")]
     pub(crate) presentation: AresSuperWeaponPresentation,
     /// Section name in rules.ini (e.g., "LightningStormSpecial").
     pub id: String,
@@ -235,12 +249,10 @@ pub struct SuperWeaponType {
     sidebar_pcx: Option<String>,
     /// Ares `SW.AITargeting.Constraints` or its mode's default, installed by
     /// RuleSet from the ordered SWTypeExt reads.
-    #[cfg(feature = "ares")]
     pub(crate) target_constraints: crate::rules::superweapon_targeting::TargetConstraints,
     /// `SW.UseAITargeting=`, default no: Ares's SWTypeExt+0x20E (100335BC)
     /// and Phobos's SWTypeExt read the same key. With it, a manual launch is
     /// refused while the constraints fail.
-    #[cfg(any(feature = "ares", feature = "phobos"))]
     pub use_ai_targeting: bool,
     /// Whether to show the charge timer countdown on the sidebar.
     pub show_timer: bool,
@@ -332,7 +344,6 @@ impl SuperWeaponType {
     }
 
     /// The effective Ares targeting constraints for this type.
-    #[cfg(feature = "ares")]
     pub fn target_constraints(&self) -> crate::rules::superweapon_targeting::TargetConstraints {
         self.target_constraints
     }
@@ -341,6 +352,16 @@ impl SuperWeaponType {
     /// (`SuperWeaponTypeClass::ReadINI`, reads `0x006CEA6D`-`0x006CEDB1`).
     /// Ares extensions require the explicit `ares` build feature.
     pub fn from_ini_section(id: &str, section: &IniSection) -> Self {
+        Self::from_ini_section_with_profile(id, section, crate::rules::ARES_ENABLED)
+    }
+
+    /// Reuse the production readers and their retained value history when an
+    /// external component explicitly selects stock semantics on a legacy host.
+    pub(crate) fn from_ini_section_with_profile(
+        id: &str,
+        section: &IniSection,
+        ares: bool,
+    ) -> Self {
         // Native reads Range and LineMultiplier before Type. The constructor
         // owns the zero defaults; keep the same current-value defaults here.
         let range = section.read_float("Range", 0.0);
@@ -349,20 +370,20 @@ impl SuperWeaponType {
         // against the kind names; a rejected name leaves the prior field.
         let kind = section
             .read_string_with("Type", 0x28, None, |current, value| {
-                SuperWeaponKind::from_ini_str(value).or(current)
+                SuperWeaponKind::from_ini_str_with_profile(value, ares).or(current)
             })
             // Ctor6CE5B0 initializes Type to -1; rejected/missing reads do
             // not remove the registered type or skip its other fields.
             .unwrap_or(SuperWeaponKind::NoEffect);
         #[cfg(feature = "ares")]
-        let extension_kind = matches!(
-            kind,
-            SuperWeaponKind::GenericWarhead | SuperWeaponKind::UnitDelivery
-        );
+        let extension_kind = ares
+            && matches!(
+                kind,
+                SuperWeaponKind::GenericWarhead | SuperWeaponKind::UnitDelivery
+            );
         #[cfg(not(feature = "ares"))]
         let extension_kind = false;
         Self {
-            #[cfg(feature = "ares")]
             presentation: AresSuperWeaponPresentation::default(),
             id: id.to_string(),
             // AbstractTypeClass `UIName=`, ReadString 0x20 (`0x00410AFB`).
@@ -391,9 +412,9 @@ impl SuperWeaponType {
             // keeps its 0x20-byte ReadString (`0x00474EE0`).
             action: match kind {
                 #[cfg(feature = "ares")]
-                SuperWeaponKind::GenericWarhead => Some("Attack".to_string()),
+                SuperWeaponKind::GenericWarhead if ares => Some("Attack".to_string()),
                 #[cfg(feature = "ares")]
-                SuperWeaponKind::UnitDelivery => Some(
+                SuperWeaponKind::UnitDelivery if ares => Some(
                     section
                         .read_name("Action", 0x20)
                         .filter(|action| !action.eq_ignore_ascii_case("Custom"))
@@ -409,10 +430,14 @@ impl SuperWeaponType {
                 .map(|name| truncate_native_bytes(name, 0x18).to_string()),
             #[cfg(feature = "ares")]
             sidebar_pcx: section.read_ares_pcx_filename("SidebarPCX"),
-            #[cfg(feature = "ares")]
             target_constraints: Default::default(),
             #[cfg(any(feature = "ares", feature = "phobos"))]
-            use_ai_targeting: section.read_bool("SW.UseAITargeting", false),
+            use_ai_targeting: (ares || cfg!(feature = "phobos"))
+                && section.read_bool("SW.UseAITargeting", false),
+            // Ordinary loading retains stock behavior. An admitted external
+            // resource may later select the same shared targeting consumer.
+            #[cfg(not(any(feature = "ares", feature = "phobos")))]
+            use_ai_targeting: false,
             show_timer: section.read_bool("ShowTimer", false),
             disableable_from_shell: section.read_bool("DisableableFromShell", false),
             use_charge_drain: section.read_bool("UseChargeDrain", false),
@@ -436,7 +461,11 @@ impl SuperWeaponType {
             aux_building: None,
             building_requirements: None,
             #[cfg(feature = "ares")]
-            money_amount: section.read_ares_int("Money.Amount", 0),
+            money_amount: if ares {
+                section.read_ares_int("Money.Amount", 0)
+            } else {
+                0
+            },
             #[cfg(not(feature = "ares"))]
             money_amount: 0,
             insufficient_funds_eva: None,
@@ -470,7 +499,7 @@ impl SuperWeaponType {
             #[cfg(not(feature = "ares"))]
             generic_warhead: None,
             #[cfg(feature = "ares")]
-            generic_warhead: (kind == SuperWeaponKind::GenericWarhead).then(|| {
+            generic_warhead: (ares && kind == SuperWeaponKind::GenericWarhead).then(|| {
                 GenericWarheadSettings {
                     warhead: None,
                     damage: section.read_int("SW.Damage", 0),
@@ -544,7 +573,6 @@ pub struct SuperWeaponBuildingRequirements {
 /// ordered reads1003349E..100334C5 and10033A0F..10033A8C. Building lists
 /// remain with their existing retained owner below. Native executed controls:
 /// tools/rules_oracle/ares_super_anims.json, fourth availability history.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AresSuperWeaponAvailability {
     allow_player: bool,
@@ -557,7 +585,6 @@ pub(crate) struct AresSuperWeaponAvailability {
 /// Immutable availability metadata for every registered definition, including
 /// Types whose effect dispatch is not implemented. ProcessedRules owns reads;
 /// RuleSet projects this one catalog independently of effect-body admission.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AresSuperWeaponMetadata {
     availability: AresSuperWeaponAvailability,
@@ -569,7 +596,6 @@ pub(crate) struct AresSuperWeaponMetadata {
 /// SWTypeExt+284/+285: constructor10031460 clears AX at10031471 and
 /// stores the pair at1003185F. The ordered 3.0 reader10033A9C/10033AB2
 /// uses Valueable<bool>::Read (1000EBF0), retaining on absent/invalid input.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AresSuperWeaponCharge {
     pub(crate) initial_ready: bool,
@@ -584,7 +610,6 @@ impl AresSuperWeaponCharge {
     }
 }
 
-#[cfg(feature = "ares")]
 impl AresSuperWeaponMetadata {
     pub(super) fn project(
         availability: &AresSuperWeaponAvailability,
@@ -615,7 +640,6 @@ impl AresSuperWeaponMetadata {
     }
 }
 
-#[cfg(feature = "ares")]
 impl Default for AresSuperWeaponAvailability {
     fn default() -> Self {
         Self {
@@ -628,18 +652,39 @@ impl Default for AresSuperWeaponAvailability {
     }
 }
 
-#[cfg(feature = "ares")]
 impl AresSuperWeaponAvailability {
+    /// Publish already-read configuration into the existing availability owner.
+    /// Country identities were resolved by the host's native HouseType reader;
+    /// every u32 mask and signed shot limit retains its original meaning.
+    pub(crate) fn from_config(
+        allow_player: bool,
+        allow_ai: bool,
+        required_houses: u32,
+        forbidden_houses: u32,
+        shots: i32,
+    ) -> Self {
+        Self {
+            allow_player,
+            allow_ai,
+            required_houses,
+            forbidden_houses,
+            shots,
+        }
+    }
+
+    #[cfg(feature = "ares")]
     pub(crate) fn read_allowance_pass(&mut self, section: &IniSection) {
         self.allow_player = section.read_ares_bool("SW.AllowPlayer", self.allow_player);
         self.allow_ai = section.read_ares_bool("SW.AllowAI", self.allow_ai);
     }
 
+    #[cfg(feature = "ares")]
     pub(crate) fn read_house_pass(&mut self, mut read: impl FnMut(&str, u32) -> u32) {
         self.required_houses = read("SW.RequiredHouses", self.required_houses);
         self.forbidden_houses = read("SW.ForbiddenHouses", self.forbidden_houses);
     }
 
+    #[cfg(feature = "ares")]
     pub(crate) fn read_shots_pass(&mut self, section: &IniSection) {
         self.shots = section.read_ares_int("SW.Shots", self.shots);
     }
@@ -663,7 +708,6 @@ impl AresSuperWeaponAvailability {
 }
 
 impl SuperWeaponBuildingRequirements {
-    #[cfg(feature = "ares")]
     pub fn allows(&self, mut present: impl FnMut(&str) -> bool) -> bool {
         (self.auxiliary.is_empty() || self.auxiliary.iter().any(|id| present(id)))
             && !self.negative.iter().any(|id| present(id))
@@ -842,7 +886,8 @@ Type=BogusType
             "[Strike]\nType=GenericWarhead\nSW.Warhead=Payload\nSW.Damage=75\n\
              [Delivery]\nType=UnitDelivery\nDeliver.Types=UNIT\n\
              [Reveal]\nType=PsychicReveal\nMoney.Amount=-500\nRechargeTime=2\n\
-             Action=PsychicReveal\nRange=7\nLineMultiplier=2\nSW.RequiresTarget=unknown-mask\n",
+             Action=PsychicReveal\nRange=7\nLineMultiplier=2\nSW.RequiresTarget=unknown-mask\n\
+             SW.UseAITargeting=yes\nSW.AnimationHeight=64\nSW.AnimationVisibility=owner\n",
         );
         for id in ["Strike", "Delivery"] {
             let sw = SuperWeaponType::from_ini_section(id, ini.section(id).unwrap());
@@ -858,6 +903,9 @@ Type=BogusType
         assert_eq!(stock.range, 7.0);
         assert_eq!(stock.line_multiplier, 2);
         assert_eq!(stock.money_amount, 0);
+        assert_eq!(stock.use_ai_targeting, cfg!(feature = "phobos"));
+        assert_eq!(stock.presentation, AresSuperWeaponPresentation::default());
+        assert_eq!(stock.target_constraints(), Default::default());
         assert!(stock.generic_warhead.is_none());
         assert!(stock.unit_delivery.is_none());
     }

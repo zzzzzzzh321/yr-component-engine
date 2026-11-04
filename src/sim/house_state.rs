@@ -1927,7 +1927,6 @@ impl HouseState {
 
     /// Inputs for Ares `IsTargetConstraintsEligible`10032110: the house's
     /// chosen enemy (`+0x5600`) and its scripted offensive cell (`+0x54F0`).
-    #[cfg(feature = "ares")]
     pub fn target_constraints_observations(
         &self,
     ) -> crate::rules::superweapon_targeting::HouseTargetingObservations {

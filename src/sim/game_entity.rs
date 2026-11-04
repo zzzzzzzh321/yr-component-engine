@@ -878,7 +878,7 @@ mod voxel_recoil;
 
 #[cfg(all(test, not(feature = "ares")))]
 #[test]
-fn default_build_rejects_saved_delivery_base_override_and_keeps_base_space() {
+fn saved_delivery_base_override_requires_admitted_payload_policy() {
     let mut entity = GameEntity::test_default_of_category(
         1,
         "YARD",
@@ -887,13 +887,15 @@ fn default_build_rejects_saved_delivery_base_override_and_keeps_base_space() {
         20,
         EntityCategory::Structure,
     );
-    assert!(entity.validate_ares_build_compatibility().is_ok());
+    assert!(entity.validate_unit_delivery_authority(false).is_ok());
+    assert!(entity.unit_delivery_provides_base_space());
     entity.unit_delivery_no_base = true;
     assert_eq!(
-        entity.validate_ares_build_compatibility(),
-        Err("delivery base overrides require a build with the ares feature")
+        entity.validate_unit_delivery_authority(false),
+        Err("delivery base overrides require an admitted custom payload policy")
     );
-    assert!(entity.unit_delivery_provides_base_space());
+    assert!(entity.validate_unit_delivery_authority(true).is_ok());
+    assert!(!entity.unit_delivery_provides_base_space());
 }
 
 impl GameEntity {
@@ -924,30 +926,24 @@ impl GameEntity {
         self.nominal_survivor = true;
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn set_unit_delivery_base_normal(&mut self, base_normal: bool) {
         self.unit_delivery_no_base = self.category() == EntityCategory::Structure && !base_normal;
     }
 
-    /// Saved extension effects must be admitted by the build that resumes them.
+    /// Saved extension effects must be admitted by the exact restored policy.
     /// Keep the raw delivery override private to its entity owner.
-    pub(crate) fn validate_ares_build_compatibility(&self) -> Result<(), &'static str> {
-        #[cfg(not(feature = "ares"))]
-        if self.unit_delivery_no_base {
-            return Err("delivery base overrides require a build with the ares feature");
+    pub(crate) fn validate_unit_delivery_authority(
+        &self,
+        custom_payloads: bool,
+    ) -> Result<(), &'static str> {
+        if self.unit_delivery_no_base && !custom_payloads {
+            return Err("delivery base overrides require an admitted custom payload policy");
         }
         Ok(())
     }
 
     pub(crate) fn unit_delivery_provides_base_space(&self) -> bool {
-        #[cfg(feature = "ares")]
-        {
-            !self.unit_delivery_no_base
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            true
-        }
+        !self.unit_delivery_no_base
     }
 
     /// Infantry519524/51958A and Unit73CEF3 subtract Foot+6B4 in DrawIt.

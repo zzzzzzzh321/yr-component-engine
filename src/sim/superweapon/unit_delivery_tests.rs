@@ -487,10 +487,10 @@ fn unit_delivery_frame_wrap_and_snapshot_owner_validation() {
     let ghost = sim.interner.intern("MissingHouse");
     let mut bad = sim.unit_deliveries.clone();
     bad.pending[0].owner = ghost;
-    assert!(bad.validate(&sim).is_err());
+    assert!(bad.validate(&sim, true).is_err());
     let mut bad = sim.unit_deliveries.clone();
     bad.pending[0].due_frame = bad.pending[0].issued_frame.wrapping_sub(1);
-    assert!(bad.validate(&sim).is_err());
+    assert!(bad.validate(&sim, true).is_err());
     sim.session.set_binary_frame_for_test(1);
     tick(&mut sim, &rules, None, FrameEffects::default());
     assert_eq!(payloads(&sim, "MTNK").len(), 1);

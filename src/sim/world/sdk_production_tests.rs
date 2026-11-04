@@ -281,7 +281,7 @@ fn sdk_production_process_seed_survives_generated_reset_and_clears_before_campai
     )
     .unwrap()
     .sim;
-    let retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
+    let mut retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
         &crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap(),
     )
     .unwrap();
@@ -291,7 +291,15 @@ fn sdk_production_process_seed_survives_generated_reset_and_clears_before_campai
         .unwrap()
         .validate_restore()
         .unwrap();
-    let mut saved_rules = RuleSet::from_processed_rules(&retained).unwrap();
+    // The formal restore owner retains the process-selected audio catalogs;
+    // a raw RuleSet projection cannot authorize their frozen declarations.
+    retained.retain_sdk_configuration_program(
+        loaded
+            .external_mod
+            .as_ref()
+            .map(|program| Arc::new(program.clone())),
+    );
+    let mut saved_rules = owner.project_saved_scenario_rules(&retained).unwrap();
     saved_rules.external_mod = loaded
         .external_mod
         .as_ref()
