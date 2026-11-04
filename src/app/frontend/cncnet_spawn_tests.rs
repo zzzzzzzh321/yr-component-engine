@@ -15,7 +15,10 @@ fn cncnet_skirmish_loads_the_client_map_instead_of_a_stale_retail_copy() {
     client.write("spawnmap.ini", CLIENT_MAP);
     retail.write("spawnmap.ini", b"stale retail file, not the selected map");
     let assets = AssetManager::from_loose_root_for_test(retail.path());
-    let request = SpawnRequest::read(&client.path().join("spawn.ini")).unwrap();
+    let pending = PendingSpawnRequest::read(&client.path().join("spawn.ini")).unwrap();
+    assert!(matches!(pending.game(), SpawnGame::Skirmish(_)));
+    client.write("spawn.ini", b"not a launch request");
+    let request = pending.resolve(None).unwrap();
     let SpawnGame::Skirmish(session) = request.game else {
         panic!("skirmish")
     };
@@ -288,18 +291,50 @@ fn rejects_network_sessions_unsupported_extensions_and_invalid_assignments() {
 }
 
 #[test]
-fn cncnet_country_indices_respect_the_compiled_capability_and_identity_width() {
-    for index in [10, 11, i32::from(u16::MAX)] {
-        let text = SKIRMISH.replacen("Side=0", &format!("Side={index}"), 1);
-        let result = SpawnRequest::parse(&text);
-        if crate::rules::ARES_ENABLED {
-            let SpawnGame::Skirmish(session) = result.unwrap().game else {
+fn cncnet_country_indices_respect_the_admitted_capability_and_identity_width() {
+    let extended = Some(SpawnIdentityPolicy {
+        extended_countries: true,
+        campaign_side_byte: false,
+    });
+    let stock = Some(SpawnIdentityPolicy {
+        extended_countries: false,
+        campaign_side_byte: true,
+    });
+    for index in [10, i32::from(u16::MAX)] {
+        for (text, local) in [
+            (
+                SKIRMISH.replacen("Side=0", &format!("Side={index}"), 1),
+                true,
+            ),
+            (
+                SKIRMISH.replacen("Multi2=8", &format!("Multi2={index}"), 1),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                SpawnRequest::parse(&text).is_ok(),
+                crate::rules::ARES_ENABLED
+            );
+            let pending = PendingSpawnRequest::parse(&text).unwrap();
+            assert!(
+                pending.resolve(stock).is_err(),
+                "explicit stock rejects Country {index}"
+            );
+            let SpawnGame::Skirmish(session) = PendingSpawnRequest::parse(&text)
+                .unwrap()
+                .resolve(extended)
+                .unwrap()
+                .game
+            else {
                 panic!("Battle Country identity");
             };
-            assert_eq!(i32::from(session.local_slot().country.raw_index()), index);
+            let country = if local {
+                session.local_slot().country
+            } else {
+                session.opponents[0].country
+            };
+            assert_eq!(i32::from(country.raw_index()), index);
             assert!(!session.local_slot().country_random);
-        } else {
-            assert!(result.is_err(), "stock adapter rejects Country {index}");
         }
     }
     for value in ["-1", "65536", "4294967306", "$10000", "broken"] {
@@ -307,13 +342,18 @@ fn cncnet_country_indices_respect_the_compiled_capability_and_identity_width() {
             SKIRMISH.replacen("Side=0", &format!("Side={value}"), 1),
             SKIRMISH.replacen("Multi2=8", &format!("Multi2={value}"), 1),
         ] {
-            assert!(SpawnRequest::parse(&text).is_err(), "Country {value}");
+            assert!(
+                PendingSpawnRequest::parse(&text).is_err(),
+                "Country {value}"
+            );
         }
     }
-    assert_eq!(
-        SpawnRequest::parse("[Settings]\nIsSinglePlayer=Yes\nSide=10\n").is_ok(),
-        crate::rules::ARES_ENABLED,
-        "campaign Side has its own byte-wide adapter identity in Ares builds"
+    assert!(PendingSpawnRequest::parse(&SKIRMISH.replacen("Side=0\n", "", 1)).is_err());
+    assert!(
+        PendingSpawnRequest::parse(SKIRMISH)
+            .unwrap()
+            .resolve(stock)
+            .is_ok()
     );
 }
 
@@ -353,7 +393,13 @@ fn cncnet_ares_country_indices_reach_house_side_and_mcv_selection() {
         let text = SKIRMISH
             .replacen("Side=0", &format!("Side={index}"), 1)
             .replacen("Multi2=8", "Multi2=11", 1);
-        let request = SpawnRequest::parse(&text).unwrap();
+        let request = PendingSpawnRequest::parse(&text)
+            .unwrap()
+            .resolve(Some(SpawnIdentityPolicy {
+                extended_countries: true,
+                campaign_side_byte: false,
+            }))
+            .unwrap();
         assert_eq!(request.seed, Some(0x8000_0000));
         let SpawnGame::Skirmish(session) = request.game else {
             panic!("Battle Country identity");

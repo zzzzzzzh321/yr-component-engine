@@ -62,19 +62,39 @@ fn cncnet_campaign_spawn_explicit_scenario_keeps_first_record_and_physical_ident
     let client = TestDirectory::new("cncnet-explicit-campaign");
     for scenario in ["other.Map", "second.Map"] {
         client.write(scenario, b"synthetic path identity fixture");
-        for side in [0, 1, 2, 3, 255] {
+        for side in [0, 1, 10, 255] {
             client.write("spawn.ini", format!(
                 "[Settings]\nIsSinglePlayer=Yes\nScenario={scenario}\nSide={side}\nCampaignID=1\nGameSpeed=2\nDifficultyModeHuman=2\nDifficultyModeComputer=0\n"
             ).as_bytes());
-            let request = SpawnRequest::read(&client.path().join("spawn.ini"));
-            if !crate::rules::ARES_ENABLED && side > 1 {
-                assert!(request.is_err());
-                continue;
-            }
-            let request = request.unwrap();
+            let path = client.path().join("spawn.ini");
+            assert_eq!(
+                SpawnRequest::read(&path).is_ok(),
+                crate::rules::ARES_ENABLED || side <= 1
+            );
+            assert_eq!(
+                PendingSpawnRequest::read(&path)
+                    .unwrap()
+                    .resolve(Some(SpawnIdentityPolicy {
+                        extended_countries: true,
+                        campaign_side_byte: false,
+                    }))
+                    .is_ok(),
+                side <= 1
+            );
+            let pending = PendingSpawnRequest::read(&path).unwrap();
+            assert!(matches!(pending.game(), SpawnGame::Campaign(_)));
+            client.write("spawn.ini", b"not a launch request");
+            let request = pending
+                .resolve(Some(SpawnIdentityPolicy {
+                    extended_countries: false,
+                    campaign_side_byte: true,
+                }))
+                .unwrap();
             let SpawnGame::Campaign(campaign) = request.game else {
                 panic!("campaign request");
             };
+            assert_eq!(campaign.side, side);
+            assert_eq!(campaign.campaign_id, 1);
             let mut clock = CountingClock::default();
             let startup = campaign
                 .prepare_startup(&catalog, request.game_speed, &mut clock)
@@ -192,7 +212,7 @@ fn cncnet_campaign_spawn_empty_catalog_fails_before_seed() {
     }
     for side in [-1, 256] {
         assert!(
-            SpawnRequest::parse(&format!("[Settings]\nIsSinglePlayer=Yes\nSide={side}\n")).is_err()
+            PendingSpawnRequest::parse(&format!("[Settings]\nIsSinglePlayer=Yes\nSide={side}\n")).is_err()
         );
     }
 }

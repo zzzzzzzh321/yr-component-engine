@@ -92,7 +92,11 @@ impl AdmittedComponent {
     pub(super) fn requires_early_admission(&self) -> bool {
         self.has_startup_resources()
             || self.manifest.hooks.contains(&api::HookKind::EvaCatalog)
-            || self.manifest.hooks.contains(&api::HookKind::LongListReaders)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::LongListReaders)
+            || self.manifest.hooks.contains(&api::HookKind::SpawnIdentity)
     }
 
     pub(super) fn startup_resource_policy(
@@ -114,13 +118,28 @@ impl AdmittedComponent {
         Ok(self.evaluate_startup(Context::EvaCatalog)?.eva_catalog)
     }
 
-    pub(super) fn long_list_readers_policy(&self) -> Result<Option<api::LongListReadersPolicy>, String> {
-        if !self.manifest.hooks.contains(&api::HookKind::LongListReaders) {
+    pub(super) fn long_list_readers_policy(
+        &self,
+    ) -> Result<Option<api::LongListReadersPolicy>, String> {
+        if !self
+            .manifest
+            .hooks
+            .contains(&api::HookKind::LongListReaders)
+        {
             return Ok(None);
         }
         Ok(self
             .evaluate_startup(Context::LongListReaders)?
             .long_list_readers)
+    }
+
+    pub(super) fn spawn_identity_policy(&self) -> Result<Option<api::SpawnIdentityPolicy>, String> {
+        if !self.manifest.hooks.contains(&api::HookKind::SpawnIdentity) {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate_startup(Context::SpawnIdentity)?
+            .spawn_identity)
     }
 
     fn evaluate_startup(&self, context: Context) -> Result<Plan, String> {

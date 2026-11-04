@@ -77,6 +77,8 @@ pub(crate) mod radar_movie;
 mod random_map_lifecycle_tests;
 #[cfg(test)]
 mod sdk_side_presentation_tests;
+#[cfg(test)]
+mod spawn_identity_sdk_tests;
 pub(crate) mod renderer_state;
 pub(crate) mod scenario_catalog;
 mod shell_campaign;
@@ -142,7 +144,7 @@ pub struct App {
     /// Retained until `resumed()` so the profile's pre-window Video read can
     /// use the command-line screen fields as its current-value defaults.
     startup_options: crate::app::frontend::startup_options::RetailStartupOptions,
-    spawn_request: Option<crate::app::frontend::cncnet_spawn::SpawnRequest>,
+    pending_spawn: Option<crate::app::frontend::cncnet_spawn::PendingSpawnRequest>,
     community_network: Option<crate::app::shell_wol::ExternalNetworkLaunch>,
     replay_request: Option<crate::app::frontend::launch::ReplayLaunchRequest>,
     startup_failure: Option<String>,
@@ -199,7 +201,7 @@ impl App {
             tactical_capture: None,
             capture_render_not_before: None,
             startup_options,
-            spawn_request: None,
+            pending_spawn: None,
             community_network: None,
             replay_request: None,
             startup_failure: None,
@@ -220,7 +222,7 @@ impl App {
             tactical_capture: None,
             capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
-            spawn_request: None,
+            pending_spawn: None,
             community_network: None,
             replay_request: None,
             startup_failure: None,
@@ -243,7 +245,7 @@ impl App {
             ),
             capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
-            spawn_request: None,
+            pending_spawn: None,
             community_network: None,
             replay_request: None,
             startup_failure: None,

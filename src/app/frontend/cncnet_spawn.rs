@@ -8,7 +8,8 @@
 //! https://github.com/CnCNet/xna-cncnet-client/tree/develop/DXMainClient/DXGUI
 //!
 //! This boundary admits one local human, Battle and stock YR campaigns. Ares
-//! builds also carry allocated custom Country identities into Battle startup.
+//! builds or an explicitly admitted component also carry custom Country
+//! identities into Battle startup.
 //! External campaigns pass an explicit Scenario independently of record0.
 //! It does not load native saves, run network sessions or load extension DLLs.
 
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
+use crate::assets::startup_resources::SpawnIdentityPolicy;
 use crate::rules::ini_parser::{IniFile, IniSection};
 use crate::skirmish_launch::{
     AiDifficulty, LaunchCountry, LaunchHumanRole, LaunchStartPosition, LaunchTeam,
@@ -28,6 +30,13 @@ pub(crate) struct SpawnRequest {
     pub(crate) game: SpawnGame,
     pub(crate) game_speed: i32,
     pub(crate) seed: Option<u32>,
+}
+
+/// A fully parsed client request whose identity ranges are not yet approved.
+/// Only `resolve` can transfer its launch data to the application.
+#[derive(Debug)]
+pub(crate) struct PendingSpawnRequest {
+    request: SpawnRequest,
 }
 
 #[derive(Debug)]
@@ -86,6 +95,16 @@ impl CampaignSpawn {
 
 impl SpawnRequest {
     pub(crate) fn read(path: &Path) -> Result<Self> {
+        PendingSpawnRequest::read(path)?.resolve(None)
+    }
+
+    pub(crate) fn parse(text: &str) -> Result<Self> {
+        PendingSpawnRequest::parse(text)?.resolve(None)
+    }
+}
+
+impl PendingSpawnRequest {
+    pub(crate) fn read(path: &Path) -> Result<Self> {
         // The client writes UTF-8 and the Spawner explicitly decodes player
         // names as UTF-8. Retail IniFile::from_bytes instead widens bytes.
         let text = crate::util::file_system::read_to_string(path)
@@ -94,7 +113,7 @@ impl SpawnRequest {
             .with_context(|| format!("invalid CnCNet launch file {}", path.display()))?;
         let absolute = std::path::absolute(path)?;
         let directory = absolute.parent().context("launch file has no directory")?;
-        match &mut request.game {
+        match &mut request.request.game {
             SpawnGame::Skirmish(session) => {
                 // The client writes the final map beside spawn.ini, not in the
                 // separate retail asset root. Require that exact file: falling
@@ -128,6 +147,65 @@ impl SpawnRequest {
     }
 
     pub(crate) fn parse(text: &str) -> Result<Self> {
+        Ok(Self {
+            request: Self::parse_representation(text)?,
+        })
+    }
+
+    pub(crate) fn game(&self) -> &SpawnGame {
+        &self.request.game
+    }
+
+    /// Approve the already-normalized identities using the admitted startup
+    /// declaration. No declaration retains the compiled profile's admission.
+    pub(crate) fn resolve(self, policy: Option<SpawnIdentityPolicy>) -> Result<SpawnRequest> {
+        let policy = policy.unwrap_or(SpawnIdentityPolicy {
+            extended_countries: crate::rules::ARES_ENABLED,
+            campaign_side_byte: crate::rules::ARES_ENABLED,
+        });
+        match &self.request.game {
+            SpawnGame::Skirmish(session) => {
+                // PopulateWithCountryNames4E3A91 caps Country+B8 at9;
+                // Ares4E3A6A ->1001E2C0/1001E39B keeps the actual ordinal.
+                // Final allocation is checked by the shared scenario owner.
+                let maximum = if policy.extended_countries {
+                    u16::MAX
+                } else {
+                    9
+                };
+                for human in &session.humans {
+                    ensure!(
+                        human.slot.country.raw_index() <= maximum,
+                        "[Settings] Side for human Multi{} must be 0..{maximum}",
+                        usize::from(human.raw_slot_index.unwrap_or(0)) + 1
+                    );
+                }
+                for opponent in &session.opponents {
+                    ensure!(
+                        opponent.country.raw_index() <= maximum,
+                        "[HouseCountries] Multi{} must be 0..{maximum}",
+                        usize::from(opponent.raw_slot_index) + 1
+                    );
+                }
+            }
+            SpawnGame::Campaign(campaign) => {
+                // This byte is client metadata, not a Country/Side or campaign
+                // record index. StartScenario683AB0 still receives record0.
+                let maximum = if policy.campaign_side_byte {
+                    u8::MAX
+                } else {
+                    1
+                };
+                ensure!(
+                    campaign.side <= maximum,
+                    "[Settings] Side must be 0..{maximum}"
+                );
+            }
+        }
+        Ok(self.request)
+    }
+
+    fn parse_representation(text: &str) -> Result<SpawnRequest> {
         let ini = IniFile::from_str(text.trim_start_matches('\u{feff}'));
         let settings = ini
             .section("Settings")
@@ -192,24 +270,14 @@ impl SpawnRequest {
                 scenario,
                 scenario_directory: None,
                 campaign_id: integer(settings, "CampaignID", -1)?,
-                side: ranged(
-                    settings,
-                    "Side",
-                    0,
-                    0,
-                    if crate::rules::ARES_ENABLED {
-                        i32::from(u8::MAX)
-                    } else {
-                        1
-                    },
-                )? as u8,
+                side: ranged(settings, "Side", 0, 0, i32::from(u8::MAX))? as u8,
                 difficulty,
                 build_off_ally: boolean(settings, "BuildOffAlly", false)?,
             })
         } else {
             SpawnGame::Skirmish(Box::new(skirmish(&ini, settings, scenario, game_speed)?))
         };
-        Ok(Self {
+        Ok(SpawnRequest {
             game,
             game_speed,
             seed,
@@ -353,17 +421,10 @@ fn skirmish(
 }
 
 fn country(section: &IniSection, key: &str) -> Result<LaunchCountry> {
-    // The client resolves Random and writes the actual Country array index,
-    // not a Side or display-list index. Stock menu4E3A91 caps it at9; Ares's
-    // replacement4E3A6A ->1001E2C0 retains Country+B8 without that cap.
-    // The shared launch owner validates allocation again after scenario Rules
-    // reset; this early reader only admits its canonical identity width.
-    let maximum = if crate::rules::ARES_ENABLED {
-        i32::from(u16::MAX)
-    } else {
-        9
-    };
-    let index = ranged(section, key, -1, 0, maximum)?;
+    // The client resolves Random before writing the actual Country ordinal.
+    // Parse only its representation here; PendingSpawnRequest::resolve owns
+    // profile/component admission after the formal startup declaration.
+    let index = ranged(section, key, -1, 0, i32::from(u16::MAX))?;
     Ok(LaunchCountry::from_country_index(index as u32))
 }
 

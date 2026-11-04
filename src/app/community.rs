@@ -3,7 +3,7 @@
 use super::{
     App,
     frontend::{
-        cncnet_spawn::{SpawnGame, SpawnRequest},
+        cncnet_spawn::{PendingSpawnRequest, SpawnGame},
         startup_options::RetailStartupOptions,
     },
 };
@@ -46,10 +46,10 @@ struct Resource {
     data: String,
 }
 
-fn decode(
+pub(super) fn decode(
     mut reader: impl Read,
 ) -> Result<(
-    SpawnRequest,
+    PendingSpawnRequest,
     Snapshot,
     Option<super::shell_wol::ExternalNetworkLaunch>,
 )> {
@@ -76,11 +76,11 @@ fn decode(
         launch.spawn.len() <= 64 * 1024,
         "community launch settings too large"
     );
-    let request = SpawnRequest::parse(&launch.spawn)?;
+    let request = PendingSpawnRequest::parse(&launch.spawn)?;
     if let Some(network) = launch.network.as_ref() {
         network.validate()?;
         ensure!(
-            matches!(request.game, SpawnGame::Skirmish(_)),
+            matches!(request.game(), SpawnGame::Skirmish(_)),
             "network launch requires skirmish settings"
         );
     }
@@ -150,7 +150,7 @@ fn decode(
         Snapshot::new(launch.release, resources)?
     };
     snapshot.set_music_enabled(launch.music_enabled.unwrap_or(true));
-    match &request.game {
+    match request.game() {
         SpawnGame::Skirmish(s) => {
             let name = s
                 .selected_map_file
@@ -181,7 +181,7 @@ impl App {
         community::install(snapshot)?;
         log::info!("Community snapshot installed from inherited pipe; entering external game");
         let mut app = Self::new(options);
-        app.spawn_request = Some(request);
+        app.pending_spawn = Some(request);
         app.community_network = network;
         Ok(app)
     }

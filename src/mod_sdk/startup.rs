@@ -99,6 +99,13 @@ fn early_resources(assets: &AssetManager) -> Result<native::StartupResources, St
     resources.long_list_readers = admitted
         .long_list_readers_policy()?
         .map(|policy| policy == api::LongListReadersPolicy::Extended2048);
+    resources.spawn_identity =
+        admitted
+            .spawn_identity_policy()?
+            .map(|policy| native::SpawnIdentityPolicy {
+                extended_countries: policy.extended_countries,
+                campaign_side_byte: policy.campaign_side_byte,
+            });
     if !admitted.has_startup_resources() {
         return Ok(resources);
     }

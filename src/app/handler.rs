@@ -355,11 +355,14 @@ impl App {
                     );
                     crate::app::loading::pump::begin_loading(&mut state, loading);
                 }
-                if let Some(request) = self.spawn_request.take()
-                    && let Err(error) = match self.community_network.take() {
-                        Some(network) => super::shell_wol::start_external_network(&mut state, request, network),
-                        None => Self::start_spawn_session(&mut state, request),
-                    }
+                if let Some(pending) = self.pending_spawn.take()
+                    && let Err(error) = Self::resolve_pending_spawn(pending, &state.process_assets)
+                        .and_then(|request| match self.community_network.take() {
+                            Some(network) => super::shell_wol::start_external_network(
+                                &mut state, request, network,
+                            ),
+                            None => Self::start_spawn_session(&mut state, request),
+                        })
                 {
                     let error = format!("CnCNet startup failed: {error:#}");
                     log::error!("{error}");
@@ -396,7 +399,7 @@ impl App {
                 #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
                 crate::web::status(&format!("Startup failed: {err:#}"));
                 log::error!("Failed to initialize: {:#}", err);
-                if self.spawn_request.is_some() || self.replay_request.is_some() {
+                if self.pending_spawn.is_some() || self.replay_request.is_some() {
                     self.startup_failure = Some(format!("CnCNet initialization failed: {err:#}"));
                 }
                 if let Some(session) = self.shell_capture.as_mut() {
@@ -446,7 +449,7 @@ impl ApplicationHandler for App {
             event_loop,
             capture_dimensions,
             self.startup_options,
-            self.spawn_request.is_some() || self.replay_request.is_some(),
+            self.pending_spawn.is_some() || self.replay_request.is_some(),
             self.replay_request
                 .as_ref()
                 .map(|request| request.retail_dir.as_path()),

@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, ensure};
 
 use super::{App, AppState};
-use crate::app::frontend::cncnet_spawn::{SpawnGame, SpawnRequest};
+use crate::app::frontend::cncnet_spawn::{PendingSpawnRequest, SpawnGame, SpawnRequest};
 use crate::app::frontend::startup_options::RetailStartupOptions;
 use crate::app::match_bootstrap::{MatchSeedClock, MatchSeedSource, OrdinaryMatchSeedClock};
 
@@ -39,10 +39,19 @@ impl App {
             std::env::var_os("RA2_QUICKPLAY").is_none(),
             "-SPAWN cannot be combined with RA2_QUICKPLAY"
         );
-        let request = SpawnRequest::read(std::path::Path::new("spawn.ini"))?;
+        let request = PendingSpawnRequest::read(std::path::Path::new("spawn.ini"))?;
         let mut app = Self::new(options);
-        app.spawn_request = Some(request);
+        app.pending_spawn = Some(request);
         Ok(app)
+    }
+
+    /// The Ready transition uses the process's original frozen recipe, after
+    /// all client syntax/path checks and before either external launch owner.
+    pub(super) fn resolve_pending_spawn(
+        pending: PendingSpawnRequest,
+        assets: &super::process_assets::ProcessAssets,
+    ) -> Result<SpawnRequest> {
+        pending.resolve(assets.spawn_identity_policy())
     }
 
     pub(super) fn start_spawn_session(state: &mut AppState, request: SpawnRequest) -> Result<()> {

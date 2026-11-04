@@ -58,6 +58,14 @@ pub enum CsfCompositionPolicy {
 pub type StringSupplementProvider =
     Arc<dyn Fn(u32) -> Result<Option<CsfCompositionPolicy>, String> + Send + Sync>;
 
+/// Immutable external-launch limits chosen by the admitted startup component.
+/// This is only admission; the native launch owner still checks allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnIdentityPolicy {
+    pub extended_countries: bool,
+    pub campaign_side_byte: bool,
+}
+
 #[derive(Clone, Default)]
 pub struct StartupResources {
     pub component: StartupComponentSource,
@@ -67,6 +75,7 @@ pub struct StartupResources {
     /// Three early list readers only: true = 2048, false = 128. None keeps
     /// the existing profile; retained with the same admitted component bytes.
     pub long_list_readers: Option<bool>,
+    pub spawn_identity: Option<SpawnIdentityPolicy>,
     pub audio: Option<AudioCatalogPolicy>,
     pub strings: Option<StringSupplementProvider>,
 }

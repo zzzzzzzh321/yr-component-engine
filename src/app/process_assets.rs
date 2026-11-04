@@ -522,6 +522,16 @@ impl ProcessAssets {
         )
     }
 
+    /// External launch admission uses the original frozen component recipe,
+    /// including while a manager lease has been lost or is being recovered.
+    pub(crate) fn spawn_identity_policy(
+        &self,
+    ) -> Option<crate::assets::startup_resources::SpawnIdentityPolicy> {
+        self.startup_resources
+            .as_ref()
+            .and_then(|resources| resources.spawn_identity)
+    }
+
     /// Shared borrow while the manager is home (`Available`).
     pub(crate) fn manager(&self) -> Option<&AssetManager> {
         self.manager.as_ref()
@@ -662,6 +672,11 @@ mod tests {
                 .unwrap();
         let frozen = assets.startup_resources().clone();
         assert_eq!(frozen.long_list_readers, Some(true));
+        let identity = crate::assets::startup_resources::SpawnIdentityPolicy {
+            extended_countries: true,
+            campaign_side_byte: true,
+        };
+        assert_eq!(frozen.spawn_identity, Some(identity));
         let StartupComponentSource::Admitted {
             bytes: original, ..
         } = &frozen.component
@@ -673,6 +688,7 @@ mod tests {
         // initialization, including actual SoundRegistry sample admission.
         process.csf = Some(crate::app::loading::init::load_csf(&assets).unwrap());
         process.initialize_sources_if_needed(&assets).unwrap();
+        assert_eq!(process.spawn_identity_policy(), Some(identity));
         assert_eq!(process.csf.as_ref().unwrap().get("NAME"), Some("extension"));
         let audio = process.audio_catalog.as_ref().unwrap();
         let cue = audio.sounds().get("StartupCue").unwrap();
@@ -686,8 +702,10 @@ mod tests {
         process.return_from_loading(assets);
         drop(process.lease_for_loading().unwrap());
         process.note_lease_ended_without_return();
+        assert_eq!(process.spawn_identity_policy(), Some(identity));
         let recovered = process.reconstruct_manager(dir.path()).unwrap();
         assert_eq!(recovered.startup_resources().long_list_readers, Some(true));
+        assert_eq!(recovered.startup_resources().spawn_identity, Some(identity));
         let StartupComponentSource::Admitted { bytes, .. } =
             &recovered.startup_resources().component
         else {
