@@ -4767,17 +4767,34 @@ impl RuleSet {
         assets: &crate::assets::asset_manager::AssetManager,
         processed: &crate::rules::native_processing::ProcessedRulesLayers,
     ) -> Result<(), String> {
-        let (objects, warheads, weapons) = self.external_mod_names();
+        let binding = self.prepare_external_mod_for_process(assets, processed)?;
+        self.bind_prepared_external_mod(binding)
+    }
+
+    pub(crate) fn prepare_external_mod_for_process(
+        &self,
+        assets: &crate::assets::asset_manager::AssetManager,
+        processed: &crate::rules::native_processing::ProcessedRulesLayers,
+    ) -> Result<crate::mod_sdk::PreparedProcessModBinding, String> {
         let registry = processed.native_registry_state();
-        self.external_mod = crate::mod_sdk::load_from_assets_for_process(
+        crate::mod_sdk::prepare_process_mod_binding(
             assets,
+            registry.sdk_configuration_seed().map(|p| p.as_ref()),
+            registry.sdk_configuration_steps(),
+        )
+    }
+
+    pub(crate) fn bind_prepared_external_mod(
+        &mut self,
+        binding: crate::mod_sdk::PreparedProcessModBinding,
+    ) -> Result<(), String> {
+        let (objects, warheads, weapons) = self.external_mod_names();
+        self.external_mod = binding.configure(
             &self.sdk_passes,
             &self.sdk_registries,
             &objects,
             &warheads,
             &weapons,
-            registry.sdk_configuration_seed().map(|p| p.as_ref()),
-            registry.sdk_configuration_steps(),
         )?;
         self.bind_resource_policies()
     }

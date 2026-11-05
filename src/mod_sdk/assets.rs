@@ -86,23 +86,66 @@ pub(crate) fn load_from_assets_for_process(
     seed: Option<&Program>,
     steps: &[crate::rules::native_processing::SdkConfigurationStep],
 ) -> Result<Option<Arc<Program>>, String> {
-    let Some(admitted) = asset_program(assets)? else {
-        return Ok(None);
-    };
-    if admitted.has_loading_theme_resource() && seed.is_none() {
-        return Err("loading theme component was not admitted before cold Rules processing".into());
+    prepare_process_mod_binding(assets, seed, steps)?.configure(
+        passes,
+        registries,
+        object_types,
+        warheads,
+        weapons,
+    )
+}
+
+/// Frozen inputs for one isolated configuration candidate, without any live
+/// Rules registry, asset-manager borrow or Simulation authority.
+pub(crate) struct PreparedProcessModBinding {
+    source: Option<(StartupComponentIdentity, Vec<u8>, bool)>,
+    seed: Option<Program>,
+    steps: Vec<crate::rules::native_processing::SdkConfigurationStep>,
+}
+
+pub(crate) fn prepare_process_mod_binding(
+    assets: &crate::assets::asset_manager::AssetManager,
+    seed: Option<&Program>,
+    steps: &[crate::rules::native_processing::SdkConfigurationStep],
+) -> Result<PreparedProcessModBinding, String> {
+    Ok(PreparedProcessModBinding {
+        source: super::startup::resolve_program_bytes(assets, false)?,
+        seed: seed.cloned(),
+        steps: steps.to_vec(),
+    })
+}
+
+impl PreparedProcessModBinding {
+    pub(crate) fn configure(
+        self,
+        passes: &[IniFile],
+        registries: &[crate::rules::native_processing::SdkRegistryPass],
+        object_types: &[String],
+        warheads: &[String],
+        weapons: &[String],
+    ) -> Result<Option<Arc<Program>>, String> {
+        let Some((identity, bytes, early)) = self.source else {
+            return Ok(None);
+        };
+        let admitted = AdmittedComponent::load(bytes, &identity.sha256)?;
+        super::startup::require_startup_frontier(&admitted, early)?;
+        if admitted.has_loading_theme_resource() && self.seed.is_none() {
+            return Err(
+                "loading theme component was not admitted before cold Rules processing".into(),
+            );
+        }
+        admitted
+            .configure(
+                passes,
+                object_types,
+                warheads,
+                weapons,
+                registries,
+                self.seed.as_ref(),
+                &self.steps,
+            )
+            .map(|p| Some(Arc::new(p)))
     }
-    admitted
-        .configure(
-            passes,
-            object_types,
-            warheads,
-            weapons,
-            registries,
-            seed,
-            steps,
-        )
-        .map(|p| Some(Arc::new(p)))
 }
 
 /// The Rules registry retains this same Program before its first Country

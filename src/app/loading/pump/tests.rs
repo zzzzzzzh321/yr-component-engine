@@ -2449,3 +2449,64 @@ fn cancelled_admission_cannot_release_a_ready_result_and_returns_the_same_asset_
         "no second lease return"
     );
 }
+
+#[test]
+fn local_network_completion_starts_peer_wait_and_preserves_its_admitted_lease() {
+    let (_, session, accepted, _, _, _) = crate::app::lan_service::loading_test_pair();
+    let dir = crate::map::source::test_support::TestDirectory::new("loading-local-complete");
+    dir.write("sentinel.bin", b"original manager");
+    let mut assets = crate::app::process_assets::ProcessAssets::new(
+        crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
+        false,
+    );
+    assets.return_from_loading(AssetManager::from_loose_root_for_test(dir.path()));
+    let original = assets
+        .manager()
+        .unwrap()
+        .load_file_from_mix("sentinel.bin")
+        .unwrap();
+    let mut loading = LoadingSession::from_request(LoadingRequest::network(accepted.clone()));
+    loading
+        .native
+        .as_mut()
+        .unwrap()
+        .progress
+        .advance_progress(100);
+    let mut result = super::super::transitions::fallback_map_load_result();
+    result.scenario.startup = accepted;
+    result.asset_manager = assets.lease_for_loading();
+    loading.stage = LoadingStage::PreparingPresentation {
+        result: Box::new(result),
+    };
+    // A long local load must not spend the peer-wait timeout before admission.
+    let loading = loading.begin_network_wait(9000);
+    let LoadingStage::AwaitingPeers { wait, .. } = &loading.stage else {
+        panic!("locally ready network result bypassed peer wait");
+    };
+    assert_eq!(wait.timeout.remaining(9000), 3600);
+    assert_eq!(wait.resend.remaining(9000), 300);
+    assert!(assets.is_leased() && !assets.is_available());
+    let mut slot = Some(loading);
+    let loading = take_after_network_service(&mut slot, &session)
+        .unwrap()
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &original.bytes,
+        &loading_asset_manager(&loading)
+            .unwrap()
+            .load_file_from_mix("SENTINEL.BIN")
+            .unwrap()
+            .bytes,
+    ));
+    loading.retire(&mut assets);
+    assert!(assets.is_available() && !assets.is_leased());
+    assert!(std::sync::Arc::ptr_eq(
+        &original.bytes,
+        &assets
+            .manager()
+            .unwrap()
+            .load_file_from_mix("sentinel.bin")
+            .unwrap()
+            .bytes,
+    ));
+}

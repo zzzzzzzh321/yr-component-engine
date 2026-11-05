@@ -475,6 +475,7 @@ fn load_with_assets(
         &assets,
         &mut rules,
         native_rules_owner,
+        None,
         &overlay_registry,
         &overlay_shp_ids,
         signed_new_ini_format,

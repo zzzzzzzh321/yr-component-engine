@@ -11,6 +11,10 @@ use std::{
 use vera_mod_api::{self as api, Context, Plan, Request};
 use vera_mod_runtime::{ComponentRuntime, LoadedModule, RuntimeLimits};
 
+#[cfg(test)]
+#[path = "program_tests.rs"]
+mod tests;
+
 #[derive(Serialize, Deserialize)]
 pub struct Program {
     bytes: Vec<u8>,
@@ -22,8 +26,22 @@ pub struct Program {
 }
 
 struct Executor {
-    runtime: ComponentRuntime,
+    runtime: Arc<ComponentRuntime>,
     module: LoadedModule,
+}
+
+fn component_runtime() -> Result<Arc<ComponentRuntime>, String> {
+    // Compilation is process-wide, bounded by the runtime's existing component
+    // cache. Configuration, Store memory and guest instances remain per call;
+    // no game state is retained here. Always use load() to verify incoming bytes.
+    static RUNTIME: OnceLock<Result<Arc<ComponentRuntime>, String>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            ComponentRuntime::new(RuntimeLimits::default())
+                .map(Arc::new)
+                .map_err(|e| e.to_string())
+        })
+        .clone()
 }
 
 /// Immutable module admission shared by early resource recipes and later Rules
@@ -37,7 +55,7 @@ pub(super) struct AdmittedComponent {
 
 impl AdmittedComponent {
     pub(super) fn load(bytes: Vec<u8>, expected: &str) -> Result<Self, String> {
-        let runtime = ComponentRuntime::new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
+        let runtime = component_runtime()?;
         let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
         let manifest = module.manifest().clone();
         if [

@@ -21,6 +21,7 @@ pub(crate) struct FreshMapLoadServices<'a> {
 
 pub(super) struct FreshMapLoadContinuation {
     label: &'static str,
+    log_phase_begin: bool,
     run: Box<dyn for<'a> FnOnce(FreshMapLoadServices<'a>) -> Result<FreshMapLoadStep>>,
 }
 
@@ -30,12 +31,57 @@ pub(super) enum FreshMapLoadStep {
 }
 
 impl FreshMapLoadContinuation {
+    pub(super) fn gameplay_resources(
+        work: crate::sim::runtime::FreshScenarioGameplayWork,
+        resume: impl for<'a> FnOnce(
+            FreshMapLoadServices<'a>,
+            crate::rules::ruleset::RuleSet,
+            Result<crate::sim::runtime::ConfiguredFreshScenarioGameplay, String>,
+        ) -> Result<FreshMapLoadStep>
+        + 'static,
+    ) -> Self {
+        match crate::app::loading::cpu_job::CpuLoadJob::start("scenario-gameplay", move || {
+            work.configure()
+        }) {
+            Ok(job) => {
+                let mut continuation = Self::await_gameplay_resources(job, resume);
+                continuation.log_phase_begin = true;
+                continuation
+            }
+            Err(error) => Self::new("gameplay-resources", move |_| Err(error)),
+        }
+    }
+
+    fn await_gameplay_resources(
+        mut job: crate::app::loading::cpu_job::CpuLoadJob<(
+            crate::rules::ruleset::RuleSet,
+            Result<crate::sim::runtime::ConfiguredFreshScenarioGameplay, String>,
+        )>,
+        resume: impl for<'a> FnOnce(
+            FreshMapLoadServices<'a>,
+            crate::rules::ruleset::RuleSet,
+            Result<crate::sim::runtime::ConfiguredFreshScenarioGameplay, String>,
+        ) -> Result<FreshMapLoadStep>
+        + 'static,
+    ) -> Self {
+        let mut continuation =
+            Self::new("gameplay-resources", move |services| match job.poll()? {
+                std::task::Poll::Pending => Ok(FreshMapLoadStep::Continue(
+                    Self::await_gameplay_resources(job, resume),
+                )),
+                std::task::Poll::Ready((rules, configured)) => resume(services, rules, configured),
+            });
+        continuation.log_phase_begin = false;
+        continuation
+    }
+
     pub(super) fn new(
         label: &'static str,
         run: impl for<'a> FnOnce(FreshMapLoadServices<'a>) -> Result<FreshMapLoadStep> + 'static,
     ) -> Self {
         Self {
             label,
+            log_phase_begin: true,
             run: Box::new(run),
         }
     }
@@ -98,7 +144,9 @@ impl FreshMapLoadJob {
             .next
             .take()
             .ok_or_else(|| anyhow::anyhow!("fresh-map continuation already consumed"))?;
-        log::debug!(target: "vera20k::loading_attempt", "phase_begin {}", continuation.label);
+        if continuation.log_phase_begin {
+            log::debug!(target: "vera20k::loading_attempt", "phase_begin {}", continuation.label);
+        }
         match (continuation.run)(services)? {
             FreshMapLoadStep::Continue(next) => {
                 self.next = Some(next);

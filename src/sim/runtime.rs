@@ -621,13 +621,25 @@ mod tests {
         // the cached policy must still agree when saved resources are restored.
         sim.initialize_trigger_definitions(&map, &Default::default(), None, None, &rules);
         let rng_before_binding = sim.scenario_rng.logical_state();
-        bind_scenario_gameplay_resources(
+        let owner_before =
+            crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap();
+        let work = prepare_fresh_scenario_gameplay_resources(rules, &assets, &owner);
+        let (mut rules, configured) = std::thread::spawn(move || work.configure()).join().unwrap();
+        assert!(
+            sim.external_mod.is_none(),
+            "worker cannot publish Scenario gameplay"
+        );
+        assert_eq!(
+            crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap(),
+            owner_before,
+            "worker cannot mutate the live native registry or checkpoint",
+        );
+        finish_fresh_scenario_gameplay_resources(
             &mut rules,
+            configured.unwrap(),
             &assets,
-            ScenarioGameplayProgram::Fresh {
-                simulation: &mut sim,
-                rules_owner: &mut owner,
-            },
+            &mut sim,
+            &mut owner,
             "tem",
             "TEMPERATE",
         )
@@ -1331,6 +1343,66 @@ pub enum ScenarioGameplayProgram<'a> {
     Saved(&'a Simulation),
 }
 
+/// Isolated final configuration. Only owned projection data crosses the worker
+/// boundary; the original process registry and Scenario stay with their owners.
+pub struct FreshScenarioGameplayWork {
+    rules: RuleSet,
+    binding: Result<crate::mod_sdk::PreparedProcessModBinding, String>,
+}
+
+/// Move-only proof that this exact Rules projection finished configuration.
+/// Publication into the live process and Scenario still happens on their thread.
+pub struct ConfiguredFreshScenarioGameplay {
+    rules_serial: u64,
+}
+
+impl FreshScenarioGameplayWork {
+    pub fn configure(mut self) -> (RuleSet, Result<ConfiguredFreshScenarioGameplay, String>) {
+        // Keep the projection even on failure. The app completes the original
+        // pre-binding native prefix before observing this candidate's error.
+        let configured = self.binding.and_then(|binding| {
+            self.rules.bind_prepared_external_mod(binding)?;
+            Ok(ConfiguredFreshScenarioGameplay {
+                rules_serial: self.rules.serial(),
+            })
+        });
+        (self.rules, configured)
+    }
+}
+
+pub fn prepare_fresh_scenario_gameplay_resources(
+    rules: RuleSet,
+    assets: &crate::assets::asset_manager::AssetManager,
+    rules_owner: &crate::rules::process_owner::NativeRulesProcessOwner,
+) -> FreshScenarioGameplayWork {
+    let binding = rules_owner
+        .saved_scenario_rules()
+        .ok_or_else(|| "fresh gameplay configuration requires completed scenario Rules".to_owned())
+        .and_then(|processed| rules.prepare_external_mod_for_process(assets, processed));
+    FreshScenarioGameplayWork { rules, binding }
+}
+
+/// Accept the candidate only at the original final-binding boundary, before
+/// constructors can consume its policies. A retired loading attempt never calls it.
+pub fn finish_fresh_scenario_gameplay_resources(
+    rules: &mut RuleSet,
+    configured: ConfiguredFreshScenarioGameplay,
+    assets: &crate::assets::asset_manager::AssetManager,
+    simulation: &mut Simulation,
+    rules_owner: &mut crate::rules::process_owner::NativeRulesProcessOwner,
+    theater_ext: &str,
+    theater_name: &str,
+) -> Result<(), String> {
+    if configured.rules_serial != rules.serial() {
+        return Err("gameplay configuration belongs to another Rules projection".into());
+    }
+    rules_owner.retain_sdk_configuration_program(rules.external_mod.clone());
+    simulation.external_mod = rules.external_mod.as_deref().cloned();
+    simulation.bind_fresh_trigger_resource_policy(rules);
+    bind_gameplay_resource_assets(rules, assets, theater_ext, theater_name);
+    Ok(())
+}
+
 /// Bind gameplay against complete scenario Rules, then extend the tolerant
 /// animation closure before constructors or rendering preparation consume it.
 /// Fresh authored/generated loads configure once; saved loads adopt the exact
@@ -1351,14 +1423,33 @@ pub fn bind_scenario_gameplay_resources(
                 .saved_scenario_rules()
                 .ok_or("fresh gameplay configuration requires completed scenario Rules")?;
             rules.bind_external_mod_for_process(assets, processed)?;
-            rules_owner.retain_sdk_configuration_program(rules.external_mod.clone());
-            simulation.external_mod = rules.external_mod.as_deref().cloned();
-            simulation.bind_fresh_trigger_resource_policy(rules);
+            let configured = ConfiguredFreshScenarioGameplay {
+                rules_serial: rules.serial(),
+            };
+            return finish_fresh_scenario_gameplay_resources(
+                rules,
+                configured,
+                assets,
+                simulation,
+                rules_owner,
+                theater_ext,
+                theater_name,
+            );
         }
         ScenarioGameplayProgram::Saved(sim) => {
             crate::mod_sdk::adopt_saved_program(rules, sim, assets)?;
         }
     }
+    bind_gameplay_resource_assets(rules, assets, theater_ext, theater_name);
+    Ok(())
+}
+
+fn bind_gameplay_resource_assets(
+    rules: &mut RuleSet,
+    assets: &crate::assets::asset_manager::AssetManager,
+    theater_ext: &str,
+    theater_name: &str,
+) {
     // The ordinary closure precedes final component admission. A declared
     // building policy must qualify its palette groups before any constructor
     // can freeze a DestroyAnim remap; the original asset owner also retains
@@ -1375,7 +1466,6 @@ pub fn bind_scenario_gameplay_resources(
     let component_anim_roots =
         crate::rules::effect_asset_catalog::gameplay_effect_anim_roots(rules);
     rules.bind_anim_class_assets(&component_anim_roots, assets, theater_ext, theater_name);
-    Ok(())
 }
 
 /// Consume the fresh authored map-load corridor on the one staged Simulation.
@@ -1390,6 +1480,7 @@ pub fn finalize_and_populate_staged_authored_scenario<F>(
     assets: &crate::assets::asset_manager::AssetManager,
     rules: &mut RuleSet,
     rules_owner: &mut crate::rules::process_owner::NativeRulesProcessOwner,
+    configured_gameplay: Option<ConfiguredFreshScenarioGameplay>,
     overlay_registry: &crate::rules::overlay_types::OverlayTypeRegistry,
     overlay_shp_ids: &std::collections::BTreeSet<u8>,
     signed_new_ini_format: i32,
@@ -1404,16 +1495,28 @@ pub fn finalize_and_populate_staged_authored_scenario<F>(
 where
     F: FnOnce(&mut Simulation, &RuleSet),
 {
-    bind_scenario_gameplay_resources(
-        rules,
-        assets,
-        ScenarioGameplayProgram::Fresh {
-            simulation: &mut *sim,
-            rules_owner: &mut *rules_owner,
-        },
-        theater_ext,
-        theater_name,
-    )
+    if let Some(configured) = configured_gameplay {
+        finish_fresh_scenario_gameplay_resources(
+            rules,
+            configured,
+            assets,
+            sim,
+            rules_owner,
+            theater_ext,
+            theater_name,
+        )
+    } else {
+        bind_scenario_gameplay_resources(
+            rules,
+            assets,
+            ScenarioGameplayProgram::Fresh {
+                simulation: &mut *sim,
+                rules_owner: &mut *rules_owner,
+            },
+            theater_ext,
+            theater_name,
+        )
+    }
     .map_err(AuthoredScenarioLoadError::Gameplay)?;
     // ReadMap4AD0C5 materializes Home only after the earlier start-slot pass.
     // The updated map feeds the single Scenario waypoint table, camera and

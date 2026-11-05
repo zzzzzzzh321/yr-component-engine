@@ -8,7 +8,7 @@ use crate::app::frontend::startup_options::{RetailStartupOptions, ScreenSize};
 use crate::app::persistence::options_profile::{RetailOptionsLoad, RetailOptionsProfile};
 
 use super::{
-    ActiveEventLoop, App, AppState, Arc, AssetManager, BTreeMap, BasicSection, BatchRenderer,
+    ActiveEventLoop, App, AppState, Arc, BTreeMap, BasicSection, BatchRenderer,
     BitFont, GameConfig, GameScreen, GpuContext, HashMap, HouseRoster, Instant, PhysicalSize,
     PlatformState, RandomMapGenerationRetention, Result, SidebarChromeLayoutSpec, SidebarTab,
     StartupAudioDisposition, Window, WindowAttributes, frontend::startup_splash,
@@ -16,9 +16,11 @@ use super::{
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use super::{MusicPlayer, SfxPlayer};
 use crate::map::scenario_sources;
+#[cfg(test)]
+use super::AssetManager;
 
-/// Main-thread startup slices own the not-yet-installed app resources. No
-/// window/GPU or process authority is lent to a worker or duplicated.
+/// Main-thread startup slices retain presentation. CPU startup owns the original,
+/// unpublished process assets until they are returned for app-state installation.
 pub(super) enum InitializationStep {
     Pending(InitializationJob),
     Ready(Box<AppState>, Vec<winit::event::WindowEvent>),
@@ -34,6 +36,30 @@ pub(super) struct InitializationJob {
 }
 
 impl InitializationStep {
+    fn pending_cpu<T: Send + 'static>(
+        window: Arc<Window>,
+        synchronous: bool,
+        work: impl FnOnce() -> T + Send + 'static,
+        resume: impl FnOnce(T) -> Result<Self> + 'static,
+    ) -> Result<Self> {
+        if synchronous {
+            return Self::pending(window, move || resume(work()));
+        }
+        let job = crate::app::loading::cpu_job::CpuLoadJob::start("startup-rules", work)?;
+        Self::await_cpu(window, job, resume)
+    }
+
+    fn await_cpu<T: Send + 'static>(
+        window: Arc<Window>,
+        mut job: crate::app::loading::cpu_job::CpuLoadJob<T>,
+        resume: impl FnOnce(T) -> Result<Self> + 'static,
+    ) -> Result<Self> {
+        Self::pending(window.clone(), move || match job.poll()? {
+            std::task::Poll::Pending => Self::await_cpu(window, job, resume),
+            std::task::Poll::Ready(result) => resume(result),
+        })
+    }
+
     /// Hidden captures keep their sealed, synchronous startup. Interactive
     /// windows return to winit between these same completed operations.
     pub(super) fn finish_synchronously(mut self) -> Result<Self> {
@@ -483,7 +509,7 @@ impl App {
         // 6A5090/6A5130 change row capacity on resize, never artwork scale.
         let ui_scale = 1.0;
         let sidebar_layout_spec = SidebarChromeLayoutSpec::stock();
-        let mut startup_asset_manager = game_config.as_ref().and_then(|config| {
+        let startup_asset_manager = game_config.as_ref().and_then(|config| {
             startup_asset_or_error(
                 crate::mod_sdk::open_active_assets(
                     &config.paths.ra2_dir,
@@ -588,19 +614,20 @@ impl App {
         if external_launch {
             log::info!("External launch: process-start splash skipped");
         }
-        InitializationStep::pending(window.clone(), move || {
-            // Ordinary interactive startup runs with the splash already on screen: the
-            // presented swapchain frame stays composited while this thread blocks,
-            // and the hold armed above is measured from that present, so a slow
-            // load is spent inside the five seconds instead of before them.
+        let media_archive_mode = startup_options.media_archive_mode;
+        let load_audio_indices = startup_audio.load_audio_indices;
+        let ini_config = game_config
+            .as_ref()
+            .map(|config| config.ini.clone())
+            .unwrap_or_default();
+        InitializationStep::pending_cpu(window.clone(), capture_dimensions.is_some(), move || {
+            // The worker uniquely owns these original, unpublished process resources.
+            // Window/GPU/audio output and the remaining continuation stay on the UI thread.
             let mut process_assets =
                 crate::app::process_assets::ProcessAssets::new_with_ini_config(
-                    startup_options.media_archive_mode,
-                    startup_audio.load_audio_indices,
-                    game_config
-                        .as_ref()
-                        .map(|config| config.ini.clone())
-                        .unwrap_or_default(),
+                    media_archive_mode,
+                    load_audio_indices,
+                    ini_config,
                 )
                 .with_personal_rules(personal_rules);
             process_assets.csf = startup_csf;
@@ -613,7 +640,9 @@ impl App {
                         .ok()
                 })
                 .unwrap_or((None, None));
-            // Return to the host only after the process Rules registry is complete.
+            (startup_asset_manager, process_assets, startup_rules, startup_rules_projection)
+        }, move |(mut startup_asset_manager, mut process_assets, startup_rules, startup_rules_projection)| {
+            // Publish the same process owner only after its complete ordered startup.
             InitializationStep::pending(window.clone(), move || {
                 if let Some(assets) = startup_asset_manager.as_mut() {
                     match assets.register_neutral_archives() {

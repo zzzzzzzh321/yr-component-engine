@@ -4,6 +4,7 @@
 
 pub(crate) mod campaign_presentation;
 pub(crate) mod composition;
+pub(crate) mod cpu_job;
 pub(crate) mod fresh_scenario;
 pub(crate) mod init;
 pub(crate) mod init_helpers;

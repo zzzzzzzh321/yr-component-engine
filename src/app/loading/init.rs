@@ -2745,6 +2745,7 @@ mod fresh_map_job;
 use fresh_map_job::{FreshMapLoadContinuation, FreshMapLoadStep};
 pub(crate) use fresh_map_job::{FreshMapLoadJob, FreshMapLoadServices};
 
+#[cfg(test)]
 pub(crate) fn load_map_from_initial(
     gpu: &GpuContext,
     batch: &BatchRenderer,
@@ -3287,9 +3288,18 @@ fn load_map_first_step(
                                 &map_data.header.theater,
                                 crate::rules::terrain_asset_catalog::TerrainAssetLoadPhase::Fresh,
                             )?;
-                            Ok(FreshMapLoadStep::Continue(FreshMapLoadContinuation::new(
-                                "objects",
-                                move |services| {
+                            // Configuration owns only this projection and immutable inputs.
+                            // Preserve native prefix effects and observe its result at the
+                            // existing authored/generated binding boundary below.
+                            let gameplay_work = crate::sim::runtime::prepare_fresh_scenario_gameplay_resources(
+                                rules,
+                                services.asset_manager,
+                                services.native_rules_owner,
+                            );
+                            Ok(FreshMapLoadStep::Continue(FreshMapLoadContinuation::gameplay_resources(
+                                gameplay_work,
+                                move |services, mut rules, configured_gameplay| {
+                                    let mut configured_gameplay = Some(configured_gameplay);
                                     let skirmish_launch_session = match_launch_descriptor
                                         .as_ref()
                                         .map(|launch| launch.session());
@@ -3297,13 +3307,13 @@ fn load_map_first_step(
                                     {
                                         // Final map/TMC Rules and the ordinary asset closure are complete.
                                         // Bind before replay or population can construct any GameEntity.
-                                        crate::sim::runtime::bind_scenario_gameplay_resources(
+                                        crate::sim::runtime::finish_fresh_scenario_gameplay_resources(
                                             &mut rules,
+                                            configured_gameplay.take().expect("one final gameplay configuration")
+                                                .map_err(anyhow::Error::msg)?,
                                             services.asset_manager,
-                                            crate::sim::runtime::ScenarioGameplayProgram::Fresh {
-                                                simulation: &mut staged_simulation,
-                                                rules_owner: &mut *services.native_rules_owner,
-                                            },
+                                            &mut staged_simulation,
+                                            services.native_rules_owner,
                                             theater_ext,
                                             &map_data.header.theater,
                                         )
@@ -3419,6 +3429,8 @@ fn load_map_first_step(
                 services.asset_manager,
                 &mut rules,
                 services.native_rules_owner,
+                Some(configured_gameplay.take().expect("one final gameplay configuration")
+                    .map_err(anyhow::Error::msg)?),
                 &overlay_registry,
                 &overlay_shp_ids,
                 signed_new_ini_format,

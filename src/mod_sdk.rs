@@ -13,7 +13,8 @@ mod simulation;
 mod startup;
 
 pub use assets::adopt_saved_program;
-pub(crate) use assets::{early_configuration_seed, load_from_assets, load_from_assets_for_process};
+pub(crate) use assets::{PreparedProcessModBinding, prepare_process_mod_binding};
+pub(crate) use assets::{early_configuration_seed, load_from_assets};
 pub use program::Program;
 pub(crate) use simulation::{
     attach_entity, live_entity_context, pre_receive_damage, preview_receive_damage, tick_entity,
