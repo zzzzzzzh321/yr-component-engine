@@ -4757,6 +4757,13 @@ pub struct RuleSet {
     source_ini_hash: u64,
 }
 
+/// The direct-launch frontend projection never owns scenario gameplay.
+/// Ordinary startup consumers retain the complete resource projection.
+pub(crate) enum StartupResourceScope {
+    Complete,
+    Frontend,
+}
+
 impl RuleSet {
     pub(crate) fn long_list_read_capacity(&self) -> usize {
         crate::rules::ini_value::long_list_read_capacity(self.long_list_readers)
@@ -4820,6 +4827,7 @@ impl RuleSet {
     pub(crate) fn bind_external_mod_from_checkpoint(
         &mut self,
         processed: &ProcessedRulesLayers,
+        scope: StartupResourceScope,
     ) -> Result<(), String> {
         let registry = processed.native_registry_state();
         let Some(checkpoint) = registry
@@ -4838,7 +4846,19 @@ impl RuleSet {
             registry.sdk_configuration_steps(),
         )?;
         self.external_mod = Some(std::sync::Arc::new(program));
-        self.bind_resource_policies()
+        match scope {
+            StartupResourceScope::Complete => self.bind_resource_policies(),
+            StartupResourceScope::Frontend => {
+                // Configuration uses the same isolated receipt. Only its UI
+                // consumers bind here; scenario admission validates and binds
+                // gameplay resources before any simulation constructors.
+                let factions = self.collect_faction_resource_bindings()?;
+                let match_rules_policy = self.collect_match_rules_policy()?;
+                self.external_factions = factions;
+                self.match_rules_policy = match_rules_policy;
+                Ok(())
+            }
+        }
     }
 
     /// Resource query names share one ordering contract across all admission
@@ -4862,6 +4882,15 @@ impl RuleSet {
         let mut names = self.weapons.keys().cloned().collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    fn collect_match_rules_policy(&self) -> Result<Option<vera_mod_api::MatchRulesPolicy>, String> {
+        Ok(self
+            .external_mod
+            .as_ref()
+            .map(|program| program.match_rules_policy())
+            .transpose()?
+            .flatten())
     }
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
@@ -4903,12 +4932,7 @@ impl RuleSet {
                 }
             }
         }
-        let match_rules_policy = self
-            .external_mod
-            .as_ref()
-            .map(|program| program.match_rules_policy())
-            .transpose()?
-            .flatten();
+        let match_rules_policy = self.collect_match_rules_policy()?;
         // CanTargetHouse10051B70 needs the retained Warhead relationships.
         // Admit the candidate projection or the raw legacy reader, never a
         // stale external binding or a silent stock fallback for explicit true.

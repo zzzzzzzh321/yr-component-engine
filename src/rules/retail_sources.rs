@@ -13,7 +13,7 @@ use crate::rules::ini_parser::directives::{
 };
 use crate::rules::personal_rules::PersonalRules;
 use crate::rules::process_owner::{NativeLangRuleSource, NativeRulesProcessOwner};
-use crate::rules::ruleset::RuleSet;
+use crate::rules::ruleset::{RuleSet, StartupResourceScope};
 use crate::rules::sound_ini::{EvaRegistry, SoundRegistry};
 use crate::util::sha256::sha256_hex;
 
@@ -274,6 +274,26 @@ impl RetailRulesSources {
         sounds: Arc<SoundRegistry>,
         eva: Arc<EvaRegistry>,
     ) -> Result<StartupRulesLoad, String> {
+        self.into_startup_with_scope(sounds, eva, StartupResourceScope::Complete)
+    }
+
+    /// UI-only projection for an external direct launch. It completes the
+    /// same isolated configuration, but gameplay resource admission belongs
+    /// to the final scenario loader, before simulation constructors.
+    pub fn into_startup_for_direct_launch(
+        self,
+        sounds: Arc<SoundRegistry>,
+        eva: Arc<EvaRegistry>,
+    ) -> Result<StartupRulesLoad, String> {
+        self.into_startup_with_scope(sounds, eva, StartupResourceScope::Frontend)
+    }
+
+    fn into_startup_with_scope(
+        self,
+        sounds: Arc<SoundRegistry>,
+        eva: Arc<EvaRegistry>,
+        scope: StartupResourceScope,
+    ) -> Result<StartupRulesLoad, String> {
         let native_owner = self.into_owner(sounds, eva)?;
         let component_projection = native_owner
             .sdk_configuration_program()
@@ -295,7 +315,7 @@ impl RetailRulesSources {
                         native_owner.bind_type_audio_references(rules, &processed);
                         // This completed projection has its own configuration
                         // receipt. Never install it into the live cold registry.
-                        rules.bind_external_mod_from_checkpoint(&processed)?;
+                        rules.bind_external_mod_from_checkpoint(&processed, scope)?;
                     }
                     let compatibility_projection =
                         processed.into_projection_discarding_native_receipt();

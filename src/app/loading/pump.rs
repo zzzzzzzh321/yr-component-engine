@@ -894,6 +894,21 @@ pub(crate) struct LoadingSession {
 }
 
 impl LoadingSession {
+    /// Interactive client-selected authored maps open on their real loading art.
+    /// This VERA presentation policy omits Main_Game's black shell-replacement
+    /// display (0x0052E64C..0x0052E69E); preparation keeps its native CPU order.
+    /// Selecting the first frame neither acknowledges a present nor pumps loading.
+    fn select_direct_launch_first_frame(&mut self) {
+        if self.next_frame == NextLoadingFrame::Blank
+            && self.native.as_ref().is_some_and(|native| {
+                matches!(native.variant, NativeLoadingArt::StockOffline(_))
+                    && native.progress_cadence == NativeLoadingProgressCadence::SelectedMap
+            })
+        {
+            self.next_frame = NextLoadingFrame::First;
+        }
+    }
+
     /// After terminal progress is published, local completion starts Wait684370.
     /// No peer-wait timer runs while construction or presentation is pending;
     /// the same result and lease reach the existing wait and installation path.
@@ -1328,6 +1343,9 @@ pub(crate) fn begin_loading(state: &mut AppState, request: LoadingRequest) {
             .map(crate::rules::ruleset::RuleSet::skirmish_colors),
     );
     let mut session = LoadingSession::from_request(request);
+    if state.frontend.external_launch && state.platform.capture_client_size.is_none() {
+        session.select_direct_launch_first_frame();
+    }
     session.job.ra2_dir = state
         .platform
         .game_config
@@ -2661,6 +2679,26 @@ pub(crate) fn theater_ramp_changed_values(runtime_color_scheme_count: usize) -> 
         }
     }
     emitted
+}
+
+/// Prepare the real loading surface before a direct-launch window is revealed.
+/// This uses the same session, prefix, asset lease and failure owner as redraw;
+/// it never acknowledges a frame or advances scenario construction.
+pub(crate) fn prepare_first_loading_surface(state: &mut AppState) {
+    // Generated startup acknowledges its native black frame before reading
+    // the scenario/Country prefix. Do not cache artwork ahead of those reads.
+    if state
+        .frontend
+        .loading_session
+        .as_ref()
+        .is_some_and(|session| session.next_frame == NextLoadingFrame::Blank)
+    {
+        return;
+    }
+    let policy = loading_failure_policy(state);
+    if let Err(error) = ensure_native_loading_atlas(state) {
+        fail_loading(state, policy, error);
+    }
 }
 
 pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Result<()> {

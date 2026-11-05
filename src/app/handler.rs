@@ -339,6 +339,10 @@ impl App {
             }
             Ok(super::initialize::InitializationStep::Ready(state, events)) => {
                 let mut state = *state;
+                // Preserve the disposition before consuming either request;
+                // replay intentionally does not set frontend.external_launch.
+                let reveal_direct_window = state.platform.capture_client_size.is_none()
+                    && (self.pending_spawn.is_some() || self.replay_request.is_some());
                 // Resizes may have arrived while startup owned the renderer.
                 Self::follow_window_size(&mut state);
                 if let Some(request) = self.replay_request.take() {
@@ -383,16 +387,36 @@ impl App {
                 }
                 // Clip the cursor to the window on first launch (
                 // default). A focus regain re-applies it if the OS dropped it.
+                if reveal_direct_window {
+                    crate::app::loading::pump::prepare_first_loading_surface(&mut state);
+                }
                 let window_id = state.platform.window.id();
                 self.state = Some(state);
                 for event in events {
                     self.window_event(event_loop, window_id, event);
                 }
                 if let Some(state) = self.state.as_ref() {
+                    if reveal_direct_window {
+                        // Show before acquiring a swapchain frame: Metal treats
+                        // hidden windows as occluded. Direct selected maps have
+                        // prepared their art; other routes keep their native
+                        // first-frame policy without a provisional text screen.
+                        state.platform.window.set_visible(true);
+                        state.platform.window.focus_window();
+                        state.platform.window.request_redraw();
+                        log::info!(
+                            "Direct launch window revealed after startup presentation preparation"
+                        );
+                    }
                     crate::app::input::cursor::apply_cursor_confinement(state);
                 }
                 #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
-                crate::web::status(self.state.as_ref().and_then(|state| state.frontend.main_menu_shell_error.as_deref()).unwrap_or("Ready"));
+                crate::web::status(
+                    self.state
+                        .as_ref()
+                        .and_then(|state| state.frontend.main_menu_shell_error.as_deref())
+                        .unwrap_or("Ready"),
+                );
                 log::info!("Initialization complete");
             }
             Err(err) => {

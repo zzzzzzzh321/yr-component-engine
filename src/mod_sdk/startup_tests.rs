@@ -105,6 +105,209 @@ fn reload(rules: &RuleSet) -> i32 {
 }
 
 #[test]
+fn sdk_direct_launch_startup_defers_combat_queries_to_full_admission() {
+    use crate::rules::process_owner::NativeScenarioRulesPrefix;
+    use crate::rules::retail_sources::RetailRulesSources;
+    use vera_mod_api::{
+        self as api, ConfigureContext, Context, HookKind, ModuleManifest, Plan, Request,
+    };
+    let request = Request {
+        api_version: api::API_VERSION,
+        context: Context::Configure(ConfigureContext {
+            pass: 0,
+            source: "fixture".into(),
+            final_pass: false,
+            object_types: vec![],
+            warheads: vec![],
+        }),
+        config: vec![],
+        state: vec![],
+    };
+    for hook in [HookKind::TypeResource, HookKind::WeaponResource] {
+        // The canonical fixture traps only on this exact resource query.
+        // Configuration still runs through the production checkpoint owner.
+        let kind = hook.as_str();
+        let condition = kind.bytes().enumerate().fold(
+            format!("(i32.eq (local.get 1) (i32.const {}))", kind.len()),
+            |condition, (index, byte)| format!(
+                "(i32.and {condition} (i32.eq (i32.load8_u offset={index} (local.get 0)) (i32.const {byte})))"
+            ),
+        );
+        let wasm = vera_mod_runtime::test_support::component_fixture(
+            &ModuleManifest {
+                api_version: api::API_VERSION,
+                id: "startup-combat-trap".into(),
+                version: "1".into(),
+                state_version: 1,
+                config_version: 1,
+                hooks: vec![
+                    HookKind::Configure,
+                    HookKind::Attach,
+                    HookKind::Damage,
+                    HookKind::Tick,
+                    HookKind::ConfigureBoundary,
+                    HookKind::ConfigureCountryRead,
+                    hook,
+                ],
+            },
+            &serde_json::to_vec(&Plan::unchanged(&request)).unwrap(),
+            &format!("(if {condition} (then unreachable))"),
+            "",
+        );
+        let dir = audio_test_install("sdk-direct-combat-trap");
+        early_component(&dir, &wasm);
+        write(
+            &dir,
+            "rulesmd.ini",
+            b"[VehicleTypes]\n0=TANK\n[TANK]\nStrength=100\nPrimary=GUN\n[GUN]\nDamage=1\n",
+        );
+        write(&dir, "artmd.ini", b"");
+        let assets = open(&dir);
+        let sources = RetailRulesSources::select(&assets).unwrap();
+        let (_, _, mut owner) = sources
+            .clone()
+            .into_startup_for_direct_launch(Default::default(), Default::default())
+            .expect("direct startup must not query gameplay resources")
+            .into_parts();
+        let error = sources
+            .into_startup(Default::default(), Default::default())
+            .err()
+            .expect("ordinary startup keeps complete admission");
+        assert!(
+            error.contains("gameplay component execution failed"),
+            "{error}"
+        );
+        let (mut rules, ..) = owner
+            .load_scenario(
+                NativeScenarioRulesPrefix::NonCampaign(None),
+                &IniFile::empty(),
+            )
+            .unwrap()
+            .into_parts();
+        let error = rules
+            .bind_external_mod_for_process(&assets, owner.saved_scenario_rules().unwrap())
+            .expect_err("final scenario admission must still query gameplay resources");
+        assert!(
+            error.contains("gameplay component execution failed"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the real .28 component in VERA_SDK_REFERENCE_WASM"]
+fn sdk_direct_launch_startup_preserves_frontend_and_live_owner_then_binds_final_gameplay() {
+    use crate::rules::process_owner::NativeScenarioRulesPrefix;
+    use crate::rules::retail_sources::RetailRulesSources;
+    use crate::rules::ruleset::SideIdx;
+    use vera_mod_api as api;
+    let wasm = component("VERA_SDK_REFERENCE_WASM");
+    let dir = audio_test_install("sdk-direct-frontend-projection");
+    early_component(&dir, &wasm);
+    write(&dir, "rulesmd.ini", b"[VeraFeatures]\nAresProduction=no\n\
+        [Countries]\n0=COUNTRY\n[Sides]\nSIDE=COUNTRY\n\
+        [COUNTRY]\nSide=SIDE\nFile.LoadScreen=custom.shp\nFile.LoadScreenPAL=custom.pal\n\
+        [SIDE]\nSidebar.MixFileIndex=4\n\
+        [VehicleTypes]\n0=TANK\n[TANK]\nStrength=100\nPrimary=GUN\nAmmo=6\nReloadAmount=5\n[GUN]\nDamage=1\nAmmo=2\n");
+    write(&dir, "artmd.ini", b"");
+    let assets = open(&dir);
+    let sources = RetailRulesSources::select(&assets).unwrap();
+    let cold = sources
+        .clone()
+        .into_owner(Default::default(), Default::default())
+        .unwrap();
+    let (direct, direct_ini, mut owner) = sources
+        .clone()
+        .into_startup_for_direct_launch(Default::default(), Default::default())
+        .unwrap()
+        .into_parts();
+    let (full, full_ini, _) = sources
+        .into_startup(Default::default(), Default::default())
+        .unwrap()
+        .into_parts();
+    let (direct, full) = (direct.unwrap(), full.unwrap());
+    assert_eq!(
+        direct_ini.unwrap().content_hash(),
+        full_ini.unwrap().content_hash()
+    );
+    assert_eq!(
+        crate::util::save_codec::serialize(direct.external_mod.as_deref().unwrap()).unwrap(),
+        crate::util::save_codec::serialize(full.external_mod.as_deref().unwrap()).unwrap(),
+        "both scopes finish the same isolated configuration"
+    );
+    assert!(direct.registered_side_ui_enabled());
+    assert_eq!(direct.match_rules_policy(), full.match_rules_policy());
+    assert_eq!(direct.side_sidebar_mix_file_index(SideIdx(0)), Some(4));
+    assert_eq!(
+        direct.side_sidebar_mix_file_index(SideIdx(0)),
+        full.side_sidebar_mix_file_index(SideIdx(0))
+    );
+    assert_eq!(
+        direct.faction_country_loading("COUNTRY"),
+        full.faction_country_loading("COUNTRY")
+    );
+    assert_eq!(
+        direct
+            .faction_country_loading("COUNTRY")
+            .unwrap()
+            .unwrap()
+            .file,
+        "custom.shp"
+    );
+    assert!(
+        direct
+            .object("TANK")
+            .unwrap()
+            .type_resource_policy()
+            .is_none()
+    );
+    assert!(
+        direct
+            .weapon("GUN")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_UNIT)
+            .is_none()
+    );
+    assert_eq!(reload(&full), 5);
+    assert!(
+        full.weapon("GUN")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_UNIT)
+            .is_some()
+    );
+    assert_eq!(
+        crate::util::save_codec::serialize(owner.sdk_configuration_program().unwrap().as_ref())
+            .unwrap(),
+        crate::util::save_codec::serialize(cold.sdk_configuration_program().unwrap().as_ref())
+            .unwrap(),
+        "projection must not publish final configuration into the live cold owner"
+    );
+    assert_eq!(
+        owner.multiplayer_countries().count(),
+        0,
+        "projection must not allocate live Countries"
+    );
+    let (mut final_rules, ..) = owner
+        .load_scenario(
+            NativeScenarioRulesPrefix::NonCampaign(None),
+            &IniFile::empty(),
+        )
+        .unwrap()
+        .into_parts();
+    final_rules
+        .bind_external_mod_for_process(&assets, owner.saved_scenario_rules().unwrap())
+        .unwrap();
+    assert_eq!(reload(&final_rules), 5);
+    assert!(
+        final_rules
+            .weapon("GUN")
+            .unwrap()
+            .resource_policy(api::WEAPON_USER_UNIT)
+            .is_some()
+    );
+}
+
+#[test]
 #[ignore = "requires VERA_SDK_LONG_LIST_WASM and .18 VERA_SDK_LONG_LIST_PREVIOUS_WASM"]
 fn sdk_long_list_cold_mode_map_and_explicit_retail_preserve_native_reader_boundaries() {
     use crate::rules::prerequisite::{Prerequisite, PrerequisiteGroup};

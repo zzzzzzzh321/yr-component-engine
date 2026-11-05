@@ -153,6 +153,36 @@ impl ProcessAssets {
         ),
         String,
     > {
+        self.initialize_sources_with_startup_scope(assets, false)
+    }
+
+    /// Direct launch needs the isolated menu/identity projection, not a second
+    /// eager binding of combat resources. The real Scenario binds all gameplay
+    /// policies at its existing admission boundary before constructors run.
+    pub(crate) fn initialize_sources_for_direct_launch(
+        &mut self,
+        assets: &AssetManager,
+    ) -> Result<
+        (
+            Option<crate::rules::ruleset::RuleSet>,
+            Option<crate::rules::ini_parser::IniFile>,
+        ),
+        String,
+    > {
+        self.initialize_sources_with_startup_scope(assets, true)
+    }
+
+    fn initialize_sources_with_startup_scope(
+        &mut self,
+        assets: &AssetManager,
+        direct_launch: bool,
+    ) -> Result<
+        (
+            Option<crate::rules::ruleset::RuleSet>,
+            Option<crate::rules::ini_parser::IniFile>,
+        ),
+        String,
+    > {
         self.startup_resources
             .get_or_insert_with(|| assets.startup_resources().clone());
         if self
@@ -204,9 +234,13 @@ impl ProcessAssets {
         let sounds =
             std::sync::Arc::clone(self.audio_catalog.as_ref().unwrap().definitions.sounds());
         let eva = std::sync::Arc::clone(self.audio_catalog.as_ref().unwrap().definitions.eva());
-        let startup = crate::rules::retail_sources::RetailRulesSources::select(assets)?
-            .with_personal_rules(self.personal_rules.clone())
-            .into_startup(sounds, eva)?;
+        let sources = crate::rules::retail_sources::RetailRulesSources::select(assets)?
+            .with_personal_rules(self.personal_rules.clone());
+        let startup = if direct_launch {
+            sources.into_startup_for_direct_launch(sounds, eva)?
+        } else {
+            sources.into_startup(sounds, eva)?
+        };
         let (rules, projection, owner) = startup.into_parts();
         self.native_rules = Some(owner);
         Ok((rules, projection))

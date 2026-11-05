@@ -161,9 +161,10 @@ impl InitializationJob {
 fn startup_window_projection(
     profile_screen: ScreenSize,
     capture_dimensions: Option<(u32, u32)>,
+    external_launch: bool,
 ) -> (u32, u32, bool) {
     capture_dimensions.map_or(
-        (profile_screen.width, profile_screen.height, true),
+        (profile_screen.width, profile_screen.height, !external_launch),
         |(width, height)| (width, height, false),
     )
 }
@@ -352,7 +353,7 @@ impl App {
                     .as_deref(),
             );
         let (window_width, window_height, window_visible) =
-            startup_window_projection(profile_screen, capture_dimensions);
+            startup_window_projection(profile_screen, capture_dimensions, external_launch);
         let startup_audio =
             StartupAudioDisposition::for_audio_enabled(startup_options.audio_enabled);
         // The player's window has a title bar and any size they drag it to; it
@@ -386,7 +387,7 @@ impl App {
             .with_resizable(!capture)
             .with_fullscreen(fullscreen)
             .with_visible(window_visible)
-            .with_active(window_visible);
+            .with_active(!capture);
         // The Wayland app ID and X11 class, which the AppImage's desktop entry
         // names (StartupWMClass), so docks show its icon for the window.
         // Unset, Wayland has none and X11 takes the name the program was
@@ -405,10 +406,11 @@ impl App {
             use winit::platform::macos::WindowAttributesExtMacOS;
             window_attrs = window_attrs.with_borderless_game(true);
         }
-        // Capture windows stay hidden, so only a visible session shows the icon.
+        // Interactive direct launches keep the icon when their loading window
+        // is revealed; sealed captures do not load a desktop icon.
         let retail_icon = game_config
             .as_ref()
-            .filter(|_| window_visible)
+            .filter(|_| !capture)
             .and_then(|config| super::window_icon::RetailIcon::load(&config.paths.ra2_dir));
         if let Some(icon) = &retail_icon {
             window_attrs = icon.apply(window_attrs);
@@ -620,6 +622,7 @@ impl App {
             .as_ref()
             .map(|config| config.ini.clone())
             .unwrap_or_default();
+        let direct_launch = external_launch && capture_dimensions.is_none();
         InitializationStep::pending_cpu(window.clone(), capture_dimensions.is_some(), move || {
             // The worker uniquely owns these original, unpublished process resources.
             // Window/GPU/audio output and the remaining continuation stay on the UI thread.
@@ -634,8 +637,12 @@ impl App {
             let (startup_rules, startup_rules_projection) = startup_asset_manager
                 .as_ref()
                 .and_then(|assets| {
-                    process_assets
-                        .initialize_sources_if_needed(assets)
+                    let result = if direct_launch {
+                        process_assets.initialize_sources_for_direct_launch(assets)
+                    } else {
+                        process_assets.initialize_sources_if_needed(assets)
+                    };
+                    result
                         .map_err(|error| log::warn!("Startup sources unavailable: {error}"))
                         .ok()
                 })
@@ -1238,6 +1245,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_launch_window_waits_for_its_real_loading_surface() {
+        let screen = ScreenSize {
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(
+            startup_window_projection(screen, None, true),
+            (800, 600, false)
+        );
+        assert_eq!(
+            startup_window_projection(screen, None, false),
+            (800, 600, true)
+        );
+        assert_eq!(
+            startup_window_projection(screen, Some((640, 480)), true),
+            (640, 480, false)
+        );
+    }
+
+    #[test]
     fn startup_errors_are_described_in_english_not_host_locale() {
         // A missing install surfaces as io::ErrorKind::NotFound inside the
         // asset error. The card cannot draw the host's localized sentence, so
@@ -1574,7 +1601,7 @@ mod tests {
             RetailOptionsLoad::without_settings(&RetailStartupOptions::default())
         );
         assert_eq!(
-            startup_window_projection(options_load.startup_shell_screen, capture_dimensions),
+            startup_window_projection(options_load.startup_shell_screen, capture_dimensions, false),
             (1024, 768, false)
         );
         assert_eq!(

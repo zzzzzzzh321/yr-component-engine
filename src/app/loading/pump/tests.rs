@@ -952,6 +952,35 @@ fn ctor_only_country_side_uses_nonzero_loading_text_scheme() {
 }
 
 #[test]
+fn direct_authored_launch_selects_art_without_acknowledging_a_frame() {
+    let mut selected = LoadingSession::from_request(LoadingRequest::unverified_legacy_skirmish(
+        test_launch_session(LaunchCountry::America),
+        unverified_seed(20),
+    ));
+    assert_eq!(selected.next_frame, NextLoadingFrame::Blank);
+    let progress = selected.native.as_ref().unwrap().progress.clone();
+    selected.select_direct_launch_first_frame();
+    assert_eq!(selected.next_frame, NextLoadingFrame::First);
+    assert_ne!(selected.next_frame, NextLoadingFrame::Later);
+    assert_eq!(selected.native.as_ref().unwrap().progress, progress);
+    assert!(matches!(selected.stage, LoadingStage::Selected(_)));
+    assert!(selected.native.as_ref().unwrap().atlas.is_none());
+    assert!(selected.job.asset_manager.is_none());
+
+    let mut random_map = test_launch_session(LaunchCountry::America);
+    random_map.selected_map_file = Some("RandMap.Sed".into());
+    let mut generated = LoadingSession::from_request(LoadingRequest::unverified_legacy_skirmish(
+        random_map,
+        unverified_seed(21),
+    ));
+    generated.select_direct_launch_first_frame();
+    assert_eq!(generated.next_frame, NextLoadingFrame::Blank);
+    let mut campaign = LoadingSession::from_request(LoadingRequest::campaign(prepared_campaign()));
+    campaign.select_direct_launch_first_frame();
+    assert_eq!(campaign.next_frame, NextLoadingFrame::Blank);
+}
+
+#[test]
 fn loading_session_selects_native_progress_cadence_from_map_kind() {
     let selected = LoadingSession::from_request(LoadingRequest::unverified_legacy_skirmish(
         test_launch_session(LaunchCountry::America),
