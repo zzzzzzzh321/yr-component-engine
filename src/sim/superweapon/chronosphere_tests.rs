@@ -47,20 +47,6 @@ pub(crate) fn retail_rules_binding(anims: &[(&str, i32)]) -> Option<RuleSet> {
     Some(rules)
 }
 
-/// [`retail_rules_binding`] with `artmd.ini`'s infantry sequences bound, as
-/// the app binds them: a killed infantryman plays its Die sequence instead of
-/// having a zero-count request refused (`0x0051D70F`) and reviving at
-/// Health 1 on its next visit (`0x0051BC57`).
-pub(crate) fn retail_rules_with_sequences(anims: &[(&str, i32)]) -> Option<RuleSet> {
-    let mut rules = retail_rules_binding(anims)?;
-    rules.bind_animation_sequences(
-        &crate::rules::infantry_sequence::parse_infantry_sequence_registry(
-            &crate::rules::retail_ini_fixture::retail_ini("artmd.ini")?,
-        ),
-    );
-    Some(rules)
-}
-
 /// Retail rules and a flat 64x64 map ([`world_with`]).
 pub fn retail_world() -> Option<(RuleSet, Simulation, InternedId)> {
     Some(world_with(retail_rules()?, 64, &[]))
@@ -127,7 +113,8 @@ fn world_with_cells(
 fn retail_water_world() -> Option<(RuleSet, Simulation, InternedId)> {
     use crate::rules::terrain_rules::{LandType, SpeedCostProfile};
     let float = SpeedCostProfile {
-        float: Some(100),
+        float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
         ..SpeedCostProfile::default()
     };
     let water = LandType::Water.as_index();
@@ -479,7 +466,8 @@ fn retail_skirmish_chrono_warp_sinks_a_landed_harrier_to_terminal_cleanup() {
                 cell.land_type = LandType::Water.as_index();
                 cell.base_land_type = cell.land_type;
                 cell.speed_costs = SpeedCostProfile {
-                    float: Some(100),
+                    float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+                    winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
                     ..Default::default()
                 };
                 cell.base_speed_costs = cell.speed_costs;

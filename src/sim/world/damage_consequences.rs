@@ -143,20 +143,6 @@ impl DamageConsequences {
         } = self;
         let ordinary = matches!(&delivery, DamageDelivery::Ordinary { .. });
         for &dead_id in &effects.immediate_uninit_ids {
-            if world
-                .substrate
-                .entities
-                .get(dead_id)
-                .and_then(|building| building.bunker.occupant())
-                .is_some()
-            {
-                crate::sim::docking::bunker_link::release_sell_destroy(
-                    world,
-                    dead_id,
-                    rules,
-                    frame_effects,
-                );
-            }
             world.uninit_with_context(
                 dead_id,
                 UninitContext::new(rules, overlay_registry).with_effects(frame_effects),
@@ -244,7 +230,7 @@ pub(crate) fn admit_explosion_effect(
             world.admit_death_anim(rules, fx.shp_name, spawn);
         }
         None => {
-            world.spawn_combat_explosion_anim(
+            world.spawn_combat_explosion_anim_with_z_adjust(
                 rules,
                 fx.shp_name,
                 fx.rx,
@@ -253,6 +239,8 @@ pub(crate) fn admit_explosion_effect(
                 fx.sub_y,
                 fx.z,
                 fx.world_z,
+                fx.z_adjust,
+                fx.owner_house,
             );
         }
     }

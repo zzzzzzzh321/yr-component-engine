@@ -7,12 +7,10 @@ use crate::app::frontend::skirmish_shell_render::{
 };
 use crate::app::match_runtime::session::NetworkVacancy;
 use crate::skirmish_launch::{AiDifficulty, LaunchStartPosition, LaunchTeam};
-use crate::skirmish_modes::mode_by_id;
+use crate::skirmish_modes::{MpModeClass, mode_by_id};
 use crate::ui::multiplayer_setup::*;
 use crate::ui::shell::trackbar::TrackbarRange;
-use crate::ui::skirmish_shell::{
-    self, SkirmishComboItem, SkirmishCountryChoice, SkirmishTrackbarId,
-};
+use crate::ui::skirmish_shell::{self, SkirmishComboItem, SkirmishCountryChoice, SkirmishTrackbarId};
 
 fn label(state: &AppState, key: &str) -> String {
     state
@@ -53,6 +51,39 @@ fn team_value(team: LaunchTeam) -> i32 {
     }
 }
 
+/// Whether the local player could press Accept (`SetupView::accept_enabled`).
+pub(super) fn accept_enabled(state: &AppState) -> bool {
+    let session = &state.match_state.session;
+    state
+        .frontend
+        .network_setup_protocol
+        .as_ref()
+        .is_some_and(|protocol| protocol.accept_eligible)
+        && session
+            .network_setup()
+            .is_some_and(|launch| !session.network_player_ready(launch.local_player_index))
+        && crate::app::shell_wol::local_choices_agreed(state)
+}
+
+/// The room's map in the scenario catalog, when this player shows its own
+/// copy of it. A guest shows its own copy only when it verified the map, and
+/// on WOL only from a mixfile (0x005E74E0); otherwise its preview is the
+/// host's Preview.bin.
+pub(super) fn local_map_index(state: &AppState) -> Option<usize> {
+    let session = &state.match_state.session;
+    let protocol = state.frontend.network_setup_protocol.as_ref()?;
+    if !session.host() && !protocol.local_preview() {
+        return None;
+    }
+    let file = session.network_setup()?.selected_map_file.as_deref()?;
+    state
+        .frontend
+        .scenario_catalog
+        .shell_maps()
+        .iter()
+        .position(|map| map.file_name.eq_ignore_ascii_case(file))
+}
+
 pub(crate) fn view(state: &AppState) -> Option<SetupView> {
     let session = &state.match_state.session;
     let launch = session.network_setup()?;
@@ -65,22 +96,7 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
     // 0x4E5C5B..0x4E5C90, 0x4E5FD5..0x4E6004: a WOL clan room hides every
     // team combo and the team header 0x794.
     let clan_room = profile_is_wol(state) && room.clan;
-    // A guest shows its own copy of the map only when it verified, and on
-    // WOL only from a mixfile (0x005E74E0); otherwise its preview is the
-    // host's Preview.bin.
-    let local_map = host || protocol.local_preview();
-    let map_index = launch
-        .selected_map_file
-        .as_deref()
-        .filter(|_| local_map)
-        .and_then(|file| {
-            state
-                .frontend
-                .scenario_catalog
-                .shell_maps()
-                .iter()
-                .position(|map| map.file_name.eq_ignore_ascii_case(file))
-        });
+    let map_index = local_map_index(state);
     let capacity = session
         .network_setup_capacity()?
         .clamp(0, crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT as i32)
@@ -99,21 +115,73 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
             .multiplayer_shell_runtime
             .cooperative_setup_view()
     });
-    let row_count = visible_limit
-        .max(observer_row.map_or(0, |row| row + 1))
-        .min(crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT);
+    // VERA's rooms list their seats, the map's players, whether taken or
+    // Open, then the spectators. A seat the host removed (Closed) stays
+    // hidden until the host's Add slot row, after the seats, opens it.
+    let several = session.network_several_observers() && observer_row.is_some();
+    let visible_limit = if several {
+        usize::from(session.network_player_row_limit())
+    } else {
+        visible_limit
+    };
+    // No AI plays in a VERA room while anyone watches (`0x5EC9F0`'s
+    // TXT_NO_AI_WITH_OBSERVER).
+    let watched = several && launch.humans.iter().any(|human| human.is_observer());
+    let seats = 0..visible_limit.min(crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT) as u8;
+    let removed = |row: &u8| session.network_vacancy(*row) == Some(NetworkVacancy::Closed);
+    let add_slot = (several && host)
+        .then(|| seats.clone().find(removed))
+        .flatten();
+    // The host keeps at least two seats.
+    let may_remove = seats.filter(|row| !removed(row)).count() > 2;
+    let ai_allowed = !watched && mode.class.lists_in_skirmish();
+    let mut listed = Vec::new();
+    if several {
+        let rows = 0..crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT as u8;
+        let watching = |row: u8| match launch
+            .humans
+            .iter()
+            .find(|human| human.raw_slot_index == Some(row))
+        {
+            Some(human) => Some(human.is_observer()),
+            None if session.network_display_ai(row).is_some() => Some(false),
+            None => match session.network_vacancy(row) {
+                Some(NetworkVacancy::Waiting) => Some(usize::from(row) >= visible_limit),
+                Some(NetworkVacancy::Open) if usize::from(row) < visible_limit => Some(false),
+                _ => None,
+            },
+        };
+        listed.extend(rows.clone().filter(|row| watching(*row) == Some(false)));
+        listed.extend(add_slot);
+        listed.extend(rows.filter(|row| watching(*row) == Some(true)));
+    }
+    let row_count = if several {
+        listed.len()
+    } else {
+        visible_limit
+            .max(observer_row.map_or(0, |row| row + 1))
+            .min(crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT)
+    };
+    let row_at = |position: usize| {
+        if several {
+            listed.get(position).copied()
+        } else {
+            (position < crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT).then_some(position as u8)
+        }
+    };
+    let dialog = super::dialog(state);
+    let rows = dialog.rows_per_page();
     let first_row = state
         .frontend
         .multiplayer_setup
         .as_ref()
-        .map_or(0, |ui| ui.first_row(row_count));
-    let mut combos = Vec::with_capacity(40);
+        .map_or(0, |ui| ui.first_row(row_count, rows));
+    let mut combos = Vec::with_capacity(5 * rows);
     let mut row_icons = std::array::from_fn(|_| None);
-    for visible_row in 0..VISIBLE_SETUP_ROWS {
-        let row = (first_row + visible_row) as u8;
-        if usize::from(row) >= crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT {
+    for visible_row in 0..rows {
+        let Some(row) = row_at(first_row + visible_row) else {
             break;
-        }
+        };
         let human = launch
             .humans
             .iter()
@@ -124,11 +192,19 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
         let is_local = local.raw_slot_index == Some(row);
         let observer = human.is_some_and(|(_, human)| human.is_observer())
             || vacancy == Some(NetworkVacancy::OpenObserver);
-        let visible = usize::from(row) < visible_limit || observer_row == Some(usize::from(row));
-        let editable = ((is_local
-            && (host || !session.network_player_ready(launch.local_player_index)))
-            || host && ai.is_some())
-            && !observer;
+        let visible =
+            several || usize::from(row) < visible_limit || observer_row == Some(usize::from(row));
+        // A VERA room's Open, Add slot and Waiting rows show only their
+        // Player combo.
+        let adding = Some(row) == add_slot;
+        let bare = several && human.is_none() && ai.is_none();
+        // VERA's room accepts for its guest (`service::auto_accept`), so the
+        // guest's row stays open: the host's next options take it back.
+        let accepted = !dialog.modern && session.network_player_ready(launch.local_player_index);
+        let editable = ((is_local && (host || !accepted)) || host && ai.is_some()) && !observer;
+        // A VERA room's guest picks Observer in its Side list to watch while
+        // a spectator row is open, and a side to play while a player row is.
+        let switching = several && is_local && !host && !accepted;
         let choices = session.network_row_choices(row)?;
         let country = if observer {
             -3
@@ -176,46 +252,90 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
                     },
                 )
             });
+        let ai_choices = [(4, "GUI:AIEasy"), (5, "GUI:AINormal"), (6, "GUI:AIHard")];
         let mut players = Vec::new();
-        if human.is_some() || !host {
-            players.push(SetupChoice {
-                value: slot_value,
-                text: slot_label.clone(),
+        if several {
+            // VERA's host kicks a person to an Open seat, puts an AI in an
+            // Open seat or retunes one, removes a seat (3, Closed), and
+            // opens a removed one from the Add slot row.
+            let item = |value: i32, text: String| SetupChoice {
+                value,
+                text,
                 swatch: None,
-            });
-        }
-        if host && !is_local {
-            let observer_only = observer_row == Some(usize::from(row))
-                && usize::from(row) > capacity
-                && ai.is_none()
-                && vacancy != Some(NetworkVacancy::Open);
-            if !observer_only {
+            };
+            let seat = adding || ai.is_some() || vacancy == Some(NetworkVacancy::Open);
+            if adding {
+                players.push(item(3, "Add slot".to_owned()));
+            }
+            if !(host && ai.is_some()) {
+                players.push(item(
+                    if adding { 2 } else { slot_value },
+                    if adding {
+                        label(state, "GUI:Open")
+                    } else {
+                        slot_label.clone()
+                    },
+                ));
+            }
+            if host && seat && (ai_allowed || ai.is_some()) {
+                for (value, key) in ai_choices {
+                    players.push(item(value, label(state, key)));
+                }
+            }
+            if host && ai.is_some() {
+                players.push(item(2, label(state, "GUI:Open")));
+            }
+            if host && human.is_some() && !is_local {
+                players.push(item(2, "Kick".to_owned()));
+            }
+            if host
+                && !adding
+                && (ai.is_some() || vacancy == Some(NetworkVacancy::Open))
+                && may_remove
+            {
+                players.push(item(3, "Remove slot".to_owned()));
+            }
+        } else {
+            if human.is_some() || !host {
                 players.push(SetupChoice {
-                    value: 2,
-                    text: label(state, "GUI:Open"),
+                    value: slot_value,
+                    text: slot_label.clone(),
                     swatch: None,
                 });
             }
-            if observer_row == Some(usize::from(row)) {
-                players.push(SetupChoice {
-                    value: 7,
-                    text: label(state, "GUI:OpenObserver"),
-                    swatch: None,
-                });
-            }
-            players.push(SetupChoice {
-                value: 3,
-                text: label(state, "GUI:Closed"),
-                swatch: None,
-            });
-            //5EB060 asks the same vtable+40 used by the Skirmish mode list.
-            if mode.class.lists_in_skirmish() && !observer_only {
-                for (value, key) in [(4, "GUI:AIEasy"), (5, "GUI:AINormal"), (6, "GUI:AIHard")] {
+            if host && !is_local {
+                let observer_only = observer_row == Some(usize::from(row))
+                    && usize::from(row) > capacity
+                    && ai.is_none()
+                    && vacancy != Some(NetworkVacancy::Open);
+                if !observer_only {
                     players.push(SetupChoice {
-                        value,
-                        text: label(state, key),
+                        value: 2,
+                        text: label(state, "GUI:Open"),
                         swatch: None,
                     });
+                }
+                if observer_row == Some(usize::from(row)) {
+                    players.push(SetupChoice {
+                        value: 7,
+                        text: label(state, "GUI:OpenObserver"),
+                        swatch: None,
+                    });
+                }
+                players.push(SetupChoice {
+                    value: 3,
+                    text: label(state, "GUI:Closed"),
+                    swatch: None,
+                });
+                //5EB060 asks the same vtable+40 used by the Skirmish mode list.
+                if mode.class.lists_in_skirmish() && !observer_only {
+                    for (value, key) in ai_choices {
+                        players.push(SetupChoice {
+                            value,
+                            text: label(state, key),
+                            swatch: None,
+                        });
+                    }
                 }
             }
         }
@@ -228,11 +348,17 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
             selected,
             choices: players,
         });
+        // VERA's room bans leave their countries off the list.
+        let banned = super::bans::banned_countries(state, launch.options.bans);
         let mut countries: Vec<_> = state
             .rules()
             .map(skirmish_shell::country_choices)
             .unwrap_or_default()
             .into_iter()
+            .filter(|item| {
+                !matches!(item, SkirmishComboItem::Country(SkirmishCountryChoice::Country(country))
+                    if banned.contains(country))
+            })
             .map(|item| choice(state, item))
             .collect();
         if let Some(player_countries) = coop.as_ref().and_then(|coop| coop.player_countries) {
@@ -258,12 +384,20 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
             }
             countries = allowed;
         }
-        if observer {
-            countries = vec![SetupChoice {
+        let sides = if switching && observer {
+            !session.network_no_open_player_row()
+        } else {
+            !observer
+        };
+        if !sides {
+            countries.clear();
+        }
+        if observer || switching && session.network_free_row(true).is_some() {
+            countries.push(SetupChoice {
                 value: -3,
                 text: label(state, "GUI:Observer"),
                 swatch: None,
-            }];
+            });
         }
         let color_claims = launch
             .humans
@@ -291,7 +425,11 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
                 .into_iter()
                 .map(|item| choice(state, item))
                 .collect::<Vec<_>>();
-        let start_claims = launch
+        // VERA shared control: outside Cooperative a player may pick a start
+        // another player holds, which joins that player's House. Such starts
+        // stay listed, marked "+".
+        let shares = human.is_some() && mode.class != MpModeClass::Cooperative;
+        let human_starts = launch
             .humans
             .iter()
             .filter(|human| {
@@ -300,16 +438,26 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
                     && !human.is_observer()
             })
             .map(|human| human.slot.start_position)
-            .chain(
-                launch
-                    .opponents
-                    .iter()
-                    .filter(|ai| ai.raw_slot_index != row)
-                    .map(|ai| ai.start_position),
-            );
+            .collect::<Vec<_>>();
+        let start_claims = human_starts.iter().copied().filter(|_| !shares).chain(
+            launch
+                .opponents
+                .iter()
+                .filter(|ai| ai.raw_slot_index != row)
+                .map(|ai| ai.start_position),
+        );
         let starts = skirmish_shell::available_start_choices(Some(start), start_claims, capacity)
             .into_iter()
-            .map(|item| choice(state, item))
+            .map(|item| {
+                let mut choice = choice(state, item);
+                if shares
+                    && let SkirmishComboItem::Start(held @ LaunchStartPosition::Position(_)) = item
+                    && human_starts.contains(&held)
+                {
+                    choice.text.push('+');
+                }
+                choice
+            })
             .collect::<Vec<_>>();
         let teams = skirmish_shell::team_choices(mode.must_ally)
             .into_iter()
@@ -332,15 +480,17 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
             combos.push(SetupCombo {
                 id: column.control(visible_row),
                 row,
-                enabled: editable && (column != SetupColumn::Team || mode.allies_allowed),
+                enabled: (editable || switching && column == SetupColumn::Country)
+                    && (column != SetupColumn::Team || mode.allies_allowed),
                 visible: visible
+                    && !bare
                     && (column == SetupColumn::Country || !observer)
                     && !(column == SetupColumn::Team && clan_room),
                 selected,
                 choices,
             });
         }
-        if visible {
+        if visible && !bare {
             let flag = u16::try_from(country)
                 .ok()
                 .and_then(|index| {
@@ -403,14 +553,14 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
             visible: cooperative,
         },
     ];
-    let dialog = super::dialog(state);
     // 7A0E50 from 5EA3E0: rows without a node show no ping image.
-    let ping_icons = std::array::from_fn(|row| {
-        dialog.wol().then_some(())?;
+    let ping_icons = std::array::from_fn(|position| {
+        (dialog.wol() && position < rows).then_some(())?;
+        let row = row_at(first_row + position)?;
         let human = launch
             .humans
             .iter()
-            .find(|human| human.raw_slot_index == Some((first_row + row) as u8))?;
+            .find(|human| human.raw_slot_index == Some(row))?;
         ping_icon(protocol.ping(&human.name)?)
     });
     Some(SetupView {
@@ -424,9 +574,7 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
         // checked and disabled in a tournament or clan room.
         short_game_locked: host && profile_is_wol(state) && room.tournament_or_clan(),
         team_header: !clan_room,
-        accept_enabled: protocol.accept_eligible
-            && !session.network_player_ready(launch.local_player_index)
-            && crate::app::shell_wol::local_choices_agreed(state),
+        accept_enabled: accept_enabled(state),
         start_requested: protocol.start_requested
             && !session.network_player_ready(launch.local_player_index),
         combos,
@@ -438,7 +586,26 @@ pub(crate) fn view(state: &AppState) -> Option<SetupView> {
             options.super_weapons,
             options.build_off_ally,
         ],
+        room_checks: [
+            options.bridges_destroyable,
+            options.ally_change_allowed,
+            options.bans.yuri,
+            options.bans.france,
+            options.bans.spy,
+            options.bans.stolen_tech,
+        ],
         row_icons,
+        options_open: dialog.modern
+            && state
+                .frontend
+                .multiplayer_setup
+                .as_ref()
+                .is_some_and(|ui| ui.options_open),
+        map_offer_open: state
+            .frontend
+            .multiplayer_setup
+            .as_ref()
+            .is_some_and(|ui| ui.map_offer.is_some()),
         mode_label: label(
             state,
             if launch.selected_map_file.is_none() {

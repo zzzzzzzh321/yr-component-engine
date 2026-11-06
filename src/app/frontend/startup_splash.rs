@@ -6,7 +6,7 @@
 //! like the menus, so it lines up with the menu that follows it.
 //!
 //! It also carries VERA20K's own legal notices, which gamemd's splash lacks; see
-//! [`LEGAL_NOTICE`] and [`BINK_NOTICE`].
+//! [`LEGAL_NOTICE`] and [`FFMPEG_NOTICE`].
 
 use crate::util::time::{Duration, Instant};
 
@@ -76,7 +76,8 @@ const fn splash_art(yr_original_style: bool) -> SplashArt {
         RA2_SPLASH
     }
 }
-const MINIMUM_VISIBLE_TIME: Duration = Duration::from_millis(5000);
+/// How long the splash stays up at least: 6 s, the maintainer's choice.
+const MINIMUM_VISIBLE_TIME: Duration = Duration::from_millis(6000);
 const TEXT_COLOR: [u8; 4] = [255, 255, 255, 255];
 
 const COPYRIGHT_KEY: &str = "TXT_COPYRIGHT";
@@ -105,10 +106,12 @@ const LEGAL_NOTICE: [&str; 3] = [
     concat!("License and source: ", env!("VERA20K_SOURCE")),
 ];
 
-/// The Bink decoder's LGPL 2.1 (section 6) puts FFmpeg's copyright, as FFmpeg
-/// shows it, and a reference to that license's text among the copyright notices
-/// a program shows. Drawn bottom left, above the trademark lines.
-const BINK_NOTICE: &str = "Bink decoder © the FFmpeg developers. License: LGPL-2.1-or-later.txt";
+/// The LGPL 2.1 (section 6) of the code ported from FFmpeg, the Bink decoder and
+/// the sidebar's xBR scaler, puts FFmpeg's copyright, as FFmpeg shows it, and a
+/// reference to that license's text among the copyright notices a program
+/// shows. Drawn bottom left, above the trademark lines.
+const FFMPEG_NOTICE: &str =
+    "Bink decoder and xBR scaler © the FFmpeg developers. License: LGPL-2.1-or-later.txt";
 
 /// The minimum on-screen hold, anchored at the first successful present.
 ///
@@ -200,16 +203,16 @@ impl StartupSplashPresentation {
     }
 }
 
-/// Draw and present the splash. Returns whether it reached the screen: a
-/// surface with no frame to give this time leaves the hold unarmed for the
-/// next redraw.
+/// Draw and present the splash, or with `None` the black frame the startup
+/// logo starts from. Returns whether it reached the screen: a surface with no
+/// frame to give this time leaves the hold unarmed for the next redraw.
 pub(crate) fn render_and_present(
     gpu: &GpuContext,
     batch: &BatchRenderer,
     presenter: &ShellSurfacePresenter,
     depth: &wgpu::TextureView,
     fps_overlay: &crate::app::diagnostics::fps_overlay::FpsOverlay,
-    splash: &StartupSplashPresentation,
+    splash: Option<&StartupSplashPresentation>,
 ) -> Result<bool> {
     batch.update_camera(
         gpu,
@@ -259,17 +262,19 @@ pub(crate) fn render_and_present(
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        batch.draw_with_buffer_ui_passthrough(
-            &mut pass,
-            &splash.texture,
-            &splash.instance_buffer,
-            1,
-        );
+        if let Some(splash) = splash {
+            batch.draw_with_buffer_ui_passthrough(
+                &mut pass,
+                &splash.texture,
+                &splash.instance_buffer,
+                1,
+            );
+        }
     }
     presenter.encode_present(&mut encoder, &output.texture);
     fps_overlay.encode(gpu, batch, &mut encoder, &output.texture);
     gpu.queue.submit(std::iter::once(encoder.finish()));
-    output.present();
+    output.present(&gpu.queue);
     Ok(true)
 }
 
@@ -434,7 +439,7 @@ fn compose_startup_splash(
         client_width,
         client_height,
         font,
-        BINK_NOTICE,
+        FFMPEG_NOTICE,
         10,
         first_bottom_y - 3 - font.cell_height as i32,
     );
@@ -553,8 +558,8 @@ mod tests {
     }
 
     #[test]
-    fn bink_notice_is_drawn_left_aligned_above_the_trademark_lines() {
-        let root = crate::map::source::test_support::TestDirectory::new("splash-bink-notice");
+    fn ffmpeg_notice_is_drawn_left_aligned_above_the_trademark_lines() {
+        let root = crate::map::source::test_support::TestDirectory::new("splash-ffmpeg-notice");
         let assets = AssetManager::from_loose_root_for_test(root.path());
         let font = FntFile::solid_for_test(2);
         let (width, height) = (800, 600);
@@ -568,7 +573,7 @@ mod tests {
         assert_eq!(white.first(), Some(&10));
         assert_eq!(
             white.last(),
-            Some(&(10 + font.text_width(BINK_NOTICE) as usize - 1))
+            Some(&(10 + font.text_width(FFMPEG_NOTICE) as usize - 1))
         );
     }
 
@@ -758,7 +763,7 @@ mod tests {
         assert!(hold.is_active(start));
         assert!(hold.is_active(start + MINIMUM_VISIBLE_TIME - Duration::from_millis(1)));
         // The hold is measured from the present, so initialization work that
-        // runs after it is spent inside the five seconds, not added to them.
+        // runs after it is spent inside the hold, not added to it.
         assert!(!hold.is_active(start + MINIMUM_VISIBLE_TIME));
         assert!(!hold.is_active(start + MINIMUM_VISIBLE_TIME + Duration::from_secs(1)));
     }

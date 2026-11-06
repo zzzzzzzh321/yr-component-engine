@@ -6,7 +6,7 @@ use crate::sim::snapshot::GameSnapshot;
 use crate::sim::team_script_vm::{TeamAiInstallDiagnostic, TeamScriptDefinition};
 use crate::util::native_x87::NativeF64Bits;
 
-use super::{MasterFrameTestRung, Simulation};
+use super::{FrameStep, Simulation};
 
 fn zero_ai_trigger_comparison() -> String {
     "00".repeat(32)
@@ -64,16 +64,23 @@ fn a_computer_team_recruits_forms_and_succeeds_in_the_master_frame() {
     let (mut sim, rules, team_id, members) = recruiting_team_fixture();
 
     sim.advance_tick(&[], Some(&rules), None, None, 67);
-    let trace = sim.take_master_frame_test_trace();
+    let order = [
+        FrameStep::SessionCommands,
+        FrameStep::Triggers,
+        FrameStep::TeamScript,
+        FrameStep::DiskLasers,
+        FrameStep::LightningStorm,
+        FrameStep::LogicVector,
+    ];
+    let trace = sim.take_frame_step_trace();
+    let visited: Vec<_> = trace
+        .into_iter()
+        .filter(|step| order.contains(step))
+        .collect();
     assert_eq!(
-        &trace[..4],
-        &[
-            MasterFrameTestRung::SessionCommands,
-            MasterFrameTestRung::Triggers,
-            MasterFrameTestRung::TeamScript,
-            MasterFrameTestRung::LogicVector,
-        ],
-        "native TeamClass AI must finish before any live LogicClass object visit"
+        visited, order,
+        "native TeamClass AI (0x0055B502) precedes the Disk walk (0x0055B5A1), \
+         LightningStorm::Process (0x0055B5C8) and every live LogicClass object visit"
     );
 
     let mut formed_with = None;
@@ -143,6 +150,39 @@ fn a_recruiting_team_survives_save_load() {
     assert_eq!(trigger_weight(&original), trigger_weight(&restored));
 }
 
+/// `TeamClass::Recruit @ 0x006EAA90` takes only its team's house's objects
+/// (`Can_Add @ 0x006EA610` refuses another house's): an infantryman of
+/// another house nearer the team's origin is passed over, one handed to the
+/// team's house is recruited first, and a member handed away is not.
+#[test]
+fn recruitment_takes_the_house_s_objects_through_ownership_changes() {
+    let (mut sim, rules, team_id, members) = recruiting_team_fixture();
+    let owner = sim.interner.get("Computer").expect("Computer interned");
+    let rival = sim.interner.intern("Rival");
+    sim.houses
+        .register(HouseState::new(rival, 1, None, false, 0, 10));
+    // The team has no centre yet, so it recruits nearest the origin.
+    let [_, handed_over] = [(2, 2), (4, 4)].map(|(rx, ry)| {
+        sim.spawn_object_at_height("E1", "Rival", rx, ry, 0, 0, &rules)
+            .expect("E1 spawns")
+    });
+    sim.change_owner(handed_over, owner);
+    sim.change_owner(members[0], rival);
+
+    sim.advance_tick(&[], Some(&rules), None, None, 67);
+    let team = sim.team_script_vm.team(team_id).expect("the team recruits");
+    assert_eq!(team.members().collect::<Vec<_>>(), [handed_over]);
+    sim.advance_tick(&[], Some(&rules), None, None, 67);
+    let mut recruited: Vec<u64> = sim
+        .team_script_vm
+        .team(team_id)
+        .expect("the team is full")
+        .members()
+        .collect();
+    recruited.sort_unstable();
+    assert_eq!(recruited, [members[1], handed_over]);
+}
+
 #[test]
 fn team_member_order_is_hashed() {
     let mut forward = Simulation::with_seed(7);
@@ -202,6 +242,185 @@ fn production_install_resolves_both_ai_team_buffers_in_fixed_and_map_passes() {
     assert_eq!(fixed.secondary_team_type, sim.interner.get(secondary));
     assert_eq!(map.primary_team_type, sim.interner.get(secondary));
     assert_eq!(map.secondary_team_type, sim.interner.get(primary));
+}
+
+/// FindByIDOrName6F0FC0 compares each registered TeamType's ID and then Name.
+/// An earlier Name therefore wins over a later ID in ordinary House AI teams.
+#[test]
+fn team_lookup_ordinary_ai_recruits_and_moves_first_name() {
+    use crate::map::map_file::MapFile;
+    use crate::rules::process_owner::NativeScenarioRulesPrefix;
+    use crate::sim::components::NavTargetRef;
+    use crate::sim::scenario_bootstrap::{
+        MatchLaunchDescriptor, ScenarioBootstrapRng, prepare_stock_offline_scenario_prefix_plan,
+    };
+    use crate::sim::scenario_session::ScenarioDescriptor;
+
+    let Some((_, assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+        return;
+    };
+    let Some(fixed) = crate::rules::retail_ini_fixture::retail_ini("aimd.ini") else {
+        return;
+    };
+    // The no-collision scene first proves the natural activation/production
+    // path. The second scene changes only FIRST.Name, keeping both complete
+    // TeamTypes and their distinct TaskForces eligible.
+    for (first_name, expected_team, expected_member) in
+        [("FIRST", "SECOND", "FLAKT"), ("SECOND", "FIRST", "E2")]
+    {
+        let map = MapFile::from_ini(IniFile::from_str(&format!(
+            "[Basic]\nNewINIFormat=4\nIgnoreGlobalAITriggers=yes\n\
+             [Map]\nTheater=TEMPERATE\nSize=0,0,32,32\nLocalSize=0,0,32,32\n\
+             [IsoMapPack5]\n1=CAAEABUAAAAAEQAA\n\
+             [General]\nTeamDelays=30,30,30\n\
+             [Houses]\n0=Computer\n\
+             [Computer]\nCountry=Russians\nIQ=5\nCredits=0\nTechLevel=10\nPlayerControl=no\n\
+             [Waypoints]\n0=32032\n9=24008\n\
+             [Units]\n0=Computer,SMCV,256,20,20,0,Guard,None,0,-1,0,-1,1,1\n\
+             [Structures]\n0=Computer,NAHAND,256,10,6,0,None,0,0,1,0,0,None,None,None,0,0\n\
+             1=Computer,NAPOWR,256,16,6,0,None,0,0,1,0,0,None,None,None,0,0\n\
+             [Infantry]\n0=Computer,E2,256,12,12,0,Guard,0,None,0,-1,0,1,1\n\
+             1=Computer,FLAKT,256,14,12,0,Guard,0,None,0,-1,0,1,1\n\
+             [TeamTypes]\n0=FIRST\n1=SECOND\n\
+             [FIRST]\nName={first_name}\nHouse=Russians\nScript=LOOKUP_MOVE\n\
+             TaskForce=LOOKUP_E2\nPriority=7\nMax=1\nIsBaseDefense=yes\n\
+             [SECOND]\nName=SECOND\nHouse=Russians\nScript=LOOKUP_MOVE\n\
+             TaskForce=LOOKUP_FLAK\nPriority=7\nMax=1\nIsBaseDefense=yes\n\
+             [TaskForces]\n0=LOOKUP_E2\n1=LOOKUP_FLAK\n\
+             [LOOKUP_E2]\nGroup=-1\n0=1,E2\n[LOOKUP_FLAK]\nGroup=-1\n0=1,FLAKT\n\
+             [ScriptTypes]\n0=LOOKUP_MOVE\n[LOOKUP_MOVE]\n0=3,9\n1=5,9999\n\
+             [AITriggerTypes]\nLOOKUP_AI=Lookup movement,SECOND,<all>,0,-1,<none>,{},5000,5000,5000,1,0,2,0,<none>,1,1,1\n\
+             [AITriggerTypesEnable]\nLOOKUP_AI=yes\n",
+            zero_ai_trigger_comparison()
+        )))
+        .expect("authored map");
+        let launch = MatchLaunchDescriptor::from_resolved(
+            crate::headless_scenario::battle_session("team-lookup.map", &[]),
+        )
+        .unwrap();
+        let prefix =
+            prepare_stock_offline_scenario_prefix_plan(&launch, &map, &map.waypoints, 0x6F0FC0)
+                .unwrap();
+        let mode =
+            crate::rules::retail_sources::select_mode_ini(&assets, Some("MPBattleMD.ini")).unwrap();
+        let (mut rules, _, art, receipt) =
+            crate::rules::retail_ini_fixture::retail_rules_owner(&assets)
+                .load_scenario(
+                    NativeScenarioRulesPrefix::NonCampaign(mode.as_ref()),
+                    &map.ini,
+                )
+                .unwrap()
+                .into_parts();
+        let bound_prefix = prefix
+            .bind_native_rules_receipt(receipt, &launch, &rules)
+            .unwrap();
+        rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
+        let registry = TeamAiIniRegistry::from_sources(&fixed, &map.ini, true);
+        // Use the production prefix admission for both RNG and native IDs;
+        // the controlled terrain and named House are installed below.
+        let (mut sim, _) = ScenarioBootstrapRng::new(0x6F0FC0)
+            .into_stock_offline_staged_simulation(
+                &ScenarioDescriptor {
+                    seed: 0x6F0FC0,
+                    game_mode_nonzero: true,
+                    ignore_global_ai_triggers: map.basic.ignore_global_ai_triggers.unwrap_or(false),
+                    ..Default::default()
+                },
+                bound_prefix,
+            )
+            .unwrap();
+        crate::sim::arena_fixture::flat_ground(&mut sim, &rules);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let roster =
+            crate::map::houses::parse_house_roster(&map.ini, &rules.color_schemes, Some(&rules));
+        crate::sim::scenario_bootstrap::initialize_map_roster_houses(
+            &mut sim,
+            &roster,
+            &rules,
+            Some(&map.ini),
+        );
+        sim.session.install_waypoints(&map.waypoints);
+        sim.initialize_trigger_definitions(&map, &registry, None, None, None, &rules);
+        sim.install_team_ai_registry(&registry, &rules).unwrap();
+        assert_eq!(sim.spawn_from_map(&map.entities, Some(&rules)), 5);
+        let owner = sim.interner.get("Computer").unwrap();
+        let script = sim.interner.get("LOOKUP_MOVE").unwrap();
+        let expected_type = sim.interner.get(expected_team).unwrap();
+        let member = sim
+            .entities()
+            .values()
+            .find(|entity| sim.interner.resolve(entity.type_ref()) == expected_member)
+            .unwrap()
+            .stable_id();
+        let mcv = sim
+            .entities()
+            .values()
+            .find(|entity| sim.interner.resolve(entity.type_ref()) == "SMCV")
+            .unwrap()
+            .stable_id();
+        assert_eq!(sim.houses[&owner].side_index(), 1);
+        assert!(!sim.houses[&owner].ai_activation().ai_triggers_active);
+        assert_eq!(sim.team_script_vm.teams_in_order().count(), 0);
+        let limit = sim.houses[&owner].team_creation().timer().duration() + 600;
+        let (mut sent_from, mut moved) = (None, false);
+        for _ in 0..limit {
+            let grid = sim.path_grid_snapshot();
+            sim.advance_tick(
+                &[],
+                Some(&rules),
+                grid.as_deref(),
+                None,
+                1000 / crate::util::fixed_math::SIM_TICK_HZ,
+            );
+            let Some(team) = sim
+                .team_script_vm
+                .teams_in_order()
+                .find(|team| team.script_id() == script)
+            else {
+                continue;
+            };
+            assert_eq!(
+                team.team_type_id(),
+                Some(expected_type),
+                "FIRST.Name={first_name}"
+            );
+            assert_eq!(team.owner(), owner);
+            if !team.formed() || team.cursor() != 0 {
+                continue;
+            }
+            assert_eq!(team.members().collect::<Vec<_>>(), [member]);
+            assert_eq!(
+                sim.team_script_vm.team_for_member(member).map(|(id, _)| id),
+                Some(team.id())
+            );
+            let actor = sim.entities().get(member).unwrap();
+            let cell = (actor.position.rx(), actor.position.ry());
+            if let Some(origin) = sent_from {
+                moved |= cell != origin;
+            } else if actor.navigation.nav_com() == Some(NavTargetRef::Cell { rx: 8, ry: 24 }) {
+                // The MCV also retasks ground forces. Tie this observation to
+                // the formed Team's Script3 and its separate waypoint first.
+                sent_from = Some(cell);
+            }
+            if moved {
+                break;
+            }
+        }
+        assert!(!sim.entities().contains(mcv), "ordinary AI deploys its MCV");
+        assert!(sim.entities().values().any(|entity| {
+            entity.owner() == owner && sim.interner.resolve(entity.type_ref()) == "NACNST"
+        }));
+        assert!(sim.houses[&owner].ai_activation().ai_triggers_active);
+        assert!(
+            sent_from.is_some(),
+            "{expected_member} receives Script3's waypoint"
+        );
+        assert!(
+            moved,
+            "{expected_member} then moves through the ordinary frame"
+        );
+    }
 }
 
 #[test]
@@ -274,6 +493,38 @@ fn production_install_refuses_fixed_resolution_loss_but_keeps_scenario_omissions
         (2, 1, 1, 1),
         "scenario-origin omissions remain diagnosed, nonfatal overlays"
     );
+}
+
+#[test]
+fn fixed_trigger_naming_an_absent_team_type_installs_without_a_team() {
+    let rules = RuleSet::from_ini(&IniFile::from_str(
+        "[InfantryTypes]\n0=E1\n[E1]\nStrength=100\n",
+    ))
+    .expect("minimal rules");
+    let comparison = zero_ai_trigger_comparison();
+    let fixed = IniFile::from_str(&format!(
+        "[AITriggerTypes]\nA=Dangling,NO_SUCH_TT,<all>,2,4,<none>,{comparison},40,10,40,1,0,1,0,<none>,1,1,1\n"
+    ));
+    let registry = TeamAiIniRegistry::from_sources(&fixed, &IniFile::from_str(""), true);
+    let mut sim = Simulation::new();
+    sim.intern_rule_type_ids(&rules);
+    sim.resolve_type_handles(&rules);
+
+    let diagnostics = sim
+        .install_team_ai_registry(&registry, &rules)
+        .expect("a fixed trigger's absent TeamType does not refuse the install");
+
+    assert_eq!(
+        diagnostics,
+        vec![TeamAiInstallDiagnostic::MissingAiTriggerTeamType {
+            trigger_id: "A".to_string(),
+            team_type_id: "NO_SUCH_TT".to_string(),
+            source: TeamAiDefinitionSource::FixedAimd,
+        }]
+    );
+    let vm = &sim.team_script_vm;
+    let trigger = vm.ai_trigger(vm.ai_trigger_order()[0]).unwrap();
+    assert_eq!(trigger.primary_team_type, None);
 }
 
 #[test]
@@ -492,8 +743,12 @@ fn only_a_human_scanner_passes_over_an_unarmed_building() {
     let computer = sim
         .spawn_object_at_height("E1", "Computer", 17, 7, 0, 0, &rules)
         .expect("E1 spawns");
-    sim.spawn_object_at_height("PLANTA", "Computer", 6, 16, 0, 0, &rules)
+    let computer_plant = sim
+        .spawn_object_at_height("PLANTA", "Computer", 6, 16, 0, 0, &rules)
         .expect("plant spawns");
+    // Seen, so the building gate refuses it, not the campaign discovery gate
+    // (`0x006F81BE`) that runs first.
+    crate::sim::arena_fixture::discover(&mut sim, computer_plant);
     let human = sim
         .spawn_object_at_height("E1", "Human", 5, 15, 0, 0, &rules)
         .expect("E1 spawns");
@@ -505,6 +760,7 @@ fn only_a_human_scanner_passes_over_an_unarmed_building() {
             id,
             crate::sim::combat::ScanMission::Guard,
         )
+        .and_then(crate::sim::combat::TargetKind::object_id)
     };
     assert_eq!(scan(computer), Some(plant));
     assert_eq!(scan(human), None);

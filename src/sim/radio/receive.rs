@@ -244,7 +244,7 @@ pub(crate) fn can_load(
         return CanLoad::Answer(RadioResponse::None);
     };
     if !crate::sim::combat::combat_weapon::is_ally_by_object(
-        Some(sim.house_alliances.as_map()),
+        Some(&sim.house_alliances),
         &sim.interner,
         building.owner(),
         unit.owner(),
@@ -1060,9 +1060,15 @@ pub(crate) fn unit_can_enter_radio(
     else {
         return RadioResponse::None;
     };
+    // Ares73758A ->1004C250 returns the native no-response tail73761F.
+    // CanDrive admission is separate; ordinary cargo cannot board this hull.
+    #[cfg(feature = "ares")]
+    if transport.driver_killed() {
+        return RadioResponse::None;
+    }
     if transport_type.passengers == 0
         || !crate::sim::combat::combat_weapon::is_ally_by_object(
-            Some(sim.house_alliances.as_map()),
+            Some(&sim.house_alliances),
             &sim.interner,
             transport.owner(),
             passenger.owner(),
@@ -2035,7 +2041,7 @@ fn radio_hello(
     }
     let ally = |asker, other| {
         crate::sim::combat::combat_weapon::is_ally_by_object(
-            Some(house_alliances.as_map()),
+            Some(house_alliances),
             interner,
             asker,
             other,

@@ -8,7 +8,7 @@ use crate::ui::shell::list::ListMetrics;
 use crate::ui::shell::saved_file_input::{self, BrowserInputResult};
 use crate::ui::skirmish_shell::seed_list::SeedListGeometry;
 use crate::ui::skirmish_shell::{
-    SavedSeedLayout, SavedSeedMode, SavedSeedOutcome, SavedSeedPrompt, SavedSeedPromptPurpose,
+    SavedSeedLayout, SavedSeedMode, SavedSeedOutcome, SavedSeedPromptPurpose,
 };
 use std::path::PathBuf;
 use winit::keyboard::KeyCode;
@@ -52,27 +52,14 @@ impl App {
         body: String,
         confirm: bool,
     ) {
-        let affirmative = Self::csf_label(
-            state,
-            if confirm { "TXT_YES" } else { "TXT_OK" },
-            if confirm { "Yes" } else { "OK" },
-        );
-        let negative = confirm.then(|| Self::csf_label(state, "TXT_NO", "No"));
+        let prompt = Self::saved_browser_prompt(state, purpose, body, confirm);
         if let Some(browser) = state
             .match_state
             .match_presentation
             .saved_game_browser
             .as_mut()
         {
-            browser.description_edit.focused = false;
-            browser.pressed_control = None;
-            browser.scroll_repeat_at = None;
-            browser.prompt = Some(SavedSeedPrompt {
-                purpose,
-                body,
-                affirmative,
-                negative,
-            });
+            browser.show_prompt(prompt);
         }
     }
 
@@ -194,23 +181,7 @@ impl App {
                 }
             }
             SavedSeedOutcome::Load(path) => {
-                match crate::app::persistence::commands::try_load_save_file(state, &path) {
-                    Ok(()) => {
-                        state.match_state.match_presentation.saved_game_browser = None;
-                        Self::enter_in_game_menu_state(state, InGameMenuState::Closed);
-                    }
-                    Err(error) => {
-                        log::warn!("Load browser: {}: {error}", path.display());
-                        let body =
-                            Self::csf_label(state, "TXT_ERROR_LOADING_GAME", "Error loading game.");
-                        Self::show_saved_game_prompt(
-                            state,
-                            SavedSeedPromptPurpose::Error,
-                            body,
-                            false,
-                        );
-                    }
-                }
+                crate::app::persistence::commands::request_saved_game_load(state, path);
             }
             SavedSeedOutcome::Delete(file_name) => {
                 let prefix = Self::csf_label(state, "TXT_DELETE_FILE_QUERY", "Delete this file?");
@@ -228,6 +199,24 @@ impl App {
                     format!("{prefix}\n\n{description}"),
                     true,
                 );
+            }
+        }
+    }
+
+    pub(crate) fn finish_saved_game_load(
+        state: &mut AppState,
+        path: &std::path::Path,
+        result: Result<(), crate::app::persistence::PreparedLoadError>,
+    ) {
+        match result {
+            Ok(()) => {
+                state.match_state.match_presentation.saved_game_browser = None;
+                Self::enter_in_game_menu_state(state, InGameMenuState::Closed);
+            }
+            Err(error) => {
+                log::warn!("Load browser: {}: {error}", path.display());
+                let body = Self::csf_label(state, "TXT_ERROR_LOADING_GAME", "Error loading game.");
+                Self::show_saved_game_prompt(state, SavedSeedPromptPurpose::Error, body, false);
             }
         }
     }

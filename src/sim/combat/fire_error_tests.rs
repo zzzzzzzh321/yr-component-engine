@@ -150,6 +150,7 @@ fn weapon(slot: &Value, input: &Value) -> Option<WeaponFacts> {
             bomb_disarm: flag(&warhead["bomb_disarm"]),
             // `FCOMP` then `TEST AH,0x40`: C3 is set for equal and unordered.
             armor_rejects_fire: verses == 0.0 || verses.is_nan(),
+            ..WarheadFacts::default()
         }),
         projectile: ProjectileFacts {
             aa: flag(&projectile["aa"]),
@@ -318,7 +319,7 @@ fn facts(input: &Value) -> FireFacts {
             chrono_warp_latch: flag(&t["chrono_warp_latch"]),
             bunkered: flag(&t["bunkered"]),
             sinking: flag(&t["sinking"]),
-            docked: flag(&t["docked"]),
+            tethered: flag(&t["docked"]),
             health: crate::sim::combat::Health::new(int(&t["health"])),
             parasite_lock_until: int(&t["parasite_lock_until"]),
             deploying: flag(&t["deploying"]) || flag(&t["undeploying"]),
@@ -339,6 +340,7 @@ fn facts(input: &Value) -> FireFacts {
             non_vehicle: flag(&tt["non_vehicle"]),
             // The fixture's BuildingType is not a 1x1 undeployer.
             is_1x1_with_undeploy: false,
+            ..TargetTypeFacts::default()
         },
     }
 }

@@ -121,7 +121,10 @@ fn boxed_landed_unit(
         .terrain_rules
         .semantics_for_land_type(LandType::Rock.as_index())
         .unwrap();
-    assert_eq!(rock.speed_costs.hover, Some(0));
+    assert_eq!(
+        rock.speed_costs.hover,
+        Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO)
+    );
     let terrain = sim.resolved_terrain.as_mut().unwrap();
     for y in 0..96 {
         for x in 0..96 {
@@ -273,6 +276,8 @@ fn failed_reanchor_on_guard_lifts_the_stock_unit_and_survives_save() {
             .same_identity(&control_dummy)
     );
     sim.scenario_rng = crate::sim::rng::SimRng::new(0);
+    // Player load clears planning tokens (6370B0 / 70BF79).
+    sim.reset_planning_after_player_load();
     for id in sim.substrate.entities.keys_sorted() {
         sim.substrate.restore_move_sound_state_after_load(id);
     }

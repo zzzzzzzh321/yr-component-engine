@@ -352,15 +352,19 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
         layers.push(RulesLayerKind::GameMode, IniFile::from_bytes(bytes)?)
     }
     layers.push(RulesLayerKind::Scenario, map.ini.clone());
+    let audio_definitions = crate::rules::audio_sources::AudioDefinitions::select(assets);
+    let mut registry = NativeRulesRegistryState::default();
+    registry.bind_fixed_sound_source(std::sync::Arc::clone(audio_definitions.sounds()));
     let processed = layers
         .process_with_fixed_art_and_registry_state_recovering(
             &art_ini,
-            NativeRulesRegistryState::default(),
+            registry,
             RulesProcessContext::ScenarioReset {
                 theater: ImageTheater::from_map(&map.ini),
                 skip_root_color_add_and_mode: false,
             },
-            &crate::rules::sound_ini::EvaRegistry::default(),
+            audio_definitions.eva(),
+            audio_definitions.sounds(),
         )
         .map_err(|failure| anyhow::anyhow!("preview rules: {}", failure.into_parts().0))?;
     let overlays = OverlayTypeRegistry::from_processed_rules(&processed);

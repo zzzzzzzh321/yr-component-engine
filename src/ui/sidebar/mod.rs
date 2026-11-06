@@ -22,6 +22,8 @@ pub use frame::{BOTTOM_STRIP_HEIGHT_PX, SIDEBAR_WIDTH_PX, SidebarFrame};
 pub use layout_spec::{SidebarChromeLayoutSpec, SidebarTheme};
 pub use power_bar_anim::PowerBarAnimState;
 pub(crate) use sidebar_view::ArmedSidebarEntry;
+#[cfg(test)]
+pub(crate) use sidebar_view::build_sidebar_view;
 pub(crate) use sidebar_view::build_sidebar_view_with_spec;
 pub(crate) use sidebar_view::{CameoFactoryStatus, ObjectCameoDrawInputs, draw_object_cameo};
 
@@ -48,10 +50,12 @@ pub fn radar_minimap_rect(screen_w: f32) -> Rect {
 }
 
 pub fn radar_minimap_rect_with_spec(screen_w: f32, spec: SidebarChromeLayoutSpec) -> Rect {
-    // Radar One_Time 652CF0 and Init_For_House 652E90: fixed aperture.
+    // Radar One_Time 652CF0 and Init_For_House 652E90: the aperture itself is
+    // the radar source frame (stock 140x108); the GDI/NOD tables move the
+    // gadget over it, which the spec carries.
     Rect {
-        x: screen_w - spec.sidebar_width + 16.0,
-        y: 49.0,
+        x: screen_w - spec.sidebar_width + spec.radar_x,
+        y: spec.radar_y,
         w: 140.0,
         h: 108.0,
     }
@@ -66,6 +70,9 @@ pub enum SidebarTab {
 }
 
 impl SidebarTab {
+    /// TypeToTab 6ABC60 / GetObjectTabIdx 6ABCD0: buildings 0, or 1 with a
+    /// combat BuildCat (production_tech's Defense), infantry 2, units and
+    /// aircraft 3. Super weapons take strip 1 in `CameoStrips`.
     pub(crate) fn for_category(category: ProductionCategory) -> Self {
         match category {
             ProductionCategory::Building => Self::Building,
@@ -134,10 +141,6 @@ pub enum SidebarAction {
         section: String,
         right: bool,
     },
-    CycleProducer(ProductionCategory),
-    CycleOwner,
-    PlaceStarterBase,
-    SpawnTestUnits,
     /// Toggle Repair-mode (cursor stays armed for clicking buildings to repair).
     /// Clears Sell; pending building placement refuses the transition.
     ToggleRepairMode,
@@ -147,7 +150,7 @@ pub enum SidebarAction {
     Deploy,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SidebarItem {
     pub rect: Rect,
     pub type_id: String,
@@ -169,6 +172,11 @@ pub struct SidebarItem {
     pub queued_count: usize,
     /// True when this cameo's linked Factory is actively producing.
     pub is_building_this_type: bool,
+    /// True when the linked Factory's held product IS this entry's type,
+    /// finished or not. `StripClass::Draw` reads `Factory+0x58` and compares its
+    /// type index with the requested one at `0x006A9CBF..0x006A9CC3` to decide
+    /// whether a count of one is the held product rather than a queued copy.
+    pub is_held_this_type: bool,
     pub is_ready: bool,
     /// True when the linked Factory has no rate or is suspended. A cash stall
     /// retains its running rate and draws a frozen clock without `TXT_HOLD`.
@@ -191,7 +199,7 @@ impl SidebarItem {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SidebarTabButton {
     pub tab: SidebarTab,
     pub rect: Rect,
@@ -208,21 +216,20 @@ pub struct SidebarTabButton {
 
 /// View entry for an SHP-driven toggle button (Repair, Sell).
 /// Rect for hit-testing, action to dispatch on click, frame index for the
-/// 5-frame SHP state table.
-#[derive(Debug, Clone)]
+/// 5-frame SHP state table. Native never disables either button
+/// (see [`gadget_flash::SidebarGadgetState::repair_frame`]).
+#[derive(Debug, Clone, PartialEq)]
 pub struct SidebarToggleButton {
     pub rect: Rect,
     pub action: SidebarAction,
     /// Externally driven latch state for the toggle gadget.
     pub active: bool,
-    /// Retained gadget disabled bit for hit-testing and tooltip presentation.
-    pub disabled: bool,
     /// SHP frame index (0..=4) for the button's per-theme SHP atlas.
     pub frame_index: u8,
 }
 
 /// View entry for one of the two SHP-driven strip scroll buttons.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SidebarScrollButton {
     pub rect: Rect,
     /// Retained gadget disabled bit. Scroll capacity comes from `6A6610`.
@@ -231,15 +238,8 @@ pub struct SidebarScrollButton {
     pub frame_index: u8,
 }
 
-#[derive(Debug, Clone)]
-pub struct SidebarControlButton {
-    pub rect: Rect,
-    pub action: SidebarAction,
-    pub label: String,
-}
-
 /// Computed vertical offsets for each chrome section, based on screen height.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SidebarLayout {
     pub sidebar_x: f32,
     pub radar_y: f32,
@@ -252,7 +252,7 @@ pub struct SidebarLayout {
     pub side2_tile_count: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SidebarView {
     pub panel_rect: Rect,
     pub layout: SidebarLayout,
@@ -276,10 +276,6 @@ pub struct SidebarView {
     pub top_buttons: [SidebarScrollButton; 2],
     pub scroll_down_button: SidebarScrollButton,
     pub scroll_up_button: SidebarScrollButton,
-    pub cycle_owner_button: SidebarControlButton,
-    pub starter_base_button: SidebarControlButton,
-    pub spawn_test_units_button: SidebarControlButton,
-    pub producer_button: Option<SidebarControlButton>,
 }
 
 pub fn default_active_tab() -> SidebarTab {
@@ -305,6 +301,14 @@ pub(crate) fn compute_layout_with_spec(
 ) -> SidebarLayout {
     // Original 6A5090/6A5130: capacity depends on screen height and side,
     // never on build-item count. Integer division truncates toward zero.
+    // Native keeps 60 select buttons per strip (0x3C stride, InitSelectZones
+    // 6A8220). Above 30 rows (screens 1810 px or taller) strips 0..2 write into
+    // the next strip's buttons, and the Vehicle strip runs past the array's
+    // end at B0B300 (a static coordinate, then the R-DN ShapeButton at B0B328).
+    // Activate 6A8330 then adds that vtable-less memory as gadgets. Native has
+    // no defined result here, so VERA keeps a working uncapped grid.
+    // GetVisibleSlotCount 6AC430 and StripClass Activate 6A8330 count 2 * rows
+    // the same way: footer 26, or 18 when Scenario +0x34B8 (the side) is set.
     let rows = ((screen_h as i32 - 227 - spec.footer_allowance - 7) / 50).max(0) as usize;
     SidebarLayout {
         sidebar_x: screen_w - spec.sidebar_width,
@@ -375,8 +379,8 @@ pub(crate) fn hit_test_item(item: &SidebarItem, right_click: bool, shift: bool) 
 }
 
 // `sidebar::hit_test` (the legacy press-path hit-test) was retired in A6: every
-// in-game surface — tabs/repair/sell/scroll (A1), cameos (A2), tactical/minimap
-// (A3), and the control/dev buttons (A6) — is now owned by the `app::input::gadget_input`
+// in-game surface — tabs/repair/sell/scroll (A1), cameos (A2) and tactical/minimap
+// (A3) — is now owned by the `app::input::gadget_input`
 // retained list (one order = hit + draw, R7 complete). `hit_test_item` (the cameo
 // click→action map) stays public for the driver.
 

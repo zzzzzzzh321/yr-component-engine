@@ -56,6 +56,9 @@ pub(super) struct DrawPassData<'a> {
     pub sidebar_unavailable: &'a [SpriteInstance],
     pub sidebar_flash: &'a [SpriteInstance],
     pub sidebar_gclock: &'a [SpriteInstance],
+    /// `SidebarInstances::smooth_chrome` and `smooth_command_bar`.
+    pub smooth_chrome: bool,
+    pub smooth_command_bar: bool,
 }
 
 /// Draw the sidebar into its own surface, as gamemd draws `g_SidebarSurface`
@@ -73,6 +76,7 @@ fn draw_sidebar_surface(
     encoder: &mut wgpu::CommandEncoder,
     data: &DrawPassData<'_>,
 ) {
+    encode_radar_pictures(state, encoder);
     let side_index = crate::app::presentation::sidebar_render::current_sidebar_side(state);
     let presentation = &state.match_state.match_presentation;
     let chrome = presentation
@@ -80,6 +84,16 @@ fn draw_sidebar_surface(
         .as_ref()
         .and_then(|set| set.resolve_side(side_index))
         .map(|resolved| resolved.atlas);
+    // Instances moved to the smooth sidebar's chrome copy draw from it.
+    let chrome_texture = |smooth: bool| {
+        chrome.and_then(|atlas| {
+            if smooth {
+                atlas.smooth_texture()
+            } else {
+                Some(&atlas.texture)
+            }
+        })
+    };
     let renderer = &mut state.renderer;
     let Some(surface) = renderer.sidebar_surface.as_ref() else {
         return;
@@ -91,13 +105,21 @@ fn draw_sidebar_surface(
     let mut draw = |tex: Option<&BatchTexture>, key: &'static str| {
         draw_pooled_with_camera(&mut pass, batch, camera, pool, tex, key);
     };
-    draw(chrome.map(|atlas| &atlas.texture), "sidebar_chrome");
+    draw(chrome_texture(data.smooth_chrome), "sidebar_chrome");
     draw(
         presentation
             .sidebar_cameo_atlas
             .as_ref()
-            .map(|atlas| &atlas.texture),
+            .map(|atlas| atlas.sidebar_texture()),
         "sidebar_cameo",
+    );
+    // StripDraw6A9AF8 outlines the hovered slot before its masks.
+    draw(
+        presentation
+            .selection_overlay
+            .as_ref()
+            .map(|overlay| overlay.white_texture()),
+        "sidebar_cameo_hover",
     );
     drop(pass);
 
@@ -163,6 +185,23 @@ fn draw_sidebar_surface(
             Some(renderer.bit_font.atlas()),
             "sidebar_queue_text",
         );
+        // Ready and Super labels6A9D94 also precede the clock6A9E97.
+        draw_pooled_with_camera(
+            &mut pass,
+            batch,
+            camera,
+            pool,
+            cameo_overlay_tex,
+            "sidebar_label_overlay",
+        );
+        draw_pooled_with_camera(
+            &mut pass,
+            batch,
+            camera,
+            pool,
+            Some(renderer.bit_font.atlas()),
+            "sidebar_label_text",
+        );
     }
     if let (Some((buffer, count)), Some(texture)) = (
         pool.get("sidebar_gclock"),
@@ -180,8 +219,7 @@ fn draw_sidebar_surface(
             crate::render::terrain_draw::PackedSpriteKind::UiPalette,
         );
     }
-    // READY skips clock6A9E44; HOLD is after it6AA014. Separate status
-    // layers preserve both without moving the earlier queue badge.
+    // The production HOLD label6AA014 is the only text after the clock.
     let mut pass = surface.begin_load_pass(SidebarPart::Column, encoder);
     let mut draw = |tex: Option<&BatchTexture>, key: &'static str| {
         draw_pooled_with_camera(&mut pass, batch, camera, pool, tex, key);
@@ -205,9 +243,29 @@ fn draw_sidebar_surface(
         batch,
         surface.camera(SidebarPart::Bar),
         pool,
-        chrome.map(|atlas| &atlas.texture),
+        chrome_texture(data.smooth_command_bar),
         "command_bar",
     );
+}
+
+/// The radar's pictures for this frame: the minimap's composition
+/// (`RadarClass::Update @ 0x00656EC0`), then the housing's paints
+/// (`RadarClass::Draw @ 0x00653100`), whose retained online draw samples it.
+/// Every frame encodes them, sidebar drawn or not, so neither waits a frame.
+fn encode_radar_pictures(state: &mut AppState, encoder: &mut wgpu::CommandEncoder) {
+    let renderer = &state.renderer;
+    let presentation = &mut state.match_state.match_presentation;
+    if let Some(minimap) = presentation.minimap.as_mut() {
+        minimap.encode_composition(&renderer.gpu.device, encoder);
+    }
+    if let Some(radar) = presentation.radar_anim.as_mut() {
+        radar.encode_paints(
+            &renderer.gpu.device,
+            &renderer.gpu.queue,
+            &renderer.batch_renderer,
+            encoder,
+        );
+    }
 }
 
 /// Create the main render pass and dispatch all draw calls in the correct order.
@@ -227,6 +285,13 @@ pub(super) fn dispatch_draw_passes(
     view: &wgpu::TextureView,
     data: &DrawPassData<'_>,
 ) {
+    // The posed voxel images the world draws sample.
+    state.renderer.vxl_pose_frame_cache.borrow_mut().encode(
+        &state.renderer.gpu.device,
+        &state.renderer.gpu.queue,
+        &state.renderer.batch_renderer,
+        encoder,
+    );
     // The sidebar's surface is complete before the frame begins; the
     // screen-fixed block copies it in.
     draw_sidebar_surface(state, encoder, data);
@@ -716,6 +781,18 @@ pub(super) fn dispatch_draw_passes(
     let mut pass = begin_main_load_pass(encoder, view, &world_depth);
     pass.set_scissor_rect(tac_x, tac_y, tac_w, tac_h);
 
+    // Ares Tactical_Draw_FlyingStrings hooks 6D4684, right after the radial
+    // indicators 6D467F and before BeaconManager 6D46B6, and draws the copied
+    // signed credit labels (->10064430) with the shared GAME.FNT passthrough.
+    #[cfg(feature = "ares")]
+    draw_pooled_ui_passthrough(
+        &mut pass,
+        &state.renderer.batch_renderer,
+        pool,
+        Some(state.renderer.bit_font.atlas()),
+        "bounty_text",
+    );
+
     // BeaconManager Draw 430AC0 (6D46B6) precedes BandBox. Its flags 600
     // bypass A and Z; each House row has its own Convert strip.
     if let Some(art) = state.match_state.match_presentation.beacon_art.as_ref() {
@@ -957,15 +1034,14 @@ pub(super) fn dispatch_draw_passes(
     // TacticalDraw6D4B25->6D4E20 is its last battlefield draw: centred
     // GRFXTXT frame, or white text if the shape/converter is unavailable.
     // Keep the tactical clip and draw before sidebar copy/Chrono capture.
+    // The atlas comes from the same selector the instances did: a country
+    // card drawn through the retail `GRFXTXT` texture samples the wrong
+    // picture at the right coordinates.
     draw_pooled_ui(
         &mut pass,
         &state.renderer.batch_renderer,
         pool,
-        state
-            .renderer
-            .outcome_banner_art
-            .as_ref()
-            .map(|art| art.texture()),
+        crate::app::presentation::outcome_banner::texture(state),
         "outcome_shape",
     );
     draw_pooled_ui(
@@ -1289,6 +1365,7 @@ fn composite_world_with_drag_rect(
 }
 
 /// Native path/rally pixels belong to the world surface, before wheel zoom.
+/// Their dashed stores keep or skip each pixel by the live A on the GPU.
 pub(super) fn draw_pooled_surface_lines<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     batch: &'a BatchRenderer,
@@ -1297,7 +1374,7 @@ pub(super) fn draw_pooled_surface_lines<'a>(
     key: &'static str,
 ) {
     if let (Some(t), Some((buf, count))) = (tex, pool.get(key)) {
-        batch.draw_with_buffer_passthrough(pass, t, buf, count);
+        batch.draw_surface_stores(pass, t, buf, count);
     }
 }
 
@@ -1547,11 +1624,14 @@ mod tests {
     fn gsi_04_01_retained_sidebar_radar_subpass_ends_with_content_boundary() {
         let chrome = source_offset("\"sidebar_chrome\"");
         let cameo = source_offset("\"sidebar_cameo\"");
+        let cameo_hover = source_offset("\"sidebar_cameo_hover\"");
         let gclock = source_offset("\"sidebar_gclock\"");
         let unavailable = source_offset("\"sidebar_unavailable\"");
         let flash = source_offset("\"sidebar_flash\"");
         let queue_fill = source_offset("\"sidebar_queue_overlay\"");
         let queue_text = source_offset("\"sidebar_queue_text\"");
+        let label_overlay = source_offset("\"sidebar_label_overlay\"");
+        let label_text = source_offset("\"sidebar_label_text\"");
         let cameo_overlay = source_offset("\"sidebar_cameo_overlay\"");
         let sidebar_text = source_offset("\"sidebar_text\"");
         let radar_anim = source_offset("\"radar_anim\"");
@@ -1561,11 +1641,14 @@ mod tests {
         let message = source_offset("\"message_text\"");
 
         assert!(chrome < cameo);
-        assert!(cameo < unavailable);
+        assert!(cameo < cameo_hover);
+        assert!(cameo_hover < unavailable);
         assert!(unavailable < flash);
         assert!(flash < queue_fill);
         assert!(queue_fill < queue_text);
-        assert!(queue_text < gclock);
+        assert!(queue_text < label_overlay);
+        assert!(label_overlay < label_text);
+        assert!(label_text < gclock);
         assert!(gclock < cameo_overlay);
         assert!(cameo_overlay < sidebar_text);
         assert!(sidebar_text < radar_anim);
@@ -1587,6 +1670,8 @@ mod tests {
             "\"sidebar_flash\"",
             "\"sidebar_queue_overlay\"",
             "\"sidebar_queue_text\"",
+            "\"sidebar_label_overlay\"",
+            "\"sidebar_label_text\"",
             "\"sidebar_cameo_overlay\"",
             "\"sidebar_text\"",
             "\"radar_anim\"",

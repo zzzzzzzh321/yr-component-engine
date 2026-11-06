@@ -89,6 +89,7 @@ fn retail_landed_aircraft_clears_occupancy_before_the_next_victims_passenger_sca
         },
         600,
         rules.warhead("NUKE").unwrap(),
+        true,
         (RAD_NO_ATTACKER, Some(attacker_house), warhead_id),
         FrameEffects::default(),
     );
@@ -357,13 +358,14 @@ fn aircraft_drop_landing_uses_original_wheel_controls() {
             .unwrap();
         cell.land_type = input["land_type"].as_u64().unwrap() as u8;
         cell.speed_costs = SpeedCostProfile {
-            foot: Some(percent),
-            track: Some(percent),
-            wheel: Some(percent),
-            float: Some(percent),
-            amphibious: Some(percent),
-            float_beach: Some(percent),
-            hover: Some(percent),
+            foot: Some(crate::rules::terrain_rules::test_speed_percent(percent)),
+            track: Some(crate::rules::terrain_rules::test_speed_percent(percent)),
+            wheel: Some(crate::rules::terrain_rules::test_speed_percent(percent)),
+            float: Some(crate::rules::terrain_rules::test_speed_percent(percent)),
+            amphibious: Some(crate::rules::terrain_rules::test_speed_percent(percent)),
+            float_beach: Some(crate::rules::terrain_rules::test_speed_percent(percent)),
+            hover: Some(crate::rules::terrain_rules::test_speed_percent(percent)),
+            winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
         };
         cell.base_speed_costs = cell.speed_costs.clone();
         assert_eq!(
@@ -382,7 +384,8 @@ fn aircraft_drop_landing_uses_original_wheel_controls() {
         assert!(locomotor.begin_piggyback_linked(
             LocomotorKind::Jumpjet,
             rules.object("DROP_AIR").unwrap(),
-            frame
+            frame,
+            None
         ));
         let runtime = locomotor.jumpjet_runtime_mut().unwrap();
         *runtime = runtime
@@ -578,6 +581,9 @@ fn magnetron_temporary_bullet_state_matches_original_construction() {
 /// real constructor -> scatter/light/Anim -> Release, without claiming the
 /// full Unit-death callback is represented by an empty cell. The actual TELE
 /// integration test above that boundary covers damage, credit and expiry.
+// Vanilla goldens: Phobos skips the Inviso scatter (`0x469AC1` ->
+// `0x469AF0`) and scatters each animation itself, which shifts the stream.
+#[cfg(not(feature = "phobos"))]
 #[test]
 fn magnetron_temporary_bullet_tails_match_original_rng_lights_and_ids() {
     use crate::sim::combat::{CombatLightRequest, RAD_NO_ATTACKER};
@@ -1925,6 +1931,8 @@ fn a_jumpjet_wreck_scans_only_on_its_committed_guard() {
             ),
             RevealOutcome::Revealed { .. }
         ));
+        // The player has seen the enemy: the campaign scan gate needs +0x41B.
+        crate::sim::arena_fixture::discover(&mut sim, enemy);
         shoot_down(&mut sim, &rules, shooter);
         let grid = crate::sim::pathfinding::PathGrid::test_all_passable(70, 70);
         let mut acquired = false;

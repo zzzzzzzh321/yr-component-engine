@@ -262,6 +262,7 @@ fn advance(scenario: &mut HeadlessScenario) -> Result<()> {
     scenario
         .runtime
         .advance_frame_for_tooling(&[], headless_scenario::SIM_TICK_MS)
+        .map(|_multiplayer_checksum| ())
         .map_err(|e| anyhow::anyhow!("advance production frame: {e}"))
 }
 

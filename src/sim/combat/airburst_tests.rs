@@ -5,7 +5,7 @@
 use super::*;
 use crate::sim::projectile::{ProjectileCoord, ProjectileDetonationReason};
 use crate::sim::rng::SimRng;
-#[cfg(not(feature = "ares"))]
+#[cfg(not(any(feature = "ares", feature = "phobos")))]
 use crate::sim::world::{FrameEffects, UninitContext};
 use serde_json::Value;
 
@@ -33,6 +33,7 @@ fn rules() -> RuleSet {
     rules
 }
 
+#[cfg(not(feature = "phobos"))]
 fn scene(z: i32) -> (Simulation, RuleSet, u64, ProjectileDetonation) {
     let rules = rules();
     let mut world = crate::sim::arena_fixture::rival_arena(&rules, 31);
@@ -76,7 +77,7 @@ fn detonate(world: &mut Simulation, rules: &RuleSet, request: ProjectileDetonati
 }
 
 #[test]
-#[cfg(not(feature = "ares"))]
+#[cfg(not(any(feature = "ares", feature = "phobos")))]
 fn stock_airburst_tail_matches_native_children_rng_and_cleanup() {
     let rows: Value = serde_json::from_str(crate::test_fixture::text(
         "tools/projectile_oracle/airburst.json",
@@ -156,7 +157,7 @@ fn stock_airburst_tail_matches_native_children_rng_and_cleanup() {
 }
 
 #[test]
-#[cfg(not(feature = "ares"))]
+#[cfg(not(any(feature = "ares", feature = "phobos")))]
 fn stock_airburst_children_reach_shared_damage_and_expire() {
     let (mut world, rules, _source, request) = scene(0);
     let victim = world
@@ -215,7 +216,7 @@ fn stock_airburst_children_reach_shared_damage_and_expire() {
 }
 
 #[test]
-#[cfg(not(feature = "ares"))]
+#[cfg(not(any(feature = "ares", feature = "phobos")))]
 fn stock_airburst_reads_live_source_and_requires_a_represented_parent() {
     let (mut world, rules, source, request) = scene(600);
     // Keep the old packet's source intentionally stale. The authoritative

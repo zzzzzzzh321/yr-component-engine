@@ -6,6 +6,11 @@
 //! Quick Match runs the same login and then its own runner
 //! (`0x0079FC40`, [`quick_match`]).
 //!
+//! The normal online visit has no welcome: Custom Match is its mode, so
+//! Internet and every return to mode 0 go straight to its sign-in `0x10F`,
+//! whose Back leaves WOL. Its lobby's Quick Match runs the Quick Match runner
+//! and comes back to the lobby. Native diagnostics keep the retail welcome.
+//!
 //! The WOLAPI COM object, its servers and its credential store are outside
 //! the shell: they meet it only through [`WolServiceRequest`] /
 //! [`WolServiceEvent`]. Production uses VERA's authenticated HTTPS lobby and
@@ -15,12 +20,16 @@
 pub(crate) mod buddies;
 pub(crate) mod buddy;
 mod live_service;
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) use live_service::lobby_base_url;
 pub(crate) mod lobby;
 mod login;
+pub(crate) mod login_info;
 pub(crate) mod my_info;
 pub(crate) mod options;
 pub(crate) mod page;
 pub(crate) mod persona;
+pub(crate) mod player_card;
 pub(crate) mod quick_match;
 mod service;
 mod test_service;
@@ -28,10 +37,19 @@ pub(crate) mod translation;
 
 pub(crate) use live_service::OnlineCleanup;
 pub(crate) use live_service::{ExternalNetworkLaunch, start_external_network};
+pub(crate) use live_service::RELEASES_URL;
+#[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) use live_service::discard_spawned_visit;
+pub(crate) use live_service::keep_network_report;
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) use live_service::retire_visit_for_exit;
+pub(crate) use live_service::{
+    DecodedRelayGrant, begin_spawned_match, decode_external_relay_grant, end_spawned_match,
+};
 pub(crate) use live_service::{
     local_choices_agreed, online_cleanup_pending, online_exit_ready, online_match_id,
 };
-pub(crate) use login::{combo_popup, login_layout, open_login_art};
+pub(crate) use login::{account_form_layout, combo_popup, login_layout, open_login_art};
 pub(crate) use service::{
     NET_STATUS_LOST, WolApiStatus, WolHighScoreRecord, WolLadderRecord, WolLoginAccepted,
     WolProvider, WolServer, WolServerList, WolServiceEvent, WolServiceRequest, request,
@@ -104,6 +122,7 @@ fn send_wol_preferences(state: &mut AppState) {
 }
 
 use super::{App, AppState};
+use crate::app::frontend::shell_layout;
 use crate::app::frontend::shell_transition::ShellExitThen;
 use crate::app::shell_route::ShellRoute;
 use crate::ui::shell::descriptor::DialogId;
@@ -175,6 +194,7 @@ pub(crate) struct WolVisit {
     /// `[0xA8B244]`; `None` is mode 0.
     mode: Option<WolMode>,
     /// `[0xA8B248]`: the mode the Buddy List runner returns to (0, 4 or 6).
+    /// VERA: also 4 for a Quick Match runner the online lobby started.
     return_mode: Option<WolMode>,
     /// Login category `[0xB73678]`: set once the login flow returned 1.
     authenticated: bool,
@@ -213,6 +233,14 @@ pub(crate) struct WolVisit {
     /// the match and cleared on runner entry (`0x00787973`); the chat sinks
     /// show nothing while it is set.
     in_game: bool,
+    /// VERA: this match started from VERA's own game room, which stays
+    /// joined through the match so its players return to it afterwards
+    /// (`finish` asks the lobby for it back).
+    pub(crate) back_to_room: bool,
+    /// VERA: BC6's Continue after a co-op mission: the stage the kept
+    /// room's host takes when the room comes back. The runner's post-match
+    /// entry drops it unless it waits for that room.
+    pub(crate) cooperative_resume: Option<crate::app::shell_network_setup::CooperativeResume>,
     /// `![0xB77DC0]`: connected to a server. A WOLAPI creation
     /// (`0x00786485`) and a failed login clear it, a connect sets it, and a
     /// lost connection outside a match clears it.
@@ -247,6 +275,9 @@ pub(crate) struct WolVisit {
     page_received: Option<Box<crate::ui::wol_page::WolPageReceived>>,
     /// The Quick Match runner's globals; the opponent outlives the runner.
     quick_match: quick_match::QuickMatchGlobals,
+    /// An external launch's relay match (docs/spawn.md) instead of a visit
+    /// the Internet button opened.
+    spawned: Option<live_service::SpawnedVisit>,
 }
 
 impl WolVisit {
@@ -274,6 +305,8 @@ impl WolVisit {
             motd: None,
             last_pager: None,
             in_game: false,
+            back_to_room: false,
+            cooperative_resume: None,
             connected: false,
             disconnected: false,
             relogin: None,
@@ -287,20 +320,13 @@ impl WolVisit {
             page_dialog: None,
             page_received: None,
             quick_match: Default::default(),
+            spawned: None,
         }
     }
 
     /// Diagnostics and tests can select a backend without changing presentation.
     pub(crate) fn set_provider(&mut self, provider: WolProvider) {
         self.provider = provider;
-    }
-
-    pub(crate) fn welcome_page_spec(&self) -> &'static crate::ui::shell::menu_page::MenuPageSpec {
-        if self.legacy_ui {
-            &crate::ui::wol_shell::WOL_WELCOME_PAGE
-        } else {
-            &crate::ui::wol_shell::WOL_ONLINE_WELCOME_PAGE
-        }
     }
 
     pub(crate) fn modern_ui(&self) -> bool {
@@ -397,6 +423,16 @@ pub(crate) fn chat_sent(state: &mut AppState, line: &crate::ui::wol_chat::WolCha
     }
 }
 
+/// The online visit is an external launch's relay match: its shell takes no
+/// input, and its end reports the result instead of re-entering the lobby.
+pub(crate) fn spawned_visit(state: &AppState) -> bool {
+    state
+        .frontend
+        .wol
+        .as_ref()
+        .is_some_and(|visit| visit.spawned.is_some())
+}
+
 /// `[0xB77DC1]`: a WOL match runs.
 pub(crate) fn in_match(state: &AppState) -> bool {
     state
@@ -475,6 +511,17 @@ pub(crate) fn open_lobby(state: &mut AppState, postmatch: bool) {
     }
 }
 
+/// `WOL_Main` with return mode 4 after a runner returned 0
+/// (`0x0077B491..0x0077B4A6`): the login is kept, the mode-loop pass applies
+/// and the custom lobby runner opens.
+pub(super) fn reopen_lobby(state: &mut AppState) {
+    if let Some(visit) = state.frontend.wol.as_mut() {
+        visit.mode = Some(WolMode::CustomMatch);
+    }
+    apply_wol_preferences(state);
+    lobby::open(state, false);
+}
+
 /// PrepareSession state 0x11 runs `WOL_Main` again. Its game-start exit
 /// (`0x0077B5B5`) kept the WOLAPI object and left the shuffle flag forced
 /// on, so this entry saves the flag as it is now. The settings re-read,
@@ -482,6 +529,15 @@ pub(crate) fn open_lobby(state: &mut AppState, postmatch: bool) {
 /// mode-loop apply (`0x0077B402`) and the lobby runner with postmatch set
 /// (`0x0077B44B`) follow.
 pub(crate) fn reenter_after_match(state: &mut AppState) {
+    if let Some(visit) = state.frontend.wol.as_mut()
+        && matches!(
+            visit.mode,
+            Some(WolMode::QuickMatch | WolMode::QuickCoop | WolMode::PlayBuddy)
+        )
+    {
+        // VERA's kept game room returns only to the custom lobby runner.
+        visit.back_to_room = false;
+    }
     live_service::match_returned(state);
     persona::enter_wol_main(state);
     read_wol_settings(state);
@@ -512,14 +568,13 @@ fn provider_for_visit(
 impl App {
     /// State 2 (`0x0052DD57`) then `WOL_Main`: the lobby music takes over
     /// (`0x0077B2D7..0x0077B31D`) and `0x10E` is created after the empty
-    /// backdrop (`0x00798DE0`).
+    /// backdrop (`0x00798DE0`); the normal online visit signs in instead.
     pub(super) fn open_wol_welcome_page(state: &mut AppState) {
         crate::app::shell_main_menu::clear_typed_codes_for_network_session(state);
         crate::app::frontend::main_menu_shell_render::clear_ra2ts_movie_session(state);
         crate::app::frontend::shell_transition::invalidate_main_menu_dialog_instance(state);
         // The message boxes paint from the skirmish chrome atlas.
         let _ = Self::ensure_skirmish_shell_chrome(state);
-        Self::ensure_wol_welcome_art(state);
         read_wol_settings(state);
         let now_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
         let lobby_music = state.frontend.wol_preferences.lobby_music != 0;
@@ -529,14 +584,31 @@ impl App {
             state.persistence.options_profile.wol_test_service,
             state.platform.capture_client_size,
         );
+        visit.set_legacy_ui(state.frontend.native_shell_ui);
         state.frontend.wol = Some(visit);
         // Persona I/O is selected by the new visit's provider, never a
         // previous visit (or the absence of one).
         persona::enter_wol_main(state);
-        persona::fill_welcome(state);
         // The first mode-loop pass (0x0077B402) applies again.
         apply_wol_preferences(state);
         state.frontend.shell_route = ShellRoute::Wol;
+        Self::open_wol_home(state);
+    }
+
+    /// Mode 0's page: the welcome `0x10E` (`0x00798DE0`), or for the normal
+    /// online visit, which has no welcome, its Custom Match sign-in. The
+    /// flow starts over the empty backdrop, as after the welcome's button.
+    fn open_wol_home(state: &mut AppState) {
+        let Some(visit) = state.frontend.wol.as_mut() else {
+            return;
+        };
+        if visit.modern_ui() {
+            Self::commit_wol_action(state, WolMode::CustomMatch);
+            return;
+        }
+        visit.page = WolPage::Welcome;
+        persona::fill_welcome(state);
+        Self::ensure_wol_welcome_art(state);
         state
             .frontend
             .shell_controller
@@ -597,21 +669,22 @@ impl App {
         );
         let visit = state.frontend.wol.as_ref()?;
         if let Some(message) = visit.message() {
+            let scale = shell_layout::shell_scale_for_screen((width as u32, height as u32));
+            let layout = message.layout(width, height, scale);
             return Some(match message.buttons {
                 WolBoxButtons::Ok(_) => vec![LaidOutControl {
                     id: BOX_OK,
-                    rect: crate::ui::shell::modal::body_ok_layout(width, height).ok,
+                    rect: layout.ok,
                 }],
                 WolBoxButtons::YesNo { .. } => {
-                    let layout = crate::ui::shell::modal::yes_no_layout(width, height);
                     vec![
                         LaidOutControl {
                             id: BOX_NO,
-                            rect: layout.no,
+                            rect: layout.cancel.expect("Yes/No has No"),
                         },
                         LaidOutControl {
                             id: BOX_YES,
-                            rect: layout.yes,
+                            rect: layout.ok,
                         },
                     ]
                 }
@@ -621,7 +694,8 @@ impl App {
             // A hidden wait box takes no pointer.
             return Some(match visit.wait_box().filter(|wait| wait.shown) {
                 Some(_) => {
-                    let layout = crate::ui::shell::modal::wait_box_layout(width, height);
+                    let scale = shell_layout::shell_scale_for_screen((width as u32, height as u32));
+                    let layout = crate::ui::shell::modal::wait_box_layout_on(width, height, scale);
                     vec![
                         LaidOutControl {
                             id: WAIT_DISCONNECT,
@@ -890,7 +964,7 @@ impl App {
 
     /// The login flow returned 0 (Back, or a failed connect after its box):
     /// mode 0 (`0x0077B3F6`), and the loop runs a fresh `0x10E` with its
-    /// entry slide.
+    /// entry slide, or the online sign-in again.
     pub(crate) fn reopen_wol_welcome(state: &mut AppState) {
         let Some(visit) = state.frontend.wol.as_mut() else {
             return;
@@ -906,17 +980,11 @@ impl App {
             logout(visit);
             visit.authenticated = false;
         }
-        visit.page = WolPage::Welcome;
-        persona::fill_welcome(state);
         // The mode-loop pass (0x0077B402) before the welcome runs.
         apply_wol_preferences(state);
         state.frontend.wol_login_art = None;
         state.frontend.shell_route = ShellRoute::Wol;
-        Self::ensure_wol_welcome_art(state);
-        state
-            .frontend
-            .shell_controller
-            .reset_to(WOL_WELCOME_DIALOG, false);
+        Self::open_wol_home(state);
         state.platform.window.request_redraw();
     }
 

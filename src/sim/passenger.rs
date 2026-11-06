@@ -140,6 +140,28 @@ enum CarrierRelation {
     },
 }
 
+/// The hull an entity is inside. VERA keeps one relation for every way in: a
+/// transport's PerCellProcess arm, a building's cargo, a garrison, and
+/// reinforcement or paradrop loading. gamemd's Transporter (`+0x11C`) is a
+/// separate field ([`PassengerRole::transporter`]). Only the passenger owner
+/// builds one; other modules read it or restore one they read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CarrierLink {
+    transport_id: u64,
+    /// `TechnoClass+0x82` InOpenToppedTransport (see `Role::Inside`).
+    open_topped: bool,
+}
+
+impl CarrierLink {
+    pub(crate) const fn transport_id(self) -> u64 {
+        self.transport_id
+    }
+
+    pub(crate) const fn open_topped(self) -> bool {
+        self.open_topped
+    }
+}
+
 impl PassengerCargo {
     pub fn new(capacity: u32, size_limit: f64) -> Self {
         Self {
@@ -403,12 +425,95 @@ impl Simulation {
             .unwrap_or_default();
         for id in passengers {
             if let Some(passenger) = self.substrate.entities.get_mut(id)
-                && let Some((carrier, _)) = passenger.passenger_role.inside_transport()
+                && let Some(link) = passenger.passenger_role.carrier_link()
             {
-                passenger
-                    .passenger_role
-                    .set_inside_transport(carrier, false);
+                passenger.passenger_role.set_carrier_link(CarrierLink {
+                    open_topped: false,
+                    ..link
+                });
             }
+        }
+    }
+
+    /// Class AddPassenger: Techno710670 adds Cargo then plays its entry
+    /// sound. Foot4DE630..4DE668 receives a Gunner only when count==1.
+    /// This is not ordinary boarding admission: it writes neither Transporter
+    /// nor OpenTopped, and does not clear the incoming object's orders.
+    pub(crate) fn add_passenger_with_context(
+        &mut self,
+        carrier: u64,
+        head_first: &[(u64, f64)],
+        context: UninitContext<'_>,
+    ) -> bool {
+        if !self.add_cargo_passenger_chain(carrier, head_first, context) {
+            return false;
+        }
+        let Some(&(head, _)) = head_first.first() else {
+            return true;
+        };
+        let rules = context.rules();
+        if let Some(transport) = self.substrate.entities.get(carrier)
+            && let Some(sound_id) = self
+                .entity_object_type(transport, rules)
+                .and_then(|object| object.enter_transport_sound.clone())
+        {
+            let coordinate =
+                crate::sim::movement::ground_pose::position_world_coord(&transport.position);
+            self.sound_events.emit(SimSoundEvent::VocAtCoord {
+                sound_id,
+                coordinate,
+                flags: 0,
+            });
+            context.effects().flush_sound(self, rules);
+        }
+        if self
+            .substrate
+            .entities
+            .get(carrier)
+            .is_some_and(|transport| {
+                transport.category().is_foot()
+                    && transport.passenger_role.passenger_count() == 1
+                    && self
+                        .entity_object_type(transport, rules)
+                        .is_some_and(|object| object.gunner)
+            })
+        {
+            receive_gunner(
+                &self.interner,
+                &self.session,
+                &mut self.scenario_rng,
+                &mut self.substrate,
+                &self.houses,
+                rules,
+                carrier,
+                head,
+            );
+        }
+        true
+    }
+
+    /// Transporter and SetInOpenTransport710470 belong to the arrival
+    /// caller, outside AddPassenger. Infantry51A45E..51A46E runs them before
+    /// the class call; Unit73A740..73A768 runs them afterwards.
+    fn mark_boarded_transport_passenger(
+        &mut self,
+        passenger: u64,
+        carrier: u64,
+        open_topped: bool,
+        rules: &RuleSet,
+        effects: FrameEffects<'_>,
+    ) {
+        if let Some(passenger) = self.substrate.entities.get_mut(passenger) {
+            passenger.passenger_role.set_carrier_link(CarrierLink {
+                transport_id: carrier,
+                open_topped,
+            });
+            passenger.passenger_role.transporter = Some(carrier);
+        }
+        if open_topped {
+            self.reset_orders_to_guard(passenger, rules, effects);
+            let registered = self.register_open_topped_passenger(passenger);
+            debug_assert!(registered, "accepted open-topped passenger remains active");
         }
     }
 
@@ -457,6 +562,9 @@ pub struct PassengerRole {
     role: Role,
     #[serde(default)]
     occupants: BuildingOccupants,
+    /// `TechnoClass+0x11C` Transporter ([`Self::transporter`]).
+    #[serde(default)]
+    transporter: Option<u64>,
 }
 
 /// The stored shape of a [`PassengerRole`]. A transport keeps its own cargo
@@ -490,31 +598,73 @@ impl PassengerRole {
         Self {
             role: Role::Transport { cargo },
             occupants: BuildingOccupants::default(),
+            transporter: None,
         }
     }
 
-    /// Transporter+11C and InOpenToppedTransport+82, independent of an entity's
-    /// own CargoClass. Callers do not inspect the storage representation.
+    /// The hull this entity is inside, with InOpenToppedTransport (`+0x82`),
+    /// independent of its own CargoClass. This is VERA's carrier relation,
+    /// wider than Transporter (`+0x11C`, [`Self::transporter`]). Callers do
+    /// not inspect the storage representation.
     pub fn inside_transport(&self) -> Option<(u64, bool)> {
-        match &self.role {
-            Role::Inside {
-                transport_id,
-                open_topped,
-            } => Some((*transport_id, *open_topped)),
-            Role::Transport { cargo } => match cargo.carrier_relation {
-                CarrierRelation::Inside {
-                    transport_id,
-                    open_topped,
-                } => Some((transport_id, open_topped)),
-                _ => None,
-            },
-            _ => None,
+        self.carrier_link()
+            .map(|link| (link.transport_id, link.open_topped))
+    }
+
+    /// `TechnoClass+0x11C` Transporter, which gamemd keeps apart from the
+    /// carrier relation. Only the transport arms of PerCellProcess set it
+    /// (Infantry `0x0051A463`, Unit `0x0073A768`); `CargoClass::AddPassenger
+    /// @ 0x004733A0` (a building's cargo, Full reinforcements `0x0065DF88`,
+    /// paradrop loading `0x0065E7F5`) and `AddGarrisonOccupant @ 0x00522910`
+    /// leave it as it is. Only the constructor (`0x006F2B93`), PointerExpired
+    /// (`0x007078D5`), a dying Unit's passenger escape (`0x007380FA`) and Unit
+    /// Mission_Unload's success path (`0x0073DBD1`) clear it, so a soldier an
+    /// aircraft unloads (`0x004151E0`, KickOutUnit `0x00415B10`) keeps it
+    /// until that aircraft dies, through any garrison or cargo he enters (no
+    /// retail `[AircraftTypes]` entry has `Passengers=`).
+    pub(crate) fn transporter(&self) -> Option<u64> {
+        self.transporter
+    }
+
+    /// Clear Transporter (`+0x11C`) at one of its native clear sites
+    /// ([`Self::transporter`]).
+    pub(crate) fn clear_transporter(&mut self) {
+        self.transporter = None;
+    }
+
+    /// The whole carrier relation, for a caller that restores it.
+    pub(crate) fn carrier_link(&self) -> Option<CarrierLink> {
+        let (Role::Inside {
+            transport_id,
+            open_topped,
         }
+        | Role::Transport {
+            cargo:
+                PassengerCargo {
+                    carrier_relation:
+                        CarrierRelation::Inside {
+                            transport_id,
+                            open_topped,
+                        },
+                    ..
+                },
+        }) = &self.role
+        else {
+            return None;
+        };
+        Some(CarrierLink {
+            transport_id: *transport_id,
+            open_topped: *open_topped,
+        })
     }
 
     /// Successful attachment or departure rollback. Cargo and its gunner
     /// selection remain owned by the vehicle throughout this transition.
-    pub(crate) fn set_inside_transport(&mut self, transport_id: u64, open_topped: bool) {
+    pub(crate) fn set_carrier_link(&mut self, link: CarrierLink) {
+        let CarrierLink {
+            transport_id,
+            open_topped,
+        } = link;
         match &mut self.role {
             Role::Transport { cargo } => {
                 cargo.carrier_relation = CarrierRelation::Inside {
@@ -529,6 +679,15 @@ impl PassengerRole {
                 }
             }
         }
+    }
+
+    /// Attach without touching Transporter: a `CargoClass::AddPassenger`
+    /// caller or a garrison ([`Self::transporter`]).
+    pub(crate) fn set_inside_transport(&mut self, transport_id: u64, open_topped: bool) {
+        self.set_carrier_link(CarrierLink {
+            transport_id,
+            open_topped,
+        });
     }
 
     /// Clear only this entity's carrier link. Its own cargo remains available
@@ -573,9 +732,9 @@ impl PassengerRole {
     /// on first use: every native Techno has its CargoClass (`+0x114`), and
     /// `HouseClass::SendParadropPlanes` fills the paradrop plane's through
     /// `CargoClass::AddPassenger` (`0x0065E7F5`). The entity's own carrier
-    /// relation (`+0x11C`, `+0x82`) is a separate Techno field that
-    /// `CargoClass::AddPassenger` (`0x004733A0`) does not write, so the hold
-    /// keeps it.
+    /// relation and Transporter (`+0x11C`, [`Self::transporter`]) are not the
+    /// hold's: `CargoClass::AddPassenger` (`0x004733A0`) writes neither
+    /// Transporter nor `+0x82`, so the hold keeps them.
     pub(crate) fn ensure_hold(&mut self) -> &mut PassengerCargo {
         if !self.is_transport() {
             let carrier_relation = match self.role {
@@ -611,10 +770,13 @@ impl PassengerRole {
         self.inside_transport().map(|(id, _)| id)
     }
 
-    /// `TechnoClass+0x82` with its `+0x11C` Transporter: the `OpenTopped=`
-    /// transport this entity rides in, if any. Read by weapon selection, the
-    /// fire coordinate, InRange, GetFireError, FireAt's damage and muzzle
-    /// anim, kill credit, navigation and the Temporal warp-distance check.
+    /// The `OpenTopped=` transport this entity rides in, if any, from the
+    /// carrier relation. It stands in for gamemd's `+0x82` and Transporter
+    /// (`+0x11C`, [`Self::transporter`]) reads, which can differ for cargo
+    /// that `CargoClass::AddPassenger` loaded (vera20k#3838). Read by weapon
+    /// selection, the fire coordinate, InRange, GetFireError, FireAt's damage
+    /// and muzzle anim, kill credit, navigation and the Temporal
+    /// warp-distance check.
     pub fn open_transport_id(&self) -> Option<u64> {
         self.inside_transport()
             .and_then(|(id, open)| open.then_some(id))
@@ -650,6 +812,18 @@ impl PassengerRole {
                 open_topped,
             },
             occupants: BuildingOccupants::default(),
+            transporter: None,
+        }
+    }
+
+    /// A fixture's passenger that a transport arm took aboard: inside
+    /// `transport_id` with Transporter (`+0x11C`) set, as Infantry
+    /// `0x0051A463` and Unit `0x0073A768` leave it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn boarded_for_test(transport_id: u64, open_topped: bool) -> Self {
+        Self {
+            transporter: Some(transport_id),
+            ..Self::inside_for_test(transport_id, open_topped)
         }
     }
 }
@@ -697,7 +871,7 @@ pub fn can_enter_transport(
     // 0x00737430). A Grinder answers ROGER but carries no one.
     transport_obj.passengers > 0
         && crate::sim::combat::combat_weapon::is_ally_by_object(
-            Some(sim.house_alliances.as_map()),
+            Some(&sim.house_alliances),
             &sim.interner,
             passenger.owner(),
             transport.owner(),
@@ -718,6 +892,11 @@ pub fn can_enter_transport(
 /// RESIDUALS: the `Assaulter=` arm (`0x00457DAD..0x00457DD3`: an
 /// assaulter may enter an occupied building of a house it is not allied
 /// with) is not represented. No retail infantry is an assaulter.
+/// Native tests the current mission `+0xAC` for Construction and Selling
+/// (`0x00457D07..0x00457D19`); `building_up`/`building_down` ask the
+/// effective mission, so a building whose current mission is still -1 with
+/// either queued (its placement frame, a sale's queue frame) refuses one
+/// frame early.
 pub fn can_dock_occupier_garrison(
     passenger: &GameEntity,
     building: &GameEntity,
@@ -909,7 +1088,6 @@ pub(crate) fn board_passenger(
             (
                 owner,
                 object.open_topped,
-                object.gunner,
                 object.infantry_absorb,
                 object.extra_power.output() > 0,
             )
@@ -917,7 +1095,7 @@ pub(crate) fn board_passenger(
     else {
         return false;
     };
-    let (carrier_owner, open_topped, gunner, infantry_absorb, extra_power) = carrier;
+    let (carrier_owner, open_topped, infantry_absorb, extra_power) = carrier;
     // Infantry51A38A adds to every building that admitted DOCK_NOW, including
     // Hospital=yes with Passengers=0. The shared raw Cargo owner creates the
     // empty hold lazily; configured capacity remains an admission policy.
@@ -1012,7 +1190,19 @@ pub(crate) fn board_passenger(
     }
     //4733A0 repeats the head's virtual Limbo before its unconditional
     //prepend.
-    let boarded = sim.add_cargo_passenger_chain(carrier_id, &[(pax_id, pax_size)], context);
+    let prior_transporter = sim
+        .substrate
+        .entities
+        .get(pax_id)
+        .and_then(|pax| pax.passenger_role.transporter());
+    if arm == BoardingArm::InfantryTransport {
+        sim.mark_boarded_transport_passenger(pax_id, carrier_id, open_topped, rules, effects);
+    }
+    let boarded = if arm.building() {
+        sim.add_cargo_passenger_chain(carrier_id, &[(pax_id, pax_size)], context)
+    } else {
+        sim.add_passenger_with_context(carrier_id, &[(pax_id, pax_size)], context)
+    };
     // The admitted carrier survives Limbo; Cargo creates its hold if needed.
     debug_assert!(boarded, "boarding admission changed during one transaction");
     if !boarded {
@@ -1027,14 +1217,22 @@ pub(crate) fn board_passenger(
                 pax_id,
             );
         }
+        if arm == BoardingArm::InfantryTransport
+            && let Some(passenger) = sim.substrate.entities.get_mut(pax_id)
+        {
+            passenger.passenger_role.clear_carrier_relation();
+            passenger.passenger_role.transporter = prior_transporter;
+        }
         let _ = sim.reveal_entity_with_context(pax_id, context);
         return false;
     }
-    if let Some(pax) = sim.substrate.entities.get_mut(pax_id) {
-        // VERA's carrier relation stands for Transporter (`+0x11C`, written
-        // by the transport arms at `0x0051A463` and `0x0073A768`) and for
-        // membership of a building's cargo. Boarding keeps the passenger's
-        // TarCom and passive flag: neither arm nor Limbo writes them.
+    if arm.building()
+        && let Some(pax) = sim.substrate.entities.get_mut(pax_id)
+    {
+        // A building's cargo shares VERA's carrier relation; Transporter
+        // (`+0x11C`, `PassengerRole::transporter`) stays as it is. Boarding keeps the
+        // passenger's TarCom and passive flag: neither arm nor Limbo writes
+        // them.
         pax.passenger_role
             .set_inside_transport(carrier_id, open_topped && !arm.building());
         if arm == BoardingArm::InfantryBuilding {
@@ -1050,24 +1248,6 @@ pub(crate) fn board_passenger(
                 false,
             );
         }
-    } else {
-        // `TechnoClass::AddPassenger @ 0x00710670` (Infantry `0x0051A46E`,
-        // Unit `0x0073A740`): the transport type's `EnterTransportSound=` at
-        // its Location (`VocClass::PlayAtCoord @ 0x00750E20`, flags 0).
-        if let Some(transport) = sim.substrate.entities.get(carrier_id)
-            && let Some(sound_id) = sim
-                .object_type(transport.type_ref(), rules)
-                .and_then(|object| object.enter_transport_sound.clone())
-        {
-            let coordinate =
-                crate::sim::movement::ground_pose::position_world_coord(&transport.position);
-            sim.sound_events.emit(SimSoundEvent::VocAtCoord {
-                sound_id,
-                coordinate,
-                flags: 0,
-            });
-            effects.flush_sound(sim, rules);
-        }
     }
     if let Some((sound_id, coordinate)) = bio_reactor_entry_sound {
         sim.sound_events.emit(SimSoundEvent::voc_at_world_coord(
@@ -1079,38 +1259,9 @@ pub(crate) fn board_passenger(
             },
         ));
     }
-    if open_topped && !arm.building() {
-        // `SetInOpenTransport @ 0x00710470` (Infantry `0x0051A45E`, before
-        // AddPassenger; Unit `0x0073A75D`, after): `+0x82` (the relation's
-        // flag above), then `ResetOrdersToGuard` (vt+0x3D0) and the
-        // LogicClass add, so the rider keeps an AI turn and guards from
-        // inside. Infantry Limbo51DF10 keeps TarCom: 51A441 ->51A45E ->710484
-        // reaches the class NULL setter with the former target intact.
-        sim.reset_orders_to_guard(pax_id, rules, effects);
-        let registered = sim.register_open_topped_passenger(pax_id);
-        debug_assert!(
-            registered,
-            "accepted open-topped passenger must remain active"
-        );
-        // The rider stands where its walk into the transport ended, and
-        // every later transport `SetLocation` copies the transport's
-        // coordinate onto it (`FootClass::SetLocation 0x004DB810` ->
-        // `0x007104F0`). Boarding itself preserves the arrival subcell.
-    }
     if arm == BoardingArm::UnitTransport {
+        sim.mark_boarded_transport_passenger(pax_id, carrier_id, open_topped, rules, effects);
         sim.open_topped_passengers_take_target(pax_id, None, rules, registry, effects);
-    }
-    if gunner && !arm.building() {
-        receive_gunner(
-            &sim.interner,
-            &sim.session,
-            &mut sim.scenario_rng,
-            &mut sim.substrate,
-            &sim.houses,
-            rules,
-            carrier_id,
-            pax_id,
-        );
     }
     true
 }
@@ -1253,6 +1404,73 @@ fn receive_gunner(
 
 /// Gunner caller dispatch to UnitClass +4D8 (7464E0). RemoveGunner always
 /// selects mode0 after optional temporal return/LetGo, even with no gunner.
+impl Simulation {
+    /// FootClass::RemovePassenger4DE670: the named Cargo4734B0 removal,
+    /// optional LeaveTransportSound and empty-hold virtual RemoveGunner.
+    /// The caller retains ownership of the passenger's carrier link until
+    /// its placement or UnInit; this operation only changes the Cargo list.
+    #[cfg(feature = "ares")]
+    pub(crate) fn remove_cargo_passenger(
+        &mut self,
+        transport_id: u64,
+        passenger: Option<u64>,
+        rules: &RuleSet,
+        effects: FrameEffects<'_>,
+    ) {
+        if let Some(id) = passenger
+            && let Some(cargo) = self
+                .substrate
+                .entities
+                .get_mut(transport_id)
+                .and_then(|entity| entity.passenger_role.cargo_mut())
+        {
+            cargo.disembark(id);
+        }
+        if passenger.is_some()
+            && let Some(transport) = self.substrate.entities.get(transport_id)
+            && let Some(sound_id) = self
+                .entity_object_type(transport, rules)
+                .and_then(|kind| kind.leave_transport_sound.clone())
+        {
+            self.sound_events
+                .emit(crate::sim::world::SimSoundEvent::VocAtCoord {
+                    sound_id,
+                    coordinate: crate::sim::movement::ground_pose::position_world_coord(
+                        &transport.position,
+                    ),
+                    flags: 0,
+                });
+            effects.flush_sound(self, rules);
+        }
+        if self
+            .substrate
+            .entities
+            .get(transport_id)
+            .is_some_and(|entity| {
+                entity
+                    .passenger_role
+                    .cargo()
+                    .is_some_and(|cargo| cargo.is_empty())
+                    && self
+                        .entity_object_type(entity, rules)
+                        .is_some_and(|kind| kind.gunner)
+            })
+        {
+            remove_gunner(
+                &self.interner,
+                &self.session,
+                &mut self.scenario_rng,
+                &mut self.substrate,
+                &mut self.houses,
+                &mut self.power_states,
+                rules,
+                transport_id,
+                passenger,
+            );
+        }
+    }
+}
+
 fn remove_gunner(
     interner: &StringInterner,
     session: &ScenarioSession,
@@ -1342,12 +1560,7 @@ fn rearm_transferred_gunner(
             actor.position.ry(),
         ));
     let snapshot = crate::sim::combat::build_attacker_snapshot(actor, target, None);
-    let live = crate::sim::combat::rof::LiveParticles {
-        spark: actor.spark_particle_system.system().is_some(),
-        // Retained Fire/Railgun links remain unported, as in the C4 caller.
-        // None of the selected stock FV/CLEG slots has these flags.
-        ..Default::default()
-    };
+    let live = actor.live_particles();
     let rof = crate::sim::combat::world_fire::snapshot_get_rof(
         scenario_rng,
         &*substrate,

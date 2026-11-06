@@ -218,9 +218,6 @@ impl Fixture {
             &IniFile::from_str(&text),
             &crate::rules::sound_ini::SoundRegistry::from_ini(&IniFile::from_str(&sound_text)),
         );
-        rules.bind_animation_sequences(
-            &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-        );
         for anim in corpus["native_fatal_anim_inputs"].as_array().unwrap() {
             rules.bind_anim_frame_count_for_test(
                 anim["name"].as_str().unwrap(),
@@ -1556,6 +1553,11 @@ impl Fixture {
 /// and without the stock smudges joined.
 #[test]
 fn original_ready_mtnk_shot_runs_building_fires_crew_and_deferred_cleanup() {
+    // Stock oracle; Ares replaces the Unit tail (737F97) and GetCrew (707D20),
+    // and Phobos `ROF.RandomDelay` (`0x006FD0B5`) redraws the rearm jitter.
+    if cfg!(any(feature = "ares", feature = "phobos")) {
+        return;
+    }
     for path in [
         "tools/spatial_oracle/building_death_anims_joined.json",
         "tools/spatial_oracle/building_death_anims_joined_stock_smudges.json",

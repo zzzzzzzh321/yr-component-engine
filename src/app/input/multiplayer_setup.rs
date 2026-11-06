@@ -6,6 +6,7 @@ use crate::app::{App, AppState};
 use crate::ui::lan_shell::LanEditKey;
 use crate::ui::main_menu_dialogs::options::LauncherCue;
 use crate::ui::multiplayer_setup::*;
+use crate::ui::shell::combobox::ComboPress;
 use crate::ui::shell::trackbar::TrackbarPress;
 use crate::util::time::Instant;
 use winit::event::{KeyEvent, MouseButton};
@@ -13,8 +14,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 
 pub(crate) fn layout(state: &AppState) -> MultiplayerSetupLayout {
     let (w, h) = shell_layout::shell_screen_size(state);
+    let dialog = crate::app::shell_network_setup::dialog(state);
     let mut layout = MultiplayerSetupLayout::new(
-        crate::app::shell_network_setup::dialog(state),
+        dialog,
         w as i32,
         h as i32,
         shell_layout::fills_window(state),
@@ -23,7 +25,7 @@ pub(crate) fn layout(state: &AppState) -> MultiplayerSetupLayout {
         .match_state
         .session
         .network_setup_capacity()
-        .is_some_and(|rows| rows > 8)
+        .is_some_and(|rows| rows > dialog.rows_per_page() as i32)
     {
         layout.arrange_extended_rows();
     }
@@ -42,6 +44,20 @@ pub(crate) fn update_geometry(state: &mut AppState) {
         (layout.page.scale.base_rect(layout.chat).w - 3).max(0) as u32,
         |text| state.renderer.bit_font.text_width(text),
     );
+}
+
+/// Whether the room's map thumbnail shows a picture with nothing over it: no
+/// combo list, Game Options or missing-map offer.
+fn preview_box_shows(state: &AppState, view: &SetupView, layout: &MultiplayerSetupLayout) -> bool {
+    !view.preview_hidden
+        && !view.options_open
+        && !view.map_offer_open
+        && state.frontend.skirmish_preview_texture.is_some()
+        && state
+            .frontend
+            .multiplayer_setup
+            .as_ref()
+            .is_some_and(|ui| ui.popup_geometry(view, layout).is_none())
 }
 
 fn notice_active(state: &AppState) -> bool {
@@ -114,7 +130,9 @@ pub(crate) fn ime_chat_rect(state: &AppState) -> Option<crate::ui::shell::geom::
         .frontend
         .multiplayer_setup
         .as_ref()
-        .filter(|ui| routed && ui.focused_control == CHAT)
+        .filter(|ui| {
+            routed && ui.focused_control == CHAT && !ui.options_open && ui.map_offer.is_none()
+        })
         .map(|_| layout(state).chat)
 }
 
@@ -149,7 +167,25 @@ pub(crate) fn key_press(state: &mut AppState, code: Option<KeyCode>, text: Optio
     };
     // NewEdit consumes all keyboard input while chat has focus. Escape is
     // inert; Enter appends CRLF before shared5EDD00/5DE360 submission.
-    let action = if ui.focused_control == CHAT {
+    // VERA's Game Options popup takes the keys first and closes on Escape
+    // or Enter.
+    let action = if let Some(offer) = &ui.map_offer {
+        match code {
+            // Keys meant for the chat just before it opened do not answer it.
+            _ if !offer.takes_keys(Instant::now()) => None,
+            Some(KeyCode::Enter | KeyCode::NumpadEnter) if !offer.downloading => {
+                Some(SetupAction::MapOffer { download: true })
+            }
+            Some(KeyCode::Escape) => Some(SetupAction::MapOffer { download: false }),
+            _ => None,
+        }
+    } else if ui.options_open {
+        matches!(
+            code,
+            Some(KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter)
+        )
+        .then_some(SetupAction::GameOptions { open: false })
+    } else if ui.focused_control == CHAT {
         let key = match code {
             Some(KeyCode::Backspace) => Some(LanEditKey::Backspace),
             Some(KeyCode::Delete) => Some(LanEditKey::Delete),
@@ -207,8 +243,14 @@ pub(crate) fn cursor_moved(state: &mut AppState) {
     };
     let layout = layout(state);
     let (x, y) = state.match_state.input.cursor_px();
-    let help = layout
-        .control_at(&view, x, y)
+    let over = layout.control_at(&view, x, y);
+    // `0x468` is no control the room's hit test finds; VERA's enlarged preview
+    // gives the box its thumbnail help and the hint.
+    let over_preview = over.is_none()
+        && layout.map_preview.contains(x, y)
+        && preview_box_shows(state, &view, &layout);
+    let help = over
+        .or(over_preview.then_some(MAP_PREVIEW))
         .and_then(|id| tooltip_key(view.dialog, id))
         .and_then(|key| {
             state
@@ -219,6 +261,11 @@ pub(crate) fn cursor_moved(state: &mut AppState) {
                 .map(str::to_owned)
         })
         .unwrap_or_default();
+    let help = if over_preview {
+        crate::app::frontend::preview_zoom::box_help(state, help)
+    } else {
+        help
+    };
     let Some(ui) = state.frontend.multiplayer_setup.as_mut() else {
         return;
     };
@@ -294,6 +341,13 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
     let over = layout
         .control_at(&view, x, y)
         .filter(|id| view.enabled(*id));
+    if pressed
+        && over.is_none()
+        && preview_box_shows(state, &view, &layout)
+        && crate::app::frontend::preview_zoom::press_on_box(state, layout.map_preview)
+    {
+        return;
+    }
     let Some(ui) = state.frontend.multiplayer_setup.as_mut() else {
         return;
     };
@@ -301,41 +355,32 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
     let mut cue = None;
     if pressed {
         if let Some(popup) = ui.popup_geometry(&view, &layout) {
-            if let Some(part) = popup.scroll_part_at(x, y) {
-                ui.popup.scroll.press(
-                    part,
-                    popup.scroll_geometry(),
-                    &mut ui.popup.top_index,
-                    y,
-                    Instant::now(),
-                );
-            } else {
-                if let Some(index) = popup.row_at(x, y)
-                    && let Some(control) = ui.popup.control
-                    && let Some(item) = view
-                        .combo(control)
-                        .and_then(|combo| combo.choices.get(index))
-                {
-                    action = Some(SetupAction::Select {
-                        control,
-                        value: item.value,
-                    });
-                }
-                ui.popup.close();
-                cue = Some(LauncherCue::ComboClose);
+            let open = ui.popup.control;
+            let press = ui.popup.press_list(popup, x, y, Instant::now());
+            if let ComboPress::Pick(index) = press
+                && let Some(control) = open
+                && let Some(item) = view
+                    .combo(control)
+                    .and_then(|combo| combo.choices.get(index))
+            {
+                action = Some(SetupAction::Select {
+                    control,
+                    value: item.value,
+                });
             }
+            cue = press.cue().map(LauncherCue::from);
         } else if let Some(control) = over {
             if let Some(combo) = view.combo(control) {
-                if crate::ui::skirmish_shell::combo_arrow_hit_rect(
+                let press = ui.popup.press_face(
+                    control,
                     layout.control_rect(control).expect("combo rect"),
                     layout.page.scale,
-                )
-                .contains(x, y)
-                {
-                    ui.popup.open(control, combo.selected);
-                }
-                cue = Some(LauncherCue::ComboOpen);
-            } else if CHECKBOXES.contains(&control) {
+                    combo.selected,
+                    x,
+                    y,
+                );
+                cue = press.cue().map(LauncherCue::from);
+            } else if CHECKBOXES.contains(&control) || ROOM_CHECKBOXES.contains(&control) {
                 if crate::ui::skirmish_shell::checkbox_icon_rect(
                     layout.control_rect(control).expect("checkbox rect"),
                     layout.page.scale,
@@ -391,6 +436,10 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
                 PAGE => Some(SetupAction::Page),
                 PREVIOUS_ROWS => Some(SetupAction::RosterPage { forward: false }),
                 NEXT_ROWS => Some(SetupAction::RosterPage { forward: true }),
+                GAME_OPTIONS => Some(SetupAction::GameOptions { open: true }),
+                GAME_OPTIONS_OK => Some(SetupAction::GameOptions { open: false }),
+                MAP_OFFER_DOWNLOAD => Some(SetupAction::MapOffer { download: true }),
+                MAP_OFFER_LEAVE => Some(SetupAction::MapOffer { download: false }),
                 _ => None,
             };
         }

@@ -12,6 +12,7 @@ from collections import deque
 from functools import lru_cache
 import hashlib
 import gzip
+import inspect
 import io
 import json
 import os
@@ -47,6 +48,27 @@ class OracleError(RuntimeError):
 
 class OracleMismatch(OracleError):
     """A comparison ran, and its native output or evidence differs from the reference."""
+
+
+def require(condition, message: str) -> None:
+    """A fixture or observation check that `python -O` cannot remove."""
+    if not condition:
+        raise OracleError(message)
+
+
+def edited_source(function, *edits: tuple[str, str]) -> str:
+    """`function`'s source with each (anchor, replacement) applied in order.
+
+    For harnesses that adapt a shared Python fixture in memory before exec: an
+    anchor that is missing or repeated fails instead of leaving the old setup.
+    """
+    source = inspect.getsource(function)
+    for anchor, replacement in edits:
+        count = source.count(anchor)
+        require(count == 1, f"{function.__qualname__}: fixture edit anchor occurs "
+                            f"{count} times: {anchor!r}")
+        source = source.replace(anchor, replacement)
+    return source
 
 
 class NativeCallTrace:
@@ -484,6 +506,21 @@ def _canonical(data) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
+def corpus_text(data, depth=0) -> str:
+    """Committed corpus layout: one entry per line through two levels, compact JSON below.
+
+    Indented corpora were twice this size in every checkout, and the rows still diff by line.
+    """
+    indent = " " * (depth + 1)
+    if depth < 2 and isinstance(data, dict) and data:
+        entries = (f"{indent}{json.dumps(key)}: {corpus_text(value, depth + 1)}" for key, value in data.items())
+        return "{\n" + ",\n".join(entries) + "\n" + " " * depth + "}" + ("\n" if depth == 0 else "")
+    if depth < 2 and isinstance(data, list) and data and isinstance(data[0], (dict, list)):
+        entries = (indent + corpus_text(value, depth + 1) for value in data)
+        return "[\n" + ",\n".join(entries) + "\n" + " " * depth + "]" + ("\n" if depth == 0 else "")
+    return json.dumps(data, separators=(",", ":"), allow_nan=False) + ("\n" if depth == 0 else "")
+
+
 def first_difference(expected, actual, path="$", limit=180) -> str | None:
     """Locate the first mismatch without dumping whole model states."""
     if type(expected) is not type(actual):
@@ -631,7 +668,7 @@ def finish_vectors(data, default_path: Path, *, provenance: dict, argv=None,
         archive_metadata = dict(provenance, payload_sha256=archive_record["canonical_payload_sha256"],
                                 raw_archive=archive_record, projected_payload_sha256=metadata["payload_sha256"])
         archive_metadata_text = json.dumps(archive_metadata, indent=2, allow_nan=False) + "\n"
-    payload_text = json.dumps(normalized, indent=2, allow_nan=False) + "\n"
+    payload_text = corpus_text(normalized)
     metadata_text = json.dumps(metadata, indent=2, allow_nan=False) + "\n"
     if difference := first_difference(sources, source_identity()):
         raise OracleError(f"Source changed during native generation: {difference}")

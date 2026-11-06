@@ -7,6 +7,7 @@ use crate::sim::projectile::{ProjectileDetonation, ProjectilePayload, Projectile
 use crate::sim::world::Simulation;
 
 /// The shared tail calls this after damage/debris, using live Bullet fields.
+#[cfg_attr(feature = "phobos", allow(dead_code))]
 /// Eight native compass neighbors followed by the retained center identity;
 /// Cluster controls neither this count nor a second parent detonation.
 pub(super) fn emit(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDetonation) {

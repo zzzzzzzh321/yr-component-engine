@@ -83,6 +83,8 @@ struct OrdinaryMoverVisit {
     snap: MoverSnapshot,
     walk_position_before_step: Option<crate::sim::components::Position>,
     prone_crawls: Option<bool>,
+    /// Phobos `ProneSpeed` for the same prone infantryman.
+    prone_multiplier: Option<f64>,
     /// Walk75AEC0 argument1: the outer call may retry a refused head once.
     walk_retry_allowed: bool,
 }
@@ -211,6 +213,7 @@ impl FootPathRequest {
                 snap,
                 walk_position_before_step: None,
                 prone_crawls: None,
+                prone_multiplier: None,
                 walk_retry_allowed: true,
             },
         })
@@ -219,6 +222,19 @@ impl FootPathRequest {
     /// The mover facts this request's search reads, as snapshotted.
     pub(super) fn snapshot(&self) -> &MoverSnapshot {
         &self.visit.snap
+    }
+
+    /// Whether this Walk request runs with its Process argument 0: the
+    /// recursion of a refused step's retry (0x75B716, 0x75BABB, 0x75BC04),
+    /// whose next refusal takes the argument-0 arms instead of retrying.
+    pub(super) fn walk_retry_spent(&self) -> bool {
+        !self.visit.walk_retry_allowed
+    }
+
+    /// Resume as that recursion would: the batched answer of a waiting
+    /// recursion (`path_batch`).
+    pub(super) fn spend_walk_retry(&mut self) {
+        self.visit.walk_retry_allowed = false;
     }
 
     /// Find_Path's core search (`Simulation::foot_core_search`) calls this
@@ -266,21 +282,22 @@ impl FootPathRequest {
         .map(|(path, _)| path)
     }
 
-    /// FootFindPath4D3920's success tail: the found route becomes the
-    /// Foot+5E0 direction queue, and 4D4003 records the current Cell as its
-    /// reference. Foot timer/latch/retry state has its own lifetime.
+    /// FootFindPath4D3920's found-route copy at4D3E82: publish the Foot+5E0
+    /// direction queue before follower callbacks. Its caller records the
+    /// live current Cell reference only afterwards, at4D4003. Foot
+    /// timer/latch/retry state has its own lifetime.
     ///
     /// Every Foot reads only that queue.
     pub(super) fn install_route(
         &self,
         actor: &mut crate::sim::game_entity::GameEntity,
-        path: Vec<(u16, u16)>,
+        path: &[(u16, u16)],
     ) {
         let current = (actor.position.rx(), actor.position.ry());
         actor
             .navigation
             .path_replay_mut()
-            .install(current, &path, 1);
+            .install_directions(current, path, 1);
     }
 }
 
@@ -421,17 +438,22 @@ fn advance_ordinary_mover(
             .as_ref()
             .filter(|loco| loco.active_kind() == crate::rules::locomotor_type::LocomotorKind::Walk)
             .and_then(|_| entities.get(entity_id).map(|entity| entity.position));
-        let prone_crawls = entities.get(entity_id).and_then(|entity| {
-            if !infantry::is_prone_for_damage(entity) {
-                return None;
-            }
-            let obj = interner.object_type(entity.type_ref(), rules)?;
-            Some(obj.crawls)
-        });
+        // The prone arm of `InfantryClass::GetMovementSpeed @ 0x00521D80`
+        // reads the type's `Crawls=` and, under Phobos, its `ProneSpeed`.
+        let prone_type = entities
+            .get(entity_id)
+            .filter(|entity| infantry::is_prone_for_damage(entity))
+            .and_then(|entity| interner.object_type(entity.type_ref(), rules));
+        let prone_crawls = prone_type.map(|obj| obj.crawls);
+        #[cfg(feature = "phobos")]
+        let prone_multiplier = prone_type.map(|obj| rules.prone_speed_for(obj));
+        #[cfg(not(feature = "phobos"))]
+        let prone_multiplier = None;
         OrdinaryMoverVisit {
             snap,
             walk_position_before_step,
             prone_crawls,
+            prone_multiplier,
             walk_retry_allowed: true,
         }
     };
@@ -471,6 +493,7 @@ fn advance_ordinary_mover(
         snap,
         walk_position_before_step,
         prone_crawls,
+        prone_multiplier,
         walk_retry_allowed,
     } = visit;
     let Some(entity) = entities.get_mut(entity_id) else {
@@ -492,6 +515,7 @@ fn advance_ordinary_mover(
                 snap,
                 walk_position_before_step,
                 prone_crawls,
+                prone_multiplier,
                 walk_retry_allowed,
             },
         });
@@ -521,6 +545,7 @@ fn advance_ordinary_mover(
         entity,
         adjusted_speed,
         prone_crawls,
+        prone_multiplier,
         native_frame,
         resolved_terrain,
         path_grid,

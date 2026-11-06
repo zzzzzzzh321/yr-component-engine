@@ -43,9 +43,6 @@ fn slice6_rules() -> RuleSet {
     let art = IniFile::from_str(crate::rules::retail_ini_fixture::GI_ART_EXCERPT);
     let mut rules = RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).unwrap();
     rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
-    rules.bind_animation_sequences(
-        &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-    );
     rules
 }
 
@@ -78,7 +75,8 @@ fn unit(owner: &str, type_id: &str, cx: u16, cy: u16, cat: EntityCategory) -> Ma
         recruitable_a: true,
         recruitable_b: true,
         group: -1,
-        structure_upgrades: [None, None, None],
+        follows: None,
+        structure_columns: Default::default(),
         structure_ai_sellable: false,
         structure_ai_repairable: false,
         structure_online: true,
@@ -403,8 +401,22 @@ fn unit(owner: &str, type_id: &str, cx: u16, cy: u16, cat: EntityCategory) -> Ma
 // The native-speed migration (60da53f9c) hashes binary64 Foot/Drive fractions.
 // A temporary projection to the old fixed fields recovers the previous pin,
 // including Stop's rounded fixed0.3; gameplay and absolute RNG checks hold.
-// Previous Rust state pin: 0xAEA5_D31A_37FA_33F9.
-const SLICE6_BASELINE_HASH: u64 = 0x5725_6E95_8F9E_04F8;
+// #3099 adds the permanent-stealth grant byte for every entity, false here.
+// Omitting only that hash fold recovers 0x5725_6E95_8F9E_04F8; the unchanged
+// replay, gameplay and absolute RNG assertions pass with either composition.
+// #3234 removed the entity hash's sensor deposit, a None byte for every object
+// here. It sat in the same run of zero bytes as that grant byte, so the pin
+// returns to the value above. Hash composition only: a temporary control
+// restoring the byte gave the previous value, with every tripwire above green.
+// Control removed. Previous: 0x00C5_304C_C361_38CE.
+// The dynamic terrain cells now fold without their presentation-only tile
+// variant, render offset and radar colours (tag v2): hash composition only.
+// A temporary control restoring the v1 fold gave the previous value, with
+// every tripwire above green. Control removed. Previous: 0x5725_6E95_8F9E_04F8.
+// #3710 folds the game options' room bans (all off here): hash composition
+// only. A temporary control omitting that fold gave the previous value, with
+// every tripwire above green. Control removed. Previous: 0xD3E2_D02E_809A_1CCD.
+const SLICE6_BASELINE_HASH: u64 = 0xD8C3_5827_8CA8_5375;
 
 #[test]
 fn replay_hash_stable_through_slice6() {

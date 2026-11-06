@@ -229,13 +229,12 @@ pub(crate) fn active_page_title_text(
         ShellSlideKind::WolQuickMatch => crate::ui::wol_quick_match::PAGE.title_key,
         ShellSlideKind::WolAddBuddyQuery => crate::ui::wol_persona::ADD_BUDDY_PAGE.title_key,
         ShellSlideKind::Keyboard => crate::ui::shell::keyboard::KEYBOARD_PAGE.title_key,
-        ShellSlideKind::NetworkOptions => crate::ui::network_options::PAGE.title_key,
         ShellSlideKind::LanLobby => crate::ui::lan_shell::PAGE.title_key,
         ShellSlideKind::NetworkSetup(dialog) => dialog.page().title_key,
         ShellSlideKind::ChooseMap => crate::ui::skirmish_shell::CHOOSE_MAP_TITLE_KEY,
         ShellSlideKind::RandomMap => crate::ui::skirmish_shell::RANDOM_MAP_TITLE_KEY,
         // The Options heading is the dialog's own resolved label.
-        ShellSlideKind::Options | ShellSlideKind::VeraOptions => {
+        ShellSlideKind::Options => {
             return state
                 .frontend
                 .options_dialog
@@ -595,7 +594,7 @@ mod tests {
         // Steady dispatch presents the page directly to the swapchain.
         let app_source = include_str!("../frame.rs");
         let dispatch = &app_source[app_source
-            .find("ActiveMenuPage::from_state(state)")
+            .find("ScreenPage::SinglePlayer | ScreenPage::MoviesAndCredits =>")
             .expect("menu page steady dispatch")..];
         let shell_call = dispatch
             .find("render_active_menu_page")

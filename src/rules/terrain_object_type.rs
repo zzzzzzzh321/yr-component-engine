@@ -278,7 +278,7 @@ impl TerrainObjectType {
     ) {
         // TerrainRead71DEBB inherits ObjectRead5F93E4: own Rules section,
         // ReadString128, registered Voc lookup, current-ID retention on misses.
-        self.ambient_sound = sounds.read_rules_reference(section, "AmbientSound");
+        self.ambient_sound = sounds.read_rules_reference(section, "AmbientSound", None);
     }
 
     pub(crate) fn ambient_sound(&self) -> Option<&str> {
@@ -889,6 +889,7 @@ mod tests {
                 impact,
                 weapon.damage,
                 warhead,
+                true,
                 (crate::sim::combat::RAD_NO_ATTACKER, None, warhead_ref),
                 FrameEffects::default(),
             );

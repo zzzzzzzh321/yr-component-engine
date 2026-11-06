@@ -21,6 +21,7 @@ use crate::sim::scenario_session::ScenarioSession;
 use crate::sim::timer::CdTimer;
 use crate::sim::world::ObjectSubstrate;
 use crate::sim::world::{FrameEffects, SimSoundEvent, Simulation};
+use crate::util::state_hasher::hash_indices;
 
 const ACTION_PLAY_SOUND: i32 = 19;
 const ACTION_FORCE_TRIGGER: i32 = 22;
@@ -59,9 +60,8 @@ const EVENT_TECHTYPE_EXISTS: i32 = 60;
 const EVENT_TECHTYPE_DOES_NOT_EXIST: i32 = 61;
 const LOGICAL_FRAMES_PER_SECOND: i32 = crate::util::fixed_math::RA2_LOGIC_FRAMES_PER_SECOND as i32;
 
-/// Action20's music operand. Theme owns the immutable process catalog, so a
-/// type8 name is kept verbatim until that owner resolves it. This preserves
-/// Read6DD7E0's From_Name721210 result without a second music registry in sim.
+/// Action20's music operand. Fresh reads retain the process catalog's index;
+/// Name remains supported for old saved actions/effects and existing callers.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ThemeRequest {
     Name(String),
@@ -90,7 +90,8 @@ pub enum TriggerEffect {
     },
     /// Execute115's named TechnoType cameo pulse, on the native frame clock.
     FlashSidebarCameo {
-        type_id: crate::sim::intern::InternedId,
+        category: crate::sim::production::ProductionCategory,
+        type_index: i32,
         duration: i32,
         frame: i32,
     },
@@ -129,8 +130,9 @@ pub enum TriggerEffect {
     HomeCamera {
         coord: Option<[i32; 3]>,
     },
-    /// Execute105/70F120: the app owns the process wall-clock bubble. Reveal
-    /// is synchronous in sim; this ordered cue never becomes gameplay state.
+    /// 70F120 from trigger action 105 or team script action 52: the app owns
+    /// the process wall-clock bubble. Reveal is synchronous in sim; this
+    /// ordered cue never becomes gameplay state.
     TalkBubble {
         actor: Option<u64>,
         value: i32,
@@ -231,7 +233,7 @@ struct TagType {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct RuntimeDefinitions {
+pub(crate) struct RuntimeDefinitions {
     team_types: Vec<String>,
     /// TeamType+D0 references resolved during physical Read6F1341. This is
     /// the sole owner; Team constructors consume the retained ordinal and
@@ -262,6 +264,28 @@ impl RuntimeDefinitions {
     fn emp_events_enabled(&self) -> bool {
         self.emp_event_policy.unwrap_or(crate::rules::ARES_ENABLED)
     }
+
+    /// TeamTypeClass::FindByIDOrName @ 0x006F0FC0 (retail gamemd.exe).
+    /// Scan the constructor vector, ID then Name for each entry; callers own
+    /// token preprocessing. This never allocates, trims or handles sentinels.
+    pub(crate) fn find_team_type(
+        &self,
+        requested: &str,
+        teams: &crate::rules::team_ai_ini::TeamAiIniRegistry,
+    ) -> Option<&str> {
+        self.team_types
+            .iter()
+            .find(|id| {
+                id.eq_ignore_ascii_case(requested)
+                    || teams.team_type_name(id).eq_ignore_ascii_case(requested)
+            })
+            .map(String::as_str)
+    }
+
+    pub(crate) fn team_type_ids(&self) -> impl Iterator<Item = &str> {
+        self.team_types.iter().map(String::as_str)
+    }
+
     fn team_type(&mut self, name: &str) -> Option<usize> {
         if is_native_none_type_name(name) {
             return None;
@@ -322,6 +346,7 @@ impl RuntimeDefinitions {
         entry: ActionEntry,
         eva: Option<&crate::rules::sound_ini::EvaRegistry>,
         sounds: Option<&crate::rules::sound_ini::SoundRegistry>,
+        themes: Option<&crate::rules::theme_ini::ThemeCatalog>,
     ) -> RuntimeAction {
         let reference = match entry.definition_reference() {
             Some(ActionDefinitionReference::Team(selector)) => match selector {
@@ -348,23 +373,34 @@ impl RuntimeDefinitions {
             None => None,
         };
         let parameter_type = entry.params.first().map_or(0, |v| crt_atoi(v));
-        let value = if parameter_type == 6 {
-            // Original753250 scans the raw, untrimmed name. Missing names
-            // materialize -1; no cue-name resolution runs during Execute.
-            Some(
+        let value = match parameter_type {
+            // TAction::Read6DD7BC/6DD7CE stores the raw name's EVA753250
+            // or Voc7514D0 ordinal in +90 for every action, including timer
+            // Execute27 at6DE5C9. Unknown names materialize -1, not zero.
+            6 | 7 => Some(
                 entry
                     .params
                     .get(1)
-                    .and_then(|name| eva.and_then(|catalog| catalog.index_of(name)))
+                    .and_then(|name| {
+                        if parameter_type == 6 {
+                            eva?.index_of(name)
+                        } else {
+                            sounds?.index_of(name)
+                        }
+                    })
                     .unwrap_or(-1),
-            )
-        } else {
-            entry.literal_value()
+            ),
+            // TActionClass::Read6DD7E0..6DD7EB, original instruction listing:
+            // From_Name721210 stores its signed result at +90 for every
+            // ActionID, independently of playback admission. Reuse the same
+            // process-selected catalog as Theme; raw missing names become -1.
+            8 => Some(entry.params.get(1).map_or(-1, |name| {
+                themes.map_or(-1, |catalog| catalog.from_name(name))
+            })),
+            _ => entry.literal_value(),
         };
         // FindIndex7514D0 compares the untrimmed token case-insensitively.
-        let sound = if parameter_type == 7 {
-            entry.params.get(1).and_then(|name| sounds?.get(name))
-        } else if matches!(entry.kind, 19 | 98 | 99) {
+        let sound = if parameter_type == 7 || matches!(entry.kind, 19 | 98 | 99) {
             //Execute's Voc call consumes +90 regardless of the authored
             //parameter type. Resolve a literal ordinal once in this reader,
             //through the same fixed catalog as a type7 name.
@@ -380,23 +416,15 @@ impl RuntimeDefinitions {
             sound,
         }
     }
-    fn read_map(
-        map: &crate::map::map_file::MapFile,
-        teams: &crate::rules::team_ai_ini::TeamAiIniRegistry,
-        eva: Option<&crate::rules::sound_ini::EvaRegistry>,
-        sounds: Option<&crate::rules::sound_ini::SoundRegistry>,
-        emp_event_policy: Option<bool>,
-    ) -> Self {
-        let mut definitions = Self {
-            emp_event_policy,
-            ..Self::default()
-        };
+    pub(crate) fn read_teams(teams: &crate::rules::team_ai_ini::TeamAiIniRegistry) -> Self {
+        let mut definitions = Self::default();
         // Full_Init687984/68798D: reads are transactions, not the final merged
         // TeamType vector. Team.Tag can first-construct TagTypes here.
-        for team in teams.team_type_read_sequence() {
-            let Some(index) = definitions.team_type(&team.id) else {
+        for (id, read) in teams.team_type_registration_sequence() {
+            let Some(index) = definitions.team_type(id) else {
                 continue;
             };
+            let Some(team) = read else { continue };
             // Read6F131E retains +D0 on an absent/empty ReadString; a
             // nonempty value calls6E6310, including either null literal.
             // Only this physical pass can construct a new TagType identity.
@@ -406,6 +434,19 @@ impl RuntimeDefinitions {
                 definitions.team_tags[index] = resolved;
             }
         }
+        definitions
+    }
+
+    fn read_map(
+        map: &crate::map::map_file::MapFile,
+        teams: &crate::rules::team_ai_ini::TeamAiIniRegistry,
+        eva: Option<&crate::rules::sound_ini::EvaRegistry>,
+        sounds: Option<&crate::rules::sound_ini::SoundRegistry>,
+        themes: Option<&crate::rules::theme_ini::ThemeCatalog>,
+        emp_event_policy: Option<bool>,
+    ) -> Self {
+        let mut definitions = Self::read_teams(teams);
+        definitions.emp_event_policy = emp_event_policy;
         // LoadFromINIList7275D0/6E5ED0 find or allocate each key's Type,
         // ignoring case, and ReadINI727240/6E6080 read every record by that
         // Type's own ID, exact case. A key differing from an earlier one only
@@ -435,13 +476,12 @@ impl RuntimeDefinitions {
                     .events
                     .get(&id)
                     .map_or_else(Vec::new, |record| record.conditions().to_vec());
-                // Events are prepended, but their reference factories ran in
-                // source order before the retained reverse traversal.
+                // TEvent::Read71F595 is find-only and runs before this
+                // Trigger's action factories. Unknown references stay null.
                 for event in events.iter_mut().rev() {
                     if let Some(team) = event.team_name.as_deref() {
-                        event.team_name = definitions
-                            .team_type(team)
-                            .map(|index| definitions.team_types[index].clone());
+                        event.team_name =
+                            definitions.find_team_type(team, teams).map(str::to_owned);
                     }
                 }
                 //727530..7275A3: a present entry rebuilds the action list.
@@ -450,7 +490,7 @@ impl RuntimeDefinitions {
                         .entries()
                         .iter()
                         .cloned()
-                        .map(|entry| definitions.resolve_action(entry, eva, sounds))
+                        .map(|entry| definitions.resolve_action(entry, eva, sounds, themes))
                         .collect::<Vec<_>>()
                 });
                 let typ = &mut definitions.trigger_types[index];
@@ -556,9 +596,13 @@ impl RuntimeDefinitions {
 // Original jump-table bytes71F700/71F744/71F780/71F7C0 and6E3F08.
 // These are classification only, never substitutes for event predicates.
 fn event_classification(kind: i32, emp_events: bool) -> u8 {
-    // Ares3.0 GetFlags1004F6A0: EMP62..65 are attached-object events;
-    // Persistable1004F610 returns false for every one of them.
-    if emp_events && matches!(kind, 62..=65) {
+    // Ares3.0 GetFlags1004F6A0 (table1004F704): EMP62..65, driver killed
+    //67/68 and vehicle taken69/70 are attached-object events. Components
+    // select the EMP classification independently of the native Ares profile;
+    // the Persistable1004F610 predicate is separate from these flags.
+    if (emp_events && matches!(kind, 62..=65))
+        || (crate::rules::ARES_ENABLED && matches!(kind, 67..=70))
+    {
         return 2;
     }
     let mut flags = 0;
@@ -626,7 +670,7 @@ struct LiveTrigger {
     enabled: bool,
     pending: bool,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct LiveTag {
     type_index: usize,
     ///6E4F44 prepends instances, reversing definition-construction order.
@@ -638,6 +682,18 @@ struct LiveTag {
     attached_cell: (i16, i16),
     pending: bool,
     dispatch_guard: bool,
+}
+// The derived fold, but with the trigger list as 64-bit words on every
+// target ([`hash_indices`]).
+impl Hash for LiveTag {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.type_index.hash(hasher);
+        hash_indices(&self.triggers, hasher);
+        self.refs.hash(hasher);
+        self.attached_cell.hash(hasher);
+        self.pending.hash(hasher);
+        self.dispatch_guard.hash(hasher);
+    }
 }
 /// Team IDs and Techno stable IDs belong to separate identity domains.
 #[derive(
@@ -678,6 +734,7 @@ pub struct TriggerRuntime {
     #[serde(skip)]
     spring_actions_left: usize,
     #[cfg(any(test, feature = "test-support"))]
+    #[serde(skip)]
     fixture_difficulty: Option<i32>,
     #[cfg(any(test, feature = "test-support"))]
     #[serde(skip)]
@@ -693,6 +750,174 @@ pub struct TriggerRuntime {
     #[cfg(any(test, feature = "test-support"))]
     #[serde(skip)]
     stop_before_action: Option<i32>,
+    /// Dev campaign trigger-trace capture: `Some` while recording.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    #[serde(skip)]
+    trace: Option<TriggerTrace>,
+}
+
+/// Records of the dev campaign trigger-trace capture, taken after each step.
+/// Observation only: nothing here feeds back into simulation state.
+#[cfg(any(test, feature = "dev-overlays"))]
+#[derive(Debug, Clone, Default)]
+struct TriggerTrace {
+    springs: Vec<TriggerSpringRecord>,
+    events: Vec<TriggerTraceEvent>,
+    next_seq: u32,
+    /// The (Spring `seq`, action ordinal) each nested record happens in.
+    parents: Vec<(u32, usize)>,
+    /// Inside a poll or House raise loop, whose own raises are not recorded.
+    window: bool,
+    /// The frame of the latest record, for records made without a session.
+    frame: u32,
+    /// The latest recorded (result, persist) of each (Trigger, event ordinal).
+    predicates: BTreeMap<(usize, usize), (bool, bool)>,
+}
+
+#[cfg(any(test, feature = "dev-overlays"))]
+impl TriggerTrace {
+    fn next_seq(&mut self) -> u32 {
+        self.next_seq += 1;
+        self.next_seq - 1
+    }
+}
+
+/// A trace record other than a Spring. `seq` orders it among the Springs, so
+/// a native replay can rebuild each frame's poll, House raises and the world
+/// inputs between them.
+#[cfg(any(test, feature = "dev-overlays"))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "event")]
+pub enum TriggerTraceEvent {
+    /// Logic55AFB0's Tag poll begins (`end` false) or ends.
+    Poll {
+        seq: u32,
+        binary_frame: u32,
+        end: bool,
+    },
+    /// HouseClass::Update's event-8 raise (4F8F87..4F8FBC) begins or ends.
+    HouseRaise {
+        seq: u32,
+        binary_frame: u32,
+        house: String,
+        end: bool,
+    },
+    /// A SetGlobal689670/SetLocal689910 write through the shared owner.
+    Variable {
+        seq: u32,
+        binary_frame: u32,
+        parent: Option<(u32, usize)>,
+        global: bool,
+        index: i32,
+        set: bool,
+    },
+    /// A live Tag constructed after the trace started (Team Tags, Tags first
+    /// attached at run time), with its Trigger chain.
+    TagConstructed {
+        seq: u32,
+        binary_frame: u32,
+        parent: Option<(u32, usize)>,
+        tag: TraceTag,
+    },
+    /// The first record: the live Tags in registry order, the Logic, map and
+    /// House Tag vectors, the poll's dirty flags and the set variables.
+    Init {
+        seq: u32,
+        binary_frame: u32,
+        tags: Vec<TraceTag>,
+        logic: Vec<usize>,
+        map: Vec<usize>,
+        houses: Vec<(String, Vec<usize>)>,
+        dirty: [bool; 4],
+        globals: Vec<u32>,
+        locals: Vec<u32>,
+    },
+    /// A Tag6E53A0 raise from outside the poll and House raise loops, or one
+    /// nested in an action. The loops' own raises are left to the replay.
+    Dispatch {
+        seq: u32,
+        binary_frame: u32,
+        parent: Option<(u32, usize)>,
+        tag: usize,
+        kind: i32,
+        force: bool,
+        actor: Option<u64>,
+        cell: (i16, i16),
+    },
+    /// A HasOccurred71E940 result for an event kind that reads the world,
+    /// recorded when it differs from the same event's previous result.
+    /// `persist` is set when this call wrote the persistence flag.
+    Predicate {
+        seq: u32,
+        binary_frame: u32,
+        parent: Option<(u32, usize)>,
+        trigger: usize,
+        ordinal: usize,
+        result: bool,
+        persist: bool,
+    },
+    /// A reinforcement member Place_Reinforcement_Members (0x65E010) could
+    /// not place: every direction refused, or the nearby search found no
+    /// Cell (`cell` (0,0)). Its residual (the next member left in limbo
+    /// natively) needs a refused placement followed by another member; with
+    /// no Cell from the start, native deletes every member (0x65E601,
+    /// 0x65E618) and leaves none.
+    PlacementRefused {
+        seq: u32,
+        binary_frame: u32,
+        parent: Option<(u32, usize)>,
+        cell: (i16, i16),
+    },
+    /// A Tag's attachment count (+2C) after an attach or detach.
+    Refs {
+        seq: u32,
+        binary_frame: u32,
+        parent: Option<(u32, usize)>,
+        tag: usize,
+        refs: i32,
+    },
+}
+
+/// A live Tag in a trace record: its index, TagType ID, attachment count and
+/// Trigger chain (live index, TriggerType ID, enabled), first to last.
+#[cfg(any(test, feature = "dev-overlays"))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TraceTag {
+    pub tag: usize,
+    pub tag_type: String,
+    pub refs: i32,
+    pub triggers: Vec<(usize, String, bool)>,
+}
+
+/// Event kinds a native replay computes itself from the trigger state, the
+/// frame and the variables; the trace records every other kind's results.
+#[cfg(any(test, feature = "dev-overlays"))]
+const REPLAYED_EVENT_KINDS: [i32; 8] = [EVENT_ANY, 13, 14, 27, 28, 36, 37, 47];
+
+/// One Spring7265C0 call, recorded for the dev campaign trigger-trace capture.
+/// Observation only: it never feeds back into simulation state.
+#[cfg(any(test, feature = "dev-overlays"))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TriggerSpringRecord {
+    /// Order among all trace records.
+    pub seq: u32,
+    /// The (Spring `seq`, action ordinal) this Spring happens in, if nested.
+    pub parent: Option<(u32, usize)>,
+    pub binary_frame: u32,
+    /// The TriggerType ID, as authored in the map's [Triggers].
+    pub trigger: String,
+    /// The live Tag holding the Trigger and its TagType ID, if any.
+    pub tag: Option<(usize, String)>,
+    /// Whether the raise was forced (Force bypasses the event predicates).
+    pub forced: bool,
+    /// The event kind raised to the Tag (0 for a Trigger forced by Force22).
+    pub raised_kind: i32,
+    /// The object Spring received (stable ID and type ID), if any.
+    pub actor: Option<(u64, String)>,
+    /// The packed Cell Spring received; (0,0) is the empty Cell.
+    pub cell: (i16, i16),
+    /// Each executed action kind and whether Execute reported it handled.
+    pub actions: Vec<(i32, bool)>,
 }
 
 /// Draw-free transfer of the outgoing Scenario's local values into a fresh
@@ -792,17 +1017,22 @@ impl TriggerRuntime {
     pub(crate) fn hash_state(&self, hasher: &mut impl Hasher) {
         // Definition ordinals, timers, active registration order, attachments
         // and the deferred queue affect later actions and are all retained.
-        // Observers never participate in this fold.
+        // Observers never participate in this fold. Index lists fold as
+        // 64-bit words on every target ([`hash_indices`]).
         self.globals_set.hash(hasher);
         self.locals_set.hash(hasher);
         self.definitions.hash(hasher);
         self.tags.hash(hasher);
         self.triggers.hash(hasher);
-        self.tag_order.hash(hasher);
-        self.trigger_order.hash(hasher);
-        self.logic_tags.hash(hasher);
-        self.map_tags.hash(hasher);
-        self.house_tags.hash(hasher);
+        hash_indices(&self.tag_order, hasher);
+        hash_indices(&self.trigger_order, hasher);
+        hash_indices(&self.logic_tags, hasher);
+        hash_indices(&self.map_tags, hasher);
+        self.house_tags.len().hash(hasher);
+        for (house, tags) in &self.house_tags {
+            house.hash(hasher);
+            hash_indices(tags, hasher);
+        }
         self.attachments.hash(hasher);
         self.cell_tags.hash(hasher);
         self.dirty.hash(hasher);
@@ -810,6 +1040,38 @@ impl TriggerRuntime {
         self.map_cursor.hash(hasher);
         self.definitions_prepared.hash(hasher);
         self.classified.hash(hasher);
+    }
+
+    /// VERA-only match-checksum terms
+    /// ([`Simulation::compute_multiplayer_frame_checksum`]): each set
+    /// Scenario global, then each set local (high bit set), then each live
+    /// trigger in registration order with what `TriggerClass::ComputeCRC @
+    /// 0x00726790` folds (type, Destroyed `+0x30`, Enabled, the timer's
+    /// remaining time, the occurred-event bits), then each live Tag with
+    /// what `TagClass::ComputeCRC @ 0x006E56E0` folds (type, Destroyed).
+    /// `ScenarioClass::ComputeCRC @ 0x0068B940` folds no variable; VERA adds
+    /// them because actions write them and events poll them.
+    pub(crate) fn fold_match_checksum(
+        &self,
+        frame: i32,
+        checksum: &mut crate::sim::multiplayer_checksum::RetailChecksumAccumulator,
+    ) {
+        for &index in &self.globals_set {
+            checksum.fold_value(index);
+        }
+        for &index in &self.locals_set {
+            checksum.fold_value(index | 0x8000_0000);
+        }
+        for trigger in self.trigger_order.iter().filter_map(|&i| self.trigger(i)) {
+            checksum.fold_value(trigger.type_index as u32);
+            checksum.fold_value(u32::from(trigger.pending) | u32::from(trigger.enabled) << 1);
+            checksum.fold_value(trigger.timer.remaining(frame) as u32);
+            checksum.fold_value(trigger.completed);
+        }
+        for tag in self.tag_order.iter().filter_map(|&i| self.tag(i)) {
+            checksum.fold_value(tag.type_index as u32);
+            checksum.fold_value(u32::from(tag.pending));
+        }
     }
     fn tag(&self, index: usize) -> Option<&LiveTag> {
         self.tags.get(index)?.as_ref()
@@ -822,6 +1084,7 @@ impl TriggerRuntime {
         condition: &EventCondition,
         current_frame: u32,
         simulation: &Simulation,
+        rules: &crate::rules::ruleset::RuleSet,
     ) -> bool {
         match condition.kind {
             EVENT_ELAPSED_SCENARIO_TIME => {
@@ -847,29 +1110,27 @@ impl TriggerRuntime {
                 values.contains(&(condition.value as u32))
                     == matches!(condition.kind, EVENT_GLOBAL_IS_SET | EVENT_LOCAL_IS_SET)
             }
-            EVENT_TECHTYPE_EXISTS => {
-                let sim = simulation;
-                let min_count = condition.value;
-                let Some(type_id) = condition.type_name.as_deref() else {
+            EVENT_TECHTYPE_EXISTS | EVENT_TECHTYPE_DOES_NOT_EXIST => {
+                // TEventClass::HasOccurred, original gamemd.exe:
+                // 71E96B/71EA30 select the last global TechnoType with an
+                // exact stored ID before comparing concrete type pointers.
+                // Reuse Action106's registry owner, including its explicit
+                // unrepresentable truncated-identity boundary.
+                let Some(object) = condition
+                    .type_name
+                    .as_deref()
+                    .and_then(|name| rules.native_techno_type_exact(name))
+                else {
                     return false;
                 };
-                if type_id.is_empty() {
-                    return false;
+                let count = count_techtype(simulation, object);
+                if condition.kind == EVENT_TECHTYPE_EXISTS {
+                    // 71EA19 checks the signed threshold inside the scan:
+                    // zero/negative still requires a nonempty Techno vector.
+                    !simulation.entities().is_empty() && count as i64 >= i64::from(condition.value)
+                } else {
+                    count == 0
                 }
-                // Native71EA03 tests the signed threshold inside its scan:
-                // even a nonpositive threshold requires at least one Techno.
-                !sim.entities().is_empty()
-                    && count_techtype(sim, type_id) as i64 >= i64::from(min_count)
-            }
-            EVENT_TECHTYPE_DOES_NOT_EXIST => {
-                let sim = simulation;
-                let Some(type_id) = condition.type_name.as_deref() else {
-                    return false;
-                };
-                if type_id.is_empty() {
-                    return false;
-                }
-                count_techtype(sim, type_id) == 0
             }
             _ => false,
         }
@@ -888,6 +1149,13 @@ struct TagEventInput {
     force: bool,
 }
 
+/// The two native TeamClass event23 broadcasts use opposite array walks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TeamTagOrder {
+    Forward,
+    Reverse,
+}
+
 /// Spring7265C0 resolves its authored House per action, preserving the incoming
 /// actor and packed Cell alongside the live Trigger. Direct TAction controls
 /// may deliberately supply no live instance.
@@ -902,6 +1170,36 @@ struct TriggerActionContext {
 pub const SCENARIO_GLOBAL_COUNT: usize = 50;
 
 impl Simulation {
+    /// `TalkBubble::SetObjectAndFrame @ 0x0070F120`, called by trigger
+    /// action 105 and team script action 52. A null object or frame 0 clears
+    /// the bubble (`0x0070F194..0x0070F1CC`); otherwise it shows `frame` over
+    /// `actor` for `TalkBubbleTime` (Rules `+0x1800`).
+    pub(crate) fn talk_bubble_set_object_and_frame(
+        &mut self,
+        actor: Option<u64>,
+        frame: i32,
+        context: crate::sim::world::UninitContext<'_>,
+    ) {
+        let actor = actor.filter(|_| frame != 0);
+        let duration = if actor.is_some() {
+            context.rules().general.talk_bubble_time
+        } else {
+            0
+        };
+        //70F134/13A/173 commits the request BEFORE Map callbacks. A nested
+        //105 from discovery must win.
+        self.publish_trigger_effects(vec![TriggerEffect::TalkBubble {
+            actor,
+            value: if actor.is_some() { frame } else { 0 },
+            duration,
+        }]);
+        if let Some(actor) = actor {
+            //70F159..70F189: flags0/0/0/1/1, current player (not the Team
+            //owner), literal radius2, including negative values.
+            self.reveal_talk_bubble_actor(actor, context);
+        }
+    }
+
     /// Validate this owner's retained identities before the restore coordinator
     /// publishes a candidate. No map re-read or live constructor runs on load.
     /// Destruction may leave orphan Triggers until their shared725C70 tickets
@@ -1110,6 +1408,50 @@ impl Simulation {
         Ok(())
     }
 
+    /// Install fixed AIMD plus scenario AI definitions after RuleSet identities
+    /// are interned and before the first gameplay tick. This is data ingress
+    /// only: the installed VM contains no live TeamClass instances.
+    ///
+    /// A fixed-AIMD definition that fails RuleSet resolution refuses the whole
+    /// install (`Err`, nothing installed); scenario-origin omissions install
+    /// and come back as logged, nonfatal diagnostics.
+    pub fn install_team_ai_registry(
+        &mut self,
+        registry: &crate::rules::team_ai_ini::TeamAiIniRegistry,
+        rules: &crate::rules::ruleset::RuleSet,
+    ) -> Result<
+        Vec<crate::sim::team_script_vm::TeamAiInstallDiagnostic>,
+        Vec<crate::sim::team_script_vm::TeamAiInstallDiagnostic>,
+    > {
+        // Cold callers stage the same physical Team prefix. Ordinary loaders
+        // already prepared the map and its action-created identities; never
+        // replay those reads or replace that tail during AI installation.
+        let staged = (!self.trigger_runtime.definitions_prepared)
+            .then(|| RuntimeDefinitions::read_teams(registry));
+        let definitions = staged.as_ref().unwrap_or(&self.trigger_runtime.definitions);
+        let (vm, diagnostics) =
+            crate::sim::team_script_vm::TeamScriptVm::from_prepared_ini_registry(
+                registry,
+                definitions,
+                &mut self.interner,
+                rules,
+            );
+        if diagnostics
+            .iter()
+            .any(crate::sim::team_script_vm::TeamAiInstallDiagnostic::is_fixed_source_refusal)
+        {
+            return Err(diagnostics);
+        }
+        if let Some(definitions) = staged {
+            self.trigger_runtime.definitions = definitions;
+        }
+        self.team_script_vm = vm;
+        for diagnostic in &diagnostics {
+            log::warn!("Team AI install diagnostic: {diagnostic:?}");
+        }
+        Ok(diagnostics)
+    }
+
     pub(crate) fn trigger_definitions_prepared(&self) -> bool {
         self.trigger_runtime.definitions_prepared
     }
@@ -1164,6 +1506,7 @@ impl Simulation {
         teams: &crate::rules::team_ai_ini::TeamAiIniRegistry,
         eva: Option<&crate::rules::sound_ini::EvaRegistry>,
         sounds: Option<&crate::rules::sound_ini::SoundRegistry>,
+        themes: Option<&crate::rules::theme_ini::ThemeCatalog>,
         rules: &crate::rules::ruleset::RuleSet,
     ) {
         // ReadLocal689B2E clears names only. Missing second tokens and slots
@@ -1187,6 +1530,7 @@ impl Simulation {
                 teams,
                 eva,
                 sounds,
+                themes,
                 rules.emp_event_policy_override(),
             ),
             definitions_prepared: true,
@@ -1266,6 +1610,20 @@ impl Simulation {
                 .unwrap()
                 .triggers
                 .insert(0, index);
+        }
+        #[cfg(any(test, feature = "dev-overlays"))]
+        if self.trigger_runtime.trace.is_some() {
+            let tag = self.trigger_runtime.trace_tag(tag_index);
+            Self::trace_event(
+                &mut self.trigger_runtime,
+                self.session.binary_frame(),
+                |seq, binary_frame, parent| TriggerTraceEvent::TagConstructed {
+                    seq,
+                    binary_frame,
+                    parent,
+                    tag,
+                },
+            );
         }
         tag_index
     }
@@ -1555,6 +1913,24 @@ impl Simulation {
             .condition
             .clone();
         match condition.kind {
+            #[cfg(feature = "ares")]
+            67..=70 => {
+                // Ares HasOccurred71E949 ->100503E0: driver killed
+                //1004F881..1004F8C7 and vehicle taken1004F8CA..1004F91F.
+                // Each requires the affected Techno;68 and70 additionally
+                // compare the source's raw House+30. No persistence write.
+                // Original71F950 stays false for these kinds, so they never latch.
+                input.kind == condition.kind
+                    && input
+                        .actor
+                        .is_some_and(|id| self.substrate.entities.contains(id))
+                    && (matches!(condition.kind, 67 | 69)
+                        || input
+                            .source
+                            .and_then(|id| self.substrate.entities.get(id))
+                            .and_then(|source| self.base_reservation_house_index(source.owner()))
+                            .is_some_and(|index| index == condition.value))
+            }
             62..=65 => {
                 // Installed HasOccurred71E949 ->100503E0/1004F7DC..870.
                 // The actor is the affected Techno. House-specific63/65
@@ -1579,6 +1955,13 @@ impl Simulation {
                 }
                 (actor.emp_remaining() > 0) == matches!(condition.kind, 62 | 63)
             }
+            // TEventClass::HasOccurred, original gamemd.exe:
+            // 0x0071E950/0x0071EC83 bypass the raised-kind/editor gates for
+            // negative or >=62 kinds; 0x0071F084 reaches AL1 at0x0071F1B4.
+            // No persistence or retained-House write. Keep Ares' replacement
+            // dispatcher and the known0..61 predicates separate.
+            #[cfg(not(feature = "ares"))]
+            kind if !(0..=61).contains(&kind) => true,
             53 => {
                 // HasOccurred71ECF5..71ED56, original gamemd: raised53
                 // and clear A8ED6B admit a forced GetDisplayOwner(+D0,1).
@@ -1591,7 +1974,14 @@ impl Simulation {
                 let Some(actor) = input.actor.and_then(|id| self.substrate.entities.get(id)) else {
                     return false;
                 };
-                let displayed = actor.disguise_house(true, self.session.current_house(), false);
+                // VERA network adaptation: an undisguised agent falls back
+                // to PlayerPtr, which differs per client and now feeds the
+                // match checksum, so a network game compares the worn
+                // identity alone.
+                let viewer = (!self.session.game_mode().is_network())
+                    .then(|| self.session.current_house())
+                    .flatten();
+                let displayed = actor.disguise_house(true, viewer, false);
                 let selected = u16::try_from(condition.value).ok().and_then(|country| {
                     self.house_by_country_index(crate::rules::ruleset::CountryIdx(country), rules)
                 });
@@ -1622,9 +2012,10 @@ impl Simulation {
                             self.interner.resolve(kind),
                         )
                         .is_some()
-                    && rules.type_array_index(
+                    && self.interner.type_array_index(
+                        kind,
                         crate::rules::object_type::ObjectCategory::Infantry,
-                        self.interner.resolve(kind),
+                        rules,
                     ) == Some(condition.value);
                 if matched {
                     *persistence = true;
@@ -1787,7 +2178,7 @@ impl Simulation {
                 true
             }
             32 | 57 => {
-                //71EEFB/71EF1F ->49FAE0 with House+5550 (active, not owned).
+                //71EFA8/71EFCB ->49FAE0 with House+5550 (active, not owned).
                 //The null incoming House reaches the original generic true
                 //tail without writing persistence.
                 let Some(owner) = incoming_house else {
@@ -1887,7 +2278,7 @@ impl Simulation {
                 })
             }
             30 | 58 => {
-                //71EFA2/71EFC2 selects Event.value's Country, then the retained
+                //71F099/71F0BD select Event.value's Country, then the retained
                 //House power ratio. Neither branch writes persistence.
                 let owner = {
                     u16::try_from(condition.value).ok().and_then(|country| {
@@ -1945,9 +2336,12 @@ impl Simulation {
             }
             //71F28B selects the generic true tail71F1B4, no persistence write.
             EVENT_ANY => true,
-            _ => self
-                .trigger_runtime
-                .evaluate_event(&condition, self.session.binary_frame(), self),
+            _ => self.trigger_runtime.evaluate_event(
+                &condition,
+                self.session.binary_frame(),
+                self,
+                rules,
+            ),
         }
     }
 
@@ -1983,14 +2377,19 @@ impl Simulation {
                 let bit = 1u32.wrapping_shl(ordinal as u32);
                 let completed = self.trigger_runtime.trigger(index).unwrap().completed & bit != 0;
                 if !completed {
-                    if !self.has_occurred(
+                    #[cfg(any(test, feature = "dev-overlays"))]
+                    let before = persistence;
+                    let occurred = self.has_occurred(
                         ordinal,
                         input,
                         incoming_house,
                         &mut persistence,
                         rules,
                         index,
-                    ) {
+                    );
+                    #[cfg(any(test, feature = "dev-overlays"))]
+                    self.trace_predicate(index, ordinal, occurred, persistence && !before);
+                    if !occurred {
                         result = false;
                         continue;
                     }
@@ -2079,6 +2478,22 @@ impl Simulation {
         if (self.session.binary_frame() as i32) % 8 != 0 {
             return;
         }
+        #[cfg(any(test, feature = "dev-overlays"))]
+        let trace_house = |sim: &mut Self, end: bool| {
+            let house = sim.interner.resolve(house).to_owned();
+            Self::trace_event(
+                &mut sim.trigger_runtime,
+                sim.session.binary_frame(),
+                |seq, binary_frame, _| TriggerTraceEvent::HouseRaise {
+                    seq,
+                    binary_frame,
+                    house,
+                    end,
+                },
+            );
+        };
+        #[cfg(any(test, feature = "dev-overlays"))]
+        trace_house(self, false);
         let count = self
             .trigger_runtime
             .house_tags
@@ -2109,6 +2524,8 @@ impl Simulation {
                 frame_effects,
             );
         }
+        #[cfg(any(test, feature = "dev-overlays"))]
+        trace_house(self, true);
         self.publish_trigger_effects(effects);
     }
 
@@ -2160,37 +2577,63 @@ impl Simulation {
         self.publish_trigger_effects(effects);
     }
 
-    /// Recalc6EA49F..6EA4D2 walks the current Tag array backwards before
-    /// destroying an empty, previously-full leaving Team. No own RNG draws,
-    /// timers or detach: ordinary Register/Reset/actions own those effects.
+    /// Retail gamemd.exe: TeamClass::Recalc6EA49F..6EA4D2 walks the Tag
+    /// array backwards; TeamClass::AI6E92D0..6E9320 walks forwards and
+    /// revisits the slot after a successful raise (6E9312). Both broadcast
+    /// before destroying the empty leaving Team. No own RNG draws, timers
+    /// or detach: ordinary Register/Reset/actions own those effects.
+    ///
+    /// A true one-shot raise destroys a Trigger, so its revisits end. Residual:
+    /// Rust revisits a repeating Tag only when the raise shifted another Tag
+    /// into the slot. Natively that revisit never ends while one of its
+    /// Triggers keeps occurring, and it can first spring a sibling Trigger
+    /// that Rust drops.
     pub(crate) fn raise_team_left_map_tags(
         &mut self,
+        order: TeamTagOrder,
         rules: &crate::rules::ruleset::RuleSet,
         registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
         frame_effects: FrameEffects<'_>,
     ) {
-        let count = self.trigger_runtime.tag_order.len();
+        let mut ordinal = match order {
+            TeamTagOrder::Forward => Some(0),
+            TeamTagOrder::Reverse => self.trigger_runtime.tag_order.len().checked_sub(1),
+        };
         let mut effects = Vec::new();
-        for ordinal in (0..count).rev() {
-            // As with House tag traversal, shrinking callbacks can leave a
-            // stale native slot beyond the new count; Rust skips that slot.
-            let Some(&tag) = self.trigger_runtime.tag_order.get(ordinal) else {
-                continue;
-            };
-            if self.dispatch_live_tag_event(
-                tag,
-                TagEventInput {
-                    kind: 23,
-                    ..Default::default()
-                },
-                &mut effects,
-                rules,
-                registry,
-                frame_effects,
-            ) && self.trigger_runtime.tag_order.is_empty()
-            {
+        while let Some(slot) = ordinal {
+            if let Some(&tag) = self.trigger_runtime.tag_order.get(slot) {
+                let repeating = self.trigger_runtime.tag(tag).is_some_and(|live| {
+                    self.trigger_runtime.definitions.tag_types[live.type_index].repeat == 2
+                });
+                let raised = self.dispatch_live_tag_event(
+                    tag,
+                    TagEventInput {
+                        kind: 23,
+                        ..Default::default()
+                    },
+                    &mut effects,
+                    rules,
+                    registry,
+                    frame_effects,
+                );
+                if raised && self.trigger_runtime.tag_order.is_empty() {
+                    break;
+                }
+                if raised
+                    && order == TeamTagOrder::Forward
+                    && (!repeating || self.trigger_runtime.tag_order.get(slot) != Some(&tag))
+                {
+                    continue;
+                }
+            } else if order == TeamTagOrder::Forward {
                 break;
             }
+            // Reverse traversal retains its original count. Shrinking
+            // callbacks can leave stale native slots; safe storage skips them.
+            ordinal = match order {
+                TeamTagOrder::Forward => slot.checked_add(1),
+                TeamTagOrder::Reverse => slot.checked_sub(1),
+            };
         }
         self.publish_trigger_effects(effects);
     }
@@ -2651,6 +3094,8 @@ impl Simulation {
             self.trigger_runtime.spring_actions_left = MAX_TRIGGER_SPRING_ACTIONS;
         }
         self.trigger_runtime.spring_depth += 1;
+        #[cfg(any(test, feature = "dev-overlays"))]
+        let record = self.trace_spring(index, type_index, input);
         let mut result = false;
         for ordinal in 0..count {
             if self.trigger_runtime.spring_actions_left == 0 {
@@ -2662,7 +3107,11 @@ impl Simulation {
             let context = self.trigger_action_context(type_index, Some(index), input, rules);
             let action =
                 self.trigger_runtime.definitions.trigger_types[type_index].actions[ordinal].clone();
-            result |= self.apply_live_trigger_action(
+            #[cfg(any(test, feature = "dev-overlays"))]
+            if let (Some((_, seq)), Some(trace)) = (record, self.trigger_runtime.trace.as_mut()) {
+                trace.parents.push((seq, ordinal));
+            }
+            let handled = self.apply_live_trigger_action(
                 &action,
                 context,
                 effects,
@@ -2670,9 +3119,189 @@ impl Simulation {
                 overlay_registry,
                 frame_effects,
             );
+            #[cfg(any(test, feature = "dev-overlays"))]
+            if let (Some((record, _)), Some(trace)) = (record, self.trigger_runtime.trace.as_mut())
+            {
+                trace.parents.pop();
+                trace.springs[record]
+                    .actions
+                    .push((action.entry.kind, handled));
+            }
+            result |= handled;
         }
         self.trigger_runtime.spring_depth -= 1;
         result
+    }
+
+    /// Push a Spring record; returns its index and `seq` while recording.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    fn trace_spring(
+        &mut self,
+        live: usize,
+        type_index: usize,
+        input: TagEventInput,
+    ) -> Option<(usize, u32)> {
+        let runtime = &self.trigger_runtime;
+        runtime.trace.as_ref()?;
+        let tag = runtime.tag_order.iter().copied().find(|&tag| {
+            runtime
+                .tag(tag)
+                .is_some_and(|live_tag| live_tag.triggers.contains(&live))
+        });
+        let tag = tag.map(|tag| {
+            let tag_type = runtime.tag(tag).unwrap().type_index;
+            (tag, runtime.definitions.tag_types[tag_type].id.clone())
+        });
+        let record = TriggerSpringRecord {
+            seq: 0,
+            parent: None,
+            binary_frame: self.session.binary_frame(),
+            trigger: runtime.definitions.trigger_types[type_index].id.clone(),
+            tag,
+            forced: input.force,
+            raised_kind: input.kind,
+            actor: input.actor.map(|id| {
+                let type_id = self
+                    .substrate
+                    .entities
+                    .get(id)
+                    .map_or("?", |entity| self.interner.resolve(entity.type_ref()));
+                (id, type_id.to_owned())
+            }),
+            cell: input.cell,
+            actions: Vec::new(),
+        };
+        let trace = self.trigger_runtime.trace.as_mut()?;
+        let seq = trace.next_seq();
+        let parent = trace.parents.last().copied();
+        trace.springs.push(TriggerSpringRecord {
+            seq,
+            parent,
+            ..record
+        });
+        Some((trace.springs.len() - 1, seq))
+    }
+
+    /// Push a non-Spring trace record built from its `seq`, `binary_frame`
+    /// and parent while recording.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    fn trace_event(
+        trigger_runtime: &mut TriggerRuntime,
+        binary_frame: u32,
+        event: impl FnOnce(u32, u32, Option<(u32, usize)>) -> TriggerTraceEvent,
+    ) {
+        if let Some(trace) = trigger_runtime.trace.as_mut() {
+            let seq = trace.next_seq();
+            let parent = trace.parents.last().copied();
+            let event = event(seq, binary_frame, parent);
+            if let TriggerTraceEvent::Poll { end, .. } | TriggerTraceEvent::HouseRaise { end, .. } =
+                event
+            {
+                trace.window = !end;
+            }
+            trace.frame = binary_frame;
+            trace.events.push(event);
+        }
+    }
+
+    /// Record a reinforcement member the placement could not place.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    pub(crate) fn trace_placement_refused(&mut self, cell: (i16, i16)) {
+        Self::trace_event(
+            &mut self.trigger_runtime,
+            self.session.binary_frame(),
+            |seq, binary_frame, parent| TriggerTraceEvent::PlacementRefused {
+                seq,
+                binary_frame,
+                parent,
+                cell,
+            },
+        );
+    }
+
+    /// Record a HasOccurred71E940 result for a world-reading event kind when
+    /// it differs from that event's previous recorded result.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    fn trace_predicate(&mut self, trigger: usize, ordinal: usize, result: bool, persist: bool) {
+        let Some(trace) = self.trigger_runtime.trace.as_mut() else {
+            return;
+        };
+        let type_index = self.trigger_runtime.triggers[trigger]
+            .as_ref()
+            .unwrap()
+            .type_index;
+        let kind = self.trigger_runtime.definitions.trigger_types[type_index].events[ordinal].kind;
+        if REPLAYED_EVENT_KINDS.contains(&kind)
+            || trace
+                .predicates
+                .insert((trigger, ordinal), (result, persist))
+                == Some((result, persist))
+        {
+            return;
+        }
+        let seq = trace.next_seq();
+        let parent = trace.parents.last().copied();
+        trace.events.push(TriggerTraceEvent::Predicate {
+            seq,
+            binary_frame: self.session.binary_frame(),
+            parent,
+            trigger,
+            ordinal,
+            result,
+            persist,
+        });
+    }
+
+    /// Start or stop recording the dev trigger-trace capture. Stopping drops
+    /// anything not yet taken. Starting records the live Tags first.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    pub fn record_trigger_springs(&mut self, on: bool) {
+        self.trigger_runtime.trace = on.then(TriggerTrace::default);
+        if !on {
+            return;
+        }
+        let runtime = &self.trigger_runtime;
+        let tags = runtime
+            .tag_order
+            .iter()
+            .map(|&tag| runtime.trace_tag(tag))
+            .collect();
+        let houses = runtime
+            .house_tags
+            .iter()
+            .map(|(&house, tags)| (self.interner.resolve(house).to_owned(), tags.clone()))
+            .collect();
+        let init = TriggerTraceEvent::Init {
+            seq: 0,
+            binary_frame: self.session.binary_frame(),
+            tags,
+            logic: runtime.logic_tags.clone(),
+            map: runtime.map_tags.clone(),
+            houses,
+            dirty: runtime.dirty,
+            globals: runtime.globals_set.iter().copied().collect(),
+            locals: runtime.locals_set.iter().copied().collect(),
+        };
+        let trace = self.trigger_runtime.trace.as_mut().unwrap();
+        trace.next_seq = 1;
+        trace.frame = self.session.binary_frame();
+        trace.events.push(init);
+    }
+
+    /// The Spring calls and other trace records made since the last take,
+    /// each oldest first.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    pub fn take_trigger_trace(&mut self) -> (Vec<TriggerSpringRecord>, Vec<TriggerTraceEvent>) {
+        self.trigger_runtime
+            .trace
+            .as_mut()
+            .map(|trace| {
+                (
+                    std::mem::take(&mut trace.springs),
+                    std::mem::take(&mut trace.events),
+                )
+            })
+            .unwrap_or_default()
     }
 
     /// Diagnostic admission for a later campaign countdown without playing
@@ -2725,6 +3354,25 @@ impl Simulation {
         self.trigger_runtime
             .dispatch_trace
             .push((index, input.kind));
+        #[cfg(any(test, feature = "dev-overlays"))]
+        if self.trigger_runtime.tag(index).is_some()
+            && let Some(trace) = self.trigger_runtime.trace.as_mut()
+        {
+            let parent = trace.parents.last().copied();
+            if parent.is_some() || !trace.window {
+                let seq = trace.next_seq();
+                trace.events.push(TriggerTraceEvent::Dispatch {
+                    seq,
+                    binary_frame: self.session.binary_frame(),
+                    parent,
+                    tag: index,
+                    kind: input.kind,
+                    force: input.force,
+                    actor: input.actor,
+                    cell: input.cell,
+                });
+            }
+        }
         let Some(tag) = self.trigger_runtime.tag(index) else {
             return false;
         };
@@ -2780,8 +3428,12 @@ impl Simulation {
                         );
                         result = true;
                         detach_all = true;
+                    } else {
+                        // TagClass::ProcessTriggerEvent, original gamemd.exe:
+                        // refs1 takes 0x006E5463 to 0x006E5484, skipping the
+                        // source-cleanup flag write at 0x006E547F.
+                        detach_attachment = true;
                     }
-                    detach_attachment = true;
                 }
                 2 => {
                     self.spring_live_trigger(
@@ -2869,6 +3521,19 @@ impl Simulation {
         if !(0..count as i32).contains(&index) {
             return false;
         }
+        #[cfg(any(test, feature = "dev-overlays"))]
+        Self::trace_event(
+            trigger_runtime,
+            session.binary_frame(),
+            |seq, binary_frame, parent| TriggerTraceEvent::Variable {
+                seq,
+                binary_frame,
+                parent,
+                global,
+                index,
+                set,
+            },
+        );
         let values = if global {
             &mut trigger_runtime.globals_set
         } else {
@@ -2918,6 +3583,16 @@ impl Simulation {
         frame_effects: FrameEffects<'_>,
     ) -> Vec<TriggerEffect> {
         let mut effects = Vec::new();
+        #[cfg(any(test, feature = "dev-overlays"))]
+        Self::trace_event(
+            &mut self.trigger_runtime,
+            self.session.binary_frame(),
+            |seq, binary_frame, _| TriggerTraceEvent::Poll {
+                seq,
+                binary_frame,
+                end: false,
+            },
+        );
         self.trigger_runtime.logic_cursor = 0;
         while let Some(&tag) = self
             .trigger_runtime
@@ -3037,6 +3712,16 @@ impl Simulation {
         }
         self.session.finish_scenario_timer_poll();
         self.trigger_runtime.dirty = [false; 4];
+        #[cfg(any(test, feature = "dev-overlays"))]
+        Self::trace_event(
+            &mut self.trigger_runtime,
+            self.session.binary_frame(),
+            |seq, binary_frame, _| TriggerTraceEvent::Poll {
+                seq,
+                binary_frame,
+                end: true,
+            },
+        );
         effects
     }
 
@@ -3207,6 +3892,8 @@ impl Simulation {
         // client with a smaller thread stack aborts before the depth guard.
         // Execute6DF0E7..6DF134 (original instructions) iterates the live registry in order and ignores Spring's
         // result. Re-read its live length after every synchronous callback.
+        // 6DF112..6DF119 passes Spring7265C0 a NULL object and the empty
+        // Cell [B0E680], never this Spring's own object or Cell.
         if action.entry.kind == ACTION_FORCE_TRIGGER {
             if let Some(DefinitionReference::Trigger(target)) = action.reference {
                 let mut ordinal = 0;
@@ -3219,7 +3906,7 @@ impl Simulation {
                     {
                         self.spring_live_trigger(
                             live,
-                            context.input,
+                            TagEventInput::default(),
                             effects,
                             rules,
                             overlay_registry,
@@ -3398,15 +4085,15 @@ impl Simulation {
             20 => {
                 // Steam gamemd: Execute6DE8E4..6DE903 passes +90
                 // to Theme720B20 and returns AL1, even when audio is gated.
-                // Type8 is an untrimmed section key, not Sound= or an ordinal.
-                // The process catalog is immutable, so its existing owner can
-                // resolve the retained name at delivery; numeric sentinels
-                // pass through unchanged. No scenario RNG/timer/detach here.
-                let request = if action.params.first().map_or(0, |v| crt_atoi(v)) == 8 {
-                    ThemeRequest::Name(action.params.get(1).cloned().unwrap_or_default())
-                } else {
-                    ThemeRequest::Index(value.unwrap_or(-1))
-                };
+                // Fresh type8 reads already retained From_Name's index. Keep
+                // late Name delivery only for older saved None operands;
+                // numeric sentinels pass unchanged. No RNG/timer/detach here.
+                let request =
+                    if value.is_none() && action.params.first().map_or(0, |v| crt_atoi(v)) == 8 {
+                        ThemeRequest::Name(action.params.get(1).cloned().unwrap_or_default())
+                    } else {
+                        ThemeRequest::Index(value.unwrap_or(-1))
+                    };
                 effects.push(TriggerEffect::MusicTheme { request });
             }
             0 => {
@@ -3445,7 +4132,7 @@ impl Simulation {
                     .with_effects(frame_effects),
             ),
             51 => {
-                //6DED66 calls the incoming House's577C90 map transition,
+                //6DEF9B calls the incoming House's577C90 map transition,
                 //then returns AL1 independently of the void service result.
                 self.trigger_reshroud_map(context.incoming_house, rules);
             }
@@ -3602,7 +4289,7 @@ impl Simulation {
                 }
                 return found;
             }
-            81..=83 => {
+            81..=84 => {
                 use crate::map::entities::EntityCategory;
                 use crate::sim::mission::{MissionId, MissionType};
 
@@ -3613,8 +4300,11 @@ impl Simulation {
                 //81 walks Techno by live Trigger identity and deliberately
                 //does NOT test Health or Limbo. 82/83 walk Foot and compare
                 //the incoming House, not the scalar or retained House.
+                //84's active Execute6DDCEC..6DDD74 (WakeupGroup6E03B0)
+                //walks every Techno category and matches raw signed Group,
+                //without a House or Tag gate, before Queue(Guard,false).
                 let mut ordinal = 0;
-                while let Some(id) = if action.kind == 81 {
+                while let Some(id) = if matches!(action.kind, 81 | 84) {
                     self.substrate.entities.techno_registry_at(ordinal)
                 } else {
                     self.substrate.entities.foot_registry_at(ordinal)
@@ -3638,7 +4328,13 @@ impl Simulation {
                             } else {
                                 entity.health.current() > 0
                                     && !entity.lifecycle.in_limbo()
-                                    && if action.kind == 82 {
+                                    && if action.kind == 84 {
+                                        entity.object_group() == value.unwrap_or(0)
+                                            && matches!(
+                                                mission,
+                                                Some(MissionType::Sleep | MissionType::Harmless)
+                                            )
+                                    } else if action.kind == 82 {
                                         mission == Some(MissionType::Sleep)
                                             && Some(entity.owner()) != context.incoming_house
                                     } else {
@@ -4149,7 +4845,7 @@ impl Simulation {
                 }
             }
             100 | 117 => {
-                // Execute6DF546/6DF90E -> radar movie5BFF50. Preparation,
+                // Execute6DF546/6DF90E -> radar movie5BF390. Preparation,
                 // the game-mode gate and missing-media handling are app-owned;
                 // the action returns success independently of queue admission.
                 effects.push(TriggerEffect::RadarMovie {
@@ -4170,20 +4866,19 @@ impl Simulation {
                 //out of deterministic simulation; the UI owns actual admission.
             }
             115 => {
-                //6E4150 scans the common TechnoType array A8EB04 in reverse,
-                //with byte-exact names, then6AC5F0 dispatches its own class.
-                //Retail SOV01 uses the unique SAPC identity; duplicate names
-                //across type classes retain the rules owner's existing order.
-                let Some(object) = rules
-                    .all_objects()
-                    .filter(|object| object.id == action.inline_type_name())
-                    .last()
-                else {
+                // TAction::FlashCameo6E4150, original instructions: reverse
+                // exact-name search of the global constructor chronology.
+                // Sidebar6AC5F0 consumes that selected type's class/index;
+                // retain those facts instead of resolving its name again.
+                let Some(object) = rules.native_techno_type_exact(action.inline_type_name()) else {
                     return false;
                 };
-                let type_id = self.interner.intern(&object.id);
+                let Some(type_index) = rules.type_array_index(object.category, &object.id) else {
+                    return true;
+                };
                 effects.push(TriggerEffect::FlashSidebarCameo {
-                    type_id,
+                    category: crate::sim::production::category_for_object(object),
+                    type_index,
                     duration: value.unwrap_or(0),
                     frame: self.session.binary_frame() as i32,
                 });
@@ -4389,7 +5084,18 @@ impl Simulation {
                 let (Some(index), Some(waypoint)) = (value, action.waypoint_index) else {
                     return false;
                 };
-                return self.trigger_play_anim_at_waypoint(rules, index, waypoint as i32);
+                return self.trigger_play_anim_at_waypoint(
+                    rules,
+                    index,
+                    waypoint as i32,
+                    frame_effects,
+                );
+            }
+            43 => {
+                let (Some(index), Some(waypoint)) = (value, action.waypoint_index) else {
+                    return false;
+                };
+                return self.trigger_play_voxel_anim_at_waypoint(rules, index, waypoint as i32);
             }
             58 => {
                 let (Some(intensity), Some(waypoint)) = (value, action.waypoint_index) else {
@@ -4588,7 +5294,11 @@ impl Simulation {
                 // +0x34..+0x40. ActionEntry.params is chunk[1..], so these are
                 // exactly indices 2..5; params[0]/[1] must never leak in.
                 if let Some(raw_local_size) = parse_visible_map_area(&action.params) {
-                    let _ = self.change_visible_map_area(raw_local_size, rules);
+                    let _ = self.change_visible_map_area(
+                        raw_local_size,
+                        crate::sim::world::UninitContext::new(rules, overlay_registry)
+                            .with_effects(frame_effects),
+                    );
                 }
             }
             145 => {
@@ -4596,10 +5306,12 @@ impl Simulation {
                 // of the incoming House/value. Resolve coordinates before
                 // the frame hash, including House50DF30's Dummy effects.
                 let coord = {
-                    let cells = self
-                        .resolved_terrain
-                        .as_ref()
-                        .map(crate::map::resolved_terrain::NativeCellQuery::canonical);
+                    let network = self.session.game_mode().is_network();
+                    let cells = self.resolved_terrain.as_ref().map(|terrain| {
+                        crate::map::resolved_terrain::NativeCellQuery::for_local_input(
+                            terrain, network,
+                        )
+                    });
                     self.home_camera_coordinate(rules, cells.as_ref())
                 };
                 effects.push(TriggerEffect::HomeCamera { coord });
@@ -4647,31 +5359,15 @@ impl Simulation {
                 } else {
                     None
                 };
-                let value = value.unwrap_or(0);
-                let actor = actor.filter(|_| value != 0);
-                let duration = if actor.is_some() {
-                    rules.general.talk_bubble_time
-                } else {
-                    0
-                };
-                effects.push(TriggerEffect::TalkBubble {
-                    actor,
-                    value: if actor.is_some() { value } else { 0 },
-                    duration,
-                });
-                //70F134/13A/173 commits the request BEFORE Map callbacks.
-                //A nested105 from discovery must win. Commit earlier cues
-                //to the one frame-output queue before entering that receiver.
+                // Commit earlier cues to the one frame-output queue before
+                // the bubble's own cue and reveal.
                 self.publish_trigger_effects(std::mem::take(effects));
-                if let Some(actor) = actor {
-                    //70F159..70F189: flags0/0/0/1/1, current player (not
-                    //the Team owner), literal radius2, including negative values.
-                    self.reveal_talk_bubble_actor(
-                        actor,
-                        crate::sim::world::UninitContext::new(rules, overlay_registry)
-                            .with_effects(frame_effects),
-                    );
-                }
+                self.talk_bubble_set_object_and_frame(
+                    actor,
+                    value.unwrap_or(0),
+                    crate::sim::world::UninitContext::new(rules, overlay_registry)
+                        .with_effects(frame_effects),
+                );
             }
             106 => {
                 // Active inline Execute6DF5D1, not the similarly annotated
@@ -4885,7 +5581,7 @@ impl Simulation {
                 }
             }
             1 | 2 | ACTION_ANNOUNCE_WIN | ACTION_ANNOUNCE_LOSE | ACTION_END_SCENARIO => {
-                //6DDCB1/6DDD23 and6DF399..6DF3CE use PlayerPtr, not the
+                //6DEA37/6DEA67 and6DDD77/6DDD93/6DDDAF use PlayerPtr, not the
                 //incoming Trigger House. The shared House result/timer
                 //owner drives normal frame termination and ScenarioExit.
                 use crate::sim::house_state::HouseOutcomeKind;
@@ -4923,16 +5619,57 @@ impl TriggerRuntime {
         self.cell_tags.remove(&NativeCellIdentity::Dummy);
     }
 
+    /// A live Tag as trace records show it.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    fn trace_tag(&self, tag: usize) -> TraceTag {
+        let live = self.tag(tag).unwrap();
+        TraceTag {
+            tag,
+            tag_type: self.definitions.tag_types[live.type_index].id.clone(),
+            refs: live.refs,
+            triggers: live
+                .triggers
+                .iter()
+                .map(|&trigger| {
+                    let live = self.trigger(trigger).unwrap();
+                    let id = self.definitions.trigger_types[live.type_index].id.clone();
+                    (trigger, id, live.enabled)
+                })
+                .collect(),
+        }
+    }
+
+    /// Record a Tag's attachment count after it changed.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    fn trace_refs(&mut self, tag: usize) {
+        let refs = self.tag(tag).unwrap().refs;
+        if let Some(trace) = self.trace.as_mut() {
+            let seq = trace.next_seq();
+            let parent = trace.parents.last().copied();
+            trace.events.push(TriggerTraceEvent::Refs {
+                seq,
+                binary_frame: trace.frame,
+                parent,
+                tag,
+                refs,
+            });
+        }
+    }
+
     fn replace_cell_trigger_tag(&mut self, cell: NativeCellIdentity, tag: Option<usize>) {
         if let Some(previous) = self.cell_tags.remove(&cell)
             && let Some(old) = self.tags[previous].as_mut()
         {
             old.refs = old.refs.wrapping_sub(1);
+            #[cfg(any(test, feature = "dev-overlays"))]
+            self.trace_refs(previous);
         }
         if let Some(tag) = tag {
             self.cell_tags.insert(cell, tag);
             let live = self.tags[tag].as_mut().unwrap();
             live.refs = live.refs.wrapping_add(1);
+            #[cfg(any(test, feature = "dev-overlays"))]
+            self.trace_refs(tag);
         }
     }
     fn replace_trigger_tag_attachment(
@@ -4945,12 +5682,16 @@ impl TriggerRuntime {
             && matches!(attachment, TagAttachment::Object(_))
         {
             old.refs = old.refs.wrapping_sub(1);
+            #[cfg(any(test, feature = "dev-overlays"))]
+            self.trace_refs(previous);
         }
         if let Some(tag) = tag {
             self.attachments.insert(attachment, tag);
             let live = self.tags[tag].as_mut().unwrap();
             if matches!(attachment, TagAttachment::Object(_)) {
                 live.refs = live.refs.wrapping_add(1);
+                #[cfg(any(test, feature = "dev-overlays"))]
+                self.trace_refs(tag);
             }
         }
         tag.is_some()
@@ -5030,25 +5771,36 @@ impl TriggerRuntime {
     pub(crate) fn mark_crate_pickup_event(&mut self) {
         self.dirty[3] = true;
     }
-    ///6E57C0 reads each linked LIVE Trigger's Type+A0, without enabled,
-    /// pending or difficulty tests.5F5B50 replaces refs, never moves the
-    /// Engineer's attachment and never deletes the old zero-ref Tag here.
-    pub(crate) fn transfer_engineer_tag_to_building(&mut self, engineer: u64, building: u64) {
-        let attachment = TagAttachment::Object(engineer);
-        let Some(&tag) = self.attachments.get(&attachment) else {
-            return;
-        };
-        let transfer = self.tag(tag).is_some_and(|tag| {
-            tag.triggers.iter().any(|&live| {
-                self.trigger(live).is_some_and(|trigger| {
-                    self.definitions.trigger_types[trigger.type_index].transfer_on_capture
+    /// LogicClass::AI's ambient fade writes Scenario+34AB after each step
+    /// (`0x0055B4BA`), so the next Logic55AFB0 poll tries events 45/46
+    /// before event 13.
+    pub(crate) fn mark_ambient_light_changed(&mut self) {
+        self.dirty[2] = true;
+    }
+    /// TagClass::IsTransferable6E57C0 reads each linked LIVE Trigger's
+    /// Type+A0, without enabled, pending or difficulty tests (retail gamemd).
+    pub(crate) fn object_tag_is_transferable(&self, object: u64) -> bool {
+        self.attachments
+            .get(&TagAttachment::Object(object))
+            .and_then(|&tag| self.tag(tag))
+            .is_some_and(|tag| {
+                tag.triggers.iter().any(|&live| {
+                    self.trigger(live).is_some_and(|trigger| {
+                        self.definitions.trigger_types[trigger.type_index].transfer_on_capture
+                    })
                 })
             })
-        });
-        if transfer {
-            //519F66 re-reads after the gate; keep the native attachment owner.
+    }
+
+    /// ObjectClass::SetTag5F5B50 after IsTransferable6E57C0: engineer
+    /// capture519F66, thief capture520439 and vehicle crew738374 all copy
+    /// the attachment. The source keeps its reference; the old zero-ref Tag
+    /// is not deleted here. Source: retail gamemd.exe instructions.
+    pub(crate) fn transfer_object_tag(&mut self, source: u64, target: u64) {
+        if self.object_tag_is_transferable(source) {
+            let attachment = TagAttachment::Object(source);
             let tag = self.attachments.get(&attachment).copied();
-            self.replace_trigger_tag_attachment(TagAttachment::Object(building), tag);
+            self.replace_trigger_tag_attachment(TagAttachment::Object(target), tag);
         }
     }
 }
@@ -5099,15 +5851,18 @@ fn parse_visible_map_area(fields: &[String]) -> Option<[i32; 4]> {
     Some([atoi(2)?, atoi(3)?, atoi(4)?, atoi(5)?])
 }
 
-fn count_techtype(sim: &Simulation, type_id: &str) -> usize {
+fn count_techtype(sim: &Simulation, object: &crate::rules::object_type::ObjectType) -> usize {
+    // HasOccurred71EA03/71EAC0 walks all stored Technos, including Limbo
+    // and Health0, comparing virtual84's concrete type pointer. Category
+    // plus interned ID preserves that identity for representable types.
+    let Some(type_id) = sim.interner.get(&object.id) else {
+        return 0;
+    };
+    let category = crate::map::entities::EntityCategory::from(object.category);
     sim.substrate
         .entities
         .values()
-        .filter(|e| {
-            sim.interner
-                .resolve(e.type_ref())
-                .eq_ignore_ascii_case(type_id)
-        })
+        .filter(|e| e.category() == category && e.type_ref() == type_id)
         .count()
 }
 
@@ -5184,6 +5939,9 @@ mod house_notification_tests;
 mod house_attacked_tests;
 
 #[cfg(test)]
+#[path = "trigger_runtime_group_wakeup_tests.rs"]
+mod group_wakeup_tests;
+#[cfg(test)]
 #[path = "trigger_runtime_wakeup_tests.rs"]
 mod wakeup_tests;
 
@@ -5258,7 +6016,9 @@ mod direct_strike_tests;
 #[cfg(test)]
 mod meteor_action_tests {
     use super::*;
+    use crate::rules::retail_ini_fixture::retail_unlayered_rules_with_art;
     use crate::sim::anim_class::meteor_tests::{formed_rules, formed_sim};
+    use crate::sim::world::voxel_meteor_tests::{fly_to_expiry, waypoint_sim};
     #[test]
     fn counted_action58_uses_literal_intensity_and_tail_waypoint_through_live_dispatch() {
         let rules = formed_rules("");
@@ -5293,7 +6053,7 @@ mod meteor_action_tests {
                     ry: 40,
                 },
             )]));
-        let action = RuntimeDefinitions::default().resolve_action(entry, None, None);
+        let action = RuntimeDefinitions::default().resolve_action(entry, None, None, None);
         let mut effects = Vec::new();
         assert!(sim.apply_live_trigger_action(
             &action,
@@ -5328,6 +6088,58 @@ mod meteor_action_tests {
             )]));
         assert!(!invalid.trigger_meteor_shower(&missing, 0, 7));
         assert_eq!(invalid.anims().count(), 0);
+    }
+
+    /// Active43 PlayVoxelAnimAtWP6E2520 through live dispatch: retail
+    /// METEOR01 starts above its waypoint (749668..74981F), keeps a straight
+    /// line back to the waypoint cell (74A7C8) and scatters PEBBLEs where it
+    /// ends (74A288..301).
+    #[test]
+    fn action43_drops_retail_meteor01_on_its_waypoint_cell_and_scatters_pebbles() {
+        let Some(rules) = retail_unlayered_rules_with_art() else {
+            return;
+        };
+        let meteor = rules.voxel_anim_type_id_by_name("METEOR01").unwrap();
+        let pebble = rules.voxel_anim_type_id_by_name("PEBBLE").unwrap();
+        let actions =
+            crate::map::actions::parse_actions(&crate::rules::ini_parser::IniFile::from_str(
+                &format!("[Actions]\nCUE=1,43,0,{},0,0,0,0,H\n", meteor.0),
+            ));
+        let entry = actions["CUE"].entries()[0].clone();
+        let action = RuntimeDefinitions::default().resolve_action(entry, None, None, None);
+        let mut sim = waypoint_sim(&rules);
+        assert!(sim.apply_live_trigger_action(
+            &action,
+            TriggerActionContext {
+                live_index: None,
+                incoming_house: None,
+                input: TagEventInput::default()
+            },
+            &mut Vec::new(),
+            &rules,
+            None,
+            crate::sim::world::FrameEffects::empty()
+        ));
+        let ids = sim.voxel_anims().ids();
+        assert_eq!(ids.len(), 1);
+        let piece = sim.voxel_anims().get(ids[0]).unwrap();
+        assert_eq!(piece.type_id(), meteor);
+        assert_eq!(piece.owner_house(), None);
+        assert!(piece.in_logic_vector());
+        // Unlimbo749794 and Bounce4397E0 both take the raised launch start.
+        assert_eq!(piece.world_coord(), piece.bounce().position_leptons());
+        assert!(piece.world_coord().z > 0);
+        let impact = fly_to_expiry(&mut sim, &rules, ids[0]);
+        assert_eq!((impact.x / 256, impact.y / 256), (40, 40));
+        let children = sim.voxel_anims().ids();
+        assert!(!children.is_empty());
+        assert!(children.len() as i32 <= 2 * rules.voxel_anim_type(meteor).spawn_count);
+        for child in children {
+            let child = sim.voxel_anims().get(child).unwrap();
+            assert_eq!(child.type_id(), pebble);
+            assert_eq!(child.owner_house(), None);
+            assert_eq!(child.world_coord(), impact);
+        }
     }
 }
 

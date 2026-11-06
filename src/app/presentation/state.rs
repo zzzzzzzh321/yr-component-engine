@@ -7,8 +7,8 @@
 //! allocated while the shell is active.
 //! Process-lifetime GPU objects live in `app::renderer_state::RendererState`.
 
-use std::collections::{BTreeMap, HashMap};
 use crate::util::time::Instant;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::map::houses::{HouseColorMap, HouseRoster};
 use crate::map::overlay::TerrainObject;
@@ -29,9 +29,9 @@ pub(crate) struct MatchPresentationState {
     /// Native Techno+3CA waterline cache, captured by drawing and retained in
     /// the snapshot presentation supplement rather than simulation authority.
     pub(crate) sinking_waterlines: std::cell::RefCell<crate::render::sinking::SinkingWaterlines>,
-    /// The pitch each unit type's cached barrel image was first drawn at.
-    pub(crate) barrel_image_pitches:
-        std::cell::RefCell<crate::render::unit_atlas::BarrelImagePitches>,
+    /// The original voxel image caches and UseBuffer flag every voxel draw
+    /// replays: which style and barrel pitch each type's stored images hold.
+    pub(crate) voxel_images: std::cell::RefCell<crate::render::voxel_image_cache::VoxelImageCache>,
     pub(crate) tile_atlas: Option<TileAtlas>,
     /// BUILDNGZ.SHA z-shape bound at group 2 of the Z-writing building draw.
     pub(crate) building_zshape: Option<crate::render::building_zshape::BuildingZShape>,
@@ -39,6 +39,8 @@ pub(crate) struct MatchPresentationState {
     /// Palette + per-house RGB ramp GPU resources for the voxel sprite shader.
     pub(crate) palette_set: Option<crate::render::palette_textures::PaletteSet>,
     pub(crate) sprite_atlas: Option<SpriteAtlas>,
+    /// The unit and sprite atlas growths rasterizing on workers.
+    pub(crate) atlas_growth: crate::render::entity_atlas_growth::EntityAtlasGrowth,
     pub(crate) overlay_atlas: Option<OverlayAtlas>,
     pub(crate) bridge_atlas: Option<BridgeAtlas>,
     pub(crate) sidebar_cameo_atlas: Option<SidebarCameoAtlas>,
@@ -48,6 +50,10 @@ pub(crate) struct MatchPresentationState {
     /// process InitGame GRFXTXT art.
     pub(crate) outcome_banner_side_art:
         Option<crate::app::presentation::outcome_banner::OutcomeBannerArt>,
+    /// The local country's own win/lose card from `[EndGameScreens]`, drawn in
+    /// the same tactical slot as the retail banner. `None` keeps the native
+    /// art; the player's Custom End Game Banner switch is read at draw time.
+    pub(crate) end_game_banner: Option<crate::app::presentation::outcome_banner::EndGameBanner>,
     pub(crate) software_cursor: Option<crate::app::presentation::render::SoftwareCursor>,
     pub(crate) terrain_grid: Option<TerrainGrid>,
     /// Overlay entries from map for per-frame instance generation.
@@ -64,14 +70,21 @@ pub(crate) struct MatchPresentationState {
     pub(crate) lighting: super::lighting::MatchLighting,
     pub(crate) line_trails: super::line_trails::LineTrails,
     pub(crate) lasers: super::lasers::Lasers,
+    #[cfg(feature = "ares")]
+    pub(crate) flying_credits: std::cell::RefCell<super::flying_credits::FlyingCredits>,
     pub(crate) talk_bubble: super::talk_bubble::TalkBubble,
     pub(crate) electric_bolts: super::electric_bolts::ElectricBolts,
     /// Process registry B04A60; ordinary kind1 beams copy their endpoints.
     pub(crate) radiation_beams: super::radiation_beams::RadiationBeams,
-    /// Process-lived native Tactical superweapon ring fade state. Map loads
-    /// replace map resources but keep this presentation owner alive.
-    pub(crate) superweapon_range_pulse:
-        crate::app::presentation::radial_indicators::SuperweaponRangePulse,
+    /// The Main_Ticks the tactical effects above step on, and the last
+    /// composite's clock ([`super::tactical_composite`]).
+    pub(crate) tactical_composite: super::tactical_composite::TacticalComposite,
+    /// The airstrike flare shades of the last composite, by designating Techno.
+    pub(crate) airstrike_shades: super::airstrike_lines::AirstrikeShades,
+    /// Process-lived native Tactical placement and superweapon ring fade
+    /// states. Map loads replace map resources but keep these owners alive.
+    pub(crate) placement_range_pulse: crate::app::presentation::radial_indicators::RangePulse,
+    pub(crate) superweapon_range_pulse: crate::app::presentation::radial_indicators::RangePulse,
     /// Native process-lived FPS counter and detail hysteresis, never sim state.
     pub(crate) detail: std::cell::RefCell<super::detail::DetailState>,
     /// The client's AnimClass `+0x19D` for Supers' ChronoPlacement anims
@@ -80,6 +93,11 @@ pub(crate) struct MatchPresentationState {
     /// The Supers' timer blinks (`SuperClass+0x40`, `+0x48`), by owner and
     /// type (`presentation::super_timers`).
     pub(crate) super_timer_blinks: crate::app::presentation::super_timers::TimerBlinks,
+    /// The earliest clock ms a drawn 0 s Super line's blink flips at, as of
+    /// the last timer draw (`presentation::super_timers::blink_due`).
+    pub(crate) super_timer_next_flip_ms: Option<u64>,
+    /// Local timer-list folding and scroll state, independent of simulation.
+    pub(crate) super_timer_dock: crate::app::presentation::super_timers::TimerDock,
     pub(crate) combat_lights: crate::app::presentation::combat_lights::CombatLightRuntime,
     /// The sole client owner of native GScreenClass shake offsets; input
     /// events decay it and Simulation only sends ordered axis writes.
@@ -88,6 +106,10 @@ pub(crate) struct MatchPresentationState {
     /// Animated radar chrome — plays 33-frame open/close animation when radar gained/lost.
     pub(crate) radar_anim: Option<crate::render::radar::anim::RadarAnimState>,
     pub(crate) radar_movies: crate::app::radar_movie::RadarMovies,
+    /// Computer opponents' skirmish talking heads. Presentation only: the
+    /// simulation never reads it, and switching it off leaves every
+    /// personality and trigger weight alone.
+    pub(crate) commander_feedback: crate::app::commander_feedback::CommanderFeedback,
     pub(crate) chrono_screen: crate::app::chrono_screen::ChronoScreenPresentation,
     pub(crate) scenario_pause: crate::app::match_runtime::scenario_pause::ScenarioPauseClock,
     /// Requested-versus-resolved atlas identity used to construct `radar_anim`.
@@ -98,7 +120,7 @@ pub(crate) struct MatchPresentationState {
         Option<crate::render::sidebar_chrome::ResolvedSidebarChromeIdentity>,
     /// Content insets [left, top, right, bottom] derived from the transparent opening
     /// in radar.shp frame 0. Used to position the minimap inside the chrome housing.
-    /// Unscaled pixels — multiply by `ui_scale` at use site.
+    /// radar.shp pixels, which draw one-to-one in render pixels.
     pub(crate) radar_content_insets: Option<[u32; 4]>,
     /// Whether the local player currently has operational radar (power-gated).
     pub(crate) has_radar: bool,
@@ -111,6 +133,18 @@ pub(crate) struct MatchPresentationState {
     /// Phobos `[Phobos] ShowPlacementPreview` (source default true).
     #[cfg(feature = "phobos")]
     pub(crate) show_placement_preview: bool,
+    /// Phobos `[Phobos] ShowFlashOnSelecting` (source default false): gates
+    /// `[AudioVisual] SelectionFlashDuration` on each local selection.
+    #[cfg(feature = "phobos")]
+    pub(crate) show_flash_on_selecting: bool,
+    /// Phobos `uimd.ini [Sidebar] CenterPauseMenuBackground` (default no),
+    /// applied to the active-game shell's background rectangle.
+    #[cfg(feature = "phobos")]
+    pub(crate) center_pause_menu_background: bool,
+    /// Phobos `[Phobos] ShowPowerPlantEnhancerRange` (source default false):
+    /// the client half of the placement-time enhancer ring switch.
+    #[cfg(feature = "phobos")]
+    pub(crate) show_power_plant_enhancer_range: bool,
     /// Phobos placement preview SHP cache for the current placing type.
     #[cfg(feature = "phobos")]
     pub(crate) placement_preview_art:
@@ -155,8 +189,6 @@ pub(crate) struct MatchPresentationState {
     pub(crate) active_sidebar_tab: SidebarTab,
     /// Native side-specific geometry in physical render pixels.
     pub(crate) sidebar_layout_spec: SidebarChromeLayoutSpec,
-    /// Ordinary retail artwork uses one render pixel per source pixel.
-    pub(crate) ui_scale: f32,
     /// Shared tooltip service (study S1) — the model is clock-injected; only
     /// `input::tooltips` reads the wall clock.
     pub(crate) tooltips: crate::ui::tooltips::TooltipService,
@@ -187,6 +219,8 @@ pub(crate) struct MatchPresentationState {
     pub(crate) pause_menu_template: crate::ui::shell::pause_menu::PauseMenuTemplate,
     /// FF's trackbars (WOL in-game menu), recreated on every state-1 entry.
     pub(crate) internet_pause: crate::app::input::pause_menu::InternetPauseControls,
+    /// VERA's Display group (Zoom, Full Screen) in every in-game menu.
+    pub(crate) display_pause: crate::app::input::pause_menu::DisplayPauseControls,
     /// What B6 init (4F1840) made of control712 when the dialog last opened;
     /// its stored results stay for that dialog's lifetime.
     pub(crate) abort_secondary: crate::ui::shell::abort::AbortSecondary,

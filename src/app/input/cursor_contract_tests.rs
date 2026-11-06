@@ -36,6 +36,102 @@ fn reveal_rows(sim: &mut Simulation, owner: crate::sim::intern::InternedId, rows
     );
 }
 
+/// Techno700609 rejects berserk before Ctrl's Attack rung; Infantry51FADD
+/// then answers NoMove.
+#[test]
+fn retail_berserk_infantry_ctrl_ground_shows_no_move() {
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let rules = &retail.rules;
+    let mut sim = arena(rules);
+    let gi = sim
+        .spawn_object("E1", "Americans", 12, 10, 0, rules)
+        .unwrap();
+    sim.entities_mut_for_test()
+        .get_mut(gi)
+        .unwrap()
+        .berserk
+        .set_active_for_test(true);
+    let selected = [gi];
+    let query = ActionQuery {
+        sim: &sim,
+        rules: Some(rules),
+        overlays: None,
+        viewer: sim.session().current_house(),
+        selected: &selected,
+        modifier: OrderModifier::ForceFire,
+        force_move_key: false,
+        order_mode: crate::app::types::OrderMode::Move,
+        planning: false,
+        mouse_over: true,
+        full_visibility: true,
+    };
+    assert_eq!(
+        query.selection_action((12, 12), None),
+        Some(CursorFeedbackKind::Invalid)
+    );
+}
+
+#[cfg(feature = "ares")]
+#[test]
+fn ares_vehicle_capture_cursor_shares_manual_action_and_preserves_shift_selection() {
+    let patch = crate::rules::ini_parser::IniFile::from_str("[E1]\nVehicleThief=yes\n");
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch(
+        "XMP03T4.MAP",
+        &patch,
+    ) else {
+        return;
+    };
+    let mut sim = arena(&retail.rules);
+    let actor = sim
+        .spawn_object("E1", "Americans", 15, 15, 0, &retail.rules)
+        .unwrap();
+    let target = sim
+        .spawn_object("MTNK", "Russians", 17, 15, 0, &retail.rules)
+        .unwrap();
+    let hover = HoverTargetKindWithId {
+        stable_id: target,
+        kind: HoverTargetKind::EnemyUnit,
+    };
+    let before = sim.state_hash();
+    assert!(crate::app::input::context_order::vehicle_capture_action(
+        &sim,
+        &retail.rules,
+        actor,
+        target,
+        OrderModifier::Normal,
+        false,
+    ));
+    assert_eq!(
+        capability_cursor_for_hover(
+            &sim,
+            &[actor],
+            Some(actor),
+            &hover,
+            Some(&retail.rules),
+            None,
+            OrderModifier::Normal,
+            false,
+            false,
+        ),
+        CursorFeedbackKind::Enter
+    );
+    assert!(!crate::app::input::context_order::vehicle_capture_action(
+        &sim,
+        &retail.rules,
+        actor,
+        target,
+        OrderModifier::Shift,
+        false,
+    ));
+    assert_eq!(
+        sim.state_hash(),
+        before,
+        "hover must not change simulation or RNG"
+    );
+}
+
 #[test]
 fn ares_no_manual_fire_native_modifier_cursors_use_the_shared_action() {
     let corpus = crate::test_fixture::json("tools/spatial_oracle/no_manual_fire.json");

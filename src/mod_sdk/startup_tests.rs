@@ -463,8 +463,8 @@ fn sdk_long_list_allies_and_saved_native_envelope_keep_the_admitted_selection() 
         },
         &rules,
     );
-    assert!(sim.house_alliances()["A"].contains("B"));
-    assert!(!sim.house_alliances()["B"].contains("A"));
+    assert!(sim.house_alliances().as_map()["A"].contains("B"));
+    assert!(!sim.house_alliances().as_map()["B"].contains("A"));
     let saved = GameSnapshot::load(&GameSnapshot::save(&sim, 0, 0, "LONG-LIST", 0))
         .unwrap()
         .sim;

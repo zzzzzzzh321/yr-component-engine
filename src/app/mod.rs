@@ -44,6 +44,10 @@ pub(crate) mod campaign_victory;
 pub(crate) mod chrono_screen;
 mod cncnet;
 pub mod community;
+#[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+mod browser_lifecycle;
+pub(crate) use cncnet::SpawnAction;
+pub(crate) mod commander_feedback;
 mod cooperative_round;
 #[cfg(feature = "debug-tools")]
 pub(crate) mod debug_tools;
@@ -55,16 +59,22 @@ mod frame;
 pub mod frontend;
 mod game_data_check;
 mod handler;
+mod hidden_run;
 mod in_game;
 mod initialize;
 pub(crate) mod input;
 pub(crate) mod lan_service;
 pub(crate) mod loading;
+pub(crate) mod map_library;
+pub mod map_picture;
 pub(crate) mod match_audio;
 pub mod match_bootstrap;
 pub(crate) mod match_diagnostics;
 pub(crate) mod match_runtime;
 pub(crate) mod movie_playback;
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+mod network_goodbye;
+pub(crate) mod movie_subtitles;
 pub(crate) mod persistence;
 /// The build description's native version metadata (`Phobos.version.h`).
 pub(crate) mod phobos_version;
@@ -96,7 +106,10 @@ mod shell_wol;
 pub(crate) mod sidebar_projection;
 #[cfg(test)]
 mod sidebar_projection_tests;
+pub(crate) mod spawn_probe;
 mod state;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod system_dialog;
 #[cfg(feature = "telemetry-dashboard")]
 pub mod telemetry;
 #[cfg(feature = "telemetry-dashboard")]
@@ -104,6 +117,9 @@ pub(crate) mod telemetry_capture;
 #[cfg(feature = "telemetry-dashboard")]
 pub(crate) mod telemetry_server;
 pub(crate) mod types;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) mod updater;
+pub(crate) mod web_link;
 mod window_icon;
 
 /// Main window title. The interactive single-instance gate finds a running copy's window by
@@ -113,15 +129,24 @@ pub const WINDOW_TITLE: &str = match (
     crate::rules::ARES_ENABLED,
     crate::rules::PHOBOS_ENABLED,
     crate::rules::NPATCH_ENABLED,
+    crate::rules::NPBUG_ENABLED,
 ) {
-    (true, true, true) => "VERA20K [Ares+Phobos+NPatch]",
-    (true, true, false) => "VERA20K [Ares+Phobos]",
-    (true, false, true) => "VERA20K [Ares+NPatch]",
-    (true, false, false) => "VERA20K [Ares]",
-    (false, true, true) => "VERA20K [Phobos+NPatch]",
-    (false, true, false) => "VERA20K [Phobos]",
-    (false, false, true) => "VERA20K [NPatch]",
-    (false, false, false) => "VERA20K",
+    (true, true, true, false) => "VERA20K [Ares+Phobos+NPatch]",
+    (true, true, false, false) => "VERA20K [Ares+Phobos]",
+    (true, false, true, false) => "VERA20K [Ares+NPatch]",
+    (true, false, false, false) => "VERA20K [Ares]",
+    (false, true, true, false) => "VERA20K [Phobos+NPatch]",
+    (false, true, false, false) => "VERA20K [Phobos]",
+    (false, false, true, false) => "VERA20K [NPatch]",
+    (false, false, false, false) => "VERA20K",
+    (true, true, true, true) => "VERA20K [Ares+Phobos+NPatch+NPBug]",
+    (true, true, false, true) => "VERA20K [Ares+Phobos+NPBug]",
+    (true, false, true, true) => "VERA20K [Ares+NPatch+NPBug]",
+    (false, true, true, true) => "VERA20K [Phobos+NPatch+NPBug]",
+    (true, false, false, true) => "VERA20K [Ares+NPBug]",
+    (false, true, false, true) => "VERA20K [Phobos+NPBug]",
+    (false, false, true, true) => "VERA20K [NPatch+NPBug]",
+    (false, false, false, true) => "VERA20K [NPBug]",
 };
 
 /// Identity stamp shared by the status screen and the telemetry capture. Not a
@@ -137,8 +162,8 @@ pub struct App {
     state: Option<AppState>,
     pending_initialization: Option<initialize::InitializationJob>,
     shell_capture: Option<crate::app::diagnostics::shell_capture::ShellCaptureSession>,
-    tactical_capture:
-        Option<crate::app::diagnostics::tactical_capture::session::TacticalCaptureSession>,
+    /// A tactical capture or a map picture, which the app drives itself.
+    hidden_run: Option<hidden_run::HiddenRun>,
     /// Render admission for hidden captures; service events may wake earlier.
     capture_render_not_before: Option<Instant>,
     /// Retained until `resumed()` so the profile's pre-window Video read can
@@ -146,6 +171,8 @@ pub struct App {
     startup_options: crate::app::frontend::startup_options::RetailStartupOptions,
     pending_spawn: Option<crate::app::frontend::cncnet_spawn::PendingSpawnRequest>,
     community_network: Option<crate::app::shell_wol::ExternalNetworkLaunch>,
+    /// -SPAWN launch result path (docs/spawn.md).
+    spawn_result_path: Option<std::path::PathBuf>,
     replay_request: Option<crate::app::frontend::launch::ReplayLaunchRequest>,
     startup_failure: Option<String>,
     /// Make sure config.toml names a game folder before the window opens
@@ -198,11 +225,12 @@ impl App {
             state: None,
             pending_initialization: None,
             shell_capture: None,
-            tactical_capture: None,
+            hidden_run: None,
             capture_render_not_before: None,
             startup_options,
             pending_spawn: None,
             community_network: None,
+            spawn_result_path: None,
             replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
@@ -219,11 +247,12 @@ impl App {
             shell_capture: Some(
                 crate::app::diagnostics::shell_capture::ShellCaptureSession::new(request),
             ),
-            tactical_capture: None,
+            hidden_run: None,
             capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             pending_spawn: None,
             community_network: None,
+            spawn_result_path: None,
             replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
@@ -238,15 +267,40 @@ impl App {
             state: None,
             pending_initialization: None,
             shell_capture: None,
-            tactical_capture: Some(
+            hidden_run: Some(hidden_run::HiddenRun::Capture(Box::new(
                 crate::app::diagnostics::tactical_capture::session::TacticalCaptureSession::new(
                     request,
                 ),
-            ),
+            ))),
             capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             pending_spawn: None,
             community_network: None,
+            spawn_result_path: None,
+            replay_request: None,
+            startup_failure: None,
+            ask_for_game_folder: false,
+            dispatching_touch: false,
+        }
+    }
+
+    /// A hidden map-picture run (`map_picture`), silent: it never opens audio.
+    pub fn new_map_picture(request: crate::app::map_picture::MapPictureRequest) -> Self {
+        Self {
+            state: None,
+            pending_initialization: None,
+            shell_capture: None,
+            hidden_run: Some(hidden_run::HiddenRun::Picture(Box::new(
+                crate::app::map_picture::session::MapPictureSession::new(request),
+            ))),
+            capture_render_not_before: None,
+            startup_options: crate::app::frontend::startup_options::RetailStartupOptions {
+                audio_enabled: false,
+                ..Default::default()
+            },
+            pending_spawn: None,
+            community_network: None,
+            spawn_result_path: None,
             replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
@@ -275,11 +329,20 @@ impl App {
         }) {
             anyhow::bail!("{error}");
         }
-        match (self.shell_capture.as_mut(), self.tactical_capture.as_mut()) {
+        match (self.shell_capture.as_mut(), self.hidden_run.as_mut()) {
             (Some(session), None) => session.take_outcome(),
             (None, Some(session)) => session.take_outcome(),
             (None, None) => Ok(()),
             (Some(_), Some(_)) => anyhow::bail!("multiple capture modes were active"),
+        }
+    }
+
+    /// Save the running match's diagnostic replay once a panic has ended the
+    /// event loop. Every other way out saves it in `exiting`, which a panic
+    /// skips. The panic hook has already written the log and `except.txt`.
+    pub fn save_replay_after_panic(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            crate::app::match_runtime::sim_tick::flush_replay_log(state);
         }
     }
 }

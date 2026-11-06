@@ -103,9 +103,17 @@ impl Simulation {
     ///   it is a JumpJet or cannot be ordered (`0x0051FAAB..0x0051FADD`): a
     ///   berserk soldier.
     ///
+    /// The planning rung (Ctrl+Alt or +0x43A, `0x00700815..0x007008A3`) never
+    /// answers its patrol action 0x33 in YR, so Ctrl+Alt always gives Guard
+    /// (0x1A). HouseClass::GetPlanningWaypointAt (`0x005023B0`) searches the
+    /// House+0x210 legacy waypoint paths, whose one insert (`0x007639A0`) is
+    /// called only from `0x00502160`, which has no call, jump or pointer
+    /// reference. FootClass::ActivatePlanningWaypoint sets +0x43A
+    /// (`0x004DC8D3`) and clears it before returning (`0x004DCE6B`), and it
+    /// asks What_Action only for a waypoint from those empty paths.
+    ///
     /// Not modelled, each answering another action where native reaches it:
-    /// the planning rung (Ctrl+Alt or +0x43A, `0x00700815..0x007008A3`); the
-    /// attack rungs (`0x007008A6..0x00700AB4`), which callers ask first
+    /// the attack rungs (`0x007008A6..0x00700AB4`), which callers ask first
     /// (Ctrl's forced shot, and [`Self::cell_attack_rung_admits`]); a tube
     /// entrance (Unit `0x007406CF`, Infantry `0x0051F9AC`); a JumpJet
     /// soldier over a tube's neighbourhood, which answers 0
@@ -462,16 +470,17 @@ impl Simulation {
     /// - then it attacks with no overlay (the cliff), a live veinhole monster,
     ///   or a Wall overlay its owner (`CellClass+0x50`) is not allied with
     ///   (`0x0070097E`), when the warhead has `Wall=`, or `Wood=` against an
-    ///   `Armor=wood` overlay (`0x007009C8..0x007009F1`).
+    ///   `Armor=wood` overlay (`0x007009C8..0x007009F1`);
+    /// - a Cell this rung refuses, or whose tail refuses, reaches the
+    ///   TerrainFire rung (`0x00700A46..0x00700AA6`): [`Self::fires_at_terrain`],
+    ///   then the same tail. The tails match, so it admits here.
     ///
-    /// Residuals: the planning rung before it answers for an object whose
-    /// +0x43A is set (`0x00700840`; FootClass::ActivatePlanningWaypoint sets
-    /// it at `0x004DC8D3`), which VERA does not model; the fogged-object scan
+    /// The planning rung before it (`0x00700840`) never answers in YR; see
+    /// [`Self::cell_move_action`]. Residuals: the fogged-object scan
     /// behind the scenario's FogOfWar flag
     /// (`0x00700761..0x0070080F`: a fogged overlay replaces the live one and
     /// a fogged enemy building admits the rung) and the veinhole monster
-    /// (`0x00700990`, no VERA owner) are not modelled; the later TerrainFire
-    /// rung (vt+0x398, `0x00700A46`) is not either.
+    /// (`0x00700990`, no VERA owner) are not modelled.
     pub fn cell_attack_rung_admits(
         &self,
         id: u64,
@@ -517,25 +526,115 @@ impl Simulation {
             .as_ref()
             .is_some_and(|terrain| terrain.is_destroyable_cliff(cell.0, cell.1))
             && !warhead.is_some_and(|warhead| warhead.fire);
-        if !(overlay.is_some_and(|overlay| overlay.legal_target) || cliff) {
-            return false;
-        }
-        let Some(overlay) = overlay else {
-            return true;
+        let attack_rung = match overlay {
+            _ if !(overlay.is_some_and(|overlay| overlay.legal_target) || cliff) => false,
+            None => true,
+            Some(overlay) => {
+                let enemy_owned =
+                    overlay_cell
+                        .and_then(|cell| cell.wall_owner)
+                        .is_some_and(|owner| {
+                            !self
+                                .house_alliances
+                                .is_allied(&self.interner, owner, entity.owner())
+                        });
+                enemy_owned
+                    && overlay.wall
+                    && warhead.is_some_and(|warhead| {
+                        warhead.wall || (warhead.wood && overlay.armor_is_wood)
+                    })
+            }
         };
-        let enemy_owned = overlay_cell
-            .and_then(|cell| cell.wall_owner)
-            .is_some_and(|owner| {
-                !crate::map::houses::is_allied_with(
-                    self.house_alliances.as_map(),
-                    self.interner.resolve(owner),
-                    self.interner.resolve(entity.owner()),
-                )
-            });
-        enemy_owned
-            && overlay.wall
-            && warhead
-                .is_some_and(|warhead| warhead.wall || (warhead.wood && overlay.armor_is_wood))
+        attack_rung || self.fires_at_terrain(id, &TargetKind::Cell(cell.0, cell.1), rules, registry)
+    }
+
+    /// TechnoClass vt+0x398 (`0x0070EF00`, which no class overrides):
+    /// whether `id`'s weapon may fire at `target` as terrain. SelectWeapon
+    /// (vt+0x2E4) and GetWeapon (vt+0x3F8) pick the weapon; without one it
+    /// answers no (`0x0070EF1F`). Then:
+    /// - a Terrain object (`0x0070EF29..0x0070EF4B`) answers
+    ///   `[CombatDamage] TreeTargeting=` (`Rules+0x17E9`) or the weapon's
+    ///   `TerrainFire=` (`+0x138`);
+    /// - anything else needs `TerrainFire=` (`0x0070EF53`), then a Cell whose
+    ///   overlay is `IsARock=` (`OverlayType+0x2B5`, `0x0070EF61..0x0070EF82`),
+    ///   or an object that IsDisguised (vt+0xC4, `+0x1D8`) and wears no house
+    ///   (vt+0xD0(1), `0x0070EF8C..0x0070EFB2`), as a Mirage worn as a tree.
+    ///
+    /// Retail rules give `TerrainFire=` only to `TankMakeupKit`, which no
+    /// type carries, and leave `TreeTargeting=` off; a map may set either.
+    pub fn fires_at_terrain(
+        &self,
+        id: u64,
+        target: &TargetKind,
+        rules: &RuleSet,
+        registry: Option<&OverlayTypeRegistry>,
+    ) -> bool {
+        use crate::sim::combat::combat_weapon;
+
+        let Some(entity) = self.substrate.entities.get(id) else {
+            return false;
+        };
+        let Some(object) = self.interner.object_type(entity.type_ref(), rules) else {
+            return false;
+        };
+        let cells = self
+            .resolved_terrain
+            .as_ref()
+            .map(NativeCellQuery::isolated);
+        // Only the WeaponType is tested (`0x0070EF1B..0x0070EF1F`), never
+        // its warhead.
+        let Some(weapon) = combat_weapon::select_weapon_index_against_in_query(
+            rules,
+            entity,
+            object,
+            &combat_weapon::attacker_facts(entity, object),
+            Some(target),
+            self,
+            &self.interner,
+            cells.as_ref(),
+            Some(&self.house_alliances),
+        )
+        .and_then(|index| {
+            combat_weapon::get_weapon(
+                entity,
+                object,
+                index,
+                &self.substrate.entities,
+                rules,
+                &self.interner,
+            )
+        }) else {
+            return false;
+        };
+        let terrain_fire = weapon.terrain_fire;
+        match *target {
+            TargetKind::Entity(target_id) if self.terrain_objects().get(target_id).is_some() => {
+                rules.general.tree_targeting || terrain_fire
+            }
+            _ if !terrain_fire => false,
+            TargetKind::Cell(x, y) => self
+                .overlay_grid
+                .as_ref()
+                .and_then(|grid| grid.cell(x, y).overlay_id)
+                .and_then(|overlay_id| registry?.flags(overlay_id))
+                .is_some_and(|overlay| overlay.is_a_rock),
+            // Infantry's vt+0xD0 answers the current player for no worn
+            // house (`0x005226C0`); the asker's owner stands in for it.
+            TargetKind::Entity(target_id) => {
+                self.substrate
+                    .entities
+                    .get(target_id)
+                    .is_some_and(|target| {
+                        target
+                            .disguise
+                            .as_ref()
+                            .is_some_and(|disguise| disguise.is_disguised())
+                            && target
+                                .disguise_house(true, Some(entity.owner()), false)
+                                .is_none()
+                    })
+            }
+        }
     }
 
     /// `MapClass::IsShrouded @ 0x00586360` for `viewer` at a clicked Cell's
@@ -667,6 +766,48 @@ impl Simulation {
             registry,
         )?;
         Ok(action == MoveAction::Move)
+    }
+
+    /// Foot What_Action's shroud rung over an object
+    /// (`FootClass::What_Action_OnObject @ 0x004DDED0`), which every Foot
+    /// class asks before its own rungs (Unit `0x0073FD62`, Infantry
+    /// `0x0051E44C`, Aircraft `0x00417CD3`): in a campaign (Session GameMode
+    /// `[0x00A8B238]` 0, `0x004DDF5C..0x004DDF63`), Techno's nonzero answer
+    /// (`0x004DDF58`) over an object whose coordinate (vt+0x48) on its ground,
+    /// raised to a bridge deck (`0x004DDEE7..0x004DDF41`), `viewer`'s map
+    /// shrouds (`IsShrouded 0x00586360`) becomes Move for a `MoveToShroud=`
+    /// type (TechnoType+0xC8D), else NoMove (`0x004DDF65..0x004DDF7B`). The
+    /// key rungs' answers (Shift, Alt, Ctrl+Alt) are Techno's too. Unlike the
+    /// Cell wrapper (`0x004DDE64..0x004DDEBE`), it asks neither the playfield
+    /// nor the planning action, and only in a campaign.
+    ///
+    /// The caller asks it only of a nonzero answer. None keeps that answer,
+    /// as for a Building, which has no Foot wrapper.
+    pub fn foot_object_shroud_action(
+        &self,
+        viewer: InternedId,
+        id: u64,
+        target: u64,
+        rules: &RuleSet,
+    ) -> Option<MoveAction> {
+        let entity = self.substrate.entities.get(id)?;
+        if entity.category() == EntityCategory::Structure
+            || self.session.game_mode() != crate::sim::scenario_session::ScenarioGameMode::Campaign
+        {
+            return None;
+        }
+        let object = self.interner.object_type(entity.type_ref(), rules)?;
+        let cells = NativeCellQuery::isolated(self.resolved_terrain.as_ref()?);
+        let coords =
+            ground_pose::target_get_coords(TargetKind::Entity(target), self, Some(&cells))?;
+        let point = grounded_coordinate(&cells, coords.x, coords.y).ok()?;
+        crate::sim::vision::point_is_shrouded(&self.fog, &cells, viewer, point).then_some(
+            if object.move_to_shroud {
+                MoveAction::Move
+            } else {
+                MoveAction::NoMove
+            },
+        )
     }
 
     /// The class rungs of a Foot's What_Action over an object that turn the
@@ -1204,11 +1345,15 @@ fn clicked_coordinate(
         },
         0,
     );
-    let mut point = DriveCoord {
-        x: centre.x,
-        y: centre.y,
-        z: 0,
-    };
+    grounded_coordinate(cells, centre.x, centre.y)
+}
+
+/// The point `(x, y)` on its ground (`Map__GetGroundHeightAtCoord
+/// 0x00578080`), raised to a bridge deck where the Cell under it has one
+/// (Cell `+0x140 & 0x100`): [`clicked_coordinate`] from a Cell's centre, and
+/// Foot What_Action's object coordinate (`0x004DDEE7..0x004DDF41`).
+fn grounded_coordinate(cells: &NativeCellQuery<'_>, x: i32, y: i32) -> Result<DriveCoord, String> {
+    let mut point = DriveCoord { x, y, z: 0 };
     point.z = query_ground(cells, point)?;
     //4DE242/4DE38C are separate Map calls after the height query.
     if cells.flags(cells.lookup_world(point.x, point.y)) & 0x100 != 0 {

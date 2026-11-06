@@ -17,13 +17,20 @@ use crate::sim::movement::locomotor::MovementLayer;
 /// captured this object. The Techno constructor stores -1 (`0x006F2EC8`). An
 /// engineer's capture stores its type after the owner change
 /// (`InfantryClass::PerCellProcess`, `0x00519A42` and `0x00519F94`, one per
-/// capture arm; [`Self::record`]). A vehicle thief's store
-/// (`InfantryClass::TryThiefVehicleCapture`, `0x00520465`) belongs to the
-/// Unit hijacker mechanism, which is separate. Its Building consumers are
-/// diagnostics.
+/// capture arm; [`Self::record`]). The vehicle capture store
+/// (`InfantryClass::TryThiefVehicleCapture`, `0x00520465`) shares this same
+/// metadata; Unit survivor creation and the house's build-limit query read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub(crate) struct CapturedInfantryType(i32);
+
+/// Native capture's consumed-actor result plus synchronous geometry changes
+/// that Rust's caller must carry to its derived map refresh.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VehicleCaptureOutcome {
+    pub(crate) consumed: bool,
+    pub(crate) bridge_state_changed: bool,
+}
 
 impl CapturedInfantryType {
     /// The Techno constructor's -1.
@@ -36,7 +43,7 @@ impl CapturedInfantryType {
         self.0
     }
 
-    /// The engineer capture's store of its native InfantryType index.
+    /// The capture receivers' store of the native InfantryType index.
     pub(crate) fn record(&mut self, native_index: i32) {
         self.0 = native_index;
     }
@@ -103,6 +110,155 @@ pub enum EntryBaseAction {
 pub(crate) struct BuildingEntryResult {
     pub(crate) bridge_state_changed: bool,
     pub(crate) return_before_foot: bool,
+}
+
+impl Simulation {
+    /// InfantryClass::TryThiefVehicleCapture5202F0..5206AA, reached at
+    /// InfantryAI51BEC0 (retail gamemd.exe). EC5 Thief, not EC6
+    /// VehicleThief, admits this original receiver. There is no mission,
+    /// health or target-owner-side gate beyond the caller's live Infantry
+    /// and the actor's directional alliance check.
+    pub(crate) fn infantry_try_thief_capture(
+        &mut self,
+        actor_id: u64,
+        rules: &RuleSet,
+        registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+        effects: FrameEffects<'_>,
+    ) -> Result<VehicleCaptureOutcome, String> {
+        use crate::sim::components::NavTargetRef;
+        use crate::sim::movement::ground_pose::object_get_coords;
+        use crate::util::native_x87::distance_3d_leptons;
+        let Some(actor) = self.substrate.entities.get(actor_id) else {
+            return Ok(VehicleCaptureOutcome::default());
+        };
+        if actor.category() != EntityCategory::Infantry
+            || !self.entity_object_type(actor, rules).is_some_and(|ty| {
+                #[cfg(not(feature = "ares"))]
+                {
+                    ty.thief
+                }
+                #[cfg(feature = "ares")]
+                {
+                    ty.vehicle_thief || ty.driver_rules().can_drive()
+                }
+            })
+        {
+            return Ok(VehicleCaptureOutcome::default());
+        }
+        let Some(nav @ NavTargetRef::Object { id: target_id }) = actor.navigation.nav_com() else {
+            return Ok(VehicleCaptureOutcome::default());
+        };
+        let Some(target) = self.substrate.entities.get(target_id) else {
+            return Ok(VehicleCaptureOutcome::default());
+        };
+        if target.category() != EntityCategory::Unit
+            || crate::sim::combat::combat_weapon::is_ally_by_object(
+                Some(&self.house_alliances),
+                &self.interner,
+                actor.owner(),
+                target.owner(),
+            )
+        {
+            return Ok(VehicleCaptureOutcome::default());
+        }
+        //520343..52038D: +4C supplies only the target's approach height.
+        // A8F240 is the standard 104-lepton height (startup517910..517940).
+        let approach = self.navigation_target_coordinate(nav, Some(actor_id), rules)?;
+        let from = object_get_coords(actor, self.resolved_terrain.as_ref());
+        let to = object_get_coords(target, self.resolved_terrain.as_ref());
+        let xyz = |point: crate::sim::components::DriveCoord| [point.x, point.y, point.z];
+        let distance = distance_3d_leptons(xyz(from), xyz(to));
+        if approach.z.wrapping_sub(from.z).wrapping_abs()
+            < crate::util::lepton::GROUND_LEVEL_HEIGHT_LEPTONS
+            && distance < 128
+        {
+            #[cfg(feature = "ares")]
+            {
+                //5203F7 ->100499A0: the shared Ares receiver returns whether
+                //this caller must consume the actor (Drive can board it).
+                let outcome =
+                    self.ares_capture_vehicle(actor_id, target_id, rules, registry, effects)?;
+                if outcome.consumed {
+                    self.uninit_with_context(
+                        actor_id,
+                        super::UninitContext::new(rules, registry).with_effects(effects),
+                    );
+                }
+                return Ok(outcome);
+            }
+            #[cfg(not(feature = "ares"))]
+            {
+                //5203F7..52046D: each callback finishes before the next live
+                // read. Radio+274 addresses slot zero, not the broadcast walk.
+                let context = super::UninitContext::new(rules, registry).with_effects(effects);
+                self.dispatch_object_tag_event(target_id, 1, Some(actor_id), None, context);
+                crate::sim::radio::transmit_to_contact(
+                    self,
+                    target_id,
+                    crate::sim::radio::RadioMessage::Break,
+                    rules,
+                    effects,
+                );
+                self.detach_all(target_id, false, context);
+                self.trigger_runtime
+                    .transfer_object_tag(actor_id, target_id);
+                if let Some(owner) = self
+                    .substrate
+                    .entities
+                    .get(actor_id)
+                    .map(|actor| actor.owner())
+                {
+                    self.change_owner_with_rules(target_id, owner, rules, registry, effects);
+                }
+                let captor_type = self
+                    .substrate
+                    .entities
+                    .get(actor_id)
+                    .and_then(|actor| self.entity_object_type(actor, rules))
+                    .and_then(|ty| {
+                        rules.type_array_index(
+                            crate::rules::object_type::ObjectCategory::Infantry,
+                            &ty.id,
+                        )
+                    });
+                if let Some(index) = captor_type
+                    && let Some(target) = self.substrate.entities.get_mut(target_id)
+                {
+                    target.capture_infantry_type_index.record(index);
+                }
+                self.uninit_with_context(actor_id, context);
+                return Ok(VehicleCaptureOutcome {
+                    consumed: true,
+                    bridge_state_changed: false,
+                });
+            }
+        }
+
+        //52047D..52069B: compare the locomotor's FINAL destination, not
+        // its paid step/head. Near targets retain it within 128 leptons;
+        // distant ones retain it in the target's approach cell.
+        let destination = crate::sim::movement::motion_query::destination(actor)
+            .ok_or_else(|| format!("Thief {actor_id} has no active locomotor destination"))?;
+        let null = crate::sim::components::DriveCoord { x: 0, y: 0, z: 0 };
+        let reissue = if destination == null {
+            true
+        } else if distance < 512 {
+            distance_3d_leptons(xyz(to), xyz(destination)) > 128
+        } else {
+            let cell = |coord: crate::sim::components::DriveCoord| {
+                (
+                    crate::util::lepton::lepton_to_cell_packed(coord.x),
+                    crate::util::lepton::lepton_to_cell_packed(coord.y),
+                )
+            };
+            cell(destination) != cell(approach)
+        };
+        if reissue {
+            self.assign_destination_represented(actor_id, Some(nav), rules, registry, effects)
+                .map_err(|error| format!("Thief {actor_id} destination: {error}"))?;
+        }
+        Ok(VehicleCaptureOutcome::default())
+    }
 }
 
 #[cfg(test)]
@@ -233,11 +389,10 @@ impl Simulation {
         }
         let target = self.substrate.entities.get(target_id)?;
         let target_type = self.object_type(target.type_ref(), rules)?;
-        if !crate::map::houses::is_allied_with(
-            self.house_alliances.as_map(),
-            self.interner.resolve(actor.owner()),
-            self.interner.resolve(target.owner()),
-        ) {
+        if !self
+            .house_alliances
+            .is_allied(&self.interner, actor.owner(), target.owner())
+        {
             return Some(UnitRepairAction::Move);
         }
         // The target's vt+80 (`0x0073FDBD`); every GameEntity is a Techno
@@ -314,7 +469,7 @@ impl Simulation {
         if actor.category() != EntityCategory::Unit
             || !self.house_is_human_player(actor.owner())
             || !combat::combat_weapon::is_ally_by_object(
-                Some(self.house_alliances.as_map()),
+                Some(&self.house_alliances),
                 &self.interner,
                 target.owner(),
                 actor.owner(),
@@ -480,7 +635,7 @@ impl Simulation {
             return None;
         }
         if !combat::combat_weapon::is_ally_by_object(
-            Some(self.house_alliances.as_map()),
+            Some(&self.house_alliances),
             &self.interner,
             actor.owner(),
             target.owner(),
@@ -592,12 +747,22 @@ impl Simulation {
                     crate::sim::movement::ground_pose::position_world_coord(&entity.position);
                 let land = cells.land_type(cells.lookup_world(coord.x, coord.y));
                 land != i32::from(crate::rules::terrain_rules::LandType::Water.as_index())
-                    && !u8::try_from(land)
+                    && u8::try_from(land)
                         .ok()
                         .and_then(|land| rules.terrain_rules.semantics_for_land_type(land))
                         .is_some_and(|row| {
+                            // UnitWhatAction7400A1..7400BE: first passenger,
+                            // strictly below the native double1% threshold.
                             row.cost_for_speed_type(passenger.speed_type)
-                                .is_none_or(|cost| cost != 0)
+                                .is_some_and(|cost| {
+                                    matches!(
+                                        crate::rules::terrain_rules::compare_speed_to_one_percent(
+                                            cost
+                                        ),
+                                        crate::util::native_x87::MaskedX87Ordering::Less
+                                            | crate::util::native_x87::MaskedX87Ordering::Unordered
+                                    )
+                                })
                         })
             });
         stranded
@@ -616,12 +781,24 @@ impl Simulation {
         houses: &crate::sim::houses::Houses,
         owner: InternedId,
     ) -> bool {
-        // House50B6F0: nonzero session mode compares exactly to LocalPlayer;
+        //50B716 loads A83D4C, the persisted native current-house input.
+        //Presentation viewer binding cannot change this receiver's result.
+        Self::is_human_player_on(session, houses, owner, session.current_house())
+    }
+
+    /// [`Self::is_human_player`] asked on the client whose `PlayerPtr`
+    /// (`[0x00A83D4C]`, read at `0x0050B716`) is `player`: a represented
+    /// network client's own house, or the current house.
+    pub(crate) fn is_human_player_on(
+        session: &crate::sim::scenario_session::ScenarioSession,
+        houses: &crate::sim::houses::Houses,
+        owner: InternedId,
+        player: Option<InternedId>,
+    ) -> bool {
+        // House50B6F0: nonzero session mode compares exactly to PlayerPtr;
         // mode zero uses the two native human/control flags.
         if session.game_mode_nonzero() {
-            //50B716 loads A83D4C, the persisted native current-house input.
-            //Presentation viewer binding cannot change this receiver's result.
-            session.current_house() == Some(owner)
+            player == Some(owner)
         } else {
             houses
                 .get(&owner)
@@ -676,17 +853,21 @@ impl Simulation {
             .entities
             .iter_sorted()
             .filter_map(|(id, entity)| {
-                let next =
-                    self.assigned_control_group(entity, entity.object_group(), group, &selected);
-                (next != entity.object_group()).then_some((id, next))
+                let current = entity.control_group();
+                let next = self.assigned_control_group(entity, current, group, &selected);
+                (next != current).then_some((id, next))
             })
             .collect();
+        // VERA network adaptation: the key's store is local to one client, so
+        // a network game keeps it in the local player's slot, off +214.
+        let local = self.session.game_mode().is_network();
         for (id, group) in changes {
-            self.substrate
-                .entities
-                .get_mut(id)
-                .unwrap()
-                .assign_object_group(group);
+            let entity = self.substrate.entities.get_mut(id).unwrap();
+            if local {
+                entity.assign_local_control_group(group);
+            } else {
+                entity.assign_object_group(group);
+            }
         }
         true
     }
@@ -769,7 +950,15 @@ impl Simulation {
             && self.house_is_human_player(actor.owner())
             && self
                 .object_type(actor.type_ref(), rules)
-                .is_some_and(|object| combat::combat_weapon::is_armed(actor, object))
+                .is_some_and(|object| {
+                    combat::combat_weapon::is_armed(
+                        actor,
+                        object,
+                        &self.substrate.entities,
+                        rules,
+                        &self.interner,
+                    )
+                })
     }
 
     /// Object-route Engineer action in Infantry51E49E..51E637. Ordinary
@@ -799,11 +988,9 @@ impl Simulation {
             return None;
         }
         if !object.bridge_repair_hut {
-            let allied = crate::map::houses::is_allied_with(
-                self.house_alliances.as_map(),
-                self.interner.resolve(actor.owner()),
-                self.interner.resolve(target.owner()),
-            );
+            let allied =
+                self.house_alliances
+                    .is_allied(&self.interner, actor.owner(), target.owner());
             let passive_occupation = self
                 .houses
                 .get(&target.owner())
@@ -902,11 +1089,9 @@ impl Simulation {
             return false;
         };
         infiltrator_admits(infantry, building)
-            && !crate::map::houses::is_allied_with(
-                self.house_alliances.as_map(),
-                self.interner.resolve(actor.owner()),
-                self.interner.resolve(target.owner()),
-            )
+            && !self
+                .house_alliances
+                .is_allied(&self.interner, actor.owner(), target.owner())
     }
 
     /// `InfantryClass::Assign_Target`'s infiltration arm
@@ -1203,11 +1388,9 @@ impl Simulation {
             return Ok(BuildingEntryResult::default());
         };
         if !object.bridge_repair_hut {
-            let allied = crate::map::houses::is_allied_with(
-                self.house_alliances.as_map(),
-                self.interner.resolve(owner),
-                self.interner.resolve(building.owner()),
-            );
+            let allied = self
+                .house_alliances
+                .is_allied(&self.interner, owner, building.owner());
             //519D6E's passive-occupation repair branch has no warp gate.
             let repair = allied
                 || (object.can_be_occupied
@@ -1219,10 +1402,12 @@ impl Simulation {
             let refused_capture = building.mission.current().known() == Some(MissionType::Selling)
                 || building.is_warped_out();
             let capturable = object.capturable;
-            let native_type_index = rules
+            let native_type_index = self
+                .interner
                 .type_array_index(
+                    engineer.type_ref(),
                     crate::rules::object_type::ObjectCategory::Infantry,
-                    self.interner.resolve(engineer.type_ref()),
+                    rules,
                 )
                 .unwrap_or(-1);
             //519D82..519EA5: with MultiEngineer on, a hostile building above
@@ -1299,7 +1484,7 @@ impl Simulation {
                     old_house.notify_building_capture();
                 }
                 self.trigger_runtime
-                    .transfer_engineer_tag_to_building(engineer_id, building_id);
+                    .transfer_object_tag(engineer_id, building_id);
                 //519F71 loads the entrant's live owner after the second
                 //Entered callback and Tag transfer. Action36 can change it
                 //again without restarting this admitted PerCell continuation.

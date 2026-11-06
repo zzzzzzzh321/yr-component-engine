@@ -171,6 +171,24 @@ pub fn is_fear_application_blocked(obj: &ObjectType, entity: &GameEntity) -> boo
     obj.fearless || has_weapon_ability(entity.veterancy.rank_kind(), obj, Ability::Fearless)
 }
 
+/// InfantryClass::FireAt @0x0051DF60, retail gamemd.exe instructions:
+/// 51DF82..51DFAA, after the base returns a Bullet. This write has no
+/// Fearless/FEARLESS gate; mission queuing remains with the FireAt caller.
+pub(crate) fn apply_empty_magazine_panic(obj: &ObjectType, entity: &mut GameEntity) -> bool {
+    if entity.lifecycle.in_limbo()
+        || !obj.fraidycat
+        || entity.ammo().is_none_or(|ammo| ammo.current() != 0)
+    {
+        return false;
+    }
+    entity
+        .infantry
+        .as_mut()
+        .expect("Infantry FireAt requires its class runtime")
+        .fear_level = MAX_FEAR;
+    true
+}
+
 pub fn can_decay_fear(obj: &ObjectType) -> bool {
     !obj.fearless
 }
@@ -208,10 +226,18 @@ pub fn apply_fear_from_damage(
     condition_red_ratio: f64,
     condition_yellow_ratio: f64,
 ) {
-    if damage_landed == 0
-        || entity.health.current() == 0
-        || is_fear_application_blocked(obj, entity)
-    {
+    if damage_landed == 0 || entity.health.current() == 0 {
+        return;
+    }
+    let latch = damager_present
+        && entity
+            .infantry
+            .as_ref()
+            .is_some_and(|infantry| infantry.fear_level <= FEAR_LATCH_CEILING);
+    // Retail gamemd.exe InfantryClass::ReceiveDamage @0x00517FA0:
+    //518C5C..518C91 returns from the sourced Fraidycat latch before the
+    //Fearless/FEARLESS gates at518C94/518CC8. Panic keeps its shared gate.
+    if !(latch && obj.fraidycat) && is_fear_application_blocked(obj, entity) {
         return;
     }
     let Some(infantry) = entity.infantry.as_mut() else {
@@ -221,7 +247,7 @@ pub fn apply_fear_from_damage(
     // ceiling *sets* fear outright — 300 for a Fraidycat, 100 otherwise — instead
     // of adding to it. Only a hit with no damager, or one taken while fear is
     // already above the ceiling, runs the health-band ladder below.
-    if damager_present && infantry.fear_level <= FEAR_LATCH_CEILING {
+    if latch {
         infantry.fear_level = if obj.fraidycat {
             MAX_FEAR
         } else {
@@ -260,7 +286,7 @@ fn repeated_fear_add(
 }
 
 impl crate::sim::world::Simulation {
-    /// Original `InfantryClass` fear receiver5200B0, called by InfantryAI at
+    /// gamemd.exe `InfantryClass__Fear_Decay_Handler @ 0x005200B0`, called by InfantryAI at
     /// 51BF0B after Foot Process and before FireAtTarget5206B0/sequencer520AE0.
     /// Caller owns survival/warped admission. Returns the existing NULL Scatter
     /// owner's immediate Process bridge-state-change result.
@@ -302,13 +328,36 @@ impl crate::sim::world::Simulation {
                     .expect("retained Infantry runtime")
                     .fear_level -= 1;
             }
-            // REQUIRED SEPARATE MECHANISM:5200E1..520105 reads live
-            // Techno+2FC after fear reaches0, calls the shared IsArmed701120
-            // if Ammo0, and refills from Type+684. The shared Ammo owner now
-            // retains the constructor/chrono count, but this fear refill and
-            // ordinary ground fire debit cycle remain separate. Stock E1's
-            // negative count bypasses this arm. Saved zero-ammo controls
-            // retain its native producer for that lifecycle migration.
+            // InfantryClass__Fear_Decay_Handler @0x005200B0, retail gamemd.exe:
+            //5200E1..520105: only this positive-fear visit reaching zero can refill an empty
+            // armed actor. Copy the current type's signed Ammo; no reload
+            // timer, RNG draw or detach belongs to this arm. Installed Ares
+            // InfantryClass_UpdatePanic_DontReload (5200D7) resumes at 52010B.
+            #[cfg(not(feature = "ares"))]
+            let refill = self.substrate.entities.get(id).and_then(|actor| {
+                if actor.infantry.as_ref()?.fear_level != 0 || actor.ammo()?.current() != 0 {
+                    return None;
+                }
+                let object = self.object_type(actor.type_ref(), rules)?;
+                crate::sim::combat::combat_weapon::is_armed(
+                    actor,
+                    object,
+                    &self.substrate.entities,
+                    rules,
+                    &self.interner,
+                )
+                .then_some(object.ammo)
+            });
+            #[cfg(not(feature = "ares"))]
+            if let Some(type_ammo) = refill {
+                self.substrate
+                    .entities
+                    .get_mut(id)
+                    .expect("retained fear receiver")
+                    .ammo_mut()
+                    .expect("empty Techno ammo was read above")
+                    .refill_empty_from_type(type_ammo);
+            }
             let actor = self
                 .substrate
                 .entities
@@ -685,11 +734,24 @@ pub fn is_prone_for_damage(entity: &GameEntity) -> bool {
     entity.infantry.is_some_and(|infantry| infantry.is_prone)
 }
 
-pub fn apply_prone_speed(speed: SimFixed, crawls: bool) -> SimFixed {
+/// `InfantryClass::GetMovementSpeed @ 0x00521D80`'s prone arm: retail applies
+/// the two integer sequences below at `0x00521DA4..0x00521DBB` (`Crawls=`) and
+/// `0x00521DBC..0x00521DC3` (no `Crawls=`).
+///
+/// Phobos's `InfantryClass_CurrentSpeed_ProneSpeed` hook at `0x00521D94`
+/// replaces both with `static_cast<int>(speed * ProneSpeed)`, so a `multiplier`
+/// short-circuits them. The product is a plain IEEE double; Rust's `as i32`
+/// truncates toward zero, as the C++ cast does. Every multiplier the readers
+/// store is a widened binary32 or a 0.67/1.5 default, so the product of a
+/// whole speed truncates alike under x87 and SSE2.
+pub fn apply_prone_speed(speed: SimFixed, crawls: bool, multiplier: Option<f64>) -> SimFixed {
     if speed <= SIM_ZERO {
         return speed;
     }
     let whole_speed = speed.to_num::<i32>().max(0);
+    if let Some(multiplier) = multiplier {
+        return SimFixed::from_num((f64::from(whole_speed) * multiplier) as i32);
+    }
     let adjusted = if crawls {
         (whole_speed.saturating_mul(2) + 2) / 3
     } else {
@@ -697,6 +759,10 @@ pub fn apply_prone_speed(speed: SimFixed, crawls: bool) -> SimFixed {
     };
     SimFixed::from_num(adjusted)
 }
+
+#[cfg(test)]
+#[path = "infantry_damage_fear_tests.rs"]
+mod damage_fear_tests;
 
 #[cfg(test)]
 mod tests {
@@ -710,9 +776,17 @@ mod tests {
     use crate::sim::intern::test_intern;
 
     fn rules_for(section: &str) -> RuleSet {
-        RuleSet::from_ini(&IniFile::from_str(&format!(
-            "[InfantryTypes]\n0=E1\n\n[VehicleTypes]\n\n[AircraftTypes]\n\n[BuildingTypes]\n\n[E1]\nStrength=100\nArmor=flak\nSpeed=4\n{section}\n"
-        )))
+        rules_with_art(section, &IniFile::empty())
+    }
+
+    /// [`rules_for`] with `art` as the fixed ART its passes read.
+    fn rules_with_art(section: &str, art: &IniFile) -> RuleSet {
+        RuleSet::from_ini_with_fixed_art_for_test(
+            &IniFile::from_str(&format!(
+                "[InfantryTypes]\n0=E1\n\n[VehicleTypes]\n\n[AircraftTypes]\n\n[BuildingTypes]\n\n[E1]\nStrength=100\nArmor=flak\nSpeed=4\n{section}\n"
+            )),
+            art,
+        )
         .expect("rules should parse")
     }
 
@@ -832,12 +906,6 @@ mod tests {
                 "no"
             }
         };
-        let mut rules = rules_for(&format!(
-            "Locomotor={{4A582744-9839-11d1-B709-00A024DDAFD1}}\n\
-             Fearless={}\nFraidycat={}\n",
-            yes_no("fearless", false),
-            yes_no("fraidycat", false)
-        ));
         let records: String = crate::rules::infantry_sequence::NATIVE_SEQUENCE_NAMES
             .iter()
             .enumerate()
@@ -851,6 +919,15 @@ mod tests {
             "[E1]\nSequence=FearFixture\nCrawls={}\n[FearFixture]\n{records}",
             yes_no("crawls", true)
         ));
+        let mut rules = rules_with_art(
+            &format!(
+                "Locomotor={{4A582744-9839-11d1-B709-00A024DDAFD1}}\n\
+                 Fearless={}\nFraidycat={}\n",
+                yes_no("fearless", false),
+                yes_no("fraidycat", false)
+            ),
+            &art,
+        );
         rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
         // Native fixture supplies Type+EBD directly. The production reader
         // binds that Crawls byte from ART, not RULES, before Down51D77A.
@@ -859,9 +936,6 @@ mod tests {
             input["crawls"].as_bool().unwrap_or(true),
             "supplied native Crawls input: {}",
             input["name"]
-        );
-        rules.bind_animation_sequences(
-            &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
         );
         let mut sim = Simulation::with_seed(31);
         sim.session.set_binary_frame_for_test(100);
@@ -1059,6 +1133,16 @@ mod tests {
         assert_native_fear_state(&sim, row);
     }
 
+    /// WEEDGUY is the retail infantry without an ARTMD image section, so it
+    /// keeps the InfantryTypeClass constructor's Crawls (`0x00523788`).
+    #[test]
+    fn retail_weedguy_keeps_the_constructor_crawls() {
+        let Some(rules) = retail_e1_rules() else {
+            return;
+        };
+        assert!(rules.object("WEEDGUY").unwrap().crawls);
+    }
+
     /// Stock E1's Crawls/Fearless/Fraidycat/Ammo/Walk inputs come through
     /// the production retail RULES/ART readers. For these receivers the Up/
     /// Down record count participates only in the zero predicate51D70F;
@@ -1199,9 +1283,6 @@ mod tests {
         let mut rules =
             RuleSet::from_processed_rules(&layers.process_with_fixed_art(&art).unwrap()).unwrap();
         rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
-        rules.bind_animation_sequences(
-            &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-        );
         Some(rules)
     }
 
@@ -1627,20 +1708,49 @@ mod tests {
     #[test]
     fn prone_speed_rounding_is_exact() {
         assert_eq!(
-            apply_prone_speed(SimFixed::from_num(10), true),
+            apply_prone_speed(SimFixed::from_num(10), true, None),
             SimFixed::from_num(7)
         );
         assert_eq!(
-            apply_prone_speed(SimFixed::from_num(11), true),
+            apply_prone_speed(SimFixed::from_num(11), true, None),
             SimFixed::from_num(8)
         );
         assert_eq!(
-            apply_prone_speed(SimFixed::from_num(10), false),
+            apply_prone_speed(SimFixed::from_num(10), false, None),
             SimFixed::from_num(15)
         );
         assert_eq!(
-            apply_prone_speed(SimFixed::from_num(11), false),
+            apply_prone_speed(SimFixed::from_num(11), false, None),
             SimFixed::from_num(16)
+        );
+    }
+
+    /// Phobos replaces both retail integer arms with `(int)(speed * ProneSpeed)`,
+    /// a double product truncated toward zero. The default 1.5 matches the
+    /// retail `speed + speed / 2`, but 0.67 is not `speed - speed / 3`: ten
+    /// leptons crawl at 6 here and at 7 there.
+    #[test]
+    fn phobos_prone_multiplier_truncates_the_double_product() {
+        for (speed, multiplier, expected) in [
+            (10, 0.67, 6),
+            (11, 0.67, 7),
+            (10, 1.5, 15),
+            (11, 1.5, 16),
+            (3, 0.67, 2),
+            (3, 2.0, 6),
+            (5, 0.5, 2),
+            // The retail crawl arm keeps one lepton at 1.
+            (1, 0.67, 0),
+        ] {
+            assert_eq!(
+                apply_prone_speed(SimFixed::from_num(speed), true, Some(multiplier)),
+                SimFixed::from_num(expected),
+                "{speed} x {multiplier}"
+            );
+        }
+        assert_eq!(
+            apply_prone_speed(SimFixed::from_num(0), true, Some(0.67)),
+            SimFixed::from_num(0)
         );
     }
 }

@@ -105,8 +105,8 @@ impl<'a> SimView<'a> {
     }
 
     /// The houses' ally graph, which fog and visibility questions ask.
-    pub fn house_alliances(&self) -> &'a crate::map::houses::HouseAllianceMap {
-        self.simulation.house_alliances.as_map()
+    pub fn house_alliances(&self) -> &'a crate::sim::house_diplomacy::HouseAlliances {
+        &self.simulation.house_alliances
     }
 
     pub fn houses(&self) -> &'a crate::sim::houses::Houses {
@@ -163,18 +163,25 @@ impl SimRuntime {
     /// One Ordinary-lane frame for side binaries (parity-digest, sim-bench):
     /// the same bound-resource transaction as `advance_frame`, with the
     /// crate-private frame output discarded so no internal type goes public.
+    /// Returns the multiplayer sync checksum a multiplayer-route frame stored
+    /// (a frame whose checksum fails fails the frame), `None` on other routes.
     pub fn advance_frame_for_tooling(
         &mut self,
         commands: &[crate::sim::command::CommandEnvelope],
         tick_ms: u32,
-    ) -> Result<(), crate::sim::world::FrameAdvanceError> {
+    ) -> Result<Option<u32>, crate::sim::world::FrameAdvanceError> {
         self.advance_frame(
             commands,
             tick_ms,
             crate::sim::world::TickLane::Ordinary,
             crate::sim::world::FrameEffects::default(),
         )
-        .map(|_| ())
+        .map(|output| {
+            output
+                .multiplayer_checksum
+                .and_then(|sync| sync.checksum.ok())
+                .map(|frame| frame.value)
+        })
     }
 
     /// The production frame transaction: advance one lane-tagged frame using
@@ -501,7 +508,8 @@ mod tests {
             recruitable_a: true,
             recruitable_b: true,
             group: -1,
-            structure_upgrades: [None, None, None],
+            follows: None,
+            structure_columns: Default::default(),
             structure_ai_sellable: false,
             structure_ai_repairable: false,
             structure_online: true,
@@ -606,7 +614,11 @@ mod tests {
         let roots = crate::rules::effect_asset_catalog::tolerant_anim_class_roots(&rules);
         rules.bind_anim_class_assets(&roots, &assets, "tem", "TEMPERATE");
         assert_eq!(
-            rules.art().anim_runtime_config("SDK_EMP_SPARK").unwrap().raw_shp_frame_count,
+            rules
+                .art()
+                .anim_runtime_config("SDK_EMP_SPARK")
+                .unwrap()
+                .raw_shp_frame_count,
             None,
             "the ordinary pre-component closure has no EMP producer yet"
         );
@@ -619,7 +631,7 @@ mod tests {
         // Both formal authored and generated loaders prepare definitions before
         // their final component bind. Keep that order, even with no EMP tags:
         // the cached policy must still agree when saved resources are restored.
-        sim.initialize_trigger_definitions(&map, &Default::default(), None, None, &rules);
+        sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None, &rules);
         let rng_before_binding = sim.scenario_rng.logical_state();
         let owner_before =
             crate::util::save_codec::serialize(owner.saved_scenario_rules().unwrap()).unwrap();
@@ -647,7 +659,11 @@ mod tests {
         sim.validate_trigger_event_policy(&rules).unwrap();
         assert_eq!(sim.scenario_rng.logical_state(), rng_before_binding);
         assert_eq!(
-            rules.art().anim_runtime_config("SDK_EMP_SPARK").unwrap().raw_shp_frame_count,
+            rules
+                .art()
+                .anim_runtime_config("SDK_EMP_SPARK")
+                .unwrap()
+                .raw_shp_frame_count,
             Some(6),
             "the shared post-component closure binds the EMP-only physical resource"
         );
@@ -1075,7 +1091,7 @@ where
             &map_data.ini,
             descriptor.game_mode_nonzero,
         );
-        sim.initialize_trigger_definitions(map_data, &teams, None, None, rules);
+        sim.initialize_trigger_definitions(map_data, &teams, None, None, None, rules);
     }
     // Active YR `ScenarioClass__Full_Init @ 0x00686B20` calls
     // `ScenarioClass__Create_Houses @ 0x00687F10` before

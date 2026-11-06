@@ -19,6 +19,7 @@
 //! ## Dependency rules
 //! - Part of rules/ — no dependencies on sim/, render/, ui/, etc.
 
+use crate::rules::affected_house::AffectedHouse;
 use crate::rules::ini_parser::IniSection;
 
 /// A weapon definition parsed from a rules.ini section.
@@ -75,9 +76,11 @@ pub struct WeaponType {
     /// firer to a human victim (FireAt `0x006FF66C`). Retail turns it off on
     /// the sniper, Virus, disguise and Mirage weapons.
     pub reveal_on_fire: bool,
-    /// `TerrainFire=` (`+0x138`, default no): the weapon may fire at a
-    /// Terrain object unforced (`TechnoClass` vt+0x398, `0x0070EF00`).
-    /// Retail authors it only on the unused `TankMakeupKit`.
+    /// `TerrainFire=` (`+0x138`, default no): the weapon may fire unforced at
+    /// a Terrain object, an `IsARock=` overlay or a disguised object wearing
+    /// no house (`TechnoClass` vt+0x398, `0x0070EF00`,
+    /// `Simulation::fires_at_terrain`). Retail authors it only on the unused
+    /// `TankMakeupKit`.
     pub terrain_fire: bool,
     /// `DisguiseFireOnly=` (`+0x13B`, constructor default false at
     /// `WeaponTypeClass::Constructor @ 0x00771C70`); `ReadBool` is called by
@@ -214,6 +217,60 @@ pub struct WeaponType {
     pub is_rad_eruption: bool,
     /// Weapon fires a magnetron beam (+0x15c).
     pub is_mag_beam: bool,
+
+    // ── Phobos AttachEffect gating ───────────────────────────────────
+    // `WeaponTypeExt::HasRequiredAttachedEffects` gates a shot on the AE the
+    // target (or, with `CheckOnFirer`, the firer) carries. The required lists
+    // must all match; the disallowed lists refuse the shot on any match.
+    // Counts pair with the type/group lists by position, the last value
+    // covering the rest.
+    pub attach_effect_required_types: Vec<String>,
+    pub attach_effect_disallowed_types: Vec<String>,
+    pub attach_effect_required_groups: Vec<String>,
+    pub attach_effect_disallowed_groups: Vec<String>,
+    pub attach_effect_required_min_counts: Vec<i32>,
+    pub attach_effect_required_max_counts: Vec<i32>,
+    pub attach_effect_disallowed_min_counts: Vec<i32>,
+    pub attach_effect_disallowed_max_counts: Vec<i32>,
+    pub attach_effect_check_on_firer: bool,
+    pub attach_effect_ignore_from_same_source: bool,
+    /// `AttachEffect.Required.Any` / `Disallowed.Any`: the native
+    /// `requireAll = !Any` switch. Each list defaults to its constructor value
+    /// (required `false`, disallowed `true`).
+    pub attach_effect_required_any: bool,
+    pub attach_effect_disallowed_any: bool,
+    /// `AttachEffect.Required.Houses` / `Disallowed.Houses`: the house the
+    /// matched instance's invoker must belong to.
+    pub attach_effect_required_houses: AffectedHouse,
+    pub attach_effect_disallowed_houses: AffectedHouse,
+    /// `AttachEffect.SameSourceOnly`: only instances from the shot's exact
+    /// invoker and source match.
+    pub attach_effect_same_source_only: bool,
+    /// Phobos `ROF.RandomDelay` (`WeaponType/Body.cpp:134`,
+    /// `Nullable<PartialVector2D<int>>`): this weapon's full-rearm jitter
+    /// range; `None` inherits `[CombatDamage]`.
+    #[cfg(feature = "phobos")]
+    pub rof_random_delay: Option<crate::rules::ini_value::PartialIntPair>,
+    /// Phobos `WeaponTypeExt::CanTargetHouses` (`AffectedHouse::All` default),
+    /// read for `Splits.UseWeaponTargeting`.
+    #[cfg(feature = "phobos")]
+    pub(crate) phobos_can_target_houses: crate::rules::affected_house::AffectedHouse,
+    /// Phobos `CanTarget`, `CanTarget.MinHealth`/`MaxHealth` and
+    /// `CanTargetVeterancy`, read for `Splits.UseWeaponTargeting`.
+    #[cfg(feature = "phobos")]
+    pub(crate) phobos_weapon_targeting: crate::rules::phobos_airburst::PhobosWeaponTargeting,
+    /// Phobos `WeaponTypeExt::Laser_IsSingleColor` (`IsSingleColor=`): a
+    /// simulated child laser draws one color instead of the inner/outer pair.
+    #[cfg(feature = "phobos")]
+    pub phobos_laser_is_single_color: bool,
+    /// Phobos `WeaponTypeExt::LaserThickness` (`LaserThickness=`,
+    /// constructor default 3): a simulated child laser's line count.
+    #[cfg(feature = "phobos")]
+    pub phobos_laser_thickness: i32,
+    /// Phobos `WeaponTypeExt::Beam_IsHouseColor` (`Beam.IsHouseColor=`): a
+    /// simulated child radiation beam takes the firing House's laser color.
+    #[cfg(feature = "phobos")]
+    pub phobos_beam_is_house_color: bool,
 }
 
 impl WeaponType {
@@ -227,6 +284,30 @@ impl WeaponType {
         policy: Option<vera_mod_api::WeaponResourcePolicy>,
     ) {
         self.resource_policy = policy;
+    }
+
+    /// `WeaponTypeExt::HasRequiredAttachedEffects` reads no list: every shot
+    /// passes without asking the target.
+    pub fn has_attach_effect_gates(&self) -> bool {
+        !self.attach_effect_required_types.is_empty()
+            || !self.attach_effect_disallowed_types.is_empty()
+            || !self.attach_effect_required_groups.is_empty()
+            || !self.attach_effect_disallowed_groups.is_empty()
+    }
+
+    /// Phobos `CanTargetHouses=`, default `AffectedHouse::All`.
+    #[cfg(feature = "phobos")]
+    pub(crate) const fn can_target_houses(&self) -> crate::rules::affected_house::AffectedHouse {
+        self.phobos_can_target_houses
+    }
+
+    /// Phobos `CanTarget`, health range and `CanTargetVeterancy`, defaults
+    /// `All`/`0.0`/`1.0`/`All`.
+    #[cfg(feature = "phobos")]
+    pub(crate) const fn weapon_targeting(
+        &self,
+    ) -> crate::rules::phobos_airburst::PhobosWeaponTargeting {
+        self.phobos_weapon_targeting
     }
 
     /// `Report.Count` (`WeaponTypeClass+0xCC`).
@@ -254,6 +335,101 @@ impl WeaponType {
         let rad_type = section.read_name("RadType", 0x80).map(str::to_owned);
         #[cfg(not(feature = "phobos"))]
         let rad_type = None;
+        // `WeaponTypeExt::LoadFromINIFile`'s AttachEffect gates. A missing key
+        // keeps the constructor's empty list / false.
+        #[cfg(feature = "phobos")]
+        let (
+            attach_effect_required_types,
+            attach_effect_disallowed_types,
+            attach_effect_required_groups,
+            attach_effect_disallowed_groups,
+        ) = (
+            name_list(section, "AttachEffect.RequiredTypes"),
+            name_list(section, "AttachEffect.DisallowedTypes"),
+            name_list(section, "AttachEffect.RequiredGroups"),
+            name_list(section, "AttachEffect.DisallowedGroups"),
+        );
+        #[cfg(feature = "phobos")]
+        let (
+            attach_effect_required_min_counts,
+            attach_effect_required_max_counts,
+            attach_effect_disallowed_min_counts,
+            attach_effect_disallowed_max_counts,
+        ) = (
+            section
+                .read_int_list("AttachEffect.RequiredMinCounts")
+                .unwrap_or_default(),
+            section
+                .read_int_list("AttachEffect.RequiredMaxCounts")
+                .unwrap_or_default(),
+            section
+                .read_int_list("AttachEffect.DisallowedMinCounts")
+                .unwrap_or_default(),
+            section
+                .read_int_list("AttachEffect.DisallowedMaxCounts")
+                .unwrap_or_default(),
+        );
+        #[cfg(feature = "phobos")]
+        let attach_effect_check_on_firer = section.read_bool("AttachEffect.CheckOnFirer", false);
+        #[cfg(feature = "phobos")]
+        let attach_effect_ignore_from_same_source =
+            section.read_bool("AttachEffect.IgnoreFromSameSource", false);
+        #[cfg(feature = "phobos")]
+        let (
+            attach_effect_required_any,
+            attach_effect_disallowed_any,
+            attach_effect_required_houses,
+            attach_effect_disallowed_houses,
+            attach_effect_same_source_only,
+        ) = (
+            section.read_bool("AttachEffect.Required.Any", false),
+            section.read_bool("AttachEffect.Disallowed.Any", true),
+            section.read_string_with(
+                "AttachEffect.Required.Houses",
+                0x100,
+                AffectedHouse::ALL,
+                |current, raw| AffectedHouse::parse(raw).unwrap_or(current),
+            ),
+            section.read_string_with(
+                "AttachEffect.Disallowed.Houses",
+                0x100,
+                AffectedHouse::ALL,
+                |current, raw| AffectedHouse::parse(raw).unwrap_or(current),
+            ),
+            section.read_bool("AttachEffect.SameSourceOnly", false),
+        );
+        #[cfg(not(feature = "phobos"))]
+        let (
+            attach_effect_required_any,
+            attach_effect_disallowed_any,
+            attach_effect_required_houses,
+            attach_effect_disallowed_houses,
+            attach_effect_same_source_only,
+        ) = (false, true, AffectedHouse::ALL, AffectedHouse::ALL, false);
+        #[cfg(not(feature = "phobos"))]
+        let (
+            attach_effect_required_types,
+            attach_effect_disallowed_types,
+            attach_effect_required_groups,
+            attach_effect_disallowed_groups,
+            attach_effect_required_min_counts,
+            attach_effect_required_max_counts,
+            attach_effect_disallowed_min_counts,
+            attach_effect_disallowed_max_counts,
+            attach_effect_check_on_firer,
+            attach_effect_ignore_from_same_source,
+        ) = (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        );
         Self {
             id: id.to_string(),
             damage: 0,
@@ -292,6 +468,22 @@ impl WeaponType {
             laser_duration: i32::from(section.read_int("LaserDuration", 10) as i8),
             rad_level: section.read_int("RadLevel", 0),
             rad_type,
+            #[cfg(feature = "phobos")]
+            phobos_can_target_houses: crate::rules::affected_house::read_affected_house(
+                section,
+                "CanTargetHouses",
+                crate::rules::affected_house::AffectedHouse::ALL,
+            ),
+            #[cfg(feature = "phobos")]
+            phobos_weapon_targeting: crate::rules::phobos_airburst::read_weapon_targeting(section),
+            // Phobos `Valueable<T>` reads through the shared Ares parser: a
+            // failed conversion keeps the constructor's value.
+            #[cfg(feature = "phobos")]
+            phobos_laser_is_single_color: section.read_ares_bool("IsSingleColor", false),
+            #[cfg(feature = "phobos")]
+            phobos_laser_thickness: section.read_ares_int("LaserThickness", 3),
+            #[cfg(feature = "phobos")]
+            phobos_beam_is_house_color: section.read_ares_bool("Beam.IsHouseColor", false),
 
             // The constructor's nulls and empty list (`0x00771C70`); the
             // ordered Process owner reads the Animation references.
@@ -349,8 +541,44 @@ impl WeaponType {
             is_rad_beam: section.read_bool("IsRadBeam", false),
             is_rad_eruption: section.read_bool("IsRadEruption", false),
             is_mag_beam: section.read_bool("IsMagBeam", false),
+
+            attach_effect_required_types,
+            attach_effect_disallowed_types,
+            attach_effect_required_groups,
+            attach_effect_disallowed_groups,
+            attach_effect_required_min_counts,
+            attach_effect_required_max_counts,
+            attach_effect_disallowed_min_counts,
+            attach_effect_disallowed_max_counts,
+            attach_effect_check_on_firer,
+            attach_effect_ignore_from_same_source,
+            attach_effect_required_any,
+            attach_effect_disallowed_any,
+            attach_effect_required_houses,
+            attach_effect_disallowed_houses,
+            attach_effect_same_source_only,
+            #[cfg(feature = "phobos")]
+            rof_random_delay: Some(section.read_ares_partial_int_pair(
+                "ROF.RandomDelay",
+                crate::rules::ini_value::PartialIntPair {
+                    low: 0,
+                    high: 0,
+                    values: 0,
+                },
+            ))
+            .filter(|range| range.values > 0),
         }
     }
+}
+
+/// A Phobos name list: `ReadString(2048)`, `strtok(",")`, tokens kept as the
+/// factory would resolve them. Absent keys leave the constructor's empty list.
+#[cfg(feature = "phobos")]
+fn name_list(section: &IniSection, key: &str) -> Vec<String> {
+    section
+        .read_list(key, 0x800)
+        .map(|tokens| tokens.into_iter().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 /// `Report=` through ReadSoundList (`0x00772394`); production binding resolves
@@ -586,6 +814,90 @@ mod tests {
             identities[0].1, identities[1].1,
             "different retained laser admission"
         );
+    }
+
+    /// Phobos `WeaponTypeExt` AttachEffect gates: the constructor's empty
+    /// lists and false switches, then every key through the production reader.
+    #[cfg(feature = "phobos")]
+    #[test]
+    fn attach_effect_gate_keys_read_with_their_defaults() {
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[VehicleTypes]\n0=UNIT\n[UNIT]\nPrimary=Plain\nSecondary=Gated\n\
+             [Plain]\nDamage=1\n\
+             [Gated]\nDamage=1\nAttachEffect.RequiredTypes=AE1,AE2\n\
+             AttachEffect.DisallowedTypes=AE3\n\
+             AttachEffect.RequiredGroups=tag\nAttachEffect.DisallowedGroups=bad\n\
+             AttachEffect.RequiredMinCounts=2,3\nAttachEffect.RequiredMaxCounts=4\n\
+             AttachEffect.DisallowedMinCounts=1\nAttachEffect.DisallowedMaxCounts=5,6\n\
+             AttachEffect.CheckOnFirer=yes\nAttachEffect.IgnoreFromSameSource=yes\n\
+             AttachEffect.Required.Any=yes\nAttachEffect.Required.Houses=enemies\n\
+             AttachEffect.Disallowed.Any=no\nAttachEffect.Disallowed.Houses=allies\n\
+             AttachEffect.SameSourceOnly=yes\n\
+             [AttachEffectTypes]\n0=AE1\n1=AE2\n2=AE3\n\
+             [AE1]\n[AE2]\n[AE3]\n",
+        ));
+        layers.push(
+            RulesLayerKind::GameMode,
+            IniFile::from_str("[Gated]\nAttachEffect.RequiredGroups=other\n"),
+        );
+        let rules = RuleSet::from_rules_layers(&layers).unwrap();
+        let plain = rules.weapon("Plain").unwrap();
+        assert!(!plain.has_attach_effect_gates());
+        assert!(plain.attach_effect_required_types.is_empty());
+        assert!(plain.attach_effect_disallowed_types.is_empty());
+        assert!(plain.attach_effect_required_groups.is_empty());
+        assert!(plain.attach_effect_disallowed_groups.is_empty());
+        assert!(plain.attach_effect_required_min_counts.is_empty());
+        assert!(plain.attach_effect_required_max_counts.is_empty());
+        assert!(plain.attach_effect_disallowed_min_counts.is_empty());
+        assert!(plain.attach_effect_disallowed_max_counts.is_empty());
+        assert!(!plain.attach_effect_check_on_firer);
+        assert!(!plain.attach_effect_ignore_from_same_source);
+        // `AEAttachInfoTypeClass`'s `requireAll = !Any` defaults.
+        assert!(!plain.attach_effect_required_any);
+        assert!(plain.attach_effect_disallowed_any);
+        assert_eq!(
+            plain.attach_effect_required_houses,
+            crate::rules::affected_house::AffectedHouse::ALL
+        );
+        assert_eq!(
+            plain.attach_effect_disallowed_houses,
+            crate::rules::affected_house::AffectedHouse::ALL
+        );
+        assert!(!plain.attach_effect_same_source_only);
+
+        let gated = rules.weapon("Gated").unwrap();
+        assert!(gated.has_attach_effect_gates());
+        assert_eq!(gated.attach_effect_required_types, vec!["AE1", "AE2"]);
+        assert_eq!(gated.attach_effect_disallowed_types, vec!["AE3"]);
+        assert_eq!(
+            gated.attach_effect_required_groups,
+            vec!["other"],
+            "the later pass replaces the list"
+        );
+        assert_eq!(gated.attach_effect_disallowed_groups, vec!["bad"]);
+        assert_eq!(gated.attach_effect_required_min_counts, vec![2, 3]);
+        assert_eq!(gated.attach_effect_required_max_counts, vec![4]);
+        assert_eq!(gated.attach_effect_disallowed_min_counts, vec![1]);
+        assert_eq!(gated.attach_effect_disallowed_max_counts, vec![5, 6]);
+        assert!(gated.attach_effect_check_on_firer);
+        assert!(gated.attach_effect_ignore_from_same_source);
+        assert!(gated.attach_effect_required_any);
+        assert!(!gated.attach_effect_disallowed_any);
+        assert!(
+            gated
+                .attach_effect_required_houses
+                .contains(crate::rules::affected_house::AffectedHouse::ENEMIES)
+        );
+        assert!(
+            gated
+                .attach_effect_disallowed_houses
+                .contains(crate::rules::affected_house::AffectedHouse::ALLIES)
+        );
+        assert!(gated.attach_effect_same_source_only);
     }
 
     #[test]

@@ -49,6 +49,7 @@ fn scene_with_rules(
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        None,
         &rules,
     );
     sim.classify_map_triggers(&rules);
@@ -164,6 +165,7 @@ fn execute(
     )));
     let action = RuntimeDefinitions::default().resolve_action(
         entries["GRANT"].entries()[0].clone(),
+        None,
         None,
         None,
     );

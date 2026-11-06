@@ -181,7 +181,10 @@ impl SavedTerrainTemplate {
     pub fn validate(&self) -> Result<(), SavedTerrainError> {
         // Resize565C10 owns the fixed512x512 cell table. A one-sided empty
         // rectangle is not a materialized grid produced by the map owner.
-        if self.width > 512 || self.height > 512 || (self.width == 0) != (self.height == 0) {
+        if self.width > crate::map::cell_index::MAX_CELL_SIDE
+            || self.height > crate::map::cell_index::MAX_CELL_SIDE
+            || (self.width == 0) != (self.height == 0)
+        {
             return Err(SavedTerrainError::Dimensions {
                 width: self.width,
                 height: self.height,
@@ -268,6 +271,7 @@ impl SavedTerrainTemplate {
         Ok(ResolvedTerrainGrid {
             width: self.width,
             height: self.height,
+            level_span: LevelSpan::of(self.cells.iter().map(|cell| cell.level)),
             cells: self.cells,
             land_speed_costs: land_speed_cost_profiles(None),
             overlay_passability: Vec::new(),
@@ -394,8 +398,7 @@ impl ResolvedTerrainGrid {
         self.tile_registry_len = theater.map(|td| td.lookup.len());
         self.dummy_accepts_smudge =
             theater.is_some_and(|td| current_tile_permissions(&td.lookup, 0xffff).0);
-        self.high_bridge_rim_tiles =
-            theater.map(super::super::bridge_rim_tiles::HighBridgeRimTiles::from_theater);
+        self.high_bridge_rim_tiles = theater.map(|td| td.high_bridge_rim_tiles);
         self.bridge_set_start = theater.and_then(|td| {
             td.bridge_set
                 .and_then(|set| td.lookup.bounds().get(usize::from(set)))

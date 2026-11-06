@@ -19,13 +19,14 @@ use crate::sim::world::Simulation;
 
 fn gsi_04_12_terrain(width: u16, height: u16) -> ResolvedTerrainGrid {
     let speed_costs = SpeedCostProfile {
-        foot: Some(100),
-        track: Some(100),
-        wheel: Some(100),
-        float: Some(100),
-        amphibious: Some(100),
-        float_beach: Some(100),
-        hover: Some(100),
+        foot: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        track: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        amphibious: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float_beach: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
     };
     let cells = (0..height)
         .flat_map(|ry| {
@@ -538,7 +539,7 @@ fn tube_hierarchy_gate_uses_raw_invalid_labels_and_goal_bridge_flag() {
     {
         let base = zones.base_topology_mut();
         base.zone_ids = vec![2, 3, 2, 3];
-        base.raw_zone_ids_by_row[row] = vec![0, 0, 1, u16::MAX];
+        base.raw_zone_ids_by_row[row] = vec![0, 0, 1, (u16::MAX as ZoneId)];
     }
     {
         let map = zones.map_mut(MovementZone::Normal).unwrap();
@@ -570,7 +571,7 @@ fn tube_hierarchy_gate_uses_raw_invalid_labels_and_goal_bridge_flag() {
     );
     assert_eq!(
         zones.get_zone_id_native(&terrain, (1, 0), MovementZone::Normal, false),
-        Some(u32::from(u16::MAX))
+        Some(u32::from(u16::MAX as ZoneId))
     );
     assert_eq!(
         zones
@@ -711,7 +712,7 @@ fn tube_hierarchy_dword_zone_query_matches_original_executable() {
                 }
             }
             base.raw_zone_ids_by_row[MovementZone::Normal.matrix_row().unwrap()] =
-                vec![0, case["raw"].as_u64().unwrap() as u16, 3];
+                vec![0, case["raw"].as_u64().unwrap() as ZoneId, 3];
         }
         dummy.stamp_coord(1234, -2345);
         assert_eq!(

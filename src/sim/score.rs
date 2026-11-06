@@ -75,6 +75,21 @@ pub struct CooperativeScoreRow {
     pub score: i32,
 }
 
+/// `Houses[]` order without passive types or the observer House
+/// (`0x005C98CD..0x005C98EB`).
+///
+/// The terminal latch and the live projection must select the same Houses, and
+/// this module's one per-client read stays in one place: the architecture
+/// guard pins `is_observer_house` here to a single site, because a value that
+/// differs per client must not steer anything a peer shares.
+fn score_contenders(houses: &Houses, session: &ScenarioSession) -> Vec<InternedId> {
+    houses
+        .in_order()
+        .filter(|house| !house.multiplay_passive() && !session.is_observer_house(house.name()))
+        .map(|house| house.name())
+        .collect()
+}
+
 impl Simulation {
     /// `0x0046DA70`/`0x0049B7E0`: one row per House that is not
     /// `MultiplayPassive` and is human (`+0x1EC`, `0x0050B730` in GameMode
@@ -113,6 +128,37 @@ impl Simulation {
         self.terminal_score_snapshot.snapshot()
     }
 
+    /// The rows a score page would show right now, without the terminal latch
+    /// and without the survivor's victory bonus.
+    ///
+    /// A match the player abandons has no natural win/loss edge to latch at,
+    /// and leaving must not consume the Scenario RNG draws the terminal
+    /// snapshot owns — those belong to the deterministic stream. The rows
+    /// therefore carry the raw `+0x54E8` score only, the value `0x005C99EB`
+    /// adds before the survivor's `Random` bonus.
+    pub fn live_score_snapshot(&self) -> TerminalScoreSnapshot {
+        let session = self.session();
+        let mut rows = Vec::new();
+        for owner in score_contenders(&self.houses, session) {
+            let Some(house) = self.houses.get(&owner) else {
+                continue;
+            };
+            let raw_score = house.economy().score();
+            let stats = house.stats();
+            rows.push(TerminalScoreRowSnapshot {
+                owner,
+                country: house.country(),
+                survived: !house.is_defeated(),
+                kills: stats.kills(),
+                losses: stats.losses(),
+                built: stats.built(),
+                raw_score,
+                score: raw_score.max(0),
+            });
+        }
+        TerminalScoreSnapshot { rows }
+    }
+
     /// Latch the snapshot at the natural win/loss terminal edge.
     ///
     /// Only the master-frame orchestrator may call this mutating half of the
@@ -137,13 +183,8 @@ impl Simulation {
             return false;
         }
 
-        // Houses[] order, without passive types or the observer House.
-        let observer = session.observer_house();
-        let contenders: Vec<InternedId> = houses
-            .in_order()
-            .filter(|house| !house.multiplay_passive() && Some(house.name()) != observer)
-            .map(|house| house.name())
-            .collect();
+        // Houses[] order, without passive types or observer Houses.
+        let contenders = score_contenders(houses, session);
         let mut rows = Vec::with_capacity(contenders.len());
         for owner in contenders {
             let Some((country, survived, stats, raw_score)) = houses.get(&owner).map(|house| {
@@ -220,6 +261,56 @@ mod tests {
         );
         sim.houses.register(house);
         owner
+    }
+
+    #[test]
+    fn live_rows_report_raw_scores_without_latching_or_drawing() {
+        let mut sim = Simulation::with_seed(0x51C0_1234);
+        let alpha = insert_house(
+            &mut sim,
+            HouseFixture {
+                name: "Alpha",
+                defeated: false,
+                passive: false,
+                score: 100,
+                units_killed: 2,
+                buildings_killed: 3,
+                units_lost: 4,
+                buildings_lost: 5,
+                built: 6,
+            },
+        );
+        let lost = insert_house(
+            &mut sim,
+            HouseFixture {
+                name: "Lost",
+                defeated: true,
+                passive: false,
+                score: 250,
+                units_killed: 1,
+                buildings_killed: 0,
+                units_lost: 0,
+                buildings_lost: 0,
+                built: 0,
+            },
+        );
+
+        let rows = sim.live_score_snapshot();
+
+        assert!(
+            sim.terminal_score_snapshot().is_none(),
+            "leaving a match must not latch the terminal snapshot"
+        );
+        let row = |owner| rows.rows.iter().find(|row| row.owner == owner).unwrap();
+        let survivor = row(alpha);
+        assert_eq!(survivor.raw_score, 100);
+        assert_eq!(
+            survivor.score, 100,
+            "no survivor bonus: that draw belongs to the terminal edge"
+        );
+        assert!(survivor.survived);
+        assert_eq!(row(lost).score, 250);
+        assert!(!row(lost).survived);
     }
 
     #[test]
@@ -384,12 +475,13 @@ mod tests {
         assert_eq!(sim.clone_scenario_rng().state(), cursor);
     }
 
-    /// 0x005C98E5: the observer House takes no row and draws nothing.
+    /// 0x005C98E5: an observer House takes no row and draws nothing, and a
+    /// VERA room's every observer is one.
     #[test]
-    fn the_observer_house_takes_no_score_row() {
+    fn observer_houses_take_no_score_row() {
         let mut sim = Simulation::with_seed(0x51C0_0B5E);
         let mut owners = Vec::new();
-        for name in ["Player", "Observer"] {
+        for name in ["Player", "Observer", "Spectator"] {
             owners.push(insert_house(
                 &mut sim,
                 HouseFixture {
@@ -408,7 +500,7 @@ mod tests {
         sim.houses.reorder_for_test(&owners);
         sim.session.install_multiplayer_house_identity(
             crate::skirmish_modes::MpModeClass::Battle,
-            Some(owners[1]),
+            vec![owners[1], owners[2]],
         );
         let mut one_draw = sim.clone_scenario_rng();
         one_draw.next_range_u32_inclusive(25, 50);
@@ -650,7 +742,7 @@ mod tests {
         let mut sim = Simulation::with_seed(0x5C4E_F000);
         sim.session.install_multiplayer_house_identity(
             crate::skirmish_modes::MpModeClass::Cooperative,
-            None,
+            Vec::new(),
         );
         insert_house(
             &mut sim,

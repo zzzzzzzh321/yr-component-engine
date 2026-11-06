@@ -6,14 +6,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::sim::game_options::GameOptions;
+use crate::sim::game_options::{GameOptions, RoomBans};
 use crate::sim::rng::SimRng;
 use crate::skirmish_modes::SkirmishGameMode;
 
+/// `MPModesMD.ini` `[Battle] 1=`, the mode every fixed developer and capture
+/// launch selects.
+pub const BATTLE_MODE_ID: i32 = 1;
 pub const SKIRMISH_PLAYER_SLOT_COUNT: usize = 8;
 pub const SKIRMISH_AI_SLOT_COUNT: usize = SKIRMISH_PLAYER_SLOT_COUNT - 1;
-/// VERA network rooms extend the retail eight-row setup without changing the
-/// offline shell's resource rows or the eight-colour retail palette.
+/// VERA seats up to thirty players: its network rooms page their roster, and
+/// offline Skirmish scrolls its computer rows through the retail eight
+/// resource rows. The eight-colour retail palette stays.
 pub const NETWORK_PLAYER_SLOT_COUNT: usize = 30;
 pub const HOUSE_COLOR_COUNT: usize = 8;
 
@@ -154,28 +158,18 @@ struct SkirmishLaunchModeInput {
 impl TryFrom<SkirmishLaunchModeInput> for SkirmishLaunchMode {
     type Error = String;
     fn try_from(input: SkirmishLaunchModeInput) -> Result<Self, Self::Error> {
-        use crate::skirmish_modes::MpModeClass;
         // Compatibility only: original MPModesMD catalog identities read by5D7CE0.
         // Production catalog conversion always supplies class explicitly.
         let class = input
             .class
             .or_else(|| {
-                let (file, class) = match input.id {
-                    1 => ("MPBattleMD.ini", MpModeClass::Battle),
-                    2 => ("MPFreeForAllMD.ini", MpModeClass::FreeForAll),
-                    3 => ("MPCoopMD.ini", MpModeClass::Cooperative),
-                    4 => ("MPUnholyMD.ini", MpModeClass::Unholy),
-                    5 => ("MPMWMD.ini", MpModeClass::ManBattle),
-                    6 => ("MPDuelMD.ini", MpModeClass::ManBattle),
-                    7 => ("MPMeatMD.ini", MpModeClass::ManBattle),
-                    8 => ("MPNavalMD.ini", MpModeClass::ManBattle),
-                    9 => ("MPTeamMD.ini", MpModeClass::Battle),
-                    _ => return None,
-                };
-                input
-                    .override_file
-                    .eq_ignore_ascii_case(file)
-                    .then_some(class)
+                Self::stock(input.id)
+                    .filter(|stock| {
+                        stock
+                            .override_file
+                            .eq_ignore_ascii_case(&input.override_file)
+                    })
+                    .map(|stock| stock.class)
             })
             .ok_or_else(|| "legacy custom launch mode requires an explicit class".to_owned())?;
         Ok(Self {
@@ -205,6 +199,58 @@ impl SkirmishLaunchMode {
             allies_allowed: mode.allies_allowed,
             must_ally: mode.must_ally,
         }
+    }
+
+    /// Stock YR `MPModesMD.ini` row `id` after its override INI, the one
+    /// versioned copy of the retail rows. Fixed launches (headless, CnCNet
+    /// spawn) take their row here, and the pre-Fill owner accepts a session
+    /// only through [`Self::matching_stock`]. A test pins every row to the
+    /// retail roster.
+    pub fn stock(id: i32) -> Option<Self> {
+        use crate::skirmish_modes::MpModeClass::{
+            Battle, Cooperative, FreeForAll, ManBattle, Unholy,
+        };
+        #[rustfmt::skip]
+        let (class, name, override_file, map_filter, random_maps, allies, must_ally) = match id {
+            1 => (Battle, "Battle", "MPBattleMD.ini", "standard", true, true, false),
+            2 => (FreeForAll, "FreeForAll", "MPFreeForAllMD.ini", "standard", true, false, false),
+            3 => (Cooperative, "Cooperative", "MPCoopMD.ini", "cooperative", false, false, false),
+            4 => (Unholy, "UnholyAlliance", "MPUnholyMD.ini", "standard", false, true, false),
+            5 => (ManBattle, "Megawealth", "MPMWMD.ini", "megawealth", false, true, false),
+            6 => (ManBattle, "Duel", "MPDuelMD.ini", "duel", false, true, false),
+            7 => (ManBattle, "MeatGrind", "MPMeatMD.ini", "meatgrind", false, true, false),
+            8 => (ManBattle, "NavalWar", "MPNavalMD.ini", "navalwar", false, true, false),
+            9 => (Battle, "TeamGame", "MPTeamMD.ini", "teamgame", false, true, true),
+            _ => return None,
+        };
+        Some(Self {
+            class,
+            id,
+            ui_name_key: format!("GUI:{name}"),
+            tooltip_key: format!("STT:Mode{name}"),
+            override_file: override_file.to_owned(),
+            map_filter: map_filter.to_owned(),
+            random_maps_allowed: random_maps,
+            allies_allowed: allies,
+            must_ally,
+        })
+    }
+
+    /// The stock row of this id when every consumed field matches it, keys
+    /// and file names compared ASCII case-insensitively. The class is not
+    /// compared; the stock row supplies it.
+    pub fn matching_stock(&self) -> Option<Self> {
+        Self::stock(self.id).filter(|stock| {
+            self.ui_name_key.eq_ignore_ascii_case(&stock.ui_name_key)
+                && self.tooltip_key.eq_ignore_ascii_case(&stock.tooltip_key)
+                && self
+                    .override_file
+                    .eq_ignore_ascii_case(&stock.override_file)
+                && self.map_filter.eq_ignore_ascii_case(&stock.map_filter)
+                && self.random_maps_allowed == stock.random_maps_allowed
+                && self.allies_allowed == stock.allies_allowed
+                && self.must_ally == stock.must_ally
+        })
     }
 }
 
@@ -373,6 +419,10 @@ pub struct SkirmishLaunchOptions {
     pub multi_engineer: bool,
     pub harvester_truce: bool,
     pub ally_change_allowed: bool,
+    /// VERA's room bans. Left out when empty, so a room without bans sends
+    /// the same options as before them.
+    #[serde(default, skip_serializing_if = "RoomBans::is_empty")]
+    pub bans: RoomBans,
 }
 
 impl Default for SkirmishLaunchOptions {
@@ -397,6 +447,7 @@ impl Default for SkirmishLaunchOptions {
             multi_engineer: defaults.multi_engineer,
             harvester_truce: defaults.harvester_truce,
             ally_change_allowed: defaults.ally_change_allowed,
+            bans: RoomBans::default(),
         }
     }
 }
@@ -429,6 +480,7 @@ impl SkirmishLaunchOptions {
             multi_engineer: options.multi_engineer,
             harvester_truce: options.harvester_truce,
             ally_change_allowed: options.ally_change_allowed,
+            bans: options.bans,
         }
     }
 
@@ -447,6 +499,7 @@ impl SkirmishLaunchOptions {
             multi_engineer: self.multi_engineer,
             harvester_truce: self.harvester_truce,
             ally_change_allowed: self.ally_change_allowed,
+            bans: self.bans,
             starting_credits: self.starting_credits,
             unit_count: self.unit_count,
             tech_level: self.tech_level,
@@ -454,6 +507,34 @@ impl SkirmishLaunchOptions {
             ai_difficulty: self.default_ai_difficulty,
             ai_players,
         }
+    }
+}
+
+/// The options VERA's game room adds to gamemd's: Destroyable Bridges,
+/// In-game Allying and the bans. LAN carries them beside the native options
+/// text, which has no field for them, and the room keeps them for its next
+/// game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomOptions {
+    pub bridges_destroyable: bool,
+    pub ally_change_allowed: bool,
+    pub bans: RoomBans,
+}
+
+impl SkirmishLaunchOptions {
+    pub fn room_options(&self) -> RoomOptions {
+        RoomOptions {
+            bridges_destroyable: self.bridges_destroyable,
+            ally_change_allowed: self.ally_change_allowed,
+            bans: self.bans,
+        }
+    }
+
+    pub fn set_room_options(&mut self, room: RoomOptions) {
+        self.bridges_destroyable = room.bridges_destroyable;
+        self.ally_change_allowed = room.ally_change_allowed;
+        self.bans = room.bans;
     }
 }
 
@@ -841,8 +922,80 @@ impl ShellRandomAssignmentState {
 }
 
 impl SkirmishLaunchSession {
+    /// The all-allied scan (BC 5DD0EA, C2 0x79071E after team copy 5E9E00):
+    /// only a nonobserver human in raw row 0 seeds the comparison. An observer
+    /// there bypasses this native gate; do not invent all-pairs. VERA shared
+    /// control: a player sharing a House plays its leader's team.
+    pub fn all_allied(&self) -> bool {
+        let house_team = |index: usize| self.humans[self.house_leader(index)].slot.team;
+        let Some(LaunchTeam::Team(team)) = self
+            .humans
+            .iter()
+            .position(|human| human.raw_slot_index == Some(0) && !human.is_observer())
+            .map(house_team)
+        else {
+            return false;
+        };
+        let same_humans = (0..self.humans.len())
+            .filter(|&index| {
+                self.humans[index].raw_slot_index.is_some() && !self.humans[index].is_observer()
+            })
+            .all(|index| house_team(index) == LaunchTeam::Team(team));
+        let same_ai = self
+            .opponents
+            .iter()
+            .all(|ai| ai.team == LaunchTeam::Team(team));
+        same_humans && same_ai && !self.mode.class.permits_all_allied()
+    }
+
+    /// FreeForAll5C5D40's roles: each non-observer node+6B is its source index.
+    pub fn free_for_all_source_roles(&self) -> Vec<(usize, LaunchHumanRole)> {
+        self.humans
+            .iter()
+            .enumerate()
+            .filter(|(_, human)| !human.is_observer())
+            .map(|(source, _)| {
+                (
+                    source,
+                    LaunchHumanRole::Player {
+                        group: source as i32,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// VERA shared control: the human whose House human `index` plays in.
+    /// Outside Cooperative, players who pick the same start share one House,
+    /// led by the first of them in row order; everyone else leads their own.
+    /// gamemd's setup refuses a taken start (`0x005E9720`), so it never sees
+    /// a shared one.
+    pub fn house_leader(&self, index: usize) -> usize {
+        let human = &self.humans[index];
+        if !self.shares_start(human) {
+            return index;
+        }
+        self.humans
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| {
+                self.shares_start(other) && other.slot.start_position == human.slot.start_position
+            })
+            .min_by_key(|(other_index, other)| other.house_source_order(*other_index))
+            .map_or(index, |(leader, _)| leader)
+    }
+
+    /// A seated player's explicit start, outside Cooperative, can be shared.
+    pub fn shares_start(&self, human: &SkirmishHumanSlot) -> bool {
+        self.mode.class != crate::skirmish_modes::MpModeClass::Cooperative
+            && human.raw_slot_index.is_some()
+            && !human.is_observer()
+            && matches!(human.slot.start_position, LaunchStartPosition::Position(_))
+    }
+
     /// Gather688415..42F combines source-human nonobservers with Session's
     /// declared AI count, independently of how many AI rows construct Houses.
+    /// A shared House counts once.
     pub fn required_start_count(&self) -> usize {
         (self.pre_fill_house_roster.nonobserver_human_count() as i32)
             .wrapping_add(self.ai_player_count)
@@ -851,11 +1004,13 @@ impl SkirmishLaunchSession {
 
     /// Rebuild the constructor cache after accepted roster/choice changes.
     /// Human identity and observer state remain authoritative in `humans`.
+    /// A shared House is one node, its leader's.
     pub fn rebuild_house_roster(&mut self) {
         let humans = self
             .humans
             .iter()
             .enumerate()
+            .filter(|(index, _)| self.house_leader(*index) == *index)
             .map(|(index, human)| PreFillHumanHouse {
                 priority: i32::from(human.slot.color_index),
                 source_order: human.house_source_order(index),

@@ -14,6 +14,7 @@ fn failed_process_retains_only_reached_component_read_points() {
             NativeRulesRegistryState::default(),
             RulesProcessContext::Ordinary,
             &EvaRegistry::default(),
+            &crate::rules::sound_ini::SoundRegistry::default(),
         )
         .unwrap_err();
     let (_, trace) = failure.into_parts();
@@ -108,7 +109,13 @@ fn cameo_metadata_uses_actual_suffixes_and_retained_image_sources() {
             .into_registry_state_discarding_events(),
     );
     continued
-        .apply_pass(&map, &art, &EvaRegistry::default(), false)
+        .apply_pass(
+            &map,
+            &art,
+            &EvaRegistry::default(),
+            false,
+            &crate::rules::sound_ini::SoundRegistry::default(),
+        )
         .unwrap();
     assert!(!continued.sdk_registry_pass().cameo_view().reads.is_empty());
     continued
@@ -128,7 +135,13 @@ fn faction_metadata_preserves_side_sweep_and_country_only_frontiers() {
     );
     let mut processor = RulesPassProcessor::default();
     processor
-        .apply_pass(&pass, &IniFile::empty(), &EvaRegistry::default(), true)
+        .apply_pass(
+            &pass,
+            &IniFile::empty(),
+            &EvaRegistry::default(),
+            true,
+            &crate::rules::sound_ini::SoundRegistry::default(),
+        )
         .unwrap();
     let full = processor.sdk_registry_pass();
     assert_eq!(full.faction_view().sides, ["FIRST", "LATER"]);
@@ -200,7 +213,13 @@ fn faction_pointer_reader_uses_the_reached_family_prefix() {
     );
     let mut processor = RulesPassProcessor::default();
     processor
-        .apply_pass(&pass, &IniFile::empty(), &EvaRegistry::default(), true)
+        .apply_pass(
+            &pass,
+            &IniFile::empty(),
+            &EvaRegistry::default(),
+            true,
+            &crate::rules::sound_ini::SoundRegistry::default(),
+        )
         .unwrap();
     let first = processor.sdk_registry_pass();
     let seed = serde_json::to_vec(&FactionReadValue {
@@ -236,7 +255,13 @@ fn faction_pointer_reader_uses_the_reached_family_prefix() {
         "later FreeUnit allocation cannot repair the earlier Find"
     );
     processor
-        .apply_pass(&pass, &IniFile::empty(), &EvaRegistry::default(), true)
+        .apply_pass(
+            &pass,
+            &IniFile::empty(),
+            &EvaRegistry::default(),
+            true,
+            &crate::rules::sound_ini::SoundRegistry::default(),
+        )
         .unwrap();
     assert_eq!(
         read(&processor.sdk_registry_pass()),
@@ -256,6 +281,158 @@ fn faction_pointer_reader_uses_the_reached_family_prefix() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn powerup_animation_lookup_does_not_bind_later_type_allocations() {
+    let root =
+        IniFile::from_str("[General]\nDropZoneAnim=LATE\n[Powerups]\nMoney=20,LATE,yes,2000\n");
+    let processed = RulesLayerStack::new(root).process().unwrap();
+    let rules = RuleSet::from_processed_rules(&processed).unwrap();
+    assert!(rules.anim_type_names.contains("LATE"));
+    let slot = crate::rules::powerups::POWERUP_MONEY;
+    assert_eq!(
+        rules.powerups.animation_index(slot),
+        -1,
+        "ReadPowerups673F2A precedes General's later AnimType allocation"
+    );
+    let (_, trace) = processed.into_ini_and_native_type_construction_trace();
+    let later = RulesLayerStack::new(IniFile::from_str("[Animations]\n0=LATE\n"))
+        .process_with_fixed_art_and_registry_state(
+            &IniFile::empty(),
+            trace.into_registry_state_discarding_events(),
+        )
+        .unwrap();
+    assert_eq!(later.powerups().animation_index(slot), -1);
+    let (_, trace) = later.into_ini_and_native_type_construction_trace();
+    let reread = RulesLayerStack::new(IniFile::from_str("[Powerups]\nMoney=25,LATE\n"))
+        .process_with_fixed_art_and_registry_state(
+            &IniFile::empty(),
+            trace.into_registry_state_discarding_events(),
+        )
+        .unwrap();
+    let rules = RuleSet::from_processed_rules(&reread).unwrap();
+    assert_eq!(
+        rules.anim_type_name_by_index(rules.powerups.animation_index(slot)),
+        Some("LATE")
+    );
+    assert_eq!(rules.powerups.weights[slot], 25);
+    assert!(rules.powerups.over_water[slot]);
+    assert_eq!(rules.powerups.magnitudes[slot].bits(), 2000_f64.to_bits());
+}
+
+#[test]
+fn animation_pointer_bindings_keep_the_selected_colliding_slot() {
+    // General's factory call66E605 allocates a second long-ID object before
+    // the Anim sweep. A native pointer comparison must select that object,
+    // not the first same-named slot returned by a later string lookup.
+    let art = IniFile::from_str("[ABCDEFGHIJKLMNOPQRSTUVWX]\nImage=MONEY\n");
+    let processed = RulesLayerStack::new(IniFile::from_str(
+        "[Animations]\n0=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+         [General]\nDropZoneAnim=ABCDEFGHIJKLMNOPQRSTUVWXY\n",
+    ))
+    .process_with_fixed_art(&art)
+    .unwrap();
+    let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
+    assert_eq!(
+        rules.anim_type_name_by_index(0),
+        rules.anim_type_name_by_index(1)
+    );
+    assert_eq!(
+        rules.general.drop_zone_anim.as_deref(),
+        rules.anim_type_runtime_key_by_index(1).as_deref(),
+    );
+    let key = rules.general.drop_zone_anim.clone().unwrap();
+    assert!(rules.anim_type_names.contains(&key));
+    rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
+    assert_eq!(rules.art().resolve_anim_image_id(&key), "MONEY");
+    assert!(
+        crate::rules::art_data::effect_shp_candidates(
+            crate::rules::art_data::EffectImageKind::Animation,
+            Some(rules.art()),
+            &key,
+            "MONEY",
+            "TEM",
+            "TEMPERATE",
+        )
+        .iter()
+        .any(|name| name == "MONEY.SHP")
+    );
+
+    let (_, trace) = processed.into_ini_and_native_type_construction_trace();
+    let bytes = save_codec::serialize(&trace.into_registry_state_discarding_events()).unwrap();
+    let saved: NativeRulesRegistryState = save_codec::deserialize(&bytes).unwrap();
+    let next = RulesLayerStack::new(IniFile::empty())
+        .process_with_fixed_art_and_registry_state(&art, saved)
+        .unwrap();
+    assert_eq!(
+        RuleSet::from_processed_rules(&next)
+            .unwrap()
+            .general
+            .drop_zone_anim,
+        Some(key)
+    );
+}
+
+#[test]
+fn powerup_globals_preserve_raw_indices_through_save_and_type_reset() {
+    let slot = crate::rules::powerups::POWERUP_MONEY;
+    let first = RulesLayerStack::new(IniFile::from_str(
+        "[Animations]\n0=OLD\n1=OLD_MONEY\n[Powerups]\nMoney=17,OLD_MONEY,yes,125%\n",
+    ))
+    .process()
+    .unwrap();
+    let table = first.powerups().clone();
+    let (_, trace) = first.into_ini_and_native_type_construction_trace();
+    let bytes = save_codec::serialize(&trace.into_registry_state_discarding_events()).unwrap();
+    let saved: NativeRulesRegistryState = save_codec::deserialize(&bytes).unwrap();
+    let next = RulesLayerStack::new(IniFile::from_str("[Animations]\n0=NEW\n1=NEW_MONEY\n"))
+        .process_with_fixed_art_and_registry_state(&IniFile::empty(), saved.destructive_reset())
+        .unwrap();
+    let rules = RuleSet::from_processed_rules(&next).unwrap();
+    assert_eq!(rules.powerups, table);
+    assert_eq!(
+        rules.anim_type_name_by_index(rules.powerups.animation_index(slot)),
+        Some("NEW_MONEY"),
+        "SaveMisc/LoadMisc retain a raw index, not the retired type name"
+    );
+    let fresh =
+        RuleSet::from_ini(&IniFile::from_str("[Animations]\n0=NEW\n1=NEW_MONEY\n")).unwrap();
+    assert_eq!(rules.source_ini_hash(), fresh.source_ini_hash());
+    assert_ne!(
+        rules.simulation_config_hash(),
+        fresh.simulation_config_hash()
+    );
+}
+
+#[test]
+fn player_at_supports_thirty_slots_without_constructing_countries() {
+    let root = IniFile::from_str("[Countries]\n0=Americans\n");
+    for (token, selector) in [
+        ("<Player @ I>", 0x1183),
+        ("<Player @ Z>", 0x1194),
+        ("<Player @ AA>", 0x1195),
+        ("<Player @ AD>", 0x1198),
+    ] {
+        let settings = IniFile::from_str(&format!("[MultiPlayer]\nSide={token}\n"));
+        let (index, trace) = read_native_multiplayer_country(
+            NativeRulesRegistryState::default(),
+            &root,
+            &settings,
+            -1,
+        );
+        assert_eq!(index, selector, "{token}");
+        assert_eq!(
+            trace
+                .into_registry_state_discarding_events()
+                .country_projection()
+                .count(),
+            1
+        );
+    }
+    assert_eq!(house_type_player_at("<Player @ AE>"), None);
+    assert_eq!(house_type_player_at("<Player @ [>"), None);
+    assert_eq!(house_type_player_at("<player @ a>"), None);
 }
 
 #[test]
@@ -357,6 +534,7 @@ fn cold_root_colors_exist_without_langrule_or_rules_process() {
         &IniFile::empty(),
         None,
         &EvaRegistry::default(),
+        &crate::rules::sound_ini::SoundRegistry::default(),
     )
     .unwrap();
     let colors = &trace.registry_state().colors;
@@ -384,6 +562,7 @@ fn langrule_country_resolves_color_from_the_earlier_cold_root() {
         &IniFile::empty(),
         Some(&langrule),
         &EvaRegistry::default(),
+        &crate::rules::sound_ini::SoundRegistry::default(),
     )
     .unwrap();
     let country = &trace.registry_state().families[&RulesTypeFamily::Country][0];
@@ -1135,6 +1314,7 @@ fn campaign_difficulty_process_layers_match_original_nine_scalar_outputs() {
             build_time: bits("build_time"),
             repair_delay: bits("repair_delay"),
             build_delay: bits("build_delay"),
+            ..DifficultyRules::default()
         }
     }
     fn row_bits(row: DifficultyRules) -> [u64; 9] {
@@ -1479,7 +1659,25 @@ fn bridge_animation_lists_match_original_retained_vectors() {
             .iter()
             .map(|value| value.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(actual, &expected, "native sequential row {index}: {row}");
+        // The native receipt prints each pointed-to object's stored ID, not
+        // its pointer. Resolve our distinct runtime keys through that same
+        // catalog before comparing those names; slot identity is tested above.
+        let names = (0..rules.anim_type_art_read_states().len())
+            .map(|slot| {
+                (
+                    rules
+                        .anim_type_runtime_key_by_index(slot as i32)
+                        .unwrap()
+                        .into_owned(),
+                    rules.anim_type_name_by_index(slot as i32).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let actual_names = actual.iter().map(|key| names[key]).collect::<Vec<_>>();
+        assert_eq!(
+            actual_names, expected,
+            "native sequential row {index}: {row}"
+        );
     }
 }
 
@@ -2110,6 +2308,9 @@ fn retail_rulesmd_artmd_constructor_trace_matches_verified_base_oracle() {
         .expect("stock base Rules pass processes");
     let events = processed.native_type_construction_trace().events();
 
+    // Regression pins, not native goldens: no checked gamemd run produces this
+    // stream. The count and FNV hash first appear in 2df8bef0e without a
+    // producer (#745).
     assert_eq!(events.len(), 1_975);
     assert_eq!(native_type_event_oracle_hash(events), 0x24516fbd1a096a12);
 
@@ -2209,9 +2410,13 @@ fn retail_cold_start_and_noncampaign_prepass_match_verified_native_oracles() {
         &fixed_art,
         None,
         &crate::rules::sound_ini::EvaRegistry::default(),
+        &crate::rules::sound_ini::SoundRegistry::default(),
     )
     .expect("stock cold startup processes");
 
+    // The cold-start, prepass and cumulative hashes below are projections of
+    // static retail data (two independent projections in bc841b754, adopted by
+    // 9145bd87e), not checked gamemd executions (#745).
     assert_eq!(startup_boundaries, [1, 608, 612, 1_014, 1_070]);
     assert_eq!(startup.event_count(), 1_070);
     assert_eq!(
@@ -2342,6 +2547,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
         &fixed_art,
         None,
         &crate::rules::sound_ini::EvaRegistry::default(),
+        &crate::rules::sound_ini::SoundRegistry::default(),
     )
     .expect("synthetic startup processes");
     assert_eq!(startup.registry_state().rules_tree_strength, 25);
@@ -2386,6 +2592,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
         &fixed_art,
         None,
         &crate::rules::sound_ini::EvaRegistry::default(),
+        &crate::rules::sound_ini::SoundRegistry::default(),
     )
     .expect("direct startup repeat processes retained state");
     assert_eq!(repeat_boundaries, [0, 0, 1, 1, 1]);
@@ -2657,6 +2864,93 @@ fn techno_weapon_bank_uses_effective_native_gates_and_elite_slot_order() {
             .iter()
             .all(|id| !matches!(*id, "WRONG" | "ALSO_WRONG" | "MAP_WRONG"))
     );
+}
+
+/// TiberiumRead721B20..721C1E, RulesRead66BC37..66BC51 and Process668F65:
+/// retain read-time Color/list answers while later passes add Colors and admit
+/// the late-created Debris types' ART bodies. A Type reset keeps the Rules scalar.
+#[test]
+fn mineral_start_inputs_retain_native_reader_state_across_process_and_reset() {
+    use crate::rules::ruleset::RuleSet;
+    use crate::rules::tiberium_type::TiberiumTypeId;
+    let art = IniFile::from_str("[A]\nRate=1\n[ B]\nRate=1\n");
+    let root = IniFile::from_str(
+        "[Colors]\nGold=43,239,255\n\
+         [CombatDamage]\nTiberiumExplosionDamage=-7\nC4Warhead=Super\n\
+         [Tiberiums]\n0=TIB\n[TIB]\nImage=1\nColor=Later\nDebris=A,A,<none>, B\n",
+    );
+    let first = RulesLayerStack::new(root)
+        .process_with_fixed_art(&art)
+        .unwrap();
+    let rules = RuleSet::from_processed_rules(&first).unwrap();
+    let tib = rules.tiberium_types.get(TiberiumTypeId(0)).unwrap();
+    assert_eq!(
+        (tib.color_scheme(), tib.debris()),
+        (0, &["A".into(), "A".into(), " B".into()][..])
+    );
+    assert_eq!(rules.combat_damage.tiberium_explosion_damage, -7);
+    assert_eq!(rules.bridge_warheads.c4_name, "Super");
+    assert_eq!(
+        rules.anim_type_art_read_states(),
+        &[("A".into(), false), (" B".into(), false)]
+    );
+    assert!(
+        crate::rules::effect_asset_catalog::anim_class_roots(&rules).contains(&" B".to_owned())
+    );
+
+    let (_, trace) = first.into_ini_and_native_type_construction_trace();
+    let state = trace.into_registry_state_discarding_events();
+    let restored = save_codec::deserialize(&save_codec::serialize(&state).unwrap()).unwrap();
+    let next = RulesLayerStack::new(IniFile::from_str(
+        "[Colors]\nLater=100,255,200\n\
+         [CombatDamage]\nTiberiumExplosionDamage=$not_hex\nC4Warhead=\n\
+         [Tiberiums]\n0=IGNORED\n[TIB]\nName=Tiberium\nDebris=\n",
+    ))
+    .process_with_fixed_art_and_registry_state(&art, restored)
+    .unwrap();
+    let rules = RuleSet::from_processed_rules(&next).unwrap();
+    let tib = rules.tiberium_types.get(TiberiumTypeId(0)).unwrap();
+    assert_eq!(tib.section, "TIB");
+    assert_eq!(
+        (tib.color_scheme(), tib.debris()),
+        (1, &["A".into(), "A".into(), " B".into()][..])
+    );
+    assert_eq!(rules.combat_damage.tiberium_explosion_damage, -7);
+    assert_eq!(rules.bridge_warheads.c4_name, "Super");
+    assert_eq!(
+        rules.anim_type_art_read_states(),
+        &[("A".into(), true), (" B".into(), true)]
+    );
+    assert!(next.native_type_construction_trace().events().is_empty());
+
+    let (_, trace) = next.into_ini_and_native_type_construction_trace();
+    let cleared = RulesLayerStack::new(IniFile::from_str(
+        "[Tiberiums]\n0=IGNORED\n[TIB]\nDebris=none,<none>\n",
+    ))
+    .process_with_fixed_art_and_registry_state(&art, trace.into_registry_state_discarding_events())
+    .unwrap();
+    let rules = RuleSet::from_processed_rules(&cleared).unwrap();
+    assert!(
+        rules
+            .tiberium_types
+            .get(TiberiumTypeId(0))
+            .unwrap()
+            .debris()
+            .is_empty()
+    );
+    let (_, trace) = cleared.into_ini_and_native_type_construction_trace();
+    let reset = RulesLayerStack::new(IniFile::empty())
+        .process_with_fixed_art_and_registry_state(
+            &art,
+            trace
+                .into_registry_state_discarding_events()
+                .destructive_reset(),
+        )
+        .unwrap();
+    let rules = RuleSet::from_processed_rules(&reset).unwrap();
+    assert_eq!(rules.combat_damage.tiberium_explosion_damage, -7);
+    assert!(rules.tiberium_types.is_empty());
+    assert!(rules.bridge_warheads.c4_name.is_empty());
 }
 
 #[test]

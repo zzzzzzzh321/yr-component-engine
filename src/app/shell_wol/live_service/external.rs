@@ -376,6 +376,7 @@ pub(crate) fn start_external_network(
         SetupDialog {
             host,
             flavor: SetupFlavor::Wol,
+            modern: true,
         },
         [crate::app::match_runtime::session::NetworkVacancy::Closed;
             crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
@@ -387,7 +388,7 @@ pub(crate) fn start_external_network(
         .set_network_start_seed(input.seed)?;
     service
         .requests
-        .send(http::Request::AdoptSession {
+        .send(http::Request::AdoptRoomSession {
             session: input.session,
             cursor: input.cursor,
         })

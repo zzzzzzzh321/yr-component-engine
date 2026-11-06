@@ -409,8 +409,27 @@ const MIN_DISTINCT_DECK_CELLS: usize = 6;
 // e59f6914f, the final facing timer moves166->167 and track residual7->6;
 // route, per-frame replay equality and all three absolute RNG pins still hold.
 // Residual: the fog/alliance digest also differs; final visibility planes match.
-// Previous Rust state pin: 0x4FC5_48E8_B854_D13D.
-const BRIDGE_HARNESS_FINAL_HASH: u64 = 0x8934_6F95_0887_B80C;
+// #3099 adds the permanent-stealth grant byte for every entity, false here.
+// Omitting only that hash fold recovers 0x8934_6F95_0887_B80C; the unchanged
+// replay, route and absolute RNG assertions pass with either hash composition.
+// #3234 removed the entity hash's sensor deposit, a None byte for every object
+// here. It sat in the same run of zero bytes as that grant byte, so the pin
+// returns to the value above. Hash composition only: a temporary control
+// restoring the byte gave the previous value, with every tripwire above green.
+// Control removed. Previous: 0x57D9_C8C7_DA7A_FBD6.
+// The dynamic terrain cells now fold without their presentation-only tile
+// variant, render offset and radar colours (tag v2): hash composition only.
+// A temporary control restoring the v1 fold gave the previous value, with
+// every tripwire above green. Control removed. Previous: 0x8934_6F95_0887_B80C.
+// #3710 folds the game options' room bans (all off here): hash composition
+// only. A temporary control omitting that fold gave the previous value, with
+// every tripwire above green. Control removed. Previous: 0x0722_C90C_F923_6AA2.
+// The fixture's owner seats no client map, so its arrivals no longer
+// materialize that default fog-owner plane: RevealArea writes only a
+// client's PlayerPtr map (`0x00567AB0..0x00567B12`). Only the fog digest
+// moves; route, replay and absolute RNG tripwires above stay green.
+// Previous: 0x8962_19D2_2722_4F7D.
+const BRIDGE_HARNESS_FINAL_HASH: u64 = 0x534D_F91E_A02A_F8B2;
 
 fn bridge_ini() -> IniFile {
     // One armed ground vehicle and one distant infantryman on a second house, so
@@ -441,9 +460,6 @@ fn bridge_rules() -> RuleSet {
     let art = IniFile::from_str(crate::rules::retail_ini_fixture::GI_ART_EXCERPT);
     let mut rules = RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).unwrap();
     rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
-    rules.bind_animation_sequences(
-        &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-    );
     rules
 }
 
@@ -596,7 +612,8 @@ fn unit(owner: &str, type_id: &str, cx: u16, cy: u16, cat: EntityCategory) -> Ma
         recruitable_a: true,
         recruitable_b: true,
         group: -1,
-        structure_upgrades: [None, None, None],
+        follows: None,
+        structure_columns: Default::default(),
         structure_ai_sellable: false,
         structure_ai_repairable: false,
         structure_online: true,

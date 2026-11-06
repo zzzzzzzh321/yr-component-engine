@@ -539,7 +539,8 @@ impl AssetManager {
     }
 
     /// Inspect the ordinary startup stack while retaining readable archives for
-    /// resource diagnostics. Missing optional probes stay silent. The partial
+    /// resource diagnostics. Missing optional probes stay silent, except the
+    /// map and movie media reported as optional issues. The partial
     /// manager is diagnostic only: ordinary startup still stops on required
     /// failures, while unreadable optional archives are logged and skipped.
     pub fn inspect_install(
@@ -607,7 +608,7 @@ impl AssetManager {
         manager.mount_startup_archive("cameo.mix", true, &mut policy)?;
 
         manager.mount_startup_map_media(media_mode, &mut policy)?;
-        manager.mount_startup_archive("multimd.mix", true, &mut policy)?;
+        manager.mount_reported_archive("multimd.mix", &mut policy)?;
         manager.mount_startup_archive("thememd.mix", false, &mut policy)?;
         // VERA presentation extension: native YR mounts THEME.MIX only when
         // THEMEMD.MIX is absent. Keep MD first, then make original RA2 music
@@ -1368,16 +1369,7 @@ impl AssetManager {
             path = if crate::util::file_system::exists(&exact) {
                 exact
             } else {
-                crate::util::file_system::read_dir(&path)
-                    .ok()?
-                    .filter_map(Result::ok)
-                    .map(|entry| entry.path())
-                    .find(|candidate| {
-                        candidate
-                            .file_name()
-                            .and_then(OsStr::to_str)
-                            .is_some_and(|name| name.eq_ignore_ascii_case(component))
-                    })?
+                crate::util::case_insensitive_path::find(&path, component)?
             };
         }
         crate::util::file_system::read(&path).ok()
@@ -1426,15 +1418,16 @@ impl AssetManager {
         match mode {
             MediaArchiveMode::Numbered { media_index } => {
                 let number = media_index.wrapping_add(1);
-                self.mount_startup_archive(&format!("mapsmd{number:02}.mix"), true, policy)?;
+                self.mount_reported_archive(&format!("mapsmd{number:02}.mix"), policy)?;
                 self.mount_startup_archive(&format!("maps{number:02}.mix"), false, policy)?;
             }
             MediaArchiveMode::CdWildcard => {
                 let result = (|| {
                     let md = self.mount_wildcard_archives(None, "mapsmd")?;
                     if !md.matched {
-                        // This is the native fallback branch, even though active
-                        // YR still fails the later required-MD global check.
+                        // This is the native fallback branch. Active YR then
+                        // fails its required-MD global check; see
+                        // `mount_reported_archive` for why VERA continues.
                         self.mount_wildcard_archives(None, "maps")?;
                     }
                     if !md.first_registered {
@@ -1445,7 +1438,7 @@ impl AssetManager {
                     Ok(())
                 })();
                 if let Err(error) = result {
-                    Self::record_archive_issue("MAPSMD*.MIX", true, error, policy)?;
+                    Self::record_archive_issue("MAPSMD*.MIX", false, error, policy)?;
                 }
             }
         }
@@ -1466,7 +1459,7 @@ impl AssetManager {
             MediaArchiveMode::Numbered { media_index } => {
                 let number = media_index.wrapping_add(1);
                 if !self.mount_startup_archive(&format!("movmd{number:02}.mix"), false, policy)? {
-                    self.mount_startup_archive(&format!("movies{number:02}.mix"), true, policy)?;
+                    self.mount_reported_archive(&format!("movies{number:02}.mix"), policy)?;
                 }
             }
             MediaArchiveMode::CdWildcard => {
@@ -1506,7 +1499,7 @@ impl AssetManager {
                     Ok(())
                 })();
                 if let Err(error) = result {
-                    Self::record_archive_issue(name, true, error, policy)?;
+                    Self::record_archive_issue(name, false, error, policy)?;
                 }
             }
         }
@@ -1555,7 +1548,9 @@ impl AssetManager {
         let directory = relative_directory
             .map(|relative| self.ra2_dir.join(relative))
             .unwrap_or_else(|| self.ra2_dir.clone());
-        let entries = match crate::util::file_system::read_dir(&directory) {
+        // Init_Mix_Files' CD search (`0x0047AF70`, FindFirstFileA at
+        // `0x0047AFCF`/`0x0047B08A`) registers each match as it is listed.
+        let entries = match crate::util::case_insensitive_path::native_listing(&directory) {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(result);
@@ -1563,12 +1558,8 @@ impl AssetManager {
             Err(err) => return Err(err.into()),
         };
 
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            let path = entry.path();
+        let mut result = WildcardMount::default();
+        for path in entries {
             if !retail_enumerated_file(&path) {
                 continue;
             }
@@ -1632,8 +1623,8 @@ impl AssetManager {
             }
             StartupArchivePolicy::OptionalWarnings if !required => {
                 // Install warnings must remain optional when the game starts.
-                // This changes no required archive or standalone media gate.
-                log::warn!("Skipping unreadable optional archive {name}: {error}");
+                // The test-only FailFast policy keeps the strict media gate.
+                log::warn!("Skipping unavailable optional archive {name}: {error}");
                 Ok(())
             }
             _ => Err(error),
@@ -1650,6 +1641,25 @@ impl AssetManager {
             Ok(mounted) => Ok(mounted),
             Err(error) => {
                 Self::record_archive_issue(name, required, error, policy)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// VERA extension: retail's Init_Mix_Files refuses to start without its map
+    /// and movie media. Retail copies hold only scenarios and movies: the lists
+    /// skip a missing map, a movie is skipped, and choosing a campaign mission
+    /// without its map returns to the menu. So VERA starts without them. Unlike
+    /// a silent optional probe, absence reaches the install check and log.
+    fn mount_reported_archive(
+        &mut self,
+        name: &str,
+        policy: &mut StartupArchivePolicy<'_>,
+    ) -> Result<bool, AssetError> {
+        match self.mount_named_archive(name, true) {
+            Ok(mounted) => Ok(mounted),
+            Err(error) => {
+                Self::record_archive_issue(name, false, error, policy)?;
                 Ok(false)
             }
         }
@@ -1833,7 +1843,12 @@ impl AssetManager {
                 continue;
             };
             let key = file_name.to_ascii_lowercase();
-            if files.contains_key(&key) {
+            // Two spellings of one name exist only on a case-sensitive file
+            // system: keep the first in byte order, not in directory order.
+            if files
+                .get(&key)
+                .is_some_and(|kept: &LooseAsset| kept.path.file_name() <= path.file_name())
+            {
                 continue;
             }
 
@@ -2329,6 +2344,21 @@ mod tests {
         );
     }
 
+    /// A case-sensitive file system can hold two spellings of one loose file;
+    /// the catalog keeps the first in byte order whatever the directory order.
+    #[test]
+    fn two_spellings_of_a_loose_file_keep_the_first_in_byte_order() {
+        let dir = TestDirectory::new("loose-spellings");
+        for name in ["rulesmd.ini", "RulesMD.ini", "RULESMD.INI"] {
+            std::fs::write(dir.path().join(name), name).expect("loose spelling");
+        }
+        if std::fs::read_dir(dir.path()).unwrap().count() < 3 {
+            return; // A case-insensitive file system holds one spelling.
+        }
+        let manager = empty_manager(dir.path());
+        assert_eq!(manager.get_ref("rulesmd.ini"), Some(&b"RULESMD.INI"[..]));
+    }
+
     #[test]
     fn loose_payloads_are_lazy_stable_and_do_not_lock_writable_files() {
         let dir = TestDirectory::new("mutable-loose");
@@ -2420,32 +2450,22 @@ mod tests {
     }
 
     #[test]
-    fn cd_map_wildcard_uses_md_family_and_preserves_enumeration_order() {
+    fn cd_map_wildcard_uses_md_family_in_native_name_order() {
         let directory = TestDirectory::new("cd-map-media");
         directory.write_mix("MAPSMD01.MIX", "one.bin", b"one");
         directory.write_mix("mapsmd03.mix", "three.bin", b"three");
         directory.write_mix("MAPS01.MIX", "base.bin", b"base");
-
-        let expected: Vec<String> = std::fs::read_dir(directory.path())
-            .expect("enumerate expected order")
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let file_name = entry.file_name().into_string().ok()?;
-                mix_wildcard_family_matches(&file_name, "mapsmd").then_some(file_name)
-            })
-            .collect();
+        directory.write_mix("mapsmd02.mix", "two.bin", b"two");
 
         let mut manager = empty_manager(directory.path());
         manager
             .mount_native_map_media(MediaArchiveMode::CdWildcard)
             .expect("CD wildcard map media");
 
-        assert_eq!(manager.loaded_archive_names(), expected);
-        assert!(
-            manager
-                .loaded_archive_names()
-                .iter()
-                .all(|name| name.to_ascii_lowercase().starts_with("mapsmd"))
+        // APFS lists these 01, 03, 02.
+        assert_eq!(
+            manager.loaded_archive_names(),
+            ["MAPSMD01.MIX", "mapsmd02.mix", "mapsmd03.mix"]
         );
     }
 
@@ -2456,19 +2476,13 @@ mod tests {
         directory.write_mix("MOVMD03.MIX", "md-three.bin", b"three");
         directory.write_mix("MOVMD04.MIX", "md-four.bin", b"four");
 
-        let expected: Vec<String> = std::fs::read_dir(directory.path())
-            .expect("enumerate expected order")
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let file_name = entry.file_name().into_string().ok()?;
-                mix_wildcard_family_matches(&file_name, "movmd").then_some(file_name)
-            })
-            .collect();
-
         let mut manager = empty_manager(directory.path());
         manager
             .mount_native_movie_media(MediaArchiveMode::CdWildcard)
             .expect("CD wildcard movie media");
+
+        // In native name order, which APFS reverses here.
+        let expected = ["MOVMD03.MIX", "MOVMD04.MIX"];
 
         assert_eq!(manager.loaded_archive_names(), expected);
     }

@@ -411,7 +411,9 @@ fn sdk_script68_mixed_team_preserves_instances_and_resumes_exact_program_after_s
             .firepower(),
         NativeF64Bits::from_bits(3.0_f64.to_bits())
     );
-    let draw = sim.building_spotlight(light, &rules).unwrap();
+    let draw = sim
+        .building_spotlight(light, sim.session().current_house(), &rules)
+        .unwrap();
     assert_eq!(draw.glow_flags, 4);
     let z = crate::sim::movement::ground_pose::position_world_coord(
         &sim.entities().get(foot).unwrap().position,
@@ -490,7 +492,11 @@ fn sdk_script68_mixed_team_preserves_instances_and_resumes_exact_program_after_s
             .light(),
         Some(light)
     );
-    assert!(restored.building_spotlight(light, &rebound).is_some());
+    assert!(
+        restored
+            .building_spotlight(light, restored.session().current_house(), &rebound)
+            .is_some()
+    );
     step(&mut restored, &rebound, group);
     assert_eq!(restored.team_script_vm.team(group).unwrap().cursor(), 1);
     assert!(

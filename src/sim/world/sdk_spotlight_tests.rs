@@ -153,7 +153,9 @@ fn sdk_spotlight_physical_layers_and_explicit_off_preserve_stock_building_lights
     let space = spawn(&mut sim, &enabled, "SPACE", 10);
     let light = child(&sim, space);
     visit(&mut sim, light, &enabled);
-    let draw = sim.building_spotlight(light, &enabled).unwrap();
+    let draw = sim
+        .building_spotlight(light, sim.session().current_house(), &enabled)
+        .unwrap();
     let z = crate::sim::movement::ground_pose::object_get_coords(
         sim.entities().get(space).unwrap(),
         sim.resolved_terrain.as_ref(),
@@ -164,7 +166,10 @@ fn sdk_spotlight_physical_layers_and_explicit_off_preserve_stock_building_lights
     let body = spawn(&mut sim, &enabled, "BODY", 14);
     let body_light = child(&sim, body);
     visit(&mut sim, body_light, &enabled);
-    assert!(sim.building_spotlight(body_light, &enabled).is_some());
+    assert!(
+        sim.building_spotlight(body_light, sim.session().current_house(), &enabled)
+            .is_some()
+    );
 
     source.push(
         RulesLayerKind::Scenario,
@@ -175,7 +180,9 @@ fn sdk_spotlight_physical_layers_and_explicit_off_preserve_stock_building_lights
     let stock = spawn(&mut off, &disabled, "STOCK", 10);
     let stock_light = child(&off, stock);
     visit(&mut off, stock_light, &disabled);
-    let draw = off.building_spotlight(stock_light, &disabled).unwrap();
+    let draw = off
+        .building_spotlight(stock_light, off.session().current_house(), &disabled)
+        .unwrap();
     let z = crate::sim::movement::ground_pose::object_get_coords(
         off.entities().get(stock).unwrap(),
         off.resolved_terrain.as_ref(),
@@ -190,7 +197,9 @@ fn sdk_spotlight_physical_layers_and_explicit_off_preserve_stock_building_lights
     let body = spawn(&mut off, &disabled, "BODY", 18);
     let space_light = child(&off, space);
     visit(&mut off, space_light, &disabled);
-    let draw = off.building_spotlight(space_light, &disabled).unwrap();
+    let draw = off
+        .building_spotlight(space_light, off.session().current_house(), &disabled)
+        .unwrap();
     let z = crate::sim::movement::ground_pose::object_get_coords(
         off.entities().get(space).unwrap(),
         off.resolved_terrain.as_ref(),
@@ -261,7 +270,10 @@ fn sdk_spotlight_foot_facing_detach_activation_and_saved_child_share_original_ow
             .unwrap()
             .is_fully_cloaked()
     );
-    assert!(sim.building_spotlight(turret_light, &rules).is_none());
+    assert!(
+        sim.building_spotlight(turret_light, sim.session().current_house(), &rules)
+            .is_none()
+    );
     sim.detach_all_pointer_expired(turret, &rules, None, FrameEffects::empty());
     assert_eq!(child(&sim, turret), turret_light);
     assert!(sim.substrate.spotlights.contains_key(turret_light));
@@ -271,7 +283,8 @@ fn sdk_spotlight_foot_facing_detach_activation_and_saved_child_share_original_ow
     visit(&mut sim, turret, &rules);
     visit(&mut sim, turret_light, &rules);
     assert!(
-        sim.building_spotlight(turret_light, &rules).is_some(),
+        sim.building_spotlight(turret_light, sim.session().current_house(), &rules)
+            .is_some(),
         "the same child regains a drawable parent after the real uncloak visit"
     );
 
@@ -287,8 +300,12 @@ fn sdk_spotlight_foot_facing_detach_activation_and_saved_child_share_original_ow
     actor.barrel_facing.as_mut().unwrap().snap(0, frame);
     visit(&mut sim, body_light, &rules);
     visit(&mut sim, turret_light, &rules);
-    let body_pose = sim.building_spotlight(body_light, &rules).unwrap();
-    let secondary_pose = sim.building_spotlight(turret_light, &rules).unwrap();
+    let body_pose = sim
+        .building_spotlight(body_light, sim.session().current_house(), &rules)
+        .unwrap();
+    let secondary_pose = sim
+        .building_spotlight(turret_light, sim.session().current_house(), &rules)
+        .unwrap();
     assert_eq!(body_pose.glow_flags, 6);
     assert_eq!(secondary_pose.glow_flags, 8);
     let actor_z = crate::sim::movement::ground_pose::position_world_coord(
@@ -311,11 +328,15 @@ fn sdk_spotlight_foot_facing_detach_activation_and_saved_child_share_original_ow
     visit(&mut sim, body_light, &rules);
     visit(&mut sim, turret_light, &rules);
     assert_ne!(
-        sim.building_spotlight(body_light, &rules).unwrap().coord,
+        sim.building_spotlight(body_light, sim.session().current_house(), &rules)
+            .unwrap()
+            .coord,
         body_pose.coord
     );
     assert_eq!(
-        sim.building_spotlight(turret_light, &rules).unwrap().coord,
+        sim.building_spotlight(turret_light, sim.session().current_house(), &rules)
+            .unwrap()
+            .coord,
         secondary_pose.coord,
         "the installed Barrel selector follows Secondary, independently of Body"
     );
@@ -329,7 +350,9 @@ fn sdk_spotlight_foot_facing_detach_activation_and_saved_child_share_original_ow
         .snap(0x4000, frame);
     visit(&mut sim, turret_light, &rules);
     assert_ne!(
-        sim.building_spotlight(turret_light, &rules).unwrap().coord,
+        sim.building_spotlight(turret_light, sim.session().current_house(), &rules)
+            .unwrap()
+            .coord,
         secondary_pose.coord
     );
 
@@ -390,7 +413,11 @@ fn sdk_spotlight_foot_facing_detach_activation_and_saved_child_share_original_ow
         restored.substrate.spotlights.get(recreated),
         Some(&retained_light)
     );
-    assert!(restored.building_spotlight(recreated, &rebound).is_some());
+    assert!(
+        restored
+            .building_spotlight(recreated, restored.session().current_house(), &rebound)
+            .is_some()
+    );
     restored.techno_limbo_with_rules(turret, &rebound, None);
     assert!(!restored.substrate.spotlights.contains_key(recreated));
     restored.uninit_with_rules(body, &rebound);

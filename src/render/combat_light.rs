@@ -80,7 +80,7 @@ impl CombatLightRenderer {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let encoded_format = surface_format.remove_srgb_suffix();
+        let encoded_format = super::webgl::encoded_format(device, surface_format);
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Combat Light Camera Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -96,17 +96,20 @@ impl CombatLightRenderer {
         });
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Combat Light Camera"),
-            contents: bytemuck::bytes_of(&CameraUniform {
-                screen_size: [1.0, 1.0],
-                camera_pos: [0.0, 0.0],
-                zoom: 1.0,
-                world_origin_y: 0.0,
-                world_height: 1.0,
-                _pad: 0.0,
+            contents: &super::webgl::uniform_bytes(
+                device,
+                bytemuck::bytes_of(&CameraUniform {
+                    screen_size: [1.0, 1.0],
+                    camera_pos: [0.0, 0.0],
+                    zoom: 1.0,
+                    world_origin_y: 0.0,
+                    world_height: 1.0,
+                    _pad: 0.0,
 
-                native_z_origin_y: 0.0,
-                _native_z_pad: 0.0,
-            }),
+                    native_z_origin_y: 0.0,
+                    _native_z_pad: 0.0,
+                }),
+            ),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -160,9 +163,11 @@ impl CombatLightRenderer {
             }],
         });
 
+        let source =
+            super::webgl::camera_source(device, shader_source(super::gpu::webgl_fallback(device)));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Combat Light Exact RGB565 Shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Combat Light Exact RGB565 Pipeline Layout"),
@@ -180,11 +185,11 @@ impl CombatLightRenderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<GpuLightInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &attributes,
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -234,6 +239,9 @@ impl CombatLightRenderer {
 
     /// Initialize5FF5AA..5FF727 owns surfaces64..73, driven by Rules+7A8.
     /// This renderer keeps one cache keyed by the effective retained radius.
+    /// RESIDUAL (dormant): native builds them once per process (flag AC1834 set
+    /// at 5FF727, from Init_Game 52BA60), so a map or mode SpotlightRadius never
+    /// reaches them. No retail map or mode sets it.
     pub(crate) fn set_spotlight_radius(&mut self, queue: &wgpu::Queue, radius: i32) {
         if self.spotlight_radius == Some(radius) {
             return;
@@ -521,6 +529,28 @@ fn allocate_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buf
     })
 }
 
+/// The WebGL2 fallback reads and writes encoded bytes through sRGB views
+/// (see `render::webgl`).
+pub(crate) fn shader_source(webgl: bool) -> String {
+    if webgl {
+        super::webgl::encoded_shader(
+            SHADER,
+            &[
+                (
+                    "textureLoad(scene, vec2i(input.position.xy), 0)",
+                    "fallback_load_encoded(textureLoad(scene, vec2i(input.position.xy), 0))",
+                ),
+                (
+                    "return vec4f(transformed) / 255.0;",
+                    "return fallback_store_encoded(vec4f(transformed) / 255.0);",
+                ),
+            ],
+        )
+    } else {
+        SHADER.to_owned()
+    }
+}
+
 fn create_composition_targets(
     device: &wgpu::Device,
     scene_layout: &wgpu::BindGroupLayout,
@@ -635,6 +665,9 @@ fn create_native_mask_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgp
 
 /// Build BSurface indices 0..63: draw odd-radius concentric filled circles on
 /// a 256x256 byte surface, then retain every other source scanline.
+/// RESIDUAL (invisible): native copies rows 0xFF wide (0x005FF54B, and
+/// 0x005FF6B5 for the type16 masks), leaving column 255 at 0. Only layer 63
+/// and type16 radii of 127 or more have data there.
 fn build_native_mask_atlas() -> Vec<u8> {
     const SOURCE_HEIGHT: usize = 256;
     let mut atlas =

@@ -52,15 +52,43 @@ impl App {
         log::info!("Returned to the shell");
     }
 
+    /// Wait_For_Players result 8 clears GameActive without an EXIT event, so
+    /// Main_Game returns past the router without 0x00686570's EVA and fades
+    /// (0x0064806C..0x006482A6, 0x0055D347).
+    pub(super) fn return_disconnected_to_main_menu(state: &mut AppState) {
+        Self::record_match_result(state, super::cncnet::ExternalMatchResult::Disconnected);
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        Self::browser_match_ended(state, super::cncnet::ExternalMatchResult::Disconnected);
+        Self::return_to_main_menu(state);
+    }
+
+    /// Quit Game's leave: a frame suspended in Wait_For_Players finishes its
+    /// tail before the result-8 return.
+    pub(super) fn leave_network_wait_to_main_menu(state: &mut AppState) {
+        if state
+            .match_state
+            .sim_runtime
+            .as_ref()
+            .is_some_and(|rt| rt.simulation.pending_network_wait())
+        {
+            crate::app::match_runtime::sim_tick::leave_network_wait(state);
+        }
+        Self::return_disconnected_to_main_menu(state);
+    }
+
     /// Stop a running scenario without an outcome teardown: its world,
     /// modal, audio and diagnostic owners, leaving the runtime retained.
     /// Shared by the EXIT return and the campaign restart (`0x006863E0`
     /// stops the elapsed clock, theme, sounds and speech before
     /// Start_Scenario).
     fn retire_running_scenario(state: &mut AppState) {
+        // Shell return and campaign restart both end the installed match.
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        Self::browser_match_ended(state, super::cncnet::ExternalMatchResult::Quit);
         state.match_state.input.planning.reset();
         let wall_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
         crate::app::radar_movie::retire(state, wall_ms);
+        crate::app::commander_feedback::retire(state);
         crate::app::chrono_screen::retire(state, wall_ms);
         if let Some(runtime) = state.match_state.sim_runtime.as_mut() {
             // Main_Game48CCC0 clears ScenarioStarted[A8ED5C] at48CEBF
@@ -87,6 +115,7 @@ impl App {
         state.match_state.match_presentation.saved_game_browser = None;
         state.match_state.network_wait = Default::default();
         state.match_state.network_failure = None;
+        state.match_state.frame_stopped = false;
         crate::app::lan_service::return_transport(state);
         // Persist the deterministic diagnostic log before leaving the scenario.
         // Runtime and presentation resources remain retained in the shell.
@@ -228,6 +257,9 @@ impl App {
             return;
         }
         state.platform.window_active = active;
+        if active {
+            state.platform.clear_attention();
+        }
         let movie_active = crate::app::radar_movie::playback_active(state);
         state
             .match_state
@@ -392,7 +424,7 @@ impl App {
             // while the overlay owns the mouse never reaches the tactical
             // body, so anything still armed here would stay latched for the
             // rest of the match: tactical capture freezes edge auto-scroll,
-            // `minimap_dragging` swallows every cursor move, and a stale
+            // an active minimap press swallows every cursor move, and a stale
             // gadget sticky capture eats the next click.
             state.match_state.input.cancel_tactical_drag();
             state
@@ -435,6 +467,13 @@ impl App {
     fn state_machine_admits_modal(state: &mut AppState) -> bool {
         if Self::house_outcome_wait_pending(state) {
             return false;
+        }
+        // A result that is already published and waiting for its commander
+        // clip is decided, but the player may still want out of the clip: the
+        // menu has to open for them. Leaving through it cuts the clip instead
+        // of queueing an EXIT event the stopped world could never execute.
+        if crate::app::commander_feedback::verdict_is_waiting_for_clip(state) {
+            return true;
         }
         let sim = state
             .match_state
@@ -543,6 +582,18 @@ impl App {
     /// back to the shell. Confirmation itself only constructs and queues the
     /// event; teardown begins after the event-tail dispatcher executes it.
     fn exit_match_to_shell(state: &mut AppState) {
+        // The result is already decided and only its commander clip is left.
+        // Leaving now cuts that clip: the card, the theme and the score page
+        // follow exactly as they would after it — the terminal frame latched
+        // the score before this point. Queueing the native EXIT event instead
+        // would go nowhere: no frame runs after a published result, so the
+        // event would never execute.
+        if crate::app::commander_feedback::verdict_is_waiting_for_clip(state) {
+            let wall_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
+            crate::app::commander_feedback::skip_verdict_clip(state, wall_ms);
+            Self::enter_in_game_menu_state(state, crate::ui::pause_menu::InGameMenuState::Closed);
+            return;
+        }
         log::info!("Abort Mission confirmed — queueing EXIT event");
         // 0x0048CAA1 clears the admission latch after queueing EXIT, even
         // when the event ring is full: until EXIT runs, State_Machine opens
@@ -565,6 +616,11 @@ impl App {
             log::warn!("Abort Mission EXIT event could not be queued for '{owner}'");
             return;
         }
+        if let Some(live) = state.match_state.live_network.as_mut() {
+            // Keep the native EXIT in its queue. The network owner resumes
+            // through any pending pause request so this event can execute.
+            live.keep_running_for_exit();
+        }
         Self::enter_in_game_menu_state(state, crate::ui::pause_menu::InGameMenuState::Closed);
     }
 
@@ -577,6 +633,8 @@ impl App {
         }
         // Remote EXIT senders run DestroyConnection first (0x0064C9B1).
         crate::app::match_runtime::network_match::drain_departures(state);
+        crate::app::match_runtime::network_match::post_speed_changes(state);
+        crate::app::match_runtime::network_match::post_caught_up(state);
         let local_owner = crate::app::input::commands::preferred_local_owner(state);
         let local_owner_id = local_owner.as_deref().and_then(|owner| {
             state
@@ -619,27 +677,83 @@ impl App {
         // Abort is the independent EXIT-event route: it never inherits the
         // victory/defeat HouseClass SavourDelay or its outcome-voice wait.
         state.match_state.scenario_outcome = None;
+        Self::record_match_result(state, super::cncnet::ExternalMatchResult::Quit);
         //686570 clears the movie queue before its independent audio fade.
         crate::app::radar_movie::retire(state, wall_ms);
+        crate::app::commander_feedback::retire(state);
         crate::app::chrono_screen::retire(state, wall_ms);
-        let _ = state.match_state.scenario_elapsed_clock.stop(wall_ms);
+        let elapsed_seconds = state.match_state.scenario_elapsed_clock.stop(wall_ms);
         // gamemd provenance: battle abort teardown; verified
         // GameExit__BattleControlTerminated @ 0x00686570 starts Theme's fade
         // (`ThemeClass::Stop(1)` @ 0x006865FA), then fades the independent
         // audio master, bounds its voice pump to 300 timer buckets, and
         // finally hard-stops audio.
         state.audio.fade_out_theme(wall_ms);
+        let destination = Self::aborted_score_destination(state, elapsed_seconds)
+            .unwrap_or(crate::app::match_runtime::scenario_exit::ScenarioExitDestination::MainMenu);
+        let showed_score = !matches!(
+            &destination,
+            crate::app::match_runtime::scenario_exit::ScenarioExitDestination::MainMenu
+        );
         let mut scenario_exit =
             crate::app::match_runtime::scenario_exit::ScenarioExitCascade::start(
                 wall_ms,
-                crate::app::match_runtime::scenario_exit::ScenarioExitDestination::MainMenu,
+                destination,
             );
+        if showed_score {
+            scenario_exit = scenario_exit.with_battle_control_terminated();
+        }
         // `0x00686570` requests EVA_BattleControlTerminated as an INTERRUPT
         // immediately before waiting for the two simultaneous audio fades.
         if let Some(action) = scenario_exit.take_start_voice_action() {
             Self::apply_scenario_exit_voice_action(state, action);
         }
         state.match_state.scenario_exit = Some(scenario_exit);
+    }
+
+    /// The score page for a skirmish the player left on purpose, or `None`
+    /// when this exit is not a skirmish's.
+    ///
+    /// Retail returns to the shell on abort. The counters a match has already
+    /// earned do not depend on how it ended, and the games this mode follows
+    /// (RA3, SC2, AoE2) show their result page after a resign. A mission, a
+    /// network match and a co-op round keep their own destinations: the first
+    /// owns its result dialogs, the second reports through cncnet, the third
+    /// has `CooperativeResult`.
+    fn aborted_score_destination(
+        state: &mut AppState,
+        elapsed_seconds: i32,
+    ) -> Option<crate::app::match_runtime::scenario_exit::ScenarioExitDestination> {
+        let eligible = state
+            .match_state
+            .sim_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.simulation.session().game_mode_nonzero())
+            && state.match_state.live_network.is_none()
+            && !crate::app::cooperative_round::applies(state)
+            && !state.match_state.map_basic.skip_score.unwrap_or(false);
+        if !eligible {
+            return None;
+        }
+        // The page numbers itself from this counter, and the natural exit
+        // increments before it builds the model.
+        state.frontend.finished_game_count = state.frontend.finished_game_count.saturating_add(1);
+        log::info!("Abort Mission: the score page follows ({elapsed_seconds} s played)");
+        let model = crate::app::match_runtime::sim_tick::build_aborted_score_screen_model(
+            state,
+            elapsed_seconds,
+        )
+        .map_err(|error| error.to_string());
+        Some(
+            crate::app::match_runtime::scenario_exit::ScenarioExitDestination::Score {
+                title: crate::app::match_runtime::scenario_exit::outcome_title(
+                    crate::sim::house_state::HouseOutcomeKind::Defeat,
+                )
+                .to_string(),
+                detail: "You left the battle.".to_string(),
+                model,
+            },
+        )
     }
 }
 
@@ -660,6 +774,7 @@ impl App {
     pub(super) fn start_quit_cascade(state: &mut AppState) {
         let wall_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
         crate::app::radar_movie::retire(state, wall_ms);
+        crate::app::commander_feedback::retire(state);
         crate::app::chrono_screen::retire(state, wall_ms);
         state.audio.fade_out_theme(wall_ms);
         state.frontend.quit_cascade = Some(crate::app::frontend::quit_cascade::QuitCascade::start(
@@ -710,6 +825,16 @@ impl App {
             log::error!("Scenario exit finished without a destination");
             return;
         };
+        // Browser launchers own their result UI. Snapshot before teardown;
+        // external launches skip score/movie/next-mission presentation.
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        {
+            Self::browser_match_ended(state, super::cncnet::ExternalMatchResult::Quit);
+            if state.frontend.external_launch {
+                Self::return_to_main_menu(state);
+                return;
+            }
+        }
         let movie = state.process_assets.native_rules().and_then(|rules| {
             crate::app::campaign_victory::win_movie(
                 &destination,
@@ -795,5 +920,45 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every in-scenario modal route, including BBB's Keyboard (state 4,
+    /// `0x004E1FE0` control 0x52C) and Sound (state 6, control 0x52D)
+    /// children that `State_Machine 0x0048C8B0` returns to state 5, commits
+    /// through `App::enter_in_game_menu_state`. A direct write skips the
+    /// Options-anchor, interaction and BBB-init effects that ride on it.
+    #[test]
+    fn only_the_transition_owner_writes_the_in_game_menu_state() {
+        fn direct_writers(dir: &std::path::Path, writers: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    direct_writers(&path, writers);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") || path.ends_with("in_game.rs") {
+                    continue;
+                }
+                let source: String = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .split_whitespace()
+                    .collect();
+                if source
+                    .match_indices(".in_game_menu=")
+                    .any(|(at, write)| !source[at + write.len()..].starts_with('='))
+                {
+                    writers.push(path);
+                }
+            }
+        }
+        let mut writers = Vec::new();
+        direct_writers(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app"),
+            &mut writers,
+        );
+        assert!(writers.is_empty(), "{writers:?}");
     }
 }

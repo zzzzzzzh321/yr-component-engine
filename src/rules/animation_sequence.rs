@@ -121,6 +121,55 @@ pub enum SequenceKind {
     AirDeathFinish,
 }
 
+impl SequenceKind {
+    /// Map a native `Sequence` name (the `DiscardOn.Sequences` token) to the
+    /// ported kind. `ready`/`guard` both drive `Stand` and `fireup` drives
+    /// `Attack`; native sequences VERA does not model (`carry`, `tumble`,
+    /// `wetdie1`, `wetdie2`) answer `None`.
+    pub fn from_native_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "ready" | "guard" => Self::Stand,
+            "prone" => Self::Prone,
+            "walk" => Self::Walk,
+            "fireup" => Self::Attack,
+            "fireprone" => Self::FireProne,
+            "secondaryfire" => Self::SecondaryFire,
+            "secondaryprone" => Self::SecondaryProne,
+            "down" => Self::Down,
+            "crawl" => Self::Crawl,
+            "up" => Self::Up,
+            "idle1" => Self::Idle1,
+            "idle2" => Self::Idle2,
+            "die1" => Self::Die1,
+            "die2" => Self::Die2,
+            "die3" => Self::Die3,
+            "die4" => Self::Die4,
+            "die5" => Self::Die5,
+            "deploy" => Self::Deploy,
+            "deployed" => Self::Deployed,
+            "deployedfire" => Self::DeployedFire,
+            "deployedidle" => Self::DeployedIdle,
+            "undeploy" => Self::Undeploy,
+            "paradrop" => Self::Paradrop,
+            "cheer" => Self::Cheer,
+            "panic" => Self::Panic,
+            "shovel" => Self::Shovel,
+            "fly" => Self::Fly,
+            "hover" => Self::Hover,
+            "firefly" => Self::FireFly,
+            "tread" => Self::Tread,
+            "swim" => Self::Swim,
+            "wetattack" => Self::WetAttack,
+            "wetidle1" => Self::WetIdle1,
+            "wetidle2" => Self::WetIdle2,
+            "airdeathstart" => Self::AirDeathStart,
+            "airdeathfalling" => Self::AirDeathFalling,
+            "airdeathfinish" => Self::AirDeathFinish,
+            _ => return None,
+        })
+    }
+}
+
 /// How a sequence behaves when it reaches its last frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LoopMode {
@@ -315,22 +364,21 @@ impl SequenceSet {
 /// on an app-side atlas refresh before their animation or death timing advances.
 pub(crate) fn build_animation_sequence_catalog(
     rules: &crate::rules::ruleset::RuleSet,
-    infantry_sequences: Option<&crate::rules::infantry_sequence::InfantrySequenceRegistry>,
 ) -> BTreeMap<String, SequenceSet> {
     let mut catalog = BTreeMap::new();
 
     for type_id in &rules.infantry_ids {
-        let Some(object) = rules.object(type_id) else {
+        let Some(object) =
+            rules.object_in_category(crate::rules::object_type::ObjectCategory::Infantry, type_id)
+        else {
             continue;
         };
-        let sequence_name = rules
-            .art()
-            .resolve_metadata_entry(&object.id, &object.image)
-            .and_then(|entry| entry.sequence.as_deref());
-        let sequence_set = sequence_name
-            .and_then(|name| infantry_sequences?.get(&name.to_ascii_uppercase()))
-            .map(crate::rules::infantry_sequence::build_sequence_set)
-            .unwrap_or_else(default_infantry_sequences);
+        // ReadSequenceData523D00 has already updated the native type's bank.
+        // Neither an Image change nor late ART binding may replay that read.
+        let sequence_set = object
+            .infantry_sequence_bank()
+            .expect("InfantryType constructor owns a sequence bank")
+            .sequence_set();
         catalog.insert(object.id.clone(), sequence_set);
     }
 

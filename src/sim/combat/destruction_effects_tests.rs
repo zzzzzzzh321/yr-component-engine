@@ -231,6 +231,7 @@ fn a_destroyed_building_explodes_per_foundation_cell_then_plays_its_destroy_anim
         let mut expected = Vec::new();
         for (rx, ry) in crate::sim::crew_survival::foundation_cells(10, 20, &"2x2".into()) {
             let (x, y) = super::super::inviso_scatter::random_direction_coord(
+                crate::map::cell_index::CellGrid::Retail,
                 &mut replay,
                 i32::from(rx) * 256 + 0x80,
                 i32::from(ry) * 256 + 0x80,
@@ -433,13 +434,14 @@ fn water_cell_sim(rules: &RuleSet, water: bool) -> Simulation {
     use crate::rules::terrain_rules::SpeedCostProfile;
 
     let open = SpeedCostProfile {
-        foot: Some(100),
-        track: Some(100),
-        wheel: Some(100),
-        float: Some(100),
-        amphibious: Some(100),
-        float_beach: Some(100),
-        hover: Some(100),
+        foot: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        track: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        amphibious: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float_beach: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
     };
     let mut sim = sim(9);
     let cells = (0..20_u16)
@@ -547,6 +549,8 @@ fn a_low_dropped_bomb_over_water_fires_no_death_weapon() {
             fires,
             "death weapon: {case}"
         );
+        // The +8F passenger kill (7380AF) is in the stock Unit tail Ares replaces.
+        #[cfg(not(feature = "ares"))]
         assert!(
             sim.substrate
                 .entities
@@ -832,6 +836,9 @@ fn a_custom_palette_building_gives_its_destroy_anim_the_palette_scheme() {
 /// The mapless fixture has no smudge candidates, so neither the centre mark
 /// nor the per-cell marks draw, and the survivor's Scatter stops after its
 /// first draw.
+// Stock Building GetCrew44EB10 always draws for the Engineer; Ares1004C650
+// draws only with a positive Engineer chance.
+#[cfg(not(feature = "ares"))]
 #[test]
 fn a_killed_building_draws_its_death_anims_before_its_survivors() {
     let rules = rules();
@@ -848,6 +855,7 @@ fn a_killed_building_draws_its_death_anims_before_its_survivors() {
         let mut expected = Vec::new();
         for &(rx, ry) in &cells {
             let (x, y) = super::super::inviso_scatter::random_direction_coord(
+                crate::map::cell_index::CellGrid::Retail,
                 &mut replay,
                 i32::from(rx) * 256 + 0x80,
                 i32::from(ry) * 256 + 0x80,
@@ -940,13 +948,14 @@ fn a_heavy_ship_dying_on_water_sinks_without_its_explosion() {
     let repeat = &controls["repeat_fatal"];
     let rules = rules();
     let open = SpeedCostProfile {
-        foot: Some(100),
-        track: Some(100),
-        wheel: Some(100),
-        float: Some(100),
-        amphibious: Some(100),
-        float_beach: Some(100),
-        hover: Some(100),
+        foot: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        track: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        amphibious: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float_beach: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
     };
     for (kind, water, sinks) in [
         ("SHIP", true, true),
@@ -994,7 +1003,7 @@ fn a_heavy_ship_dying_on_water_sinks_without_its_explosion() {
             assert!(played.is_empty(), "{kind}: {played:?}");
             // Original Unit ReceiveDamage737E33..737E5E restores the ship
             // after the fatal receiver and retains it for Unit AI's sinking
-            // suffix. Native executions: naval_occupants, water-neighbor rows.
+            // suffix.
             let retained = sim.substrate.entities.get(ship).expect("retained hull");
             assert_eq!(
                 retained.health.current(),

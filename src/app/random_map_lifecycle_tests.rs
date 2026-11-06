@@ -2,9 +2,10 @@ use super::RandomMapGenerationRetention;
 use super::frontend::skirmish_session::{MultiplayerShellRuntime, skirmish_global_defaults};
 use super::loading::pump::{LoadingProgressSink, LoadingRequest};
 use super::shell_random_map::{
-    RandomMapUpdate, accept_random_map_setup_owners, begin_random_map_generation_owners,
-    cancel_random_map_setup_owners, finish_random_map_generation_owners,
-    prepare_random_map_generation, spawn_random_map_generation_worker,
+    RandomMapRulesPreparation, RandomMapUpdate, accept_random_map_setup_owners,
+    begin_random_map_generation_owners, cancel_random_map_setup_owners,
+    finish_random_map_generation_owners, prepare_random_map_generation,
+    spawn_random_map_generation_worker,
 };
 use crate::map::rmg::{RmgConstructionPhase, RmgConstructionTrace, RmgOptions, RmgRng};
 use crate::skirmish_launch::{
@@ -70,15 +71,23 @@ fn launch_session(seed_name: &str) -> SkirmishLaunchSession {
 fn start_production_worker(
     assets: &mut crate::assets::asset_manager::AssetManager,
     options: &RmgOptions,
-    native_rules: &crate::rules::process_owner::NativeRulesProcessOwner,
+    native_rules: &mut crate::rules::process_owner::NativeRulesProcessOwner,
     runtime: &mut MultiplayerShellRuntime,
     retention: &mut RandomMapGenerationRetention,
     shared_cell_dummy: &crate::map::resolved_terrain::SharedCellDummy,
 ) -> std::sync::mpsc::Receiver<RandomMapUpdate> {
     begin_random_map_generation_owners(runtime, retention, options);
-    let prepared = prepare_random_map_generation(assets, options, Some(native_rules), None)
-        .expect("production retail generation preparation");
-    let decision = retention.map_storage_decision(options);
+    let decision = retention.begin_map_storage_decision(options);
+    let prepared = prepare_random_map_generation(
+        assets,
+        options,
+        RandomMapRulesPreparation::Generation {
+            owner: Some(native_rules),
+            reinitialize: decision.reinitializes(),
+        },
+        None,
+    )
+    .expect("production retail generation preparation");
     let receiver = spawn_random_map_generation_worker(
         options.clone(),
         prepared.settings,
@@ -132,7 +141,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     )
     .expect("active-retail AssetManager");
     let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
-    let (_, _, native_rules) = crate::rules::retail_sources::load_startup_rules(
+    let (_, _, mut native_rules) = crate::rules::retail_sources::load_startup_rules(
         &assets,
         std::sync::Arc::clone(audio.sounds()),
         std::sync::Arc::clone(audio.eva()),
@@ -201,7 +210,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     let receiver = start_production_worker(
         &mut assets,
         &options,
-        &native_rules,
+        &mut native_rules,
         &mut runtime,
         &mut retention,
         &shared_cell_dummy,
@@ -236,7 +245,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     let receiver = start_production_worker(
         &mut assets,
         &options,
-        &native_rules,
+        &mut native_rules,
         &mut runtime,
         &mut retention,
         &shared_cell_dummy,
@@ -274,6 +283,10 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
         Some(&seed_dir),
     )
     .expect("Use Map accepts the completed production result");
+    assert!(
+        retention.map_storage_decision(&options).reinitializes(),
+        "accepted teardown must force the next preview reset before Full_Init can replace Rules"
+    );
     assert_eq!(generation_entries, 2, "valid preview adds no worker run");
     assert!(randmap_img.is_file());
     assert!(!randmap_sed.exists(), "accepted caller follows teardown");
@@ -292,7 +305,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     let receiver = start_production_worker(
         &mut assets,
         &options,
-        &native_rules,
+        &mut native_rules,
         &mut runtime,
         &mut retention,
         &shared_cell_dummy,
@@ -342,7 +355,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     let receiver = start_production_worker(
         &mut assets,
         &options,
-        &native_rules,
+        &mut native_rules,
         &mut runtime,
         &mut retention,
         &shared_cell_dummy,
@@ -360,6 +373,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     ));
     let shell_after_preview = runtime.scenario_rng_logical_state_for_test();
     assert_ne!(shell_after_preview, shell_before_cancel_generation);
+    let preview_before_cancel = native_rules.prepared_random_map_rules().unwrap() as *const _;
     assert_eq!(
         cancel_random_map_setup_owners(
             &mut runtime,
@@ -368,6 +382,15 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
             Some(&seed_dir),
         ),
         Some(previous_selection)
+    );
+    assert_eq!(
+        native_rules.prepared_random_map_rules().unwrap() as *const _,
+        preview_before_cancel,
+        "Cancel keeps the same live Rules registry"
+    );
+    assert!(
+        retention.map_storage_decision(&options).reinitializes(),
+        "Cancel drops the dialog cache key before a later scenario can replace Rules"
     );
     assert_eq!(generation_entries, 4);
     assert!(randmap_img.is_file(), "Cancel publishes completed preview");
@@ -411,8 +434,12 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     let direct_initial = super::loading::init::load_map_initial_with_assets(
         seed_dir.clone(),
         &mut assets,
-        Some(&native_rules),
+        Some(&mut native_rules),
+        None,
         Some(seed_name),
+        Some("MPBattleMD.ini"),
+        crate::app::match_runtime::session::SessionMode::Skirmish,
+        false,
         &mut SilentProgress,
     )
     .expect("direct .SED launch regeneration");
@@ -465,7 +492,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
         .load_random_map_snapshot_for_test(
             seed_dir.clone(),
             &mut assets,
-            Some(&native_rules),
+            Some(&mut native_rules),
             &mut SilentProgress,
         )
         .expect("accepted UI .SED regeneration and admitted bundle transfer");
@@ -496,7 +523,7 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     )
     .with_accepted_random_map(Some(direct_accepted));
     let direct_launch = direct_request
-        .prepare_random_map_snapshot_for_test(direct_initial, &mut assets)
+        .prepare_random_map_snapshot_for_test(direct_initial, &mut assets, &mut native_rules)
         .expect("reference generated bundle crosses accepted admission");
     assert_eq!(ui_launch, direct_launch);
     assert_ne!(ui_launch.map.header.0, "POISON_PREVIEW");
@@ -552,7 +579,11 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
         Some(crate::sim::crates::CratePlacement {
             requested: 1,
             accepted: 1,
-            visible: 0,
+            visible: ui_launch
+                .startup_crate_slots
+                .iter()
+                .filter(|(_, _, overlay, _)| overlay.is_some())
+                .count() as u32,
         }),
         "accepted playable RMG must reach the ordinary startup-crate post-map seam"
     );
@@ -563,12 +594,14 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
     assert_eq!(slot.start_frame, 0);
     assert_ne!(slot.aux, 0);
     assert!(slot.duration > 0);
-    //OverlayClass::Mark5FC5CD..5FC5E3 rejects slope>4 except raw typeB2,
-    //returning false at5FC784 before writing the identity. CrateValidate
-    //4A198F..4A1A83 still accepts, so this unchanged retail fixture owns a
-    //timed ghost after the ordinary two-start RMG pass, not a visible overlay.
-    assert!(slope.expect("accepted crate cell has resolved terrain") > 4);
-    assert_eq!(live_overlay, None);
+    // OverlayClass::Mark (0x5FC570) rejects slope>4 except raw type 0xB2
+    // (0x5FC5CD..0x5FC5E3, false at 0x5FC784) before writing the identity,
+    // while CrateValidate (0x4A18F0) still accepts the cell: the slot then
+    // owns a timed ghost. A marked crate cell gets data 0xFF (0x5FD105). The
+    // generated map decides which, so assert the rule rather than the cell.
+    if slope.expect("accepted crate cell has resolved terrain") > 4 {
+        assert_eq!(live_overlay, None, "Mark rejects a steep crate cell");
+    }
     assert!(ui_launch.startup_crate.crates_enabled);
     assert_eq!(ui_launch.startup_crate.minimum, 1);
     assert_eq!(ui_launch.startup_crate.maximum, 255);
@@ -604,10 +637,24 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
         "ordinary WCRATE is not Mark's steep-slope exception"
     );
     assert_eq!(ui_launch.startup_crate.body_frame, 0);
-    assert!(
-        ui_launch.startup_crate.presented.is_empty(),
-        "a timed ghost cannot enter initial overlay presentation"
-    );
+    match live_overlay {
+        Some((overlay_id, data)) => {
+            assert_eq!(data, u8::MAX);
+            assert_eq!(
+                ui_launch.startup_crate.presented,
+                [(
+                    u16::try_from(slot.cell_x).expect("positive crate x"),
+                    u16::try_from(slot.cell_y).expect("positive crate y"),
+                    overlay_id,
+                    u8::MAX,
+                )]
+            );
+        }
+        None => assert!(
+            ui_launch.startup_crate.presented.is_empty(),
+            "a timed ghost cannot enter initial overlay presentation"
+        ),
+    }
     println!(
         "STARTUP_CRATE_PRODUCTION rules=min:{} max:{} regen_bits:{:#018X} wood:{} common:{} water:{} ids:{wood_id}/{water_id} frame:{}",
         ui_launch.startup_crate.minimum,

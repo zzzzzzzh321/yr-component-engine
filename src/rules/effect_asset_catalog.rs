@@ -358,6 +358,13 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     for name in &rules.general.metallic_debris {
         insert(name);
     }
+    // AnimStart424DCC..424E5F constructs the retained mineral Debris type.
+    // Bind these roots even when no weapon or death effect names them.
+    for tiberium in rules.tiberium_types.types() {
+        for name in tiberium.debris() {
+            insert(name);
+        }
+    }
     // AreaDamage48A34D constructs the retained BarrelExplode; Voxel749F30
     // constructs its ExpireAnim74A1AF and BounceAnim74A87F. Bind these
     // producers explicitly rather than depending on another warhead's list.
@@ -483,9 +490,9 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     // `sim::crates::pickup`). No warhead list names MONEY, HEALALL, ARMOR,
     // FIREPOWR, SPEED, VETERAN or REVEAL. A row's absent default (`NONE`)
     // and a mod's unregistered name resolve to native's `-1`: no root.
-    for name in rules.powerups.anims.iter().flatten() {
-        if rules.anim_type_names.contains(name) {
-            insert(name);
+    for &index in rules.powerups.animation_indices() {
+        if let Some(name) = rules.anim_type_runtime_key_by_index(index) {
+            insert(&name);
         }
     }
     // The cliff-collapse debris types are literals in the producer

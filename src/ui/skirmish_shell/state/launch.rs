@@ -2,9 +2,9 @@
 
 use crate::map::scenario_menu::MapMenuEntry;
 use crate::skirmish_launch::{
-    HOUSE_COLOR_COUNT, LaunchStartPosition, LaunchTeam, LaunchValidationError, PreFillHouseRoster,
-    SKIRMISH_PLAYER_SLOT_COUNT, SkirmishAiSlot, SkirmishLaunchMode, SkirmishLaunchSession,
-    SkirmishLocalSlot,
+    HOUSE_COLOR_COUNT, LaunchStartPosition, LaunchTeam, LaunchValidationError,
+    NETWORK_PLAYER_SLOT_COUNT, PreFillHouseRoster, SkirmishAiSlot, SkirmishLaunchMode,
+    SkirmishLaunchSession, SkirmishLocalSlot,
 };
 use crate::skirmish_modes::{SkirmishGameMode, mode_by_id};
 
@@ -16,7 +16,8 @@ fn launch_start_position(
 ) -> Result<LaunchStartPosition, LaunchValidationError> {
     match start_position {
         LaunchStartPosition::Auto => Ok(LaunchStartPosition::Auto),
-        LaunchStartPosition::Position(position) if position < SKIRMISH_PLAYER_SLOT_COUNT as u8 => {
+        // VERA's maps with more than eight starts list them up to thirty.
+        LaunchStartPosition::Position(position) if position < NETWORK_PLAYER_SLOT_COUNT as u8 => {
             Ok(LaunchStartPosition::Position(position))
         }
         LaunchStartPosition::Position(position) => {
@@ -33,11 +34,18 @@ fn launch_color_index(slot: usize, color_index: usize) -> Result<u8, LaunchValid
     }
 }
 
+/// Pack the current controls into a Start session, or refuse a match that has
+/// fewer than two sides.
+///
+/// `allow_single_team` is `[VERA] SoloSkirmish=`: it accepts an undisturbed
+/// test match, both with no opponent at all and with every active AI on the
+/// local player's own explicit team. Retail keeps both the "at least two
+/// players" and the "more than one team" gates.
 pub fn launch_session(
     state: &SkirmishShellState,
     maps: &[MapMenuEntry],
     modes: &[SkirmishGameMode],
-    allow_solo: bool,
+    allow_single_team: bool,
 ) -> Result<SkirmishLaunchSession, LaunchValidationError> {
     let selected_map = maps
         .get(state.selected_map_idx)
@@ -56,13 +64,12 @@ pub fn launch_session(
             requested_players,
         });
     }
-    // `[VERA] SoloSkirmish=yes` accepts a match with no opponent for an
-    // undisturbed test game. Retail keeps its "at least two players" gate.
-    if active_count == 0 && !allow_solo {
+    // Retail keeps its "at least two players" gate.
+    if active_count == 0 && !allow_single_team {
         return Err(LaunchValidationError::NoEnabledOpponent);
     }
     // With no opponent active there is no team conflict to report.
-    if state.player_team >= 0 && active_count > 0 {
+    if state.player_team >= 0 && active_count > 0 && !allow_single_team {
         let local_team = state.player_team as u8;
         let all_active_ai_same_team = state
             .opponents

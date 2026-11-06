@@ -163,7 +163,7 @@ fn assert_shp_light(
             .collect(),
     );
     let interpolation = crate::app::presentation::interpolation::RenderInterpolation::new(false);
-    let pitches = std::cell::RefCell::default();
+    let voxel_images = std::cell::RefCell::default();
     let colors =
         crate::map::houses::HouseColorMap::from([(owner_name.clone(), HouseColorIndex(0))]);
     let location = crate::sim::movement::ground_pose::object_location(actor, Some(terrain));
@@ -176,11 +176,17 @@ fn assert_shp_light(
             atlas: Some(&atlas),
             overlay_atlas: None,
             unit_atlas: None,
-            barrel_image_pitches: &pitches,
+            voxel_images: &voxel_images,
+            depth_tested_images: None,
             interpolation: &interpolation,
             camera: [screen.0 - 400.0, screen.1 - 300.0],
             render_size: [800, 600],
             zoom: 1.0,
+            building_viewport: crate::app::presentation::render::tactical_world_viewport(
+                [screen.0 - 400.0, screen.1 - 300.0],
+                [0, 0, 800, 600],
+                None,
+            ),
             axis: crate::render::batch::DepthAxis {
                 origin_y: 0.0,
                 world_height: 10_000.0,

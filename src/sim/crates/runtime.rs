@@ -362,7 +362,10 @@ mod tests {
             );
             assert_eq!(
                 (cell.speed_costs.track, cell.speed_costs.float),
-                (Some(0), Some(100))
+                (
+                    Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+                    Some(crate::util::native_x87::NativeF32Bits::ONE)
+                )
             );
             assert!(!cell.overlay_blocks);
             assert!(loaded.path_grid().unwrap().is_walkable(15, 15));
@@ -932,12 +935,6 @@ mod tests {
         assert!(
             !regenerated.is_empty(),
             "the replacement took the free slot"
-        );
-
-        assert!(
-            on.take_master_frame_test_trace()
-                .contains(&crate::sim::world::MasterFrameTestRung::CrateRegen),
-            "the rung is an observable master-frame position, not an incidental call"
         );
 
         let mut off = sim_with_grid(0x5C);

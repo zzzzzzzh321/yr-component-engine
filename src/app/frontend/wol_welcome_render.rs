@@ -20,18 +20,19 @@ use crate::app::frontend::shell_pass::{
     software_cursor,
 };
 use crate::app::frontend::shell_transition::ShellSlideKind;
+use crate::app::frontend::skirmish_shell_render::WolLobbyPaint;
 use crate::app::shell_wol::WolPage;
 use crate::render::shell_paint::{
     self, CHROME_DEPTH, CURSOR_DEPTH, PARENT_BACKGROUND_DEPTH, PaintButton, PaintLabel,
     SHELL_TEXT_RGB_ENABLED, push_entry_scaled,
 };
 use crate::render::shell_text::ShellAlign;
-use crate::ui::shell::geom::{ShellScale, centred_in_window};
+use crate::ui::shell::geom::{RectPx, ShellScale, centred_in_window};
 use crate::ui::shell::menu_page::{MenuPageButtonRect, MenuPageLayout, MenuPageSpec};
 use crate::ui::shell::slide::PanelArt;
 use crate::ui::wol_shell::{
     BOX_NO, BOX_OK, BOX_YES, StaticAlign, WAIT_CHECK_STATUS, WAIT_DISCONNECT, WOL_LOBBY_TITLE_KEY,
-    WolBoxButtons, WolTextCaption,
+    WolBoxButtons,
 };
 
 /// Icon and group-box children sit over the background, under the text.
@@ -58,6 +59,7 @@ pub(crate) fn message_box_parts(
     pressed: Option<u16>,
     screen_w: i32,
     screen_h: i32,
+    scale: ShellScale,
 ) -> (
     crate::ui::shell::geom::RectPx,
     Vec<(crate::ui::shell::geom::RectPx, bool)>,
@@ -71,9 +73,9 @@ pub(crate) fn message_box_parts(
         path_a_reveal: None,
     };
     let button_align = ShellAlign(ShellAlign::H_CENTER.0 | ShellAlign::V_CENTER.0);
+    let geometry = message.layout(screen_w, screen_h, scale);
     match &message.buttons {
         WolBoxButtons::Ok(ok) => {
-            let geometry = crate::ui::shell::modal::body_ok_layout(screen_w, screen_h);
             let ok_pressed = pressed == Some(BOX_OK);
             (
                 geometry.dialog,
@@ -89,22 +91,27 @@ pub(crate) fn message_box_parts(
             )
         }
         WolBoxButtons::YesNo { yes, no } => {
-            let geometry = crate::ui::shell::modal::yes_no_layout(screen_w, screen_h);
             let yes_pressed = pressed == Some(BOX_YES);
             let no_pressed = pressed == Some(BOX_NO);
             (
                 geometry.dialog,
-                vec![(geometry.yes, yes_pressed), (geometry.no, no_pressed)],
+                vec![
+                    (geometry.ok, yes_pressed),
+                    (geometry.cancel.expect("Yes/No has No"), no_pressed),
+                ],
                 vec![
                     label(&message.body, geometry.body, ShellAlign::NONE),
                     label(
                         yes,
-                        owner_draw_button_label_rect(geometry.yes, yes_pressed),
+                        owner_draw_button_label_rect(geometry.ok, yes_pressed),
                         button_align,
                     ),
                     label(
                         no,
-                        owner_draw_button_label_rect(geometry.no, no_pressed),
+                        owner_draw_button_label_rect(
+                            geometry.cancel.expect("Yes/No has No"),
+                            no_pressed,
+                        ),
                         button_align,
                     ),
                 ],
@@ -130,26 +137,21 @@ pub(crate) fn presented_wol_page(state: &AppState) -> PresentedShell {
     }
 }
 
-/// `0xCF` or `0x11E` over whatever the page shows.
-pub(crate) fn page_dialogs_paint(
-    state: &AppState,
-) -> Option<crate::app::frontend::skirmish_shell_render::WolLobbyPaint> {
+/// `0xCF` or `0x11E` over whatever the page shows, and where it sits.
+pub(crate) fn page_dialogs_paint(state: &AppState) -> Option<(RectPx, WolLobbyPaint)> {
     use crate::app::frontend::skirmish_shell_render::{
         paint_wol_page_dialog, paint_wol_page_received,
     };
     use crate::app::shell_wol::page;
     if let Some(dialog) = page::page_dialog(state) {
-        return Some(paint_wol_page_dialog(
-            state,
-            dialog,
-            &page::page_layout(state),
-        ));
+        let layout = page::page_layout(state);
+        return Some((layout.dialog, paint_wol_page_dialog(state, dialog, &layout)));
     }
     let received = page::page_received(state)?;
-    Some(paint_wol_page_received(
-        state,
-        received,
-        &page::received_layout(state),
+    let layout = page::received_layout(state);
+    Some((
+        layout.dialog,
+        paint_wol_page_received(state, received, &layout),
     ))
 }
 
@@ -326,8 +328,15 @@ pub(crate) fn render_wol_page(
     let page_statics = painted.kind().is_some() && !leaving;
     // The chat lobby 0x113 has no warning monitor (template static 0x71C;
     // 0x60AB71..0x60AC9E lists the family dialogs carrying it) but has the
-    // +0xD5 top panel instead; every other painted WOL page is the reverse.
-    let top_panel = matches!(painted, Painted::Lobby(_));
+    // +0xD5 top panel instead; every other painted WOL page is the reverse,
+    // as is the online lobby, which has no lobby list.
+    let top_panel = matches!(painted, Painted::Lobby(_))
+        && state
+            .frontend
+            .wol
+            .as_ref()
+            .and_then(|visit| visit.lobby())
+            .is_none_or(|lobby| crate::ui::wol_lobby::keeps_top_panel(lobby.ui.page_spec()));
     let monitor_frame = if page_statics && !top_panel {
         crate::app::frontend::menu_page_render::paint_shell_monitor(state)
     } else {
@@ -473,10 +482,7 @@ pub(crate) fn render_wol_page(
         for (text, rect) in &layout.texts {
             let caption = match filled.iter().find(|(id, _)| Some(*id) == text.id) {
                 Some((_, value)) => value.as_str().into(),
-                None => match text.caption {
-                    WolTextCaption::Csf(key) => resolve_csf(state, key),
-                    WolTextCaption::Literal(value) => value.into(),
-                },
+                None => resolve_csf(state, text.key),
             };
             if caption.is_empty() {
                 continue;
@@ -514,13 +520,10 @@ pub(crate) fn render_wol_page(
                 &crate::ui::shell::modal::wol_add_buddy_layout(screen_w, screen_h),
             )
         });
-    // 0x115 and the modal 0x11E sit over 0x116 without covering it.
+    // 0x115 sits over 0x116 without covering it.
     let buddy_popup = match &painted {
         Painted::Buddy(_) if add_buddy.is_some() => {
             Some(crate::ui::shell::modal::wol_add_buddy_layout(screen_w, screen_h).dialog)
-        }
-        Painted::Buddy(_) if crate::app::shell_wol::page::page_received(state).is_some() => {
-            Some(crate::app::shell_wol::page::received_layout(state).dialog)
         }
         _ => None,
     };
@@ -543,6 +546,28 @@ pub(crate) fn render_wol_page(
             .map(|login| {
                 crate::app::frontend::skirmish_shell_render::paint_wol_login_children(
                     state, login, layout,
+                )
+            }),
+        _ => None,
+    };
+    // VERA online's account popup over the login page.
+    let account_form = match (&painted, children) {
+        (Painted::Login(layout), true) => state
+            .frontend
+            .wol
+            .as_ref()
+            .and_then(|visit| visit.login())
+            .and_then(|login| login.account.as_ref())
+            .zip(crate::app::shell_wol::account_form_layout(state))
+            .map(|(form, rects)| {
+                (
+                    rects.dialog,
+                    crate::app::frontend::skirmish_shell_render::paint_wol_account_form(
+                        state,
+                        form,
+                        &rects,
+                        layout.page.scale,
+                    ),
                 )
             }),
         _ => None,
@@ -593,9 +618,7 @@ pub(crate) fn render_wol_page(
     let lobby = state.frontend.wol.as_ref().and_then(|visit| visit.lobby());
     let lobby_children = match (&painted, children, lobby) {
         (Painted::Lobby(layout), true, Some(lobby)) => {
-            let base_names: [String; 8] = std::array::from_fn(|index| {
-                resolve_csf(state, &format!("TXT_LOB_{}", index + 1)).into_owned()
-            });
+            let base_names = crate::app::shell_wol::lobby::base_names(state);
             Some(
                 crate::app::frontend::skirmish_shell_render::paint_wol_lobby_children(
                     state,
@@ -605,6 +628,23 @@ pub(crate) fn render_wol_page(
                     &base_names,
                 ),
             )
+        }
+        _ => None,
+    };
+    // VERA's player card over the modern lobby.
+    let player_card = match (&painted, children) {
+        (Painted::Lobby(layout), true) => {
+            crate::app::shell_wol::player_card::view(state).map(|view| {
+                (
+                    view.layout.dialog,
+                    crate::app::frontend::skirmish_shell_render::paint_wol_player_card(
+                        state,
+                        &view,
+                        art,
+                        layout.page.scale,
+                    ),
+                )
+            })
         }
         _ => None,
     };
@@ -619,8 +659,10 @@ pub(crate) fn render_wol_page(
             crate::app::frontend::skirmish_shell_render::paint_wol_lobby_popup(
                 state,
                 popup,
+                lobby.ui.is_modern(),
                 screen_w,
                 screen_h,
+                crate::app::shell_wol::lobby::popup_scale(state),
                 &status,
                 lobby.ui.caret_visible(crate::util::time::Instant::now()),
             ),
@@ -894,10 +936,10 @@ pub(crate) fn render_wol_page(
         };
         let button_align = ShellAlign(ShellAlign::H_CENTER.0 | ShellAlign::V_CENTER.0);
         let (dialog, buttons, box_labels) = if let Some(message) = &message {
-            message_box_parts(message, pressed, screen_w, screen_h)
+            message_box_parts(message, pressed, screen_w, screen_h, scale)
         } else {
             let wait = wait.as_ref().expect("filtered above");
-            let geometry = crate::ui::shell::modal::wait_box_layout(screen_w, screen_h);
+            let geometry = crate::ui::shell::modal::wait_box_layout_on(screen_w, screen_h, scale);
             let disconnect = pressed == Some(WAIT_DISCONNECT);
             let check = pressed == Some(WAIT_CHECK_STATUS);
             (
@@ -938,7 +980,7 @@ pub(crate) fn render_wol_page(
             dialog,
             &modal_buttons,
             &box_labels,
-            ShellScale::RETAIL,
+            scale,
             BOX_DEPTHS,
         );
         box_sprites = draw.sprites;
@@ -980,6 +1022,14 @@ pub(crate) fn render_wol_page(
         });
         text.extend(login.texts);
         text.extend(login.popup_texts);
+    }
+    if let (Some(atlas), Some((dialog, form))) = (controls_atlas, account_form) {
+        hide_glyphs_under(&mut text, dialog);
+        draws.push(TexturedDraw {
+            texture: &atlas.texture,
+            instances: form.controls,
+        });
+        text.extend(form.texts);
     }
     if let (Some(atlas), Some(my_info)) = (controls_atlas, my_info_children) {
         draws.push(TexturedDraw {
@@ -1063,7 +1113,24 @@ pub(crate) fn render_wol_page(
         });
         text.extend(popup.texts);
     }
-    if let (Some(atlas), Some(page)) = (controls_atlas, page_dialogs) {
+    if let (Some(atlas), Some((dialog, card))) = (controls_atlas, player_card) {
+        hide_glyphs_under(&mut text, dialog);
+        draws.push(TexturedDraw {
+            texture: &atlas.texture,
+            instances: card.controls,
+        });
+        if let Some(art) = art {
+            draws.push(TexturedDraw {
+                texture: &art.texture,
+                instances: card.icons,
+            });
+        }
+        text.extend(card.texts);
+    }
+    // 0xCF and 0x11E leave the page painting beneath them, over the lobby,
+    // the buddy list or any other page.
+    if let (Some(atlas), Some((dialog, page))) = (controls_atlas, page_dialogs) {
+        hide_glyphs_under(&mut text, dialog);
         draws.push(TexturedDraw {
             texture: &atlas.texture,
             instances: page.controls,

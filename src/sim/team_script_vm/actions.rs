@@ -75,9 +75,16 @@ use crate::sim::scenario_session::ScenarioSession;
 use crate::sim::team_script_vm::TeamScriptVm;
 use crate::sim::world::ObjectSubstrate;
 
+#[path = "scout_houses.rs"]
+mod scout_houses;
+
 #[cfg(test)]
 #[path = "scout_tests.rs"]
 mod scout_tests;
+
+#[cfg(test)]
+#[path = "scout_houses_tests.rs"]
+mod scout_houses_tests;
 
 #[cfg(test)]
 #[path = "result_tests.rs"]
@@ -155,6 +162,8 @@ pub(super) const fn action_is_ported(action_id: i32) -> bool {
             | 27
             | 30
             | 31
+            | 32
+            | 33
             | 34
             | 37
             | 38
@@ -165,8 +174,11 @@ pub(super) const fn action_is_ported(action_id: i32) -> bool {
             | 43
             | 46
             | 47
+            | 48
             | 49
             | 50
+            | 51
+            | 52
             | 53
             | 54
             | 55
@@ -180,7 +192,7 @@ pub(super) const fn action_is_ported(action_id: i32) -> bool {
             | 63
             | 64
             | 68
-    )
+    ) || (cfg!(feature = "ares") && action_id == 67)
 }
 
 /// A member's NavCom as a team target, for `Distance`.
@@ -295,6 +307,7 @@ impl Simulation {
     ) {
         let current_frame = self.session.binary_frame() as i32;
         match action.action_id {
+            48 => self.team_action_scout_houses(team_id, rules, registry, frame_effects),
             0 => self.team_action_attack_quarry(
                 team_id,
                 action.argument,
@@ -561,7 +574,7 @@ impl Simulation {
                     team.advance_pending = true;
                 }
             }
-            64 => {
+            64 | 67 if action.action_id == 64 || cfg!(feature = "ares") => {
                 //6E9F0D -> each member's vt34C/Foot4DFE00. Cache the next
                 //member before its seek callback; successful entrants leave
                 //the Team via the shared6EA870 owner with no_idle=true.
@@ -576,6 +589,12 @@ impl Simulation {
                         .teams
                         .get(&team_id)
                         .and_then(|team| team.next_member_after(current));
+                    // Installed Ares dispatcher1003A110 sets Ext+B0 for67,
+                    // clears it for64, then calls the same Foot vt+34C.
+                    #[cfg(feature = "ares")]
+                    if let Some(foot) = self.substrate.entities.get_mut(current) {
+                        foot.vehicle_driver.set_vehicle_seek(action.action_id != 64);
+                    }
                     if self.foot_enter_nearest_occupiable(current, rules, registry, frame_effects) {
                         self.team_remove_member(team_id, current, true, rules, frame_effects);
                     }
@@ -826,6 +845,39 @@ impl Simulation {
                     team.advance_pending = true;
                 }
             }
+            // Case 32 (`0x006E9A74..0x006E9A9F`), named Ion Storm Start but
+            // the Lightning Storm in YR, like trigger action 44: unless
+            // IsActive `0x0053A100`, Start `0x00539EB0` with the argument as
+            // duration, LightningDeferment (Rules `+0x1794`), the zero cell
+            // `[0x00B0E948]` and no house. Then Team+80=1 either way.
+            32 => {
+                if !crate::sim::superweapon::lightning_storm::raging(self) {
+                    crate::sim::superweapon::lightning_storm::start(
+                        self,
+                        rules,
+                        action.argument,
+                        rules.general.lightning_deferment,
+                        (0, 0),
+                        None,
+                    );
+                }
+                if let Some(team) = self.team_script_vm.teams.get_mut(&team_id) {
+                    team.advance_pending = true;
+                }
+            }
+            // Case 33 (`0x006E9AAE..0x006E9AC0`), like trigger action 45: a
+            // raging storm gets Stop `0x0053A090`'s end request. Then
+            // Team+80=1 either way.
+            33 => {
+                if crate::sim::superweapon::lightning_storm::raging(self) {
+                    crate::sim::superweapon::lightning_storm::request_end(
+                        &mut self.lightning_storm,
+                    );
+                }
+                if let Some(team) = self.team_script_vm.teams.get_mut(&team_id) {
+                    team.advance_pending = true;
+                }
+            }
             43 => Self::team_action_wait_until_loaded(
                 &self.interner,
                 &self.substrate,
@@ -868,6 +920,15 @@ impl Simulation {
                     }
                 }
             }
+            51 => self.team_action_play_animation(team_id, first, action.argument, rules),
+            52 => self.team_action_talk_bubble(
+                team_id,
+                first,
+                action.argument,
+                rules,
+                registry,
+                frame_effects,
+            ),
             53 => self.team_action_gather_at_enemy_base(
                 team_id,
                 first,
@@ -961,6 +1022,90 @@ impl Simulation {
                 debug_assert!(!action_is_ported(action_id));
                 self.refuse_team_script_action(team_id, action_id);
             }
+        }
+    }
+
+    /// Team script action 51: play an animation at every team member.
+    ///
+    /// gamemd `TeamClass` action 51 at `0x006EF610`, reached from the action
+    /// chain at `0x006E9D29..0x006E9D3E`. The argument's low 16 bits select a
+    /// registered AnimType (pointer table `0x008B4154`, count `0x008B4160`) and
+    /// an index outside that table finishes without spawning. Head first, every
+    /// member gets its own `AnimClass` (`0x00421EA0`: delay 0, the argument's
+    /// high 16 bits as its loop count, draw flags `0x600`) at the member's
+    /// GetCoords (vtable `+0x48`), attached to the member (`0x00424B50`), and
+    /// the action finishes on the same visit. A non-first visit only finishes.
+    fn team_action_play_animation(
+        &mut self,
+        team_id: u64,
+        first: bool,
+        argument: i32,
+        rules: &crate::rules::ruleset::RuleSet,
+    ) {
+        if first {
+            let index = argument & 0xffff;
+            let type_name = rules.anim_type_runtime_key_by_index(index);
+            if let Some(type_name) = type_name {
+                let type_id = self.interner.intern(&type_name);
+                let members: Vec<u64> = self
+                    .team_script_vm
+                    .teams
+                    .get(&team_id)
+                    .map(|team| team.members().collect())
+                    .unwrap_or_default();
+                for member in members {
+                    let Some(world) = self.anim_owner_coords(member) else {
+                        continue;
+                    };
+                    let (rx, ry, sub_x, sub_y, level) = world.to_cell_sub_z();
+                    let descriptor = crate::sim::components::AnimClassSpawnDescriptor {
+                        loop_count: (argument >> 16) & 0xffff,
+                        draw_flags: 0x600,
+                        owner: Some(member),
+                        ..crate::sim::components::AnimClassSpawnDescriptor::new(
+                            type_id, rx, ry, sub_x, sub_y, level,
+                        )
+                    };
+                    let _ = self.spawn_anim_at_world(rules, descriptor, world);
+                }
+            }
+        }
+        if let Some(team) = self.team_script_vm.teams.get_mut(&team_id) {
+            team.advance_pending = true;
+        }
+    }
+
+    /// Team script action 52: a talk bubble over the team's first member.
+    ///
+    /// gamemd `TeamClass::AI`'s action chain at `0x006E9D42..0x006E9D5B`: on
+    /// the step's first visit it calls `TalkBubble::SetObjectAndFrame @
+    /// 0x0070F120` with the team's first member (`+0x54`) and the argument as
+    /// the frame, then finishes the step (`+0x80 = 1`). A later visit returns
+    /// at `0x006E95AB` without finishing.
+    fn team_action_talk_bubble(
+        &mut self,
+        team_id: u64,
+        first: bool,
+        argument: i32,
+        rules: &RuleSet,
+        registry: Option<&OverlayTypeRegistry>,
+        frame_effects: FrameEffects<'_>,
+    ) {
+        if !first {
+            return;
+        }
+        let actor = self
+            .team_script_vm
+            .teams
+            .get(&team_id)
+            .and_then(|team| team.members().next());
+        self.talk_bubble_set_object_and_frame(
+            actor,
+            argument,
+            crate::sim::world::UninitContext::new(rules, registry).with_effects(frame_effects),
+        );
+        if let Some(team) = self.team_script_vm.teams.get_mut(&team_id) {
+            team.advance_pending = true;
         }
     }
 
@@ -1197,7 +1342,7 @@ impl Simulation {
                     {
                         self.team_assign_mission_target(
                             team_id,
-                            threat.map(TeamTarget::Object),
+                            threat.map(TeamTarget::from),
                             rules,
                             registry,
                             effects,
@@ -2247,7 +2392,7 @@ impl Simulation {
                             self,
                             member,
                             rules,
-                            None,
+                            registry,
                             frame_effects,
                         );
                     }
@@ -2383,7 +2528,7 @@ impl Simulation {
         quarry: i32,
         rules: &RuleSet,
         registry: Option<&OverlayTypeRegistry>,
-    ) -> Option<u64> {
+    ) -> Option<crate::sim::combat::TargetKind> {
         let mission = self.team_quarry_mission(team_id, quarry);
         crate::sim::world::direct_greatest_threat(self, rules, registry, leader, mission)
     }
@@ -2603,7 +2748,7 @@ impl Simulation {
             let target = self.team_quarry_threat(team_id, leader, quarry, rules, registry);
             self.team_assign_mission_target(
                 team_id,
-                target.map(TeamTarget::Object),
+                target.map(TeamTarget::from),
                 rules,
                 registry,
                 frame_effects,
@@ -2762,7 +2907,6 @@ impl Simulation {
             .houses
             .get(&owner)
             .and_then(|house| house.enemy_house());
-        let asker = self.interner.resolve(owner);
         let terrain = self.resolved_terrain.as_ref();
         let buildings: Vec<TargetBuilding> = self
             .substrate
@@ -2776,11 +2920,9 @@ impl Simulation {
                 id,
                 location: location_xyz(building, terrain),
                 enemy_owned: Some(building.owner()) == enemy,
-                allied: crate::map::houses::is_allied_with(
-                    self.house_alliances.as_map(),
-                    asker,
-                    self.interner.resolve(building.owner()),
-                ),
+                allied: self
+                    .house_alliances
+                    .is_allied(&self.interner, owner, building.owner()),
                 passive: self
                     .houses
                     .get(&building.owner())

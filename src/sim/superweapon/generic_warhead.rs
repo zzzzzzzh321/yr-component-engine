@@ -13,7 +13,7 @@ use crate::rules::superweapon_type::SuperWeaponType;
 use crate::sim::combat::{CombatLightRequest, RAD_NO_ATTACKER, detonation_anim, world_receiver};
 use crate::sim::intern::InternedId;
 use crate::sim::projectile::ProjectileCoord;
-use crate::sim::world::{FrameEffects, SimSoundEvent, Simulation};
+use crate::sim::world::{FrameEffects, Simulation};
 
 #[cfg(all(test, feature = "ares"))]
 #[path = "generic_warhead_tests.rs"]
@@ -42,7 +42,6 @@ pub(super) fn launch(
     sim: &mut Simulation,
     rules: &RuleSet,
     owner: InternedId,
-    sw_type: InternedId,
     sw: &SuperWeaponType,
     cell: (u16, u16),
     overlays: Option<&OverlayTypeRegistry>,
@@ -72,22 +71,30 @@ pub(super) fn launch(
     let [x, y, z] = super::deck_coords(sim, cell);
     let impact = ProjectileCoord::new(x, y, z);
     let warhead_ref = sim.interner.intern(&warhead.id);
-    world_receiver::apply_area_damage(
+    let receipt = world_receiver::apply_area_damage(
         sim,
         rules,
         overlays,
         impact,
         settings.damage,
         warhead,
+        true,
         (source, Some(owner), warhead_ref),
         effects,
     );
     // Ares selects its damage animation and flash after DamageArea (which
     // may synchronously destroy the source or change the target's land).
     let land = detonation_anim::land_at(sim, impact);
-    if let Some(effect) =
-        detonation_anim::effect(sim, rules, warhead, settings.damage, land, impact, impact)
-    {
+    if let Some(effect) = detonation_anim::effect(
+        sim,
+        rules,
+        warhead,
+        settings.damage,
+        land,
+        impact,
+        impact,
+        receipt.crit_active,
+    ) {
         crate::sim::world::damage_consequences::admit_explosion_effect(sim, rules, effect);
     }
     sim.combat_light_requests.emit(CombatLightRequest::Impact {
@@ -97,14 +104,6 @@ pub(super) fn launch(
         coord: impact,
         force_create: false,
         flags: 0,
-    });
-    // This case plays no positional cue: the target cell's centre, with no
-    // Map lookup (a lookup off the map would stamp the shared Dummy).
-    let world = crate::sim::components::DriveCoord::cell(cell.0, cell.1, 0).into();
-    sim.sound_events.emit(SimSoundEvent::SuperWeaponLaunched {
-        owner,
-        sw_type,
-        world,
     });
     true
 }

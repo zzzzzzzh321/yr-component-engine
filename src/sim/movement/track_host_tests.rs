@@ -640,8 +640,8 @@ fn accepted_chain_preserves_call_budget_and_reloads_callback_queue_once() {
                     (0..32).map(move |x| {
                         let mut cell =
                             crate::map::resolved_terrain::ResolvedTerrainCell::clear_for_test(x, y);
-                        cell.speed_costs.track = Some(100);
-                        cell.speed_costs.float = Some(100);
+                        cell.speed_costs.track = Some(crate::util::native_x87::NativeF32Bits::ONE);
+                        cell.speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::ONE);
                         if family == TrackFamily::Ship {
                             cell.zone_type = crate::map::resolved_terrain::zone_class::WATER;
                             cell.ground_walk_blocked = true;
@@ -2083,7 +2083,10 @@ fn native_depot_arrival_uses_the_original_terminal_handoff() {
         assert_eq!(
             crate::sim::combat::combat_weapon::is_armed(
                 sim.substrate.entities.get(tank).unwrap(),
-                object
+                object,
+                &sim.substrate.entities,
+                &rules,
+                &sim.interner,
             ),
             native_getter["is_armed_eax"] != 0,
             "{context}: canonical IsArmed"
@@ -2703,9 +2706,16 @@ fn the_unit_guard_pick_follows_house_iq_team_and_type() {
     ] {
         let (mut sim, rules, id) = retail_unit_on_move(type_name, human, iq).unwrap();
         let slave_type = sim.intern("SLAV");
-        let unit = sim.substrate.entities.get_mut(id).unwrap();
+        let unit = sim.substrate.entities.get(id).unwrap();
         let object = rules.object(type_name).unwrap();
-        assert!(crate::sim::combat::combat_weapon::is_armed(unit, object));
+        assert!(crate::sim::combat::combat_weapon::is_armed(
+            unit,
+            object,
+            &sim.substrate.entities,
+            &rules,
+            &sim.interner
+        ));
+        let unit = sim.substrate.entities.get_mut(id).unwrap();
         match link {
             "slave" => {
                 unit.slave = crate::sim::slave_manager::SlaveLink::for_test(Some(id + 1), vec![]);
@@ -2817,11 +2827,15 @@ fn a_mission_only_transport_with_passengers_selects_unload() {
         let passenger = sim
             .spawn_object("E1", "Americans", 12, 12, 0, &rules)
             .unwrap();
-        let unit = sim.substrate.entities.get_mut(id).unwrap();
+        let unit = sim.substrate.entities.get(id).unwrap();
         assert!(!crate::sim::combat::combat_weapon::is_armed(
             unit,
-            rules.object("SAPC").unwrap()
+            rules.object("SAPC").unwrap(),
+            &sim.substrate.entities,
+            &rules,
+            &sim.interner,
         ));
+        let unit = sim.substrate.entities.get_mut(id).unwrap();
         if case != "commanded" {
             unit.mission_only.mark();
         }

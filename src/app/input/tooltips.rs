@@ -8,6 +8,8 @@
 //! - Part of the app layer — may depend on everything.
 
 use crate::app::AppState;
+use crate::app::input::cursor::CursorVisibility;
+use crate::app::input::gadget_input::{ID_SCROLL_DOWN, ID_SCROLL_UP, ID_TAB_BASE};
 use crate::app::presentation::sidebar_render::{
     current_sidebar_side, current_sidebar_theme, current_sidebar_view,
 };
@@ -15,6 +17,7 @@ use crate::assets::csf_file::{CsfArg, format_csf};
 use crate::map::entities::EntityCategory;
 use crate::render::batch::SpriteInstance;
 use crate::ui::game_screen::GameScreen;
+use crate::ui::sidebar::SidebarView;
 use crate::ui::tooltips::{TipRect, TipRegion};
 
 /// In-game tip ids mirror the gamemd id space: button ids as-is, cameo slots
@@ -70,12 +73,12 @@ pub(crate) const TIP_CURSOR_OFFSET: [i32; 2] = [12, 16];
 /// sides of an 86x38 box).
 pub(crate) const TIP_BORDER_PX: f32 = 1.0;
 /// Popup box size = measured text plus this much in **total** (not per side):
-/// gamemd adds 4 to the measured width and 3 to the measured height.
+/// positioning pass `0x00478C46..0x00478C49` adds 4 width and 3 height.
 pub(crate) const TIP_BOX_PAD: [f32; 2] = [4.0, 3.0];
-/// Text draw origin inside the popup box: `+2` horizontal, `+4` vertical.
-/// With the FNT cell height carrying a 1 px gap under the glyph rows, a
-/// one-line tip lands exactly flush with the box bottom.
-pub(crate) const TIP_TEXT_INSET: [f32; 2] = [2.0, 4.0];
+/// Draw pass `0x00478F2D..0x00478F30` pads the frame separately from positioning.
+const TIP_DRAW_PAD: [f32; 2] = [8.0, 4.0];
+/// `0x00479024..0x00479029`: text starts at x+4/y+2, not x+2/y+4.
+pub(crate) const TIP_TEXT_INSET: [f32; 2] = [4.0, 2.0];
 
 pub(crate) fn now_ms(state: &AppState) -> u64 {
     state.diagnostic_presentation_ms().unwrap_or_else(|| {
@@ -195,7 +198,7 @@ fn tactical_world_tip_text(
     world: (f32, f32),
     cursor_coordinates: bool,
 ) -> String {
-    tactical_world_tip_text_sampled(view, rules, csf, world, cursor_coordinates, None)
+    tactical_world_tip_text_sampled(view, rules, csf, world, cursor_coordinates, None, None)
 }
 
 fn tactical_world_tip_text_sampled(
@@ -205,6 +208,7 @@ fn tactical_world_tip_text_sampled(
     world: (f32, f32),
     cursor_coordinates: bool,
     interpolation: Option<&crate::app::presentation::interpolation::RenderInterpolation>,
+    translucent_viewer: Option<crate::sim::intern::InternedId>,
 ) -> String {
     let Some((terrain, viewer)) = view.resolved_terrain().zip(view.session().current_house())
     else {
@@ -232,7 +236,9 @@ fn tactical_world_tip_text_sampled(
     let picked = crate::app::input::entity_pick::pick_entity_at_point(
         crate::app::input::entity_pick::PresentedWorld {
             sim,
+            rules: Some(rules),
             interpolation: interpolation.unwrap_or(&native),
+            translucent_viewer,
         },
         &order,
         Some(view.fog()),
@@ -337,6 +343,15 @@ fn unit_turret_tip_text(
     object: &crate::rules::object_type::ObjectType,
     csf: Option<&crate::assets::csf_file::CsfFile>,
 ) -> String {
+    // Ares UnitGetUIName746B89 ->1004BF20 returns the configured full
+    // weapon-mode name before the original passenger/turret formatter.
+    #[cfg(feature = "ares")]
+    if let Some(label) = object
+        .gunner_turrets
+        .weapon_ui_name(entity.current_weapon_number())
+    {
+        return crate::assets::csf_file::type_ui_name(Some(label), csf);
+    }
     let tip = |key: &str| csf.map_or_else(|| key.to_owned(), |csf| csf.text(key).into_owned());
     let passenger = entity
         .passenger_role
@@ -357,10 +372,18 @@ fn unit_turret_tip_text(
         },
         None => tip("Tip:Rocket"),
     };
-    format!(
-        "{word} {}",
-        crate::assets::csf_file::type_ui_name(object.ui_name.as_deref(), csf)
-    )
+    let own = crate::assets::csf_file::type_ui_name(object.ui_name.as_deref(), csf);
+    #[cfg(feature = "ares")]
+    {
+        // Ares spacing hook746C55 ->1004BF90 separates nonempty pieces only.
+        if word.is_empty() {
+            return own;
+        }
+        if own.is_empty() {
+            return word;
+        }
+    }
+    format!("{word} {own}")
 }
 
 fn tactical_tip_text(state: &AppState) -> String {
@@ -383,6 +406,8 @@ fn tactical_tip_text(state: &AppState) -> String {
         input.cursor_x,
         input.cursor_y,
     );
+    let translucent_viewer =
+        crate::app::presentation::instances::translucent_fog_viewer(state, view.simulation());
     tactical_world_tip_text_sampled(
         view,
         rules,
@@ -390,6 +415,7 @@ fn tactical_tip_text(state: &AppState) -> String {
         world,
         input.cursor_coordinates,
         Some(&state.match_state.match_presentation.interpolation),
+        translucent_viewer,
     )
 }
 
@@ -425,6 +451,34 @@ fn with_disabled_suffix(state: &AppState, tip: String, disabled: bool) -> String
     )
 }
 
+/// `SidebarClass::GetTooltipText @ 0x006AC210` for the gadgets with a `Tip:*`
+/// label: 200 reads R-UP, 0xC9 R-DN and 0xCB..0xCE the four tabs. Each label
+/// gets the `Tip:Disabled` suffix when that gadget's `IsEnabled` fails
+/// (`0x006AC24E`), the scroll pair included.
+fn sidebar_button_tip(view: &SidebarView, id: u16) -> Option<(&'static str, bool)> {
+    match id {
+        ID_SCROLL_UP => Some((TIP_LABEL_SCROLL_UP, view.scroll_up_button.disabled)),
+        ID_SCROLL_DOWN => Some((TIP_LABEL_SCROLL_DOWN, view.scroll_down_button.disabled)),
+        _ => {
+            let index = usize::from(id.checked_sub(ID_TAB_BASE)?);
+            Some((*TIP_LABELS_TAB.get(index)?, view.tabs.get(index)?.disabled))
+        }
+    }
+}
+
+fn sidebar_button_tip_text(
+    state: &AppState,
+    cursor: CursorVisibility,
+    view: &SidebarView,
+    id: u16,
+) -> String {
+    dynamic_tip_text(cursor, || {
+        sidebar_button_tip(view, id)
+            .map(|(label, disabled)| with_disabled_suffix(state, csf_text(state, label), disabled))
+            .unwrap_or_default()
+    })
+}
+
 /// Cameo tooltip text for a buildable slot.
 ///
 /// gamemd formats the localized `UIName` and the item cost through CSF
@@ -433,6 +487,10 @@ fn with_disabled_suffix(state: &AppState, tip: String, disabled: bool) -> String
 /// between the name and the price, so a Grizzly Battle Tank cameo tip is four
 /// stacked lines — `Grizzly` / `Battle` / `Tank` / `$700` — not one line and
 /// not a name/price pair.
+///
+/// StripClass::GetCameoTooltip 6A92E0, which returns a super weapon's bare
+/// name. Its `TXT_MONEY_FORMAT_1` branch and DrawCameoText 6AC480 need
+/// ShowCameoNames (+0x53A4), which only the constructor 6A4E60 writes (0).
 fn cameo_tip_text(money_format: Option<&str>, name: &str, cost: Option<i64>) -> String {
     let formatted = match (money_format, cost) {
         (Some(fmt), Some(cost)) => format_csf(fmt, &[CsfArg::Str(name), CsfArg::Int(cost)]),
@@ -506,17 +564,11 @@ fn sync_in_game_regions(state: &mut AppState) {
         text: power_text,
     });
     for (i, tab) in view.tabs.iter().enumerate() {
-        let label = TIP_LABELS_TAB
-            .get(i)
-            .copied()
-            .unwrap_or(TIP_LABELS_TAB[TIP_LABELS_TAB.len() - 1]);
-        let text = dynamic_tip_text(cursor, || {
-            with_disabled_suffix(state, csf_text(state, label), tab.disabled)
-        });
+        let id = ID_TAB_BASE + i as u16;
         regions.push(TipRegion {
-            id: crate::app::input::gadget_input::ID_TAB_BASE as u32 + i as u32,
+            id: u32::from(id),
             rect: tip_rect(frame, tab.rect),
-            text,
+            text: sidebar_button_tip_text(state, cursor, &view, id),
         });
     }
     regions.push(TipRegion {
@@ -529,19 +581,14 @@ fn sync_in_game_regions(state: &mut AppState) {
         rect: tip_rect(frame, view.sell_button.rect),
         text: csf_text(state, "TXT_SELL_MODE"),
     });
-    {
-        // Our scroll gadget model carries no disabled state yet, so the
-        // `Tip:Disabled` branch is unreachable for this pair; the labels
-        // themselves are the native ones.
+    for (id, button) in [
+        (ID_SCROLL_DOWN, &view.scroll_down_button),
+        (ID_SCROLL_UP, &view.scroll_up_button),
+    ] {
         regions.push(TipRegion {
-            id: crate::app::input::gadget_input::ID_SCROLL_DOWN as u32,
-            rect: tip_rect(frame, view.scroll_down_button.rect),
-            text: dynamic_tip_text(cursor, || csf_text(state, TIP_LABEL_SCROLL_DOWN)),
-        });
-        regions.push(TipRegion {
-            id: crate::app::input::gadget_input::ID_SCROLL_UP as u32,
-            rect: tip_rect(frame, view.scroll_up_button.rect),
-            text: dynamic_tip_text(cursor, || csf_text(state, TIP_LABEL_SCROLL_UP)),
+            id: u32::from(id),
+            rect: tip_rect(frame, button.rect),
+            text: sidebar_button_tip_text(state, cursor, &view, id),
         });
     }
     for (slot, item) in view.items.iter().enumerate() {
@@ -717,18 +764,22 @@ pub(crate) fn tooltip_quads(
     // Region the popup is sized and placed against. gamemd measures with the
     // selected region's width; which region record it picks is UNCHECKED, so
     // the render surface width is used here.
-    let (layout, [box_w, box_h]) = size_tip_box(font, text, region[2] as u32);
+    let (layout, [placement_w, placement_h]) = size_tip_box(font, text, region[2] as u32);
+    let box_w = layout.width as f32 + TIP_DRAW_PAD[0];
+    let box_h = layout.height as f32 + TIP_DRAW_PAD[1];
     let bx = place_tip(
         tip_xy[0] as f32,
         TIP_CURSOR_OFFSET[0] as f32,
-        box_w,
+        placement_w,
         region[0],
         region[2],
     );
+    // Draw clamps the wider frame to the surface at `0x00478F40..0x00478F56`.
+    let bx = bx.min(region[0] + (region[2] - box_w).max(0.0));
     let by = place_tip(
         tip_xy[1] as f32,
         TIP_CURSOR_OFFSET[1] as f32,
-        box_h,
+        placement_h,
         region[1],
         region[3],
     );
@@ -1522,6 +1573,45 @@ mod tests {
     }
 
     #[test]
+    fn scroll_tips_take_the_disabled_suffix_like_the_tabs() {
+        use crate::ui::sidebar::{SidebarTab, gadget_flash::SidebarGadgetState};
+        // An empty strip fits on screen, so 6A6610 disables both arrows and
+        // 6AC210 asks the same IsEnabled for them as for the tabs.
+        let view = crate::ui::sidebar::build_sidebar_view(
+            1024.0,
+            768.0,
+            SidebarTab::Building,
+            0,
+            0,
+            0,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            0,
+            None,
+            &SidebarGadgetState::default(),
+            None,
+            None,
+        );
+        assert!(view.scroll_down_button.disabled && view.scroll_up_button.disabled);
+        assert_eq!(
+            sidebar_button_tip(&view, ID_SCROLL_DOWN),
+            Some((TIP_LABEL_SCROLL_DOWN, true))
+        );
+        assert_eq!(
+            sidebar_button_tip(&view, ID_SCROLL_UP),
+            Some((TIP_LABEL_SCROLL_UP, true))
+        );
+        assert_eq!(
+            sidebar_button_tip(&view, ID_TAB_BASE + 3),
+            Some((TIP_LABELS_TAB[3], view.tabs[3].disabled))
+        );
+        assert_eq!(sidebar_button_tip(&view, ID_TAB_BASE + 4), None);
+    }
+
+    #[test]
     fn disabled_tip_appends_the_parenthesised_csf_word() {
         assert_eq!(
             format_csf(
@@ -1598,7 +1688,7 @@ mod tests {
         }
 
         // And with no pan the box sits at cursor + the native cursor offset,
-        // with the text at the +2/+4 inset inside it.
+        // with the text at the native +4/+2 inset inside it.
         assert_eq!(
             at_origin.0[0].position,
             [
@@ -1609,8 +1699,8 @@ mod tests {
         assert_eq!(
             at_origin.2[0].position,
             [
-                100.0 + TIP_CURSOR_OFFSET[0] as f32 + 2.0,
-                100.0 + TIP_CURSOR_OFFSET[1] as f32 + 4.0
+                100.0 + TIP_CURSOR_OFFSET[0] as f32 + 4.0,
+                100.0 + TIP_CURSOR_OFFSET[1] as f32 + 2.0
             ]
         );
     }
@@ -1623,7 +1713,7 @@ mod tests {
     fn sidebar_tip_only_flips_when_the_screen_would_clip_it() {
         let font = make_test_font(&[(b'x' as u16, 6)], 4);
         let screen = [0.0, 0.0, 1024.0, 768.0];
-        // "xxx" measures 21 px, so the box is 25 wide.
+        // "xxx" measures 21 px: positioning uses 25, drawing uses 29.
         let (fill, _, text) = tooltip_quads(
             &font,
             "xxx",
@@ -1638,7 +1728,7 @@ mod tests {
             [912.0, 316.0],
             "a cameo tip must not flip while the screen still has room"
         );
-        assert_eq!(text[0].position, [914.0, 320.0]);
+        assert_eq!(text[0].position, [916.0, 318.0]);
 
         // One cursor pixel further right leaves no room for the box, so it
         // lands back-up of the cursor instead: 1010 - 12 - 25.
@@ -1652,7 +1742,55 @@ mod tests {
             true,
         );
         assert_eq!(flipped[0].position, [973.0, 316.0]);
-        assert_eq!(flipped[0].size, [25.0, font.cell_height() + 3.0]);
+        assert_eq!(flipped[0].size, [29.0, font.cell_height() + 4.0]);
+    }
+
+    #[test]
+    fn tooltip_draw_uses_native_insets_for_cjk_latin_digits_and_multiple_lines() {
+        let font = make_test_font(&[('汉' as u16, 16), (b'A' as u16, 6), (b'1' as u16, 6)], 4);
+        for region in [[0.0, 0.0, 800.0, 600.0], [0.0, 0.0, 1280.0, 720.0]] {
+            for text in ["汉", "A1", "汉\nA1"] {
+                let layout = font.wrap_layout(text, region[2] as u32);
+                let (fill, _, glyphs) =
+                    tooltip_quads(&font, text, [100, 100], region, [1.0; 3], [0.0; 2], true);
+                assert_eq!(
+                    fill[0].size,
+                    [layout.width as f32 + 8.0, layout.height as f32 + 4.0]
+                );
+                assert_eq!(
+                    glyphs[0].position,
+                    [fill[0].position[0] + 4.0, fill[0].position[1] + 2.0]
+                );
+                if text.contains('\n') {
+                    assert_eq!(glyphs[1].position[0], glyphs[0].position[0]);
+                    assert_eq!(
+                        glyphs[1].position[1] - glyphs[0].position[1],
+                        font.cell_height()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tooltip_draw_clamps_the_wider_frame_without_changing_position_measurement() {
+        let font = make_test_font(&[(b'x' as u16, 6)], 4);
+        assert_eq!(
+            size_tip_box(&font, "xxx", 1024).1,
+            [25.0, font.cell_height() + 3.0]
+        );
+        let (fill, _, text) = tooltip_quads(
+            &font,
+            "xxx",
+            [985, 300],
+            [0.0, 0.0, 1024.0, 768.0],
+            [1.0; 3],
+            [0.0; 2],
+            true,
+        );
+        assert_eq!(fill[0].position, [995.0, 316.0]);
+        assert_eq!(fill[0].size, [29.0, font.cell_height() + 4.0]);
+        assert_eq!(text[0].position, [999.0, 318.0]);
     }
 
     /// The retail tip's interior is solid black — captured over bright cameo art

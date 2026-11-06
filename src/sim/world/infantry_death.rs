@@ -392,7 +392,7 @@ impl Simulation {
                 // unbound row admits.
                 cell.speed_costs
                     .cost_for_speed_type(crate::rules::locomotor_type::SpeedType::Foot)
-                    == Some(0)
+                    .is_some_and(|cost| cost.is_zero())
             });
         if footless && !on_bridge {
             return false;
@@ -658,9 +658,6 @@ mod corpse_tests {
         let mut registry = crate::rules::art_data::ArtRegistry::from_ini(&art);
         registry.bind_anim_frame_count_for_test("NUKEDIE", 20);
         rules.install_art_data(registry);
-        rules.bind_animation_sequences(
-            &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-        );
         let mut sim = Simulation::new();
         crate::sim::arena_fixture::flat_arena(&mut sim, &rules);
         let id = sim
@@ -767,16 +764,10 @@ mod corpse_tests {
     /// anim, no corpse. `[SA]`'s `InfDeath=1` still leaves the Die1 corpse.
     #[test]
     fn retail_warheads_without_inf_death_remove_the_infantryman_at_once() {
-        let Some(mut rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules_with_art()
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules_with_art()
         else {
             return;
         };
-        let Some(art) = crate::rules::retail_ini_fixture::retail_ini("artmd.ini") else {
-            return;
-        };
-        rules.bind_animation_sequences(
-            &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-        );
         for (warhead, inf_death) in [("CometWH", 0), ("GrandCannonWH", 0), ("SA", 1)] {
             assert_eq!(
                 rules.warhead(warhead).unwrap().inf_death,
@@ -825,16 +816,10 @@ mod corpse_tests {
     /// a map that places one can kill it into that revival.
     #[test]
     fn retail_infantry_without_die_frames_are_the_weedguy() {
-        let Some(mut rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules_with_art()
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules_with_art()
         else {
             return;
         };
-        let Some(art) = crate::rules::retail_ini_fixture::retail_ini("artmd.ini") else {
-            return;
-        };
-        rules.bind_animation_sequences(
-            &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-        );
         assert!(!rules.infantry_ids.is_empty());
         let without: Vec<&String> = rules
             .infantry_ids

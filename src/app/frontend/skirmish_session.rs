@@ -6,11 +6,14 @@
 
 pub(crate) mod cooperative;
 mod persistence;
+mod saved_setups;
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::app::loading::init::MapMenuEntry;
+use crate::app::scenario_catalog::ScenarioCatalog;
 use crate::assets::asset_manager::AssetManager;
 use crate::rules::ini_parser::IniFile;
 use crate::sim::rng::SimRng;
@@ -19,8 +22,8 @@ use crate::skirmish_launch::{
 };
 use crate::skirmish_modes::{SkirmishGameMode, mode_by_id};
 use crate::ui::skirmish_shell::{
-    PlayerNameEditState, SkirmishAiRowType, SkirmishShellState, SkirmishTrackbarId,
-    game_speed_from_visual_position, game_speed_visual_position,
+    PlayerNameEditState, SkirmishAiRowType, SkirmishSavedSetup, SkirmishShellState,
+    SkirmishTrackbarId, game_speed_from_visual_position, game_speed_visual_position,
 };
 use cooperative::{
     CooperativeCountryRole, CooperativeCountryRosterEntry, CooperativeError,
@@ -35,7 +38,8 @@ use persistence::{
 
 use crate::app::persistence::profile_file;
 const CONCRETE_ITEM_DATA: i32 = -1;
-const RANDOM_ITEM_DATA: i32 = -2;
+/// A MultiPlayer pick's Random item data, which My Information also stores.
+pub(crate) const RANDOM_ITEM_DATA: i32 = -2;
 const MULTIPLAYER_HANDLE_UNITS: usize = 0x14;
 const MULTIPLAYER_HANDLE_LIMIT_BYTES: usize = 19;
 const DEFAULT_MULTIPLAYER_HANDLE: &[u8] = b"[New Player]";
@@ -45,11 +49,7 @@ const DEFAULT_MULTIPLAYER_GAME_MODE: i32 = 1;
 /// admission shared by the HTTP response, login continuation and handle owner.
 pub(crate) fn validate_online_handle(name: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
-        !name.is_empty()
-            && name.len() <= 24
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+        crate::ui::wol_account::valid_name(name),
         "online service returned an invalid player name"
     );
     Ok(())
@@ -205,6 +205,12 @@ pub(crate) struct MultiplayerShellRuntime {
     /// working copy, but closing it does not reconstruct this global record.
     random_map_options: crate::map::rmg::RmgOptions,
     ini_path: Option<PathBuf>,
+    /// VERA's per-map Skirmish setups, by `SkirmishSetups.ini` section; read
+    /// once at startup like the profile.
+    saved_setups: HashMap<String, SkirmishSavedSetup>,
+    /// VERA: the page the player last left Skirmish from, which the next
+    /// visit to its map puts back. Same file, same reading.
+    last_setup: Option<saved_setups::LastSetup>,
     cooperative_registry: CooperativeRegistry,
     cooperative_progress: CooperativeProgressState,
     cooperative_country_roster: Vec<CooperativeCountryRosterEntry>,
@@ -388,19 +394,14 @@ impl MultiplayerShellRuntime {
     }
 
     pub(crate) fn local_participant(&self) -> crate::skirmish_launch::SkirmishHumanSlot {
+        let preferences = &self.local_preferences;
         crate::skirmish_launch::SkirmishHumanSlot {
             raw_slot_index: Some(0),
-            name: crate::util::native_string::acp_decode(&self.local_preferences.handle_bytes),
-            slot: crate::skirmish_launch::SkirmishLocalSlot {
-                country: LaunchCountry::from_country_index(
-                    self.local_preferences.side.max(0) as u32
-                ),
-                country_random: self.local_preferences.side_ex == RANDOM_ITEM_DATA,
-                color_index: u8::try_from(self.local_preferences.color_index).unwrap_or(0),
-                color_random: self.local_preferences.color_ex == RANDOM_ITEM_DATA,
-                start_position: crate::skirmish_launch::LaunchStartPosition::Auto,
-                team: crate::skirmish_launch::LaunchTeam::None,
-            },
+            name: crate::util::native_string::acp_decode(&preferences.handle_bytes),
+            slot: picked_seat(
+                (preferences.side, preferences.side_ex),
+                (preferences.color_index, preferences.color_ex),
+            ),
             role: crate::skirmish_launch::LaunchHumanRole::from_observer(self.lan_observer()),
         }
     }
@@ -465,8 +466,11 @@ impl MultiplayerShellRuntime {
         let records = catalog.records();
         let preferred = usize::try_from(snapshot.scenario_index).unwrap_or(0);
         let valid = |mode: &SkirmishGameMode, index: usize| {
+            // VERA: an Online row names no file here until Choose Map
+            // downloads it, so a remembered index on one gives way too.
             records.get(index).is_some_and(|record| {
-                crate::map::skirmish_scenarios::is_valid_map(record, mode, room_only)
+                !record.is_online()
+                    && crate::map::skirmish_scenarios::is_valid_map(record, mode, room_only)
             })
         };
         let mut selected = valid(mode, preferred).then_some(preferred);
@@ -503,6 +507,9 @@ impl MultiplayerShellRuntime {
         options.build_off_ally = snapshot.build_off_ally;
         options.mcv_redeploy = snapshot.mcv_repacks;
         options.crates = snapshot.crates_appear;
+        if let Some(room) = snapshot.room {
+            options.set_room_options(room);
+        }
         let mut local = self.local_participant();
         local.set_observer(observe);
         local.slot.team = if mode.must_ally {
@@ -610,6 +617,7 @@ impl MultiplayerShellRuntime {
         snapshot.build_off_ally = launch.options.build_off_ally;
         snapshot.mcv_repacks = launch.options.mcv_redeploy;
         snapshot.crates_appear = launch.options.crates;
+        snapshot.room = Some(launch.options.room_options());
         for (index, slot) in snapshot.slots.iter_mut().enumerate() {
             let row = (index + 1) as u8;
             *slot = if let Some(ai) = launch.opponents.iter().find(|ai| ai.raw_slot_index == row) {
@@ -730,16 +738,9 @@ impl MultiplayerShellRuntime {
     /// Country and Color this way (`0x00786938`, `0x0078694B`). The draw
     /// branch (flag set) has no caller here.
     pub(crate) fn set_side_and_color(&mut self, side: i32, color: i32) {
-        let pick = |value: i32| {
-            if value == RANDOM_ITEM_DATA {
-                (0, RANDOM_ITEM_DATA)
-            } else {
-                (value, CONCRETE_ITEM_DATA)
-            }
-        };
         let preferences = &mut self.local_preferences;
-        (preferences.side, preferences.side_ex) = pick(side);
-        (preferences.color_index, preferences.color_ex) = pick(color);
+        (preferences.side, preferences.side_ex) = persona_pick(side);
+        (preferences.color_index, preferences.color_ex) = persona_pick(color);
     }
 
     pub(crate) fn lan_observer(&self) -> bool {
@@ -854,9 +855,11 @@ impl MultiplayerShellRuntime {
 
     /// Host ProcessRandomAssignments69B8C0 consumes this process Scenario
     /// cursor. The accepted host seed reseeds gameplay later at52E619.
+    /// A Random country never lands on one of VERA's room bans, `banned`.
     pub(crate) fn resolve_network_assignments(
         &mut self,
         session: &SkirmishLaunchSession,
+        banned: &[LaunchCountry],
     ) -> Result<SkirmishLaunchSession, CooperativeError> {
         let progress = is_cooperative_mode(session).then(|| {
             self.cooperative_progress
@@ -874,6 +877,7 @@ impl MultiplayerShellRuntime {
                 self.weighted_country_random,
                 role,
                 rng,
+                banned,
             )
         };
         let mut assignments = ShellRandomAssignmentState::new(session);
@@ -921,6 +925,10 @@ impl MultiplayerShellRuntime {
             lan_observer_mode,
             settings_ini,
         ) = load_persistence(ini_path.as_deref(), defaults);
+        let (saved_setups, last_setup) = saved_setups_path(ini_path.as_deref())
+            .and_then(|path| crate::util::file_system::read(path).ok())
+            .map(|bytes| saved_setups::read_setups(&bytes))
+            .unwrap_or_default();
 
         let mut runtime = Self {
             snapshot,
@@ -933,6 +941,8 @@ impl MultiplayerShellRuntime {
             scenario_rng,
             random_map_options: crate::map::rmg::RmgOptions::default(),
             ini_path,
+            saved_setups,
+            last_setup,
             cooperative_registry,
             cooperative_progress,
             cooperative_country_roster,
@@ -954,6 +964,51 @@ impl MultiplayerShellRuntime {
     #[cfg(test)]
     fn snapshot(&self) -> &MultiplayerSetupSnapshot {
         &self.snapshot
+    }
+
+    /// A new `0x102`: the setup hydrate, the selected mode's Team refresh and
+    /// the selected map's row hide pass, with VERA's map and last-setup fixes.
+    pub(crate) fn open_skirmish_page(
+        &self,
+        state: &mut SkirmishShellState,
+        catalog: &ScenarioCatalog,
+        modes: &[SkirmishGameMode],
+    ) {
+        let maps = catalog.shell_maps();
+        let records = catalog.records();
+        self.hydrate_shell(state, maps, modes);
+        // VERA: the last setup names its map by file, so a list that changed
+        // since does not move the page to another map. Without it, a saved
+        // index on an Online row (the list grew since it was saved) names no
+        // file here: it moves to the first local map; with none, it goes past
+        // the end, which Start reports as no selected map.
+        let last = self.last_setup.as_ref().and_then(|last| {
+            let index = records.iter().position(|record| {
+                !record.is_online() && saved_setups::section_name(&record.file_name) == last.map
+            })?;
+            Some((index, &last.setup))
+        });
+        if let Some((index, _)) = last {
+            state.selected_map_idx = index;
+        } else if records
+            .get(state.selected_map_idx)
+            .is_some_and(|record| record.is_online())
+        {
+            state.selected_map_idx = catalog.first_local_index().unwrap_or(records.len());
+        }
+        crate::ui::skirmish_shell::repair_teams_for_selected_mode(state, modes);
+        crate::ui::skirmish_shell::initialize_rows_for_selected_map(state, maps);
+        // VERA: the page left on this map comes back as Load Setup puts a
+        // setup back, with the rows past `[Skirmish]`'s seven and every start
+        // and team. The player's side and colour stay as `[MultiPlayer]` gave
+        // them, which the network rooms share.
+        if let Some((_, setup)) = last {
+            let shown = SkirmishSavedSetup::capture(state, maps).player;
+            let mut setup = setup.clone();
+            setup.player.country = shown.country;
+            setup.player.color = shown.color;
+            setup.apply(state, maps);
+        }
     }
 
     /// Apply the one-time process snapshot to raw shell controls. The caller
@@ -1049,6 +1104,7 @@ impl MultiplayerShellRuntime {
         modes: &[SkirmishGameMode],
         session: &SkirmishLaunchSession,
     ) -> Result<SkirmishLaunchSession, CooperativeError> {
+        self.remember_last_setup(state, maps);
         pack_snapshot_selection(&mut self.snapshot, state, maps, modes);
 
         // Validation may already have built a borrowed-input session, but it is
@@ -1082,6 +1138,7 @@ impl MultiplayerShellRuntime {
                 self.weighted_country_random,
                 role,
                 rng,
+                &[],
             )
         };
 
@@ -1132,6 +1189,7 @@ impl MultiplayerShellRuntime {
         maps: &[MapMenuEntry],
         modes: &[SkirmishGameMode],
     ) {
+        self.remember_last_setup(state, maps);
         pack_snapshot_selection(&mut self.snapshot, state, maps, modes);
         pack_snapshot_slots(&mut self.snapshot, state);
         pack_snapshot_options(&mut self.snapshot, state);
@@ -1183,9 +1241,21 @@ impl MultiplayerShellRuntime {
         }
     }
 
+    /// The active record's `C0` text (`0x0049D680`): what `+0x60`
+    /// publishes to every guest. None without a valid record.
+    pub(crate) fn cooperative_campaign_text(&self) -> Option<String> {
+        self.cooperative_progress
+            .active()?
+            .campaign_text(&self.cooperative_registry)
+    }
+
     /// `0x0049E4F0`: the CoopCampMD `[Campaigns]` count, 0 without the file.
     pub(crate) fn cooperative_campaign_count(&self) -> u32 {
         self.cooperative_registry.campaigns.len() as u32
+    }
+
+    pub(crate) fn cooperative_registry(&self) -> &CooperativeRegistry {
+        &self.cooperative_registry
     }
 
     /// A campaign's `CampaignName` string-table key, for `+0x4C`'s rows.
@@ -1193,6 +1263,11 @@ impl MultiplayerShellRuntime {
         self.cooperative_registry
             .campaign(campaign)
             .map(|campaign| campaign.campaign_name.as_str())
+    }
+
+    /// The campaign whose maps include `scenario`, a WOL room's listed map.
+    pub(crate) fn cooperative_campaign_for_scenario(&self, scenario: &str) -> Option<usize> {
+        self.cooperative_registry.campaign_for_scenario(scenario)
     }
 
     /// Cooperative `+0x1C` for a native country value (-2 Random).
@@ -1346,9 +1421,13 @@ impl MultiplayerShellRuntime {
     }
 
     /// Apply all snapshot keys to one in-memory buffer and perform one write.
-    /// Failure is intentionally nonfatal, matching the native caller.
+    /// Failure is intentionally nonfatal, matching the native caller. VERA's
+    /// last setup then goes to `SkirmishSetups.ini`.
     pub(crate) fn persist_snapshot(&mut self) {
         self.persist_preferences(|runtime, existing| runtime.update_persistence_bytes(existing));
+        if let Some(last) = &self.last_setup {
+            self.update_setups_file(|file| saved_setups::write_last_setup(file, last));
+        }
     }
 
     /// Cooperative `+0xA0` after a won mission (`0x005C3783..0x005C381F`):
@@ -1384,6 +1463,50 @@ impl MultiplayerShellRuntime {
             .as_deref()
             .and_then(Path::parent)
             .map(|dir| dir.join(cooperative::COOP_SAVE_INI))
+    }
+
+    /// The setup Save Setup last kept for the shell's selected map.
+    pub(crate) fn saved_setup(
+        &self,
+        state: &SkirmishShellState,
+        maps: &[MapMenuEntry],
+    ) -> Option<&SkirmishSavedSetup> {
+        let map = maps.get(state.selected_map_idx)?;
+        self.saved_setups
+            .get(&saved_setups::section_name(&map.file_name))
+    }
+
+    /// Save Setup: keep the page as the selected map's setup and write its
+    /// section of `SkirmishSetups.ini`. A failed write keeps it for this run.
+    pub(crate) fn save_setup(&mut self, state: &SkirmishShellState, maps: &[MapMenuEntry]) {
+        let Some(map) = maps.get(state.selected_map_idx) else {
+            return;
+        };
+        let setup = SkirmishSavedSetup::capture(state, maps);
+        let section = saved_setups::section_name(&map.file_name);
+        self.update_setups_file(|file| saved_setups::write_setup(file, &section, &setup));
+        self.saved_setups.insert(section, setup);
+    }
+
+    /// VERA: keep the page as shown for the next visit to its map.
+    fn remember_last_setup(&mut self, state: &SkirmishShellState, maps: &[MapMenuEntry]) {
+        if let Some(map) = maps.get(state.selected_map_idx) {
+            self.last_setup = Some(saved_setups::LastSetup {
+                map: saved_setups::section_name(&map.file_name),
+                setup: SkirmishSavedSetup::capture(state, maps),
+            });
+        }
+    }
+
+    /// Rewrite `SkirmishSetups.ini` beside the profile; a failure is logged.
+    fn update_setups_file(&self, update: impl FnOnce(&[u8]) -> Vec<u8>) {
+        let Some(path) = saved_setups_path(self.ini_path.as_deref()) else {
+            return;
+        };
+        let existing = crate::util::file_system::read(&path).unwrap_or_default();
+        if let Err(err) = crate::util::file_system::write(&path, update(&existing)) {
+            log::warn!("Could not write {}: {err}", path.display());
+        }
     }
 
     /// The saved-campaign readers' file (`0x0049D120`, `0x0049D390`,
@@ -1614,7 +1737,33 @@ pub(crate) fn skirmish_global_defaults(state: &SkirmishShellState) -> SkirmishGl
     }
 }
 
+/// One shell Random country. VERA's room bans redraw a draw that lands on a
+/// `banned` country, so a room without bans draws exactly as native does;
+/// Cooperative keeps its campaign's own countries.
 fn draw_shell_country(
+    registry: &CooperativeRegistry,
+    progress: Option<&CooperativeProgressRecord>,
+    roster: &[CooperativeCountryRosterEntry],
+    weighted: bool,
+    role: RandomCountryRole,
+    rng: &mut SimRng,
+    banned: &[LaunchCountry],
+) -> Result<LaunchCountry, CooperativeError> {
+    if progress.is_some() {
+        return draw_native_shell_country(registry, progress, roster, weighted, role, rng);
+    }
+    // Retail bans at most two of the ten countries a draw reaches; a mod
+    // that bans every one of them fails here instead of drawing forever.
+    for _ in 0..64 {
+        let country = draw_native_shell_country(registry, progress, roster, weighted, role, rng)?;
+        if !banned.contains(&country) {
+            return Ok(country);
+        }
+    }
+    Err(CooperativeError::NoEligibleRandomCountries)
+}
+
+fn draw_native_shell_country(
     registry: &CooperativeRegistry,
     progress: Option<&CooperativeProgressRecord>,
     roster: &[CooperativeCountryRosterEntry],
@@ -1801,6 +1950,60 @@ fn persisted_row_type(value: SkirmishAiRowType) -> i32 {
     }
 }
 
+/// `SkirmishSetups.ini` beside the profile, like coopsave.ini.
+fn saved_setups_path(ini_path: Option<&Path>) -> Option<PathBuf> {
+    Some(ini_path?.parent()?.join(saved_setups::FILE_NAME))
+}
+
+/// `0x0069B760(value, 0)` / `0x0069B7E0(value, 0)`'s item data and Ex
+/// ([`MultiplayerShellRuntime::set_side_and_color`]).
+fn persona_pick(value: i32) -> (i32, i32) {
+    if value == RANDOM_ITEM_DATA {
+        (0, RANDOM_ITEM_DATA)
+    } else {
+        (value, CONCRETE_ITEM_DATA)
+    }
+}
+
+/// A node's seat from its side and colour picks (item data, Ex).
+fn picked_seat(
+    (side, side_ex): (i32, i32),
+    (color, color_ex): (i32, i32),
+) -> crate::skirmish_launch::SkirmishLocalSlot {
+    crate::skirmish_launch::SkirmishLocalSlot {
+        country: LaunchCountry::from_country_index(side.max(0) as u32),
+        country_random: side_ex == RANDOM_ITEM_DATA,
+        color_index: u8::try_from(color).unwrap_or(0),
+        color_random: color_ex == RANDOM_ITEM_DATA,
+        start_position: crate::skirmish_launch::LaunchStartPosition::Auto,
+        team: crate::skirmish_launch::LaunchTeam::None,
+    }
+}
+
+/// The seat a persona's Country and Color item data (My Information's rows,
+/// -2 Random) give any player, as [`MultiplayerShellRuntime::set_side_and_color`]
+/// then `local_participant` give this one.
+pub(crate) fn persona_seat(country: i32, color: i32) -> crate::skirmish_launch::SkirmishLocalSlot {
+    picked_seat(persona_pick(country), persona_pick(color))
+}
+
+/// A seat's side and colour as My Information's item data (-2 Random):
+/// [`persona_seat`]'s inverse.
+pub(crate) fn seat_items(slot: &crate::skirmish_launch::SkirmishLocalSlot) -> (i32, i32) {
+    (
+        if slot.country_random {
+            RANDOM_ITEM_DATA
+        } else {
+            menu_country_item_data(slot.country)
+        },
+        if slot.color_random {
+            RANDOM_ITEM_DATA
+        } else {
+            i32::from(slot.color_index)
+        },
+    )
+}
+
 fn menu_country_from_item_data(value: i32) -> Option<LaunchCountry> {
     u16::try_from(value)
         .ok()
@@ -1859,6 +2062,15 @@ mod tests {
         AiDifficulty, LaunchStartPosition, LaunchTeam, SkirmishAiSlot, SkirmishLaunchMode,
         SkirmishLaunchOptions, SkirmishLocalSlot,
     };
+
+    /// A Quick Match request sends a seat's picks as the item data the
+    /// matchbot's `Start` gives back to [`persona_seat`].
+    #[test]
+    fn seat_items_give_back_the_persona_picks() {
+        for (country, color) in [(RANDOM_ITEM_DATA, RANDOM_ITEM_DATA), (5, 3), (0, 0)] {
+            assert_eq!(seat_items(&persona_seat(country, color)), (country, color));
+        }
+    }
 
     fn map_named(file_name: &str) -> MapMenuEntry {
         MapMenuEntry {
@@ -1964,6 +2176,8 @@ mod tests {
             scenario_rng,
             random_map_options: crate::map::rmg::RmgOptions::default(),
             ini_path: None,
+            saved_setups: HashMap::new(),
+            last_setup: None,
             cooperative_registry,
             cooperative_progress,
             cooperative_country_roster: controlled_ten_country_roster(),
@@ -1994,6 +2208,8 @@ mod tests {
             scenario_rng: SimRng::new(u64::from(seed)),
             random_map_options: crate::map::rmg::RmgOptions::default(),
             ini_path: None,
+            saved_setups: HashMap::new(),
+            last_setup: None,
             cooperative_registry: CooperativeRegistry::default(),
             cooperative_progress: CooperativeProgressState::default(),
             cooperative_country_roster: controlled_ten_country_roster(),
@@ -2257,13 +2473,65 @@ mod tests {
         assert!(observer.opponents.is_empty());
     }
 
+    /// A room reopened after its game keeps VERA's room options, as it keeps
+    /// the native checkboxes.
+    #[test]
+    fn a_reopened_room_keeps_its_bans_bridges_and_allying() {
+        use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
+        let mut owner = runtime(
+            MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
+            1,
+        );
+        let catalog = crate::app::scenario_catalog::ScenarioCatalog::from_records(vec![
+            SkirmishScenarioRecord::concrete_from_ini(
+                0,
+                SkirmishScenarioSource::Synthetic,
+                "test.mmx",
+                &IniFile::from_str("[Basic]\nGameMode=standard\n"),
+            ),
+        ]);
+        let modes = [mode()];
+        let open = |owner: &mut MultiplayerShellRuntime| {
+            owner
+                .new_network_setup(
+                    SetupProfile::Lan,
+                    false,
+                    &catalog,
+                    &modes,
+                    crate::skirmish_launch::SkirmishLaunchOptions::default(),
+                    crate::ui::skirmish_shell::SkirmishTrackbarBounds::default(),
+                    false,
+                    Default::default(),
+                )
+                .unwrap()
+        };
+        let (mut launch, vacancies) = open(&mut owner);
+        let room = crate::skirmish_launch::RoomOptions {
+            bridges_destroyable: false,
+            ally_change_allowed: false,
+            bans: crate::sim::game_options::RoomBans {
+                yuri: true,
+                stolen_tech: true,
+                ..Default::default()
+            },
+        };
+        assert_ne!(launch.options.room_options(), room);
+        launch.options.set_room_options(room);
+        owner.remember_network_setup(
+            SetupProfile::Lan,
+            &launch,
+            std::array::from_fn(|row| Some(vacancies[row])),
+            std::array::from_fn(|_| None),
+            &catalog,
+        );
+        assert_eq!(open(&mut owner).0.options.room_options(), room);
+    }
+
     #[test]
     fn network_profiles_retain_extended_rows_without_extending_the_ini_format() {
         use crate::app::match_runtime::session::NetworkVacancy;
         use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
-        use crate::skirmish_launch::{
-            AiDifficulty, LaunchStartPosition, LaunchTeam, SkirmishAiSlot,
-        };
+        use crate::skirmish_launch::{AiDifficulty, LaunchStartPosition, LaunchTeam, SkirmishAiSlot};
         let mut map_ini = "[Basic]\nGameMode=standard\nMaxPlayers=30\n[Waypoints]\n".to_owned();
         for row in 0..30 {
             map_ini.push_str(&format!("{row}={}\n", 10010 + row));
@@ -2505,6 +2773,76 @@ mod tests {
             Some(borrowed_profile)
         );
         drop(assets);
+        std::fs::remove_dir_all(directory).expect("remove owned fixture");
+    }
+
+    /// VERA: quitting from Skirmish keeps the page in `SkirmishSetups.ini`. A
+    /// new run opens on its map by file after the list changed, with the
+    /// starts, teams and computer rows past the seventh that `[Skirmish]`
+    /// has no keys for.
+    #[test]
+    fn the_last_setup_comes_back_on_its_map_in_a_new_run() {
+        use crate::map::skirmish_scenarios::SkirmishScenarioRecord;
+        use crate::ui::skirmish_shell::{SkirmishSetupComputer, SkirmishSetupSeat};
+
+        let directory = std::env::temp_dir().join(format!(
+            "vera20k-last-setup-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        let open = |files: &[&str]| {
+            let runtime = MultiplayerShellRuntime::initialize(
+                42,
+                &mut empty_process_assets(),
+                Some(&directory),
+                None,
+                None,
+                defaults(),
+            );
+            let records = files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    let map = MapMenuEntry {
+                        player_capacity: 12,
+                        ..map_named(file)
+                    };
+                    SkirmishScenarioRecord::from_map_menu_entry(index, &map)
+                })
+                .collect();
+            let catalog = ScenarioCatalog::from_records(records);
+            let mut shell = SkirmishShellState::default();
+            runtime.open_skirmish_page(&mut shell, &catalog, &[mode()]);
+            (runtime, catalog, shell)
+        };
+
+        let (mut runtime, catalog, mut shell) = open(&["a.map", "big.map"]);
+        let maps = catalog.shell_maps();
+        crate::ui::skirmish_shell::accept_selected_map(&mut shell, maps, 1);
+        let mut page = SkirmishSavedSetup::capture(&shell, maps);
+        page.player.start = LaunchStartPosition::Position(2);
+        page.player.team = 1;
+        page.computers[8] = SkirmishSetupComputer {
+            row_type: SkirmishAiRowType::Hard,
+            seat: SkirmishSetupSeat {
+                start: LaunchStartPosition::Position(9),
+                team: 0,
+                ..page.computers[8].seat
+            },
+        };
+        page.apply(&mut shell, maps);
+        assert_eq!(SkirmishSavedSetup::capture(&shell, maps), page);
+        runtime.pack_durable_state(&shell, maps, &[mode()]);
+        runtime.persist_snapshot();
+
+        // A map added before it puts `ScenIndex` on another file.
+        let (_, catalog, shell) = open(&["a.map", "new.map", "big.map"]);
+        assert_eq!(shell.selected_map_idx, 2);
+        assert_eq!(
+            SkirmishSavedSetup::capture(&shell, catalog.shell_maps()),
+            page
+        );
         std::fs::remove_dir_all(directory).expect("remove owned fixture");
     }
 
@@ -3418,7 +3756,8 @@ WOLTaunts=junk
         let mut runtime = runtime(snapshot, 3);
         let mut shell = SkirmishShellState::default();
         runtime.hydrate_shell(&mut shell, &[map()], &[mode()]);
-        shell.zoom_enabled = false;
+        shell.selected_mode_must_ally = !shell.selected_mode_must_ally;
+        let must_ally = shell.selected_mode_must_ally;
 
         runtime.snapshot.unit_count = 4;
         runtime.hydrate_shell(&mut shell, &[map()], &[mode()]);
@@ -3427,9 +3766,40 @@ WOLTaunts=junk
             shell.unit_count, 4,
             "a reopened page shows the durable record, not its own last face"
         );
-        assert!(
-            !shell.zoom_enabled,
+        assert_eq!(
+            shell.selected_mode_must_ally, must_ally,
             "a field outside the record is untouched"
+        );
+    }
+
+    /// A room ban redraws a Random country that lands on it; without bans
+    /// the draws are the native ones.
+    #[cfg(not(feature = "ares"))]
+    #[test]
+    fn random_country_redraws_a_banned_country() {
+        use crate::skirmish_launch::RandomCountryRole;
+        let registry = CooperativeRegistry::default();
+        let draw = |banned: &[LaunchCountry]| {
+            let mut rng = SimRng::new(1);
+            let country = draw_shell_country(
+                &registry,
+                None,
+                &[],
+                false,
+                RandomCountryRole::Human,
+                &mut rng,
+                banned,
+            )
+            .unwrap();
+            (country, rng)
+        };
+        let (native, mut native_rng) = draw(&[]);
+        let (redrawn, _) = draw(&[native]);
+        assert_ne!(redrawn, native);
+        assert_eq!(
+            redrawn,
+            LaunchCountry::from_country_index(native_rng.next_range_u32_inclusive(0, 9)),
+            "the redraw is the stream's next draw"
         );
     }
 
@@ -3452,7 +3822,8 @@ WOLTaunts=junk
                 &roster,
                 true,
                 RandomCountryRole::Human,
-                &mut rng
+                &mut rng,
+                &[]
             )
             .unwrap()
             .raw_index(),
@@ -3466,7 +3837,8 @@ WOLTaunts=junk
                 &roster,
                 true,
                 RandomCountryRole::Ai { index: 0 },
-                &mut rng
+                &mut rng,
+                &[]
             )
             .unwrap()
             .raw_index(),
@@ -3483,7 +3855,8 @@ WOLTaunts=junk
                 &none,
                 true,
                 RandomCountryRole::Human,
-                &mut rng
+                &mut rng,
+                &[]
             ),
             Err(CooperativeError::NoEligibleRandomCountries)
         ));

@@ -29,6 +29,10 @@ fn main() -> Result<()> {
     {
         std::process::exit(result?);
     }
+    // docs/spawn.md: headless launch compatibility probe; JSON on stdout.
+    if let Some(result) = vera20k::app::frontend::launch::try_probe(std::env::args_os().skip(1)) {
+        std::process::exit(result?);
+    }
     // A launch from the macOS app bundle or the Linux AppImage works in the
     // app's data folder. Enter it before the logger opens logs/ there.
     // The external community host supplies a dedicated cwd/config even when
@@ -37,7 +41,14 @@ fn main() -> Result<()> {
         .skip(1)
         .eq([std::ffi::OsString::from("--community-launch")]);
     let app_bundle = !community_host && vera20k::app::app_bundle::enter_data_folder();
-    let log_path = match vera20k::util::logging::init_file_logger("ra2") {
+    // A hidden map-picture run, which the menus start while the game runs,
+    // keeps its own log beside the game's.
+    let log_name = if vera20k::app::map_picture::is_invocation(std::env::args_os().skip(1)) {
+        "map-picture"
+    } else {
+        "ra2"
+    };
+    let log_path = match vera20k::util::logging::init_file_logger(log_name) {
         Ok(path) => {
             eprintln!("Logging to {}", path.display());
             Some(path)
@@ -49,7 +60,10 @@ fn main() -> Result<()> {
         }
     };
 
-    vera20k::util::logging::install_panic_hook(log_path.as_deref());
+    vera20k::util::logging::install_panic_hook(
+        log_path.as_deref(),
+        Some(vera20k::app::system_dialog::report_panic),
+    );
 
     log::info!(
         "VERA20k {} starting ({}/{})",
@@ -70,6 +84,10 @@ fn main() -> Result<()> {
         "VeraX support compiled in: {}",
         vera20k::rules::VERAX_ENABLED
     );
+    log::info!(
+        "NPBUG support compiled in: {}",
+        vera20k::rules::NPBUG_ENABLED
+    );
     if let Some(path) = &log_path {
         log::info!("Log file: {}", path.display());
     }
@@ -79,10 +97,14 @@ fn main() -> Result<()> {
         log::error!("VERA20k exited with an error: {error:#}");
     }
     log::logger().flush();
-    result
+    // docs/spawn.md: a `-SPAWN` launch exits with its result's status.
+    match result? {
+        0 => Ok(()),
+        status => std::process::exit(status),
+    }
 }
 
-fn run(app_bundle: bool) -> Result<()> {
+fn run(app_bundle: bool) -> Result<i32> {
     let community_launch = std::env::args_os()
         .skip(1)
         .eq([std::ffi::OsString::from("--community-launch")]);
@@ -92,6 +114,16 @@ fn run(app_bundle: bool) -> Result<()> {
         vera20k::app::frontend::launch::parse_launch_args(std::env::args_os().skip(1))?
     };
 
+    // A player started this launch and may have no console: a failure that
+    // ends it shows a message box. Spawn, replay and capture launches come
+    // from other programs and scripts, which must never wait on a click.
+    if matches!(
+        launch_mode,
+        vera20k::app::frontend::launch::AppLaunchMode::Interactive(_)
+    ) {
+        vera20k::app::system_dialog::enable_fatal_messages();
+    }
+
     // A help switch terminates before anything else is created, matching the
     // native switch parser returning a failure that makes WinMain bail.
     if matches!(
@@ -99,7 +131,7 @@ fn run(app_bundle: bool) -> Result<()> {
         vera20k::app::frontend::launch::AppLaunchMode::Usage
     ) {
         println!("{}", vera20k::app::frontend::startup_options::usage_text());
-        return Ok(());
+        return Ok(0);
     }
 
     // Native claims its single-instance gate before it creates a window: a
@@ -137,7 +169,7 @@ fn run(app_bundle: bool) -> Result<()> {
                     // code reads "already running" as a clean run. Anything
                     // asserting on a window must assert on the window.
                     log::info!("VERA20k is already running — raised the existing window");
-                    return Ok(());
+                    return Ok(0);
                 }
             }
         }
@@ -146,7 +178,22 @@ fn run(app_bundle: bool) -> Result<()> {
 
     // Create the OS event loop. This drives the entire application:
     // window events, input, redraws, lifecycle events.
-    let event_loop: EventLoop<()> = EventLoop::builder().build()?;
+    let mut builder = EventLoop::builder();
+    // A `-SPAWN` test run with its opt-in invisible window (tools/spawn/README.md)
+    // and a hidden map-picture run also stay out of the Dock and menu bar.
+    #[cfg(target_os = "macos")]
+    if matches!(
+        &launch_mode,
+        vera20k::app::frontend::launch::AppLaunchMode::MapPicture(_)
+    ) || matches!(
+        &launch_mode,
+        vera20k::app::frontend::launch::AppLaunchMode::Spawn(_)
+    ) && vera20k::app::App::spawn_hidden_window_requested()
+    {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        builder.with_activation_policy(ActivationPolicy::Prohibited);
+    }
+    let event_loop: EventLoop<()> = builder.build()?;
 
     // Create the app and hand control to the event loop.
     // This blocks until the window is closed.
@@ -182,10 +229,29 @@ fn run(app_bundle: bool) -> Result<()> {
             request.validate_runtime_environment()?;
             vera20k::app::App::new_tactical_capture(request)
         }
+        vera20k::app::frontend::launch::AppLaunchMode::MapPicture(request) => {
+            vera20k::app::map_picture::watch_lifetime();
+            vera20k::app::App::new_map_picture(request)
+        }
     };
-    event_loop.run_app(&mut app)?;
+    // A panic skips `exiting`, where the match replay is saved. winit stops
+    // its loop and hands the panic back here (macOS and Windows catch it in
+    // their callbacks; elsewhere it unwinds straight out), with `app` intact.
+    // Save the replay, then let the panic end the process as before.
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        event_loop.run_app(&mut app)
+    }));
+    match ran {
+        Ok(result) => result?,
+        Err(panic) => {
+            app.save_replay_after_panic();
+            std::panic::resume_unwind(panic);
+        }
+    }
+    // Written for failed launches too, before the failure returns below.
+    let spawn_status = app.finish_spawn_launch();
     app.finish_capture()?;
 
     log::info!("VERA20k shut down cleanly");
-    Ok(())
+    Ok(spawn_status.unwrap_or(0))
 }

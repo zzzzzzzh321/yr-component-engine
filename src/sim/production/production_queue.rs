@@ -6,6 +6,7 @@
 use crate::sim::world::FrameEffects;
 use std::collections::BTreeMap;
 
+use crate::map::entities::EntityCategory;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::intern::InternedId;
 use crate::sim::world::Simulation;
@@ -16,6 +17,7 @@ use super::production_spawn::{
     ExitArm, dock_exit, exit_arm, mark_war_factory_spawn_contact, naval_exit_cell,
     unlimbo_held_naval_unit,
 };
+use super::production_tech::production_category_for_object;
 use super::production_types::*;
 
 /// `owner`'s Available_Money, by house name; 0 for a house that does not
@@ -109,14 +111,6 @@ pub fn build_options_for_owner(sim: &Simulation, rules: &RuleSet, owner: &str) -
         .collect()
 }
 
-/// True if this owner has at least one buildable production option — useful
-/// for picking a likely local player house in UI code.
-pub fn has_build_option_for_owner(sim: &Simulation, rules: &RuleSet, owner: &str) -> bool {
-    super::production_tech::all_build_options_for_owner(sim, rules, owner)
-        .iter()
-        .any(|o| o.enabled)
-}
-
 /// StripClass::AI6A8DC6 visits the local sidebar's retained Factory links.
 /// HasChanged4C9C60 is consumed before IsComplete4CA130, in entry order; a
 /// remote or absent strip never consumes that Factory's notification. Mobile
@@ -147,6 +141,25 @@ pub fn publish_production_changes(
             owner,
             visit.category,
         );
+        // StripAI6A8E48 -> SetSidebarTabObject734250 follows every admitted
+        // changed+complete Building, even after once-only accounting/EVA.
+        // Class and BuildCat come from the actual held entity's type.
+        if let Some(stable_id) = factory_lifecycle::active_entity_id(sim, owner, visit.category)
+            && let Some(entity) = sim.substrate.entities.get(stable_id)
+            && entity.category() == EntityCategory::Structure
+            && let Some(object_type) = sim.entity_object_type(entity, rules)
+        {
+            sim.lifecycle_outputs.emit(
+                crate::sim::world::LifecycleOutput::ProductionBuildingReady {
+                    owner,
+                    category: production_category_for_object(object_type),
+                    stable_id,
+                },
+            );
+            // Native6A8E4D joins the next visit; Building publication does
+            // not enter the mobile PLACE/request-clear tail.
+            continue;
+        }
         let Some(record) = sim.encode_place_mobile_record(owner, visit.category, rules) else {
             continue;
         };

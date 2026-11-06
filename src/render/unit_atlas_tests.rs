@@ -61,6 +61,52 @@ fn retail_jumpjet_unit_demand_includes_native_shadow_stencils() {
     }
 }
 
+/// A Magnetron's `IsLocomotor=` Jumpjet lifts any vehicle, whose shadow
+/// Unit73C1D2's suffix then draws at the slope of the cell below (base
+/// Shadow_Matrix 0x0055A7D0): unmasked high above it, and in the grounded
+/// entry (73C468) on the ground. A Hover victim and a Drive victim over a
+/// ramp both need a resident native stencil for each.
+#[test]
+fn retail_lifted_vehicles_keep_native_shadow_stencils_on_their_cell_slope() {
+    use crate::render::foot_depth::DepthCell;
+    use crate::render::unit_shadow::{UnitShadowContext, pose};
+    use crate::rules::retail_ini_fixture::{retail_assets, retail_battle_rules};
+    let Some(battle) = retail_battle_rules() else {
+        return;
+    };
+    let (_, assets) = retail_assets().expect("retail assets for the loaded rules");
+    let [x, y] = [10 * 256 + 128; 2];
+    for (type_id, ramp) in [("ROBO", 0), ("HTNK", 1)] {
+        let demand = UnitAtlasDemand {
+            ground: BTreeSet::from([type_id.to_string()]),
+            ..Default::default()
+        };
+        let (keys, _) = needed_unit_keys(&demand, &assets, Some(&battle.rules));
+        let model = UnitModel::load(&assets, type_id, Some(&battle.rules)).unwrap();
+        let floor = crate::util::lepton::ground_height_leptons(0, ramp, x, y).unwrap();
+        for height in [0, 500] {
+            let key = pose(
+                UnitShadowContext {
+                    xyz: [x, y, floor + height],
+                    on_bridge: false,
+                    marked: true,
+                    primary_facing: 0x4000,
+                },
+                |coord| DepthCell {
+                    coord,
+                    ramp,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .key(type_id);
+            assert!(keys.contains(&key), "{key:?} resident");
+            let (_, bounds) = model.render(&key, None, None, &mut None).unwrap();
+            assert!(bounds.is_some(), "{key:?} native stencil");
+        }
+    }
+}
+
 /// Aircraft DrawIt4148A0 reaches the shared Foot shadow owner. An ordinary
 /// retail Harrier therefore needs a shadow resident alongside its body.
 #[test]
@@ -393,6 +439,7 @@ fn incremental_repack_plan_retains_old_unloading_referent() {
         offset_y: 0.0,
         native_draw_bounds: Some([-4, -4, 14, 12]),
         shadow_center: None,
+        pool_bytes: 0,
     };
     // CMON is CMIN's stock UnloadingClass referent. It may be absent from the
     // current live-key collector but must remain in the rendered cache.
@@ -448,35 +495,6 @@ fn unit_barrel_pitches_walk_the_unlimbo_turn() {
     let half = unit_barrel_pitches(128);
     assert_eq!(half.len(), 17);
     assert_eq!((half[8], half[9], half[16]), (-8, 23, 16));
-}
-
-#[test]
-fn barrel_image_keeps_its_first_drawn_pitch() {
-    let key = |type_id: &str, facing| UnitSpriteKey {
-        type_id: type_id.into(),
-        turret_index: 0,
-        facing,
-        layer: VxlLayer::Turret,
-        frame: 0,
-        slope_type: 0,
-        barrel_pitch: 0,
-    };
-    let mut pitches = BarrelImagePitches::default();
-    // The first unit drawn under a key fixes its image; later ones reuse it.
-    assert_eq!(pitches.pitch(&key("MTNK", 32), None, 0), 0);
-    assert_eq!(pitches.pitch(&key("MTNK", 32), None, -1), 0);
-    assert_eq!(pitches.pitch(&key("MTNK", 40), None, -1), -1);
-    assert_eq!(pitches.pitch(&key("MTNK", 40), None, 0), -1);
-    // A TurretOffset type keys the hull's facing too; each type has its own.
-    assert_eq!(pitches.pitch(&key("MTNK", 32), Some(0), -1), -1);
-    assert_eq!(pitches.pitch(&key("HTNK", 32), None, -1), -1);
-    let mut different_turret = key("MTNK", 32);
-    different_turret.turret_index = 1;
-    assert_eq!(pitches.pitch(&different_turret, None, -2), -2);
-    assert_eq!(pitches.pitch(&key("MTNK", 32), None, -2), 0);
-    // A new scenario starts empty.
-    pitches.clear();
-    assert_eq!(pitches.pitch(&key("MTNK", 32), None, -1), -1);
 }
 
 /// gamemd's voxel loader names a vehicle's models from its rules `Image=`
@@ -720,7 +738,8 @@ fn retail_ifv_atlas_covers_all_turrets_without_replicating_its_hull() {
     let (keys, _) = needed_unit_keys(&demand, &assets, Some(&battle.rules));
     let count = |layer| keys.iter().filter(|key| key.layer == layer).count();
     assert_eq!(count(VxlLayer::Body), 32 * 17);
-    assert_eq!(count(VxlLayer::Shadow), 32 * 17);
+    // Flight and grounded stencils for the Magnetron's lift.
+    assert_eq!(count(VxlLayer::Shadow), 2 * 32 * 17);
     assert_eq!(count(VxlLayer::Turret), 4 * 32 * 17);
     assert_eq!(
         keys.iter()
@@ -921,12 +940,12 @@ fn kirov_direct_matrix_requires_hva_and_wraps_its_native_frame() {
     .unwrap();
     let lighting = crate::render::vxl_raster::VxlLighting::Diffuse;
     let (first, bounds) = model
-        .render_matrix(matrix, 0, true, lighting, Some(&vpl))
+        .render_matrix(matrix, 0, true, lighting, Some(&vpl), false, None)
         .unwrap();
     assert!(bounds.is_some());
     let frames = model.body.as_ref().unwrap().hva().unwrap().frame_count;
     let (wrapped, wrapped_bounds) = model
-        .render_matrix(matrix, frames, true, lighting, Some(&vpl))
+        .render_matrix(matrix, frames, true, lighting, Some(&vpl), false, None)
         .unwrap();
     assert_eq!(first.palette_indices, wrapped.palette_indices);
     assert_eq!(bounds, wrapped_bounds);
@@ -943,13 +962,13 @@ fn kirov_direct_matrix_requires_hva_and_wraps_its_native_frame() {
     let model = UnitModel::load(&no_hva, "ZBOMB", None).unwrap();
     assert!(
         model
-            .render_matrix(matrix, 0, true, lighting, Some(&vpl))
+            .render_matrix(matrix, 0, true, lighting, Some(&vpl), false, None)
             .is_none(),
         "Bullet LoadVoxelAssets requires both main files"
     );
     assert!(
         model
-            .render_matrix(matrix, 0, false, lighting, Some(&vpl))
+            .render_matrix(matrix, 0, false, lighting, Some(&vpl), false, None)
             .is_some(),
         "the explicit debris no-HVA caller still uses the same raster owner"
     );

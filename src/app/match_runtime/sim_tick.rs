@@ -6,10 +6,9 @@
 //! ## Dependency rules
 //! - Part of the app layer — may depend on everything.
 
-use std::collections::HashSet;
-use std::path::Path;
 #[cfg(feature = "telemetry-dashboard")]
 use crate::util::time::Instant;
+use std::path::Path;
 
 use crate::app::AppState;
 use crate::app::input::commands::{preferred_local_owner, preferred_local_owner_name};
@@ -18,7 +17,6 @@ use crate::app::match_runtime::session::SessionMode;
 use crate::app::types::SIM_TICK_MS;
 use crate::map::terrain;
 use crate::render::sprite_atlas;
-use crate::render::unit_atlas;
 use crate::sim::production;
 use crate::sim::replay::ScenarioServiceInput;
 use crate::sim::trigger_runtime::TriggerEffect;
@@ -101,7 +99,7 @@ pub(crate) fn drive_local_player_outcome_exit(state: &mut AppState, wall_ms: u64
     {
         return;
     }
-    let Some(owner) = state.match_state.local_player_owner() else {
+    let Some(owner) = state.match_state.local_player_owner().map(str::to_owned) else {
         return;
     };
     let outcome = state
@@ -112,19 +110,53 @@ pub(crate) fn drive_local_player_outcome_exit(state: &mut AppState, wall_ms: u64
         .filter(|sim| sim.pending_outcome_wait().is_none())
         .and_then(|sim| {
             sim.interner()
-                .get(owner)
+                .get(&owner)
                 .and_then(|owner| sim.ready_outcome_for_owner(owner))
         });
     let Some(outcome) = outcome.map(|outcome| outcome.kind) else {
         return;
     };
+    // The loser gets the last word. The simulation published this result on
+    // its own frame, the same one a headless or replay run publishes, and no
+    // further frame runs while it waits. With `Custom End Game Movie` on, only
+    // what follows here waits for the losing commander's clip: the card, the
+    // teardown and the score page.
+    if crate::app::commander_feedback::owe_the_verdict_a_clip(state, outcome, wall_ms) {
+        return;
+    }
     log::info!(
         "Match end ready for local player '{owner}': {}",
         crate::app::match_runtime::scenario_exit::outcome_title(outcome)
     );
-    //685670/685DC0 clear5BF450 before either outcome fade.
+    crate::app::App::record_match_result(
+        state,
+        match outcome {
+            crate::sim::house_state::HouseOutcomeKind::Victory => {
+                crate::app::cncnet::ExternalMatchResult::Won
+            }
+            crate::sim::house_state::HouseOutcomeKind::Defeat => {
+                crate::app::cncnet::ExternalMatchResult::Lost
+            }
+        },
+    );
+    //685670/685DC0 clear5BF450 before either outcome fade. With `Custom End
+    // Game Movie` on, this route waited for the losing commander's clip, so
+    // the verdict below is the first thing said after the loser. With the
+    // switch off, this cuts a clip still playing.
     crate::app::radar_movie::retire(state, wall_ms);
     crate::app::chrono_screen::retire(state, wall_ms);
+    // The result's own line, when a clip was still in its way.
+    //
+    // The simulation emitted it on the kill frame (`Flag_To_Win 0x004FCBA9` /
+    // `Flag_To_Lose 0x004FCDA1`). With `Custom End Game Movie` on it was not
+    // delivered there, because the clip that kill earns would have cleared it
+    // (`RadarMovieCommand::Announce` -> `clear_eva_queues` + `suspend_eva`).
+    // The clip layer says it as soon as no clip is in the way; one still
+    // playing when the result was published leaves it to here, after `retire`
+    // has released the clip's EVA hold. Either way it is said once.
+    if crate::app::commander_feedback::take_withheld_verdict_line(state) {
+        play_outcome_eva(state, outcome);
+    }
     state.frontend.finished_game_count = state.frontend.finished_game_count.saturating_add(1);
     let elapsed_score_ticks = state
         .match_state
@@ -136,6 +168,32 @@ pub(crate) fn drive_local_player_outcome_exit(state: &mut AppState, wall_ms: u64
     if cooperative {
         crate::app::cooperative_round::mission_ended(state, elapsed_score_ticks);
     }
+    // The match's own verdict presentation (`[EndGameScreens]`): the country's
+    // banner picture on the battlefield and its banner music start together,
+    // and both answer to the in-game switch. This reads the banner half only;
+    // the score page reads its own `Score*` half (`build_score_screen_model`).
+
+    let entry = local_end_game_entry(state, outcome);
+    let banner = entry.as_ref().and_then(|entry| entry.banner_art());
+    // The verdict's beat is the beat, card or not: a country that names no
+    // picture still gets the retail banner's three seconds over the still
+    // battlefield before the teardown takes the screen. Requiring the picture
+    // here instead skipped the beat entirely, and with it the retail banner —
+    // the frame froze and went straight to the score page.
+    let hold_banner = state.persistence.options_profile.custom_end_game_banner && entry.is_some();
+    log::info!(
+        "Match end: verdict entry={} card={} hold_banner={hold_banner}",
+        entry.is_some(),
+        banner.is_some(),
+    );
+    // The theme belongs to the verdict, not to the card: with `Custom End Game
+    // Movie` on it started when the clip wait opened, so the rest of the clip
+    // had the new music under it and restarting here would cut that track
+    // back to its first bar. One beat later the score page asks for its own
+    // `Score*` half, which is a no-op when this name is already playing.
+    if !crate::app::commander_feedback::verdict_was_held_for_a_clip(state) {
+        start_verdict_theme(state, outcome, wall_ms);
+    }
     let title = crate::app::match_runtime::scenario_exit::outcome_title(outcome).to_string();
     let detail = crate::app::match_runtime::scenario_exit::outcome_detail(outcome).to_string();
     let destination = crate::app::match_runtime::scenario_exit::scenario_exit_destination(
@@ -146,14 +204,121 @@ pub(crate) fn drive_local_player_outcome_exit(state: &mut AppState, wall_ms: u64
         title,
         detail,
         || build_campaign_score_screen_model(state, elapsed_score_ticks),
-        || build_score_screen_model(state, elapsed_seconds),
+        || build_score_screen_model(state, elapsed_seconds, false),
     );
     // Native campaign victories enter the standalone dialog `0x103`; campaign
     // defeats take a separate prompt path. Only GameMode!=0 takes the generic
     // `ScoreDialog__Run 0x5C9720` / SCORE-theme handoff.
-    state.match_state.scenario_exit = Some(
-        crate::app::match_runtime::scenario_exit::ScenarioExitCascade::start(wall_ms, destination),
-    );
+    let cascade =
+        crate::app::match_runtime::scenario_exit::ScenarioExitCascade::start_holding_banner(
+            wall_ms,
+            destination,
+            hold_banner,
+        )
+        // The half the beat draws is decided here, once, and never re-derived:
+        // `complete_outcome` clears the House's Won flag the moment the sim's
+        // own Vox wait ends, which is long before this router runs. Native
+        // keeps the choice in its screen text object for the same reason.
+        .with_verdict(outcome);
+    // The card has been up since the result was published. If a clip played
+    // under it, that beat is already spent and the fade may start as soon as
+    // the clip ends; a verdict with no clip still gets the full beat from
+    // here.
+    let cascade = match crate::app::commander_feedback::verdict_card_shown_at_ms(state) {
+        Some(card_at) => cascade.with_banner_hold_until(
+            card_at.saturating_add(crate::app::match_runtime::scenario_exit::BANNER_HOLD_MS),
+        ),
+        None => cascade,
+    };
+    state.match_state.scenario_exit = Some(cascade);
+}
+
+/// The local player's own `[EndGameScreens]` entry for the result just
+/// admitted: its picture and music, or `None` when the rules set names nothing
+/// for this country and half.
+fn local_end_game_entry(
+    state: &AppState,
+    outcome: crate::sim::house_state::HouseOutcomeKind,
+) -> Option<crate::rules::end_game::EndGamePresentation<'_>> {
+    let sim = &state.match_state.sim_runtime.as_ref()?.simulation;
+    // A mission owns its own result screens; the match card is a match's.
+    if !sim.session().game_mode_nonzero() {
+        return None;
+    }
+    let house = sim
+        .session()
+        .current_house()
+        .and_then(|owner| sim.houses().get(&owner))?;
+    let kind = match outcome {
+        crate::sim::house_state::HouseOutcomeKind::Victory => {
+            crate::rules::end_game::EndGameKind::Victory
+        }
+        crate::sim::house_state::HouseOutcomeKind::Defeat => {
+            crate::rules::end_game::EndGameKind::Defeat
+        }
+    };
+    let country = sim.resolve(house.country()?);
+    state
+        .rules()?
+        .end_game_screens()
+        .presentation(country, kind)
+}
+
+/// The battlefield's own theme for the result (`[EndGameScreens] *Music=`).
+///
+/// With `Custom End Game Movie` on this runs when the result is published and
+/// the clip wait opens, so the rest of the loser's clip plays over the new
+/// track. Otherwise it runs when the verdict is taken, one beat before the
+/// score page asks for its own `Score*` half.
+pub(crate) fn start_verdict_theme(
+    state: &mut AppState,
+    outcome: crate::sim::house_state::HouseOutcomeKind,
+    wall_ms: u64,
+) {
+    if !state.persistence.options_profile.custom_end_game_banner {
+        return;
+    }
+    let theme = local_end_game_entry(state, outcome)
+        .and_then(|entry| entry.banner_music().map(str::to_owned));
+    let Some(theme) = theme else {
+        return;
+    };
+    let Some(assets) = state.process_assets.manager() else {
+        return;
+    };
+    state.audio.play_theme(&theme, assets, wall_ms);
+    log::info!("Match end: the battlefield theme switches to '{theme}'");
+}
+
+/// The result's own EVA line, spoken through the shared `VoxClass` owner.
+///
+/// `HouseClass::Flag_To_Win 0x004FCBA9` / `Flag_To_Lose 0x004FCDA1` say it with
+/// `EDX = -1`; [`crate::app::match_runtime::sound_dispatch::outcome_eva_event`]
+/// owns that selection for the simulation's event, and this replays the same
+/// selection when the frame's delivery withheld the original for a clip
+/// ([`crate::app::commander_feedback::withholds_verdict_line`]).
+pub(crate) fn play_outcome_eva(
+    state: &mut AppState,
+    outcome: crate::sim::house_state::HouseOutcomeKind,
+) {
+    let campaign = !state
+        .match_state
+        .sim_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.simulation.session().game_mode_nonzero());
+    let event = crate::app::match_runtime::sound_dispatch::outcome_eva_event(outcome, campaign);
+    let (Some(sfx), Some(catalog), Some(assets)) = (
+        state.audio.sfx_player.as_mut(),
+        state.process_assets.audio_catalog(),
+        state.process_assets.manager(),
+    ) else {
+        return;
+    };
+    if sfx.play_eva(event, None, catalog.eva(), assets, catalog.index()) {
+        log::info!("Match end: the verdict speaks '{event}'");
+    } else {
+        log::warn!("Match end: '{event}' was not admitted; the verdict stays silent");
+    }
 }
 
 fn build_campaign_score_screen_model(
@@ -373,6 +538,7 @@ fn score_title_key(mode: SessionMode) -> &'static str {
 fn build_score_screen_model(
     state: &AppState,
     elapsed_seconds: i32,
+    aborted: bool,
 ) -> Result<crate::ui::score_shell::ScoreScreenModel, crate::rules::error::RulesError> {
     use crate::ui::score_shell::ScoreScreenModel;
 
@@ -384,10 +550,20 @@ fn build_score_screen_model(
     else {
         return Ok(ScoreScreenModel::default());
     };
-    let Some(raw_snapshot) = sim.terminal_score_snapshot() else {
-        log::error!("Natural match exit reached the score screen without a sim snapshot");
-        return Ok(ScoreScreenModel::default());
+    // A natural exit reads the snapshot the terminal edge latched. An aborted
+    // match never reached that edge, so it reads the live rows instead: the
+    // page still shows what the player earned, and leaving consumes none of
+    // the Scenario RNG draws the latch owns.
+    let snapshot = if aborted {
+        sim.live_score_snapshot()
+    } else {
+        let Some(snapshot) = sim.terminal_score_snapshot() else {
+            log::error!("Natural match exit reached the score screen without a sim snapshot");
+            return Ok(ScoreScreenModel::default());
+        };
+        snapshot.clone()
     };
+    let raw_snapshot = &snapshot;
     let computer = crate::app::frontend::shell_pass::resolve_csf(state, "TXT_COMPUTER");
     let rows = resolve_score_rows(
         sim,
@@ -402,24 +578,79 @@ fn build_score_screen_model(
         .and_then(|owner| sim.interner().get(owner));
     let local_house = local_owner.and_then(|owner| sim.houses().get(&owner));
     let side = local_house.map_or(0, |house| house.side_index());
+    // Leaving the match is a defeat: the player ended it, so the lose half of
+    // the side's theme and of `[EndGameScreens]` is the one that fits. A match
+    // that ended by itself keeps its own flag.
+    let defeated = aborted || local_house.is_some_and(|house| house.is_defeated());
     // `Global_DrawScoreScreen_ScoreTheme` (0x1002F4B0, patch site 0x5C9B75)
     // selects the side's win or lose theme on the local player's
     // HouseClass+0x1F5 defeated flag; the literal it otherwise pushes is
     // 0x0082FEBC "SCORE". It keeps that literal when the local player is the
     // Observer house (`Player [0xA83D4C] == Observer [0xAC1198]`,
     // 0x1002F4B8..0x1002F4C7).
-    let observing = local_owner.is_some() && local_owner == sim.session().observer_house();
+    let observing = local_owner.is_some_and(|owner| sim.session().is_observer_house(owner));
     let side_presentation = state.process_assets.side_presentation(side)?;
     let theme = (!observing)
         .then(|| {
             side_presentation.as_ref().and_then(|side| {
-                side.score_theme(crate::rules::ruleset::ScoreTheme::Multiplayer {
-                    defeated: local_house.is_some_and(|house| house.is_defeated()),
-                })
+                side.score_theme(crate::rules::ruleset::ScoreTheme::Multiplayer { defeated })
             })
         })
         .flatten()
         .map(str::to_owned);
+    // `[EndGameScreens]`: the local country's own music and picture, when the
+    // rules set names one. The music replaces the side's theme; the picture
+    // replaces the side art in `open_score_page`. The defeat flag that picks
+    // the half is the same one the native theme selection reads, so an observer
+    // — which has no result of its own — keeps the retail page.
+    //
+    // This is the *score page's* switch (`[VERA] CustomEndGameScore=`,
+    // Options' Custom End Game Score Screen): its background and its theme
+    // move together. The battlefield verdict — a picture over the tactical
+    // view a beat earlier — answers to its own switch and its own keys
+    // (`VictoryArt=`/`VictoryMusic=`), resolved in
+    // `drive_local_player_outcome_exit`, so a player can keep one and drop the
+    // other.
+    //
+    // The score page reads the `Score*` half of the same entry, and borrows
+    // nothing from the banner half: that half is a *battlefield* picture (the
+    // RA3 end-game cards are banners there too), so showing it behind the
+    // score columns is exactly the mix-up this split undoes. A rules set that
+    // wrote only the banner half therefore leaves `background` empty and
+    // `theme` on the side's, which is the retail page.
+    let custom_score = state.persistence.options_profile.custom_end_game_score;
+    let (country_music, background) = (!observing)
+        .then(|| {
+            let house = local_house?;
+            let kind = if defeated {
+                crate::rules::end_game::EndGameKind::Defeat
+            } else {
+                crate::rules::end_game::EndGameKind::Victory
+            };
+            let country = sim.resolve(house.country()?);
+            let presentation = state
+                .rules()?
+                .end_game_screens()
+                .presentation(country, kind)?;
+            let background = if custom_score {
+                presentation
+                    .score_art()
+                    .map(|art| crate::ui::score_shell::ScoreBackground {
+                        shape: art.shape,
+                        palette: art.palette,
+                    })
+            } else {
+                None
+            };
+            let music = if custom_score {
+                presentation.score_music().map(str::to_owned)
+            } else {
+                None
+            };
+            Some((music, background))
+        })
+        .flatten()
+        .unwrap_or_default();
 
     Ok(ScoreScreenModel {
         title_key: score_title_key(state.match_state.session_mode()),
@@ -430,9 +661,24 @@ fn build_score_screen_model(
         elapsed_seconds: elapsed_seconds as u32,
         side,
         side_presentation,
-        theme,
+        theme: country_music.or(theme),
+        background,
         rows,
     })
+}
+
+/// The score page for a match the player left on purpose.
+///
+/// Retail returns to the shell; the score a skirmish has earned up to that
+/// point is still meaningful, and the games this mode follows (RA3, SC2, AoE2)
+/// show it after a resign. The rows come from [`Simulation::live_score_snapshot`]
+/// — the raw counters, no survivor bonus — because an abandoned match has no
+/// terminal edge to latch and leaving must not advance the Scenario RNG.
+pub(crate) fn build_aborted_score_screen_model(
+    state: &AppState,
+    elapsed_seconds: i32,
+) -> Result<crate::ui::score_shell::ScoreScreenModel, crate::rules::error::RulesError> {
+    build_score_screen_model(state, elapsed_seconds, true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,11 +729,9 @@ pub(crate) enum ExactStepError {
 /// Pause is the explicit `GamePause::Enter @ 0x00406F00` path: suspend every
 /// event, stop the playing channels, and pause the EVA/speech stream.
 ///
-/// `MatchState::paused` **is** VERA's in-game-menu state: it reads
-/// `InGameMenuState::is_open()`, and apart from the `J` debug pause and the
-/// fullscreen movie below no other pause reaches the SFX player. That is not
-/// a divergence from gamemd; it is
-/// exactly gamemd's pause. `State_Machine @ 0x0048C8B0` brackets its entire
+/// `MatchState::paused` includes VERA's in-game-menu state, the developer
+/// pause and the synchronized online pause. The menu uses gamemd's pause:
+/// `State_Machine @ 0x0048C8B0` brackets its entire
 /// dialog switch — case 5 `OptionsClass::ShowInGameDialog`, case 8
 /// `Show_Diplomacy_Menu`, case 9 `ScenarioClass::ShowMissionRestateBriefing`
 /// — between `StateMachine::EnterPause @ 0x00683EB0`, whose first statement
@@ -557,7 +801,9 @@ pub(crate) fn service_audio_outputs(state: &mut AppState, now_ms: u64) {
 /// the Win32 message pump `0x005D4D50`) runs neither, so it is not pumped.
 /// Network modes also pump in the throttle spin, and the in-game menu's
 /// modal pump (`0x00623120`) and the exit and outcome waits pump from their
-/// own loops, so those passes keep the per-pass pump.
+/// own loops, so those passes keep the per-pass pump. So does a published
+/// result the exit router leaves waiting for a commander clip: no Main_Tick
+/// runs while it waits (`App::service_match_runtime_once`).
 pub(crate) fn main_tick_owns_audio_pump(state: &AppState, simulation_allowed: bool) -> bool {
     let match_state = &state.match_state;
     audio_pump_follows_main_tick(
@@ -568,7 +814,8 @@ pub(crate) fn main_tick_owns_audio_pump(state: &AppState, simulation_allowed: bo
         match_state.match_presentation.in_game_menu.is_open()
             || match_state.debug_pause
             || match_state.scenario_exit.is_some()
-            || match_state.scenario_outcome.is_some(),
+            || match_state.scenario_outcome.is_some()
+            || crate::app::App::local_outcome_exit_ready(state),
     )
 }
 
@@ -819,6 +1066,9 @@ fn advance_in_game_runtime_mode(
     main_tick_pumps_audio: bool,
 ) -> bool {
     let replaying = state.match_state.match_diagnostics.is_replay_playback();
+    state
+        .match_state
+        .sync_multiplayer_pause_clock(crate::app::match_runtime::frame_pacer::wall_clock_ms());
     // ExecuteDoList64CD0C is a blocking message box inside this frame. Even
     // exact-step diagnostics must not admit another Logic pass while it waits.
     if super::network_failure::pending(state) {
@@ -828,58 +1078,79 @@ fn advance_in_game_runtime_mode(
     if crate::app::App::house_outcome_wait_pending(state) {
         // House4F8649/4F8772 services48D080 inside this Main_Tick;
         // it never re-enters55D7C2's timed-pause/Chrono/input prelude.
-        return advance_one_simulation_frame(
-            state,
-            TickLane::Ordinary,
-            None,
-            FrameResume::OutcomeWait,
-        );
+        let completed =
+            advance_one_simulation_frame(state, TickLane::Ordinary, None, FrameResume::OutcomeWait);
+        state
+            .match_state
+            .sync_multiplayer_pause_clock(crate::app::match_runtime::frame_pacer::wall_clock_ms());
+        return completed;
     }
     crate::app::input::commands::reconcile_paid_super_weapon_cursor(state);
+    // VERA's canonical pause barrier is authoritative even for diagnostic
+    // exact stepping. The derived predicate becomes true only after the
+    // entire barrier frame, including a retained network transaction, finishes.
+    // Transport and UI continue in the outer service loop.
+    if state.match_state.multiplayer_paused() {
+        return false;
+    }
+    if !replaying {
+        crate::app::input::build_repeat::top_up(state);
+    }
     let frame_stepping = matches!(mode, RuntimeAdvanceMode::WallClock { .. })
         && state.diag.debug_frame_step_requested;
+    let resume_wait = state
+        .match_state
+        .sim_runtime
+        .as_ref()
+        .is_some_and(|rt| rt.simulation.pending_network_wait());
+    // Locally paced frames keep their due time; see `admitted_frame_start_ms`.
+    let mut paced_frame_start_ms = None;
     let pacer_timing_admits = match mode {
         RuntimeAdvanceMode::WallClock { now_ms } => {
-            let game_speed = state
-                .match_state
-                .sim_runtime
-                .as_ref()
-                .map(|rt| &rt.simulation)
-                .map_or_else(
-                    || {
-                        state
-                            .match_state
-                            .match_presentation
-                            .in_game_options
-                            .game_speed
-                            .min(6) as u8
-                    },
-                    |sim| sim.session().game_options().game_speed.clamp(0, 6) as u8,
-                );
             // Pure timing consult; pause/menu blocking belongs to the decision.
-            let network_fps = super::network_match::frame_budget(state);
+            let (game_speed, network_fps) = local_pacing_inputs(state);
             if let Some(live) = state
                 .match_state
                 .live_network
                 .as_ref()
                 .filter(|live| live.uses_sequenced_lockstep())
             {
-                live.has_terminal_network_error()
-                    || state
-                        .match_state
-                        .sim_runtime
-                        .as_ref()
-                        .is_some_and(|runtime| {
-                            super::frame_pacer::LocalFramePacer::admits_canonical_frame(
-                                runtime.simulation.session().binary_frame(),
-                                live.committed_frontier(),
+                if live.has_terminal_network_error() {
+                    true
+                } else if let Some(runtime) = state.match_state.sim_runtime.as_ref() {
+                    let frame = runtime.simulation.session().binary_frame();
+                    let frontier = live.committed_frontier();
+                    if let Some(timing) = live.sequenced_timing().filter(|_| {
+                        !replaying
+                            && !frame_stepping
+                            && !state.match_state.paused()
+                            && !state.focus_freeze_active()
+                            && !runtime.simulation.session().scenario_paused()
+                    }) {
+                        let recovering = live.recovery_status(now_ms as u32, frame).is_some();
+                        state
+                            .platform
+                            .frame_pacer
+                            .online_frame_decision(
+                                crate::util::time::Instant::now(),
+                                frame,
+                                frontier,
+                                timing,
+                                resume_wait,
+                                recovering,
                             )
-                        })
+                            .admits()
+                    } else {
+                        super::frame_pacer::LocalFramePacer::admits_canonical_frame(frame, frontier)
+                    }
+                } else {
+                    false
+                }
             } else {
-                state
-                    .platform
-                    .frame_pacer
-                    .should_admit(now_ms, game_speed, network_fps, false)
+                let pacer = &state.platform.frame_pacer;
+                paced_frame_start_ms =
+                    Some(pacer.admitted_frame_start_ms(now_ms, game_speed, network_fps));
+                pacer.should_admit(now_ms, game_speed, network_fps, false)
             }
         }
         RuntimeAdvanceMode::ExactOneStep => false,
@@ -888,6 +1159,7 @@ fn advance_in_game_runtime_mode(
         RuntimeAdvanceMode::WallClock { now_ms } => now_ms,
         RuntimeAdvanceMode::ExactOneStep => crate::app::match_runtime::frame_pacer::wall_clock_ms(),
     };
+    let frame_start_ms = paced_frame_start_ms.unwrap_or(wall_ms);
     let service_live = matches!(mode, RuntimeAdvanceMode::WallClock { .. })
         && !replaying
         && !state.match_state.match_presentation.in_game_menu.is_open()
@@ -915,13 +1187,17 @@ fn advance_in_game_runtime_mode(
             pump_audio_service(state, wall_ms);
         }
         super::scenario_pause::apply_service(state, ScenarioServiceInput::StepChronoScreen);
-        state.platform.frame_pacer.record_admitted_frame(wall_ms);
+        state
+            .platform
+            .frame_pacer
+            .record_admitted_frame(frame_start_ms);
+        // The early return still draws the tactical view (0x0055D84F).
+        state
+            .match_state
+            .match_presentation
+            .tactical_composite
+            .note_main_tick();
     }
-    let resume_wait = state
-        .match_state
-        .sim_runtime
-        .as_ref()
-        .is_some_and(|rt| rt.simulation.pending_network_wait());
     let mut decision = decide_runtime_pass(RuntimePassInputs {
         exact_step: matches!(mode, RuntimeAdvanceMode::ExactOneStep),
         window_active: state.platform.window_active,
@@ -969,6 +1245,13 @@ fn advance_in_game_runtime_mode(
         .scroll_input
         .then(|| crate::app::input::camera::poll_mouse_scroll(state));
     if decision.run_sim {
+        // One Main_Tick, one tactical composite (RenderFrame 0x0055D8F2),
+        // however many frames debug speed runs in this pass.
+        state
+            .match_state
+            .match_presentation
+            .tactical_composite
+            .note_main_tick();
         let tick_lane = decision.tick_lane;
         let resume = if resume_wait {
             FrameResume::NetworkWait
@@ -978,9 +1261,30 @@ fn advance_in_game_runtime_mode(
         if decision.admitted_by_pacer && !resume_wait {
             // MainTick arms its timer before Logic; time already spent in
             // Wait_For_Players must not restart that interval on completion.
-            state.platform.frame_pacer.record_admitted_frame(wall_ms);
+            state
+                .platform
+                .frame_pacer
+                .record_admitted_frame(frame_start_ms);
         }
-        let frame_committed = advance_one_simulation_frame(state, tick_lane, mouse_scroll, resume);
+        let mut frame_committed =
+            advance_one_simulation_frame(state, tick_lane, mouse_scroll, resume);
+        // Debug speed runs further frames in this paced pass, each through
+        // the same frame transaction; the pacer interval is unchanged.
+        if !frame_stepping && !replaying && debug_speed_allowed(state) {
+            for _ in 1..state.platform.frame_pacer.debug_speed() {
+                if state.match_state.scenario_outcome.is_some()
+                    || state.match_state.scenario_exit.is_some()
+                    || crate::app::App::house_outcome_wait_pending(state)
+                {
+                    break;
+                }
+                frame_committed |=
+                    advance_one_simulation_frame(state, tick_lane, None, FrameResume::None);
+            }
+        }
+        state
+            .match_state
+            .sync_multiplayer_pause_clock(crate::app::match_runtime::frame_pacer::wall_clock_ms());
         if crate::app::App::house_outcome_wait_pending(state) {
             return false;
         }
@@ -1091,6 +1395,35 @@ fn advance_in_game_runtime_mode(
     decision.run_sim
 }
 
+/// The GameSpeed and network FPS (with lag delay) the local pacer times
+/// Main_Tick by; sequenced online play paces with its own clock instead.
+pub(crate) fn local_pacing_inputs(state: &AppState) -> (u8, Option<(u16, u32)>) {
+    let game_speed = state
+        .match_state
+        .sim_runtime
+        .as_ref()
+        .map(|rt| &rt.simulation)
+        .map_or_else(
+            || {
+                state
+                    .match_state
+                    .match_presentation
+                    .in_game_options
+                    .game_speed
+                    .min(6) as u8
+            },
+            |sim| sim.session().game_options().game_speed.clamp(0, 6) as u8,
+        );
+    (game_speed, super::network_match::frame_budget(state))
+}
+
+/// Debug speed is limited to an offline Skirmish; online, LAN and campaign
+/// play keep one frame per paced interval.
+pub(crate) fn debug_speed_allowed(state: &AppState) -> bool {
+    state.match_state.session_mode() == super::session::SessionMode::Skirmish
+        && state.match_state.live_network.is_none()
+}
+
 /// Tick simulation: advance movement and animation systems.
 fn should_record_replay_tick(
     tick_result: &crate::sim::world::TickResult,
@@ -1122,6 +1455,38 @@ enum FrameResume {
     OutcomeWait,
 }
 
+/// House+56FC, the laser color a `LaserColor::House` or `Beam.IsHouseColor`
+/// birth resolves through.
+fn house_laser_rgb(
+    runtime: Option<&crate::sim::runtime::SimRuntime>,
+    colors: &crate::map::houses::HouseColorMap,
+    owner: crate::sim::intern::InternedId,
+) -> [u8; 3] {
+    let Some(runtime) = runtime else {
+        return [0; 3];
+    };
+    let name = runtime.simulation.interner().resolve(owner);
+    // CreateHouses initializes the two literal special houses without
+    // ComputeRemap; their +56FC stays0.
+    if runtime.simulation.session().game_mode_nonzero()
+        && (name.eq_ignore_ascii_case("Neutral") || name.eq_ignore_ascii_case("Special"))
+    {
+        return [0; 3];
+    }
+    let index = colors.get(name).copied().or_else(|| {
+        colors
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, &color)| color)
+    });
+    index.map_or([0; 3], |index| {
+        crate::render::palette_light::house_laser_rgb(
+            &runtime.resources.rules.house_color_ramps,
+            index,
+        )
+    })
+}
+
 fn advance_one_simulation_frame(
     state: &mut AppState,
     tick_lane: TickLane,
@@ -1137,6 +1502,10 @@ fn advance_one_simulation_frame(
         live.begin_processing(super::frame_pacer::wall_clock_ms() as u32);
     }
     let mut refresh_atlases_after_tick = false;
+    // With `Custom End Game Movie` on, the result's own EVA line waits until
+    // no commander clip is in its way. See
+    // [`super::FrameClientBoundary::with_deferred_verdict`].
+    let defer_verdict_to_clip = crate::app::commander_feedback::withholds_verdict_line(state);
     // Trigger definitions are runtime-bound (F07), so a live runtime is the
     // only activity source; the old trigger-only fixture mode is unrepresentable.
     let runtime_active = state.match_state.sim_runtime.is_some();
@@ -1185,7 +1554,7 @@ fn advance_one_simulation_frame(
             .detail
             .borrow()
             .frame_rate();
-        let other_local_pause = state.match_state.paused();
+        let other_local_pause = state.match_state.local_paused();
         let rules_owner = state.process_assets.native_rules();
         let initial_save = if !resuming && tick_lane == TickLane::Ordinary {
             crate::app::persistence::commands::prepare_initial_campaign_save(state, rules_owner)
@@ -1228,8 +1597,7 @@ fn advance_one_simulation_frame(
             };
             // Recorded whether or not a client is attached: the history ring
             // backfills a dashboard that connects mid-match.
-            #[cfg(feature = "telemetry-dashboard")]
-            let telemetry_advance_started = Instant::now();
+            let advance_started = crate::util::time::Instant::now();
             // F07: the runtime is the one production frame API — bound
             // resources, no caller-substitutable inputs.
             let mut output = {
@@ -1313,6 +1681,15 @@ fn advance_one_simulation_frame(
                         .as_mut()
                         .and_then(|radar| radar.set_has_radar(available))
                 };
+                #[cfg(feature = "ares")]
+                let flying_credits = &state.match_state.match_presentation.flying_credits;
+                #[cfg(feature = "ares")]
+                let queue_bounty =
+                    |sim: &crate::sim::world::Simulation,
+                     rules: &crate::rules::ruleset::RuleSet,
+                     text: crate::sim::bounty::BountyText| {
+                        flying_credits.borrow_mut().admit(sim, rules, text);
+                    };
                 let boundary = super::frame_effects::FrameClientBoundary::new(
                     playback,
                     local_owner_name.as_deref(),
@@ -1333,13 +1710,16 @@ fn advance_one_simulation_frame(
                     session_mode,
                     other_local_pause,
                 )
-                .with_outcome_wait(&mut state.match_state.scenario_outcome);
+                .with_outcome_wait(&mut state.match_state.scenario_outcome)
+                .with_deferred_verdict(defer_verdict_to_clip);
                 let effects = FrameEffects::for_sound(&boundary)
                     .with_tactical_radar(&boundary)
                     .with_local_planning(&boundary)
                     .with_network_commands(&boundary)
                     .with_production_strip(&production_visits, &clear_production_request)
                     .with_before_logic(&before_logic);
+                #[cfg(feature = "ares")]
+                let effects = effects.with_bounty_text(&queue_bounty);
                 // Recorded completion owns outcome timing during playback;
                 // a local audio wait cannot add a frame or change its hash.
                 let effects = if replaying {
@@ -1364,7 +1744,8 @@ fn advance_one_simulation_frame(
                         }
                     }
                 } else {
-                    match resume {
+                    let network = rt.simulation.session().game_mode().is_network();
+                    let advanced = match resume {
                         FrameResume::ChecksumModal => rt.resume_after_network_failure(effects),
                         FrameResume::NetworkWait => rt.resume_network_wait(effects),
                         FrameResume::NetworkLeave => rt.leave_network_wait(effects),
@@ -1372,8 +1753,21 @@ fn advance_one_simulation_frame(
                         FrameResume::None => {
                             rt.advance_frame(&due_commands, SIM_TICK_MS, tick_lane, effects)
                         }
+                    };
+                    // VERA-only: a peer's malformed event or a failed checksum
+                    // must not crash a LAN/online match. The frame did not
+                    // commit, so this timeline never runs again; the checksum
+                    // box's Stop returns to the shell. Offline, only internal
+                    // defects reach here, so they stay a loud panic. A
+                    // checksum mismatch never arrives here (it suspends the
+                    // frame instead), so neither the log nor the box
+                    // (`network_failure::vera_body`) calls this a desync.
+                    if network && let Err(error) = &advanced {
+                        log::error!("Network match stopped by an error, not a desync: {error}");
+                        state.match_state.frame_stopped = true;
+                        return false;
                     }
-                    .expect("simulation frame failed; prior world mutations remain")
+                    advanced.expect("simulation frame failed; prior world mutations remain")
                 }
             };
             state
@@ -1387,9 +1781,15 @@ fn advance_one_simulation_frame(
                 // reached the synchronous boundary above exactly once.
                 return false;
             }
+            let tick_cost = advance_started.elapsed();
+            let tick_ms = tick_cost.as_secs_f32() * 1000.0;
+            state.match_state.network_quality.record_tick(tick_ms);
+            // The relay's pace reports carry the simulation's own cost.
+            if let Some(live) = state.match_state.live_network.as_mut() {
+                live.record_tick_cost(tick_cost);
+            }
             #[cfg(feature = "telemetry-dashboard")]
             {
-                let tick_ms = telemetry_advance_started.elapsed().as_secs_f32() * 1000.0;
                 let tick = rt.simulation.session().tick();
                 let entities = rt.simulation.entities().len();
                 let houses = rt.simulation.houses().len();
@@ -1561,7 +1961,18 @@ fn advance_one_simulation_frame(
                 })
             };
             super::sound_dispatch::dispatch_sim_sound_events(
-                frame_sound_events.into_iter().skip(sound_events_delivered),
+                frame_sound_events
+                    .into_iter()
+                    .skip(sound_events_delivered)
+                    // The same rule as the frame boundary's, for the facts
+                    // that arrived after that boundary's last pass.
+                    .filter(|event| {
+                        !(defer_verdict_to_clip
+                            && matches!(
+                                event,
+                                crate::sim::world::SimSoundEvent::MatchOutcome { .. }
+                            ))
+                    }),
                 sim,
                 &resources.rules,
                 local_owner_name.as_deref(),
@@ -1702,11 +2113,13 @@ fn advance_one_simulation_frame(
                 | LifecycleOutput::SidebarRecalculated { .. }
                 | LifecycleOutput::ProductionBeginAttempted { .. }
                 | LifecycleOutput::ProductionFactoryLinked { .. }
+                | LifecycleOutput::ProductionBuildingReady { .. }
                 | LifecycleOutput::ProductionFactoryAbandoning { .. }
                 | LifecycleOutput::ProductionFactoryUnlinked { .. }
                 | LifecycleOutput::BuildingPlacementRetry { .. }
                 | LifecycleOutput::BuildingPlacementSucceeded { .. }
                 | LifecycleOutput::BuildingProductionAbandoned { .. }
+                | LifecycleOutput::ConstructionYardCaptured { .. }
                 | LifecycleOutput::FollowReleased { .. }
                 | LifecycleOutput::ObjectSelected { .. } => {}
                 LifecycleOutput::ObjectPointerExpired { stable_id } => {
@@ -1731,32 +2144,9 @@ fn advance_one_simulation_frame(
                     let runtime = state.match_state.sim_runtime.as_ref();
                     let presentation = &mut state.match_state.match_presentation;
                     let colors = &presentation.house_color_map;
-                    presentation.lasers.create(birth, |owner| {
-                        let Some(runtime) = runtime else {
-                            return [0; 3];
-                        };
-                        let name = runtime.simulation.interner().resolve(owner);
-                        // CreateHouses initializes the two literal special
-                        // houses without ComputeRemap; their +56FC stays0.
-                        if runtime.simulation.session().game_mode_nonzero()
-                            && (name.eq_ignore_ascii_case("Neutral")
-                                || name.eq_ignore_ascii_case("Special"))
-                        {
-                            return [0; 3];
-                        }
-                        let index = colors.get(name).copied().or_else(|| {
-                            colors
-                                .iter()
-                                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-                                .map(|(_, &color)| color)
-                        });
-                        index.map_or([0; 3], |index| {
-                            crate::render::palette_light::house_laser_rgb(
-                                &runtime.resources.rules.house_color_ramps,
-                                index,
-                            )
-                        })
-                    });
+                    presentation
+                        .lasers
+                        .create(birth, |owner| house_laser_rgb(runtime, colors, owner));
                 }
                 LifecycleOutput::ElectricBoltCreated(birth) => {
                     state
@@ -1766,11 +2156,12 @@ fn advance_one_simulation_frame(
                         .create(birth);
                 }
                 LifecycleOutput::RadiationBeamCreated(birth) => {
-                    state
-                        .match_state
-                        .match_presentation
+                    let runtime = state.match_state.sim_runtime.as_ref();
+                    let presentation = &mut state.match_state.match_presentation;
+                    let colors = &presentation.house_color_map;
+                    presentation
                         .radiation_beams
-                        .create(birth);
+                        .create(birth, |owner| house_laser_rgb(runtime, colors, owner));
                 }
                 LifecycleOutput::LineTrailConstructed { stable_id, style } => {
                     let presentation = &mut state.match_state.match_presentation;
@@ -1990,7 +2381,8 @@ pub(crate) fn apply_trigger_effects(state: &mut AppState, effects: &[TriggerEffe
                 }
             }
             TriggerEffect::FlashSidebarCameo {
-                type_id,
+                category,
+                type_index,
                 duration,
                 frame,
             } => {
@@ -2001,7 +2393,8 @@ pub(crate) fn apply_trigger_effects(state: &mut AppState, effects: &[TriggerEffe
                         .match_presentation
                         .sidebar_projection
                         .flash_cameo(
-                            *type_id,
+                            *category,
+                            *type_index,
                             *duration,
                             *frame,
                             runtime.simulation.interner(),
@@ -2033,8 +2426,9 @@ pub(crate) fn update_building_placement_preview(state: &mut AppState) {
         // it is neither an abandon nor a permission to emit another PLACE.
         return;
     }
-    let owner: String = preferred_local_owner(state).unwrap_or_else(|| "Americans".to_string());
-    let (Some(sim), Some(rules)) = (
+    let owner = preferred_local_owner(state);
+    let (Some(owner), Some(sim), Some(rules)) = (
+        owner,
         state
             .match_state
             .sim_runtime
@@ -2088,120 +2482,57 @@ pub(crate) fn update_building_placement_preview(state: &mut AppState) {
         );
 }
 
-/// Refresh entity atlases after entities spawn, die, change type/owner or leave
-/// the display.
+/// Start growing the entity atlases after entities spawn, die, change type or
+/// owner, or leave the display ([`EntityAtlasGrowth::start`]). The rasters run
+/// on workers; [`publish_entity_atlas_growth`] completes them. Reuses the
+/// process asset manager instead of creating a new one (avoids re-opening all
+/// MIX archives from disk).
 ///
-/// This runs on every such event, so the check is per object model, never per
-/// sprite key: a refresh happens only when a voxel model or an object (type,
-/// house colour) appears that the atlas has not collected. The refresh then
-/// renders only those sprites and appends them to a growth page.
-/// Reuses the process asset manager instead of creating a new one (avoids re-opening
-/// all MIX archives from disk).
+/// [`EntityAtlasGrowth::start`]: crate::render::entity_atlas_growth::EntityAtlasGrowth::start
 pub(crate) fn refresh_entity_atlases(state: &mut AppState) {
     let Some(rt) = state.match_state.sim_runtime.as_ref() else {
         return;
     };
-    let sim = &rt.simulation;
-    let bound_rules = Some(&rt.resources.rules);
     let Some(asset_manager) = state.process_assets.manager() else {
         log::warn!("Atlas refresh skipped: no asset manager available");
         return;
     };
-
-    // Check if the unit atlas lacks a voxel model the world now draws.
-    let unit_rebuild = !unit_atlas::atlas_covers_world(
-        state.match_state.match_presentation.unit_atlas.as_ref(),
-        sim.entities(),
-        bound_rules,
-        Some(sim.interner()),
-    );
-
-    // Check if the sprite atlas lacks an object (type, house colour), an
-    // AnimClass colour remap or the harvest overlay the world now draws.
-    let extra_buildings: Vec<&str> =
-        crate::app::frontend::skirmish::deployable_building_types(bound_rules);
-    let anim_remap_keys = sprite_atlas::collect_anim_remap_base_keys(
-        sim,
-        &state.match_state.match_presentation.house_color_map,
-    );
-    let frozen_keys = sprite_atlas::collect_fogged_sprite_keys(
-        sim,
-        &rt.resources.rules,
-        &state.match_state.match_presentation.house_color_map,
-    );
-    let sprite_rebuild = !sprite_atlas::atlas_covers_world(
-        state.match_state.match_presentation.sprite_atlas.as_ref(),
-        sim.entities(),
-        &state.match_state.match_presentation.house_color_map,
-        &extra_buildings,
-        &anim_remap_keys,
-        Some(sim.interner()),
-    ) || !sprite_atlas::atlas_covers_sprite_keys(
-        state.match_state.match_presentation.sprite_atlas.as_ref(),
-        &frozen_keys,
-        bound_rules,
-    );
-
-    if !unit_rebuild && !sprite_rebuild {
-        return;
-    }
-
-    // Growth pages must key on the palettes the load-time pages used.
-    let Some((palette, cell_palette)) = crate::map::theater::load_theater_unit_and_iso_palettes(
-        asset_manager,
-        &state.match_state.match_presentation.theater_name,
-    ) else {
-        log::warn!("Atlas refresh skipped: theater palettes not found");
-        return;
-    };
-
-    if unit_rebuild {
-        log::info!("Refreshing the unit atlas: new voxel models");
-        let existing = state.match_state.match_presentation.unit_atlas.take();
-        if let Some(new_unit_atlas) = unit_atlas::build_unit_atlas(
-            &state.renderer.gpu.device,
-            &state.renderer.gpu.queue,
-            &state.renderer.batch_renderer,
-            sim.entities(),
+    let presentation = &mut state.match_state.match_presentation;
+    presentation.atlas_growth.start(
+        &crate::render::entity_atlas_growth::GrowthSource {
+            sim: &rt.simulation,
+            rules: Some(&rt.resources.rules),
             asset_manager,
-            bound_rules,
-            existing,
-            Some(sim.interner()),
+            house_colors: &presentation.house_color_map,
+            theater_name: &presentation.theater_name,
+            theater_ext: &presentation.theater_ext,
+            max_texture_dimension_2d: state.renderer.gpu.device.limits().max_texture_dimension_2d,
+        },
+        presentation.unit_atlas.as_ref(),
+        presentation.sprite_atlas.as_ref(),
+    );
+}
+
+/// Publish the finished atlas growths before a picture is judged, then start
+/// the growths the world still needs. `wait` blocks until none runs, so
+/// captures draw complete atlases and never depend on worker timing.
+pub(crate) fn publish_entity_atlas_growth(state: &mut AppState, wait: bool) {
+    loop {
+        let gpu = &state.renderer.gpu;
+        let presentation = &mut state.match_state.match_presentation;
+        if !presentation.atlas_growth.publish(
+            &gpu.device,
+            &gpu.queue,
+            &state.renderer.batch_renderer,
+            &mut presentation.unit_atlas,
+            &mut presentation.sprite_atlas,
+            wait,
         ) {
-            state.match_state.match_presentation.unit_atlas = Some(new_unit_atlas);
+            return;
         }
-    }
-
-    if sprite_rebuild {
-        log::info!("Refreshing the sprite atlas: new SHP object types or colour remaps");
-        let existing = state.match_state.match_presentation.sprite_atlas.take();
-        let cell_drawer_type_ids: HashSet<String> = sim
-            .resolved_terrain()
-            .into_iter()
-            .flat_map(|terrain| terrain.tile_animations())
-            .map(|anim| anim.anim_name.to_ascii_uppercase())
-            .collect();
-        if let Some(new_sprite_atlas) = sprite_atlas::build_sprite_atlas(
-            &state.renderer.gpu.device,
-            &state.renderer.gpu.queue,
-            &state.renderer.batch_renderer,
-            sim.entities(),
-            asset_manager,
-            &palette,
-            &state.match_state.match_presentation.theater_ext,
-            &state.match_state.match_presentation.theater_name,
-            bound_rules,
-            bound_rules.map(|rules| rules.art()),
-            &state.match_state.match_presentation.house_color_map,
-            &extra_buildings,
-            &anim_remap_keys,
-            &cell_drawer_type_ids,
-            &frozen_keys,
-            Some(&cell_palette),
-            existing,
-            Some(sim.interner()),
-        ) {
-            state.match_state.match_presentation.sprite_atlas = Some(new_sprite_atlas);
+        refresh_entity_atlases(state);
+        if !wait {
+            return;
         }
     }
 }
@@ -2336,23 +2667,6 @@ pub(crate) fn screen_point_to_world_cell(
     )
 }
 
-pub(crate) fn nearest_walkable_cell(
-    grid: &crate::sim::pathfinding::PathGrid,
-    start: (u16, u16),
-    max_radius: u16,
-) -> Option<(u16, u16)> {
-    grid.nearest_walkable_any_layer(start.0, start.1, max_radius)
-}
-
-pub(crate) fn clamp_cell_to_grid(
-    grid: &crate::sim::pathfinding::PathGrid,
-    cell: (u16, u16),
-) -> (u16, u16) {
-    let max_x = grid.width().saturating_sub(1);
-    let max_y = grid.height().saturating_sub(1);
-    (cell.0.min(max_x), cell.1.min(max_y))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2385,13 +2699,14 @@ mod tests {
             ))
             .unwrap();
         let speed_costs = SpeedCostProfile {
-            foot: Some(100),
-            track: Some(100),
-            wheel: Some(100),
-            float: Some(100),
-            amphibious: Some(100),
-            float_beach: Some(100),
-            hover: Some(100),
+            foot: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            track: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            amphibious: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            float_beach: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
         };
         let terrain = ResolvedTerrainGrid::from_cells(
             1,
@@ -2537,6 +2852,29 @@ mod tests {
                 })
             ),
             (rx, ry)
+        );
+    }
+
+    #[test]
+    fn high_terrain_picking_round_trips_camera_and_zoom() {
+        let cells = (0..32)
+            .flat_map(|ry| {
+                (0..32).map(move |rx| {
+                    let mut cell = ResolvedTerrainCell::clear_for_test(rx, ry);
+                    cell.level = 16;
+                    cell
+                })
+            })
+            .collect();
+        let terrain = ResolvedTerrainGrid::from_cells(32, 32, cells);
+        let camera = (-93.5, 80.25);
+        let zoom = 1.5;
+        let (x, y) = crate::map::terrain::iso_to_screen(16, 16, 16);
+        let screen = ((x + 30.0 - camera.0) * zoom, (y + 15.0 - camera.1) * zoom);
+        let world = super::screen_point_to_world_with_camera(screen, camera, zoom);
+        assert_eq!(
+            world_point_to_cell(world.0, world.1, Some(&terrain)),
+            (16, 16)
         );
     }
 

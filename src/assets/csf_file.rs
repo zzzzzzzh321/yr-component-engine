@@ -45,6 +45,10 @@ pub struct CsfFile {
     // Ares's override hook frees the old value before reading its replacement.
     // A malformed body can therefore leave a registered label with a null value.
     entries: CsfEntries,
+    /// VERA's localization layer (`[VERA] Language=`), searched only for
+    /// labels the table has no text for. Lookup-only: `len`/`entries` still
+    /// describe the loaded files.
+    fallbacks: HashMap<String, CsfText>,
 }
 
 /// Raw diagnostics retain the existing map semantics. The active Ares table
@@ -107,7 +111,14 @@ impl CsfFile {
             0
         };
 
-        let mut entries = HashMap::with_capacity(label_count as usize);
+        // The header counts are validated but are not the loop bound: retail
+        // walks records until the next read/magic check fails. Bound the map
+        // reservation by what the buffer could hold — one entry needs at least
+        // its 12-byte label header plus a 10-byte one-character string value —
+        // so a malformed count cannot steer the allocation before any record
+        // is parsed.
+        let possible_entries = (data.len() / 22) as u32;
+        let mut entries = HashMap::with_capacity(label_count.min(possible_entries) as usize);
         let mut offset: usize = 24;
 
         // Retail walks records until the next read/magic check fails;
@@ -128,6 +139,7 @@ impl CsfFile {
             version,
             language,
             entries: CsfEntries::Raw(entries),
+            fallbacks: HashMap::new(),
         })
     }
 
@@ -272,12 +284,31 @@ impl CsfFile {
             .map(|text| (text.stored_key.as_str(), text.raw.as_str()))
     }
 
+    /// Install VERA's localized text for `key` behind the loaded table: it
+    /// answers only when the table has no text for that label. The text is
+    /// used as written: CSF whitespace normalization is a property of the
+    /// binary table, not of VERA's string files.
+    pub fn set_fallback(&mut self, key: &str, value: &str) {
+        let stored_key = key.to_ascii_uppercase();
+        self.fallbacks.insert(
+            stored_key.clone(),
+            CsfText {
+                value: value.to_owned(),
+                raw: value.to_owned(),
+                stored_key,
+            },
+        );
+    }
+
     fn lookup_text(&self, key: &str) -> Option<&CsfText> {
         let key = key.to_ascii_uppercase();
-        match &self.entries {
-            CsfEntries::Raw(entries) => entries.get(&key)?.as_ref(),
-            CsfEntries::Ares(labels) => labels[native_label_search(labels, &key)?].1.as_ref(),
-        }
+        let loaded = match &self.entries {
+            CsfEntries::Raw(entries) => entries.get(&key).and_then(Option::as_ref),
+            CsfEntries::Ares(labels) => {
+                native_label_search(labels, &key).and_then(|slot| labels[slot].1.as_ref())
+            }
+        };
+        loaded.or_else(|| self.fallbacks.get(&key))
     }
 
     /// Native initialized-table lookup. Missing labels are visible, not an
@@ -574,6 +605,25 @@ fn normalize_whitespace(units: &[u16]) -> Vec<u16> {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
+
+    #[test]
+    fn a_huge_header_label_count_cannot_steer_the_map_reservation() {
+        // 24-byte header claiming u32::MAX labels with no records behind it.
+        // The reservation must come from the file size, not the count: the
+        // count once asked for roughly 833 GB before the first read.
+        let mut data = Vec::with_capacity(25);
+        data.extend_from_slice(&HEADER_MAGIC.to_le_bytes());
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        data.extend_from_slice(&[0; 8]);
+        data.push(0);
+        let parsed = CsfFile::from_bytes(&data).expect("parse walks until reads fail");
+        match parsed.entries {
+            CsfEntries::Raw(entries) => assert!(entries.is_empty()),
+            CsfEntries::Ares(entries) => assert!(entries.is_empty()),
+        }
+    }
 
     /// Encode a string into CSF format (UTF-16-LE then bitwise-NOT).
     pub(super) fn encode_csf_string(s: &str) -> Vec<u8> {

@@ -12,6 +12,8 @@ pub(crate) mod detail;
 pub(crate) mod digital_display;
 pub(crate) mod electric_bolts;
 pub(crate) mod fire_effects;
+#[cfg(feature = "ares")]
+pub(crate) mod flying_credits;
 pub(crate) mod house_ui;
 pub(crate) mod instances;
 pub(crate) mod interpolation;
@@ -38,6 +40,7 @@ pub(crate) mod sw_sidebar;
 #[cfg(feature = "phobos")]
 pub(crate) mod sw_sidebar_build;
 pub(crate) mod super_timers;
+pub(crate) mod tactical_composite;
 pub(crate) mod talk_bubble;
 pub(crate) mod target_lines;
 pub(crate) mod ui_overlays;

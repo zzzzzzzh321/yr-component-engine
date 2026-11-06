@@ -520,6 +520,7 @@ impl Simulation {
             ProjectileCoord::new(at.x, at.y, at.z),
             rules.bridge_rules.strength,
             warhead,
+            true,
             (
                 source.unwrap_or(crate::sim::combat::RAD_NO_ATTACKER),
                 None,
@@ -527,6 +528,7 @@ impl Simulation {
             ),
             effects,
         )
+        .bridge_state_changed
     }
 
     /// `0x0051A738..0x0051A75E`: the land of the NavCom's cell
@@ -554,9 +556,7 @@ impl Simulation {
     /// and draws `RandomRanged(3, 5)`; PTROOP's empty slot answers 1 without
     /// a draw.
     ///
-    /// GetROF's Spark arm reads the same actual +308 link as FireAt.
-    /// RESIDUAL: Fire/Railgun retained links remain unported. No retail
-    /// planter's slot-1 weapon has those flags.
+    /// GetROF's particle arms read the same actual links as FireAt.
     fn rearm_c4_planter(
         interner: &StringInterner,
         session: &ScenarioSession,
@@ -587,10 +587,7 @@ impl Simulation {
             None,
         );
         let burst_index = planter.weapon_burst.index();
-        let live = crate::sim::combat::rof::LiveParticles {
-            spark: planter.spark_particle_system.system().is_some(),
-            ..Default::default()
-        };
+        let live = planter.live_particles();
         let rof = crate::sim::combat::world_fire::snapshot_get_rof(
             scenario_rng,
             &*substrate,

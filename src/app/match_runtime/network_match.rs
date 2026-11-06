@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::app::AppState;
 use crate::app::match_runtime::session::{MatchSession, SessionMode, WallBucketTimer};
-use crate::net::live_commands::{LiveCommandMode, LiveWaitInfo, LiveWaitKind};
+use crate::net::live_commands::{LiveCommandMode, LiveWaitInfo, LiveWaitKind, MatchSpeedChange};
 use crate::sim::intern::InternedId;
 use crate::sim::world::Simulation;
 use crate::ui::lan_shell::LanChatLine;
@@ -27,7 +27,7 @@ pub(crate) fn frame_budget(state: &AppState) -> Option<(u16, u32)> {
         .match_state
         .live_network
         .as_ref()
-        .and_then(|live| live.fixed_frames_per_second())
+        .and_then(|live| live.relay_frames_per_second())
     {
         return Some((fps, 0));
     }
@@ -68,10 +68,13 @@ impl ConnectionError {
 }
 
 /// The line DestroyConnection posts for a destroyed connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConnectionDestroyed {
     pub(crate) owner: InternedId,
     pub(crate) key: &'static str,
+    /// VERA shared control: the player who left a House others share,
+    /// named in place of the House.
+    pub(crate) player: Option<String>,
 }
 
 /// What a controlled peer did during the match, decoded from its packets.
@@ -137,6 +140,11 @@ pub(crate) fn destroy_connection(
     let startup_pending = live
         .as_ref()
         .is_some_and(|(live, _)| live.startup_pending());
+    // In relay-ordered play the committed departure already carried the shared
+    // EVENT_REMOVEPLAYER; only this client's connection and line remain.
+    let sequenced = live
+        .as_ref()
+        .is_some_and(|(live, _)| live.uses_sequenced_lockstep());
     if !session.disconnect_network_participant(source_index, error.code()) {
         return None;
     }
@@ -152,9 +160,11 @@ pub(crate) fn destroy_connection(
         //the reason-specific effects. Progress shares that connection's life.
         live.remove_peer(house);
     }
-    if error == ConnectionError::Lost && !startup_pending {
+    // VERA shared control: a House a connected teammate still controls stays.
+    let teammate = session.network_teammate_connected(source_index);
+    if error == ConnectionError::Lost && !startup_pending && !sequenced {
         let frame = sim.session().binary_frame();
-        if frame == 0 && sim.session().network_command_timing().is_none() {
+        if frame == 0 && sim.session().network_command_timing().is_none() && !teammate {
             sim.flag_house_to_die(owner);
         }
         // VERA UDP/relay adaptation: native5DA86A..5DA87A only flags at zero.
@@ -164,29 +174,38 @@ pub(crate) fn destroy_connection(
         if frame != 0 || sim.session().network_command_timing().is_some() {
             // EVENT_REMOVEPLAYER from PlayerPtr with the House's index
             // (0x005DA898..0x005DA8F0); it kills the House on every peer.
+            // VERA shared control: the lost participant's sender, which is
+            // that index unless players share Houses.
             let local = sim.session().current_house();
-            let index = sim.houses().index_of(owner);
-            if let (Some(local), Some(index)) = (local, index) {
+            let sender = source_house(session, sim, source_index);
+            if let (Some(local), Some(sender)) = (local, sender) {
                 let local = sim.interner().resolve(local).to_string();
                 crate::app::input::commands::schedule_command_in_sim(
                     sim,
                     &local,
-                    crate::sim::command::Command::RemovePlayer {
-                        house_index: index as i32,
-                    },
+                    crate::sim::command::Command::RemovePlayer { source: sender },
                 );
             }
         }
     }
     // 0x005DA8F7..0x005DA90F: a WOL tournament game kills the House of a
-    // player who left (error 0). RESIDUAL: mode 4's ladder-stats call
-    // (0x005DA921..) is backend.
-    if !startup_pending && error == ConnectionError::Left && sim.session().wol_tournament_game() {
+    // player who left (error 0). An executed EXIT ran this in the sim's EXIT
+    // block. RESIDUAL: mode 4's ladder-stats call (0x005DA921..) is backend.
+    if !startup_pending
+        && error == ConnectionError::Left
+        && !teammate
+        && sim.session().wol_tournament_game()
+        && !sim
+            .houses()
+            .get(&owner)
+            .is_some_and(|house| house.left_game())
+    {
         sim.flag_house_to_die(owner);
     }
     Some(ConnectionDestroyed {
         owner,
         key: error.csf_key(),
+        player: shared_house_player_name(session, source_index),
     })
 }
 
@@ -214,31 +233,120 @@ pub(crate) fn receive_departure(
 /// DestroyConnection's line (`0x005DA7A9..0x005DA83E`): the template with the
 /// House's UI name, in its HouseType's `Color=` scheme (`[[House+0x34]+0xC0]`).
 pub(crate) fn post_connection_line(state: &mut AppState, destroyed: ConnectionDestroyed) {
-    crate::app::input::messages::post_house_line(
-        state,
-        destroyed.key,
-        destroyed.owner,
-        crate::app::input::messages::HouseLineColor::Country,
-    );
+    let color = crate::app::input::messages::HouseLineColor::Country;
+    match destroyed.player {
+        Some(player) => crate::app::input::messages::post_player_house_line(
+            state,
+            destroyed.key,
+            destroyed.owner,
+            &player,
+            color,
+        ),
+        None => crate::app::input::messages::post_house_line(
+            state,
+            destroyed.key,
+            destroyed.owner,
+            color,
+        ),
+    }
 }
 
 /// The executed EXIT events of remote senders this frame: each runs
-/// DestroyConnection(house, 0) (`0x0064C9B1`).
+/// DestroyConnection(house, 0) (`0x0064C9B1`). Remote sources the relay ended
+/// for silence run DestroyConnection(house, 1) after their EVENT_REMOVEPLAYER.
 pub(crate) fn drain_departures(state: &mut AppState) {
     let Some(runtime) = state.match_state.sim_runtime.as_mut() else {
         return;
     };
-    let departed = runtime.simulation.take_departed_owners();
-    for owner in departed {
+    let departed = runtime.simulation.take_departed_senders();
+    for sender in departed {
         let Some(runtime) = state.match_state.sim_runtime.as_ref() else {
             return;
         };
-        let sim = &runtime.simulation;
-        let name = sim.interner().resolve(owner).to_string();
-        let Some(source) = state.match_state.session.network_owner_source(&name) else {
+        let Some(source) = house_source(
+            &state.match_state.session,
+            &runtime.simulation,
+            i32::from(sender),
+        ) else {
             continue;
         };
         kick(state, source, ConnectionError::Left);
+    }
+    let lost = state
+        .match_state
+        .live_network
+        .as_mut()
+        .map(|live| live.take_lost_houses())
+        .unwrap_or_default();
+    for house in lost {
+        let Some(runtime) = state.match_state.sim_runtime.as_ref() else {
+            return;
+        };
+        let Some(source) = house_source(
+            &state.match_state.session,
+            &runtime.simulation,
+            i32::from(house),
+        ) else {
+            continue;
+        };
+        kick(state, source, ConnectionError::Lost);
+    }
+}
+
+/// The relay's rate changes in frames dispatched so far, one chat line each.
+/// The relay slows a match whose player's PC cannot keep up; native lockstep
+/// slows to its slowest player without a line.
+pub(crate) fn post_speed_changes(state: &mut AppState) {
+    let changes = state
+        .match_state
+        .live_network
+        .as_mut()
+        .map(|live| live.take_speed_changes())
+        .unwrap_or_default();
+    for change in changes {
+        let text = match change {
+            MatchSpeedChange::SlowedBy(house) => {
+                state.match_state.network_quality.record_slowdown(house);
+                let Some(runtime) = state.match_state.sim_runtime.as_ref() else {
+                    return;
+                };
+                let name = house_source(
+                    &state.match_state.session,
+                    &runtime.simulation,
+                    i32::from(house),
+                )
+                .map(|source| participant_name(&state.match_state.session, source))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "A player".to_owned());
+                format!("{name} is slowing the game down.")
+            }
+            MatchSpeedChange::Normal => "Game speed is back to normal.".to_owned(),
+        };
+        crate::app::input::messages::post_match_speed(state, &text);
+    }
+}
+
+/// VERA: once this game reaches a pause that found it catching up, it tells
+/// everyone in chat, so whoever resumes knows the match can go on. A player
+/// leaving or already defeated keeps quiet.
+pub(crate) fn post_caught_up(state: &mut AppState) {
+    let reached = state.match_state.multiplayer_paused();
+    let Some((frame, defeated)) = state.match_state.sim_runtime.as_ref().map(|runtime| {
+        (
+            runtime.simulation.session().binary_frame(),
+            runtime.simulation.local_player_defeated(),
+        )
+    }) else {
+        return;
+    };
+    let caught_up =
+        state.match_state.live_network.as_mut().is_some_and(|live| {
+            live.take_caught_up_in_pause(reached, frame) && !live.exit_requested()
+        });
+    if caught_up && !defeated {
+        let text =
+            crate::i18n::text(state.process_assets.csf.as_ref(), "VERA:CaughtUp").into_owned();
+        crate::app::input::chat::send_to_all(state, &text);
     }
 }
 
@@ -313,11 +421,7 @@ pub(crate) fn service_event(state: &mut AppState, event: NetworkMatchEvent) -> a
                 .retain(|peer| peer.source_index != source_index);
         }
         NetworkMatchEvent::KickVote { voter, target } => {
-            state
-                .match_state
-                .network_wait
-                .received_votes
-                .push_back((voter, target));
+            state.match_state.network_wait.queue_vote(voter, target);
         }
         NetworkMatchEvent::PeerAlly {
             source_index,
@@ -451,6 +555,14 @@ enum WaitTimeout {
 }
 
 impl NetworkMatchWait {
+    /// One dialog pass consumes one queued vote, so a repeated proposal is
+    /// queued once: a peer resending its vote cannot push others' back.
+    fn queue_vote(&mut self, voter: usize, target: usize) {
+        if !self.received_votes.contains(&(voter, target)) {
+            self.received_votes.push_back((voter, target));
+        }
+    }
+
     fn observe_live_wait(&mut self, info: LiveWaitInfo) {
         if self
             .wait
@@ -563,6 +675,17 @@ pub(crate) fn nodes(session: &MatchSession) -> Vec<usize> {
         .collect()
 }
 
+/// VERA shared control: participant `source_index`'s own name when it
+/// shares its House, which names a House's only player.
+pub(crate) fn shared_house_player_name(
+    session: &MatchSession,
+    source_index: usize,
+) -> Option<String> {
+    let owner = session.network_source_owner(source_index)?;
+    (session.network_owner_sources(&owner).len() > 1)
+        .then(|| participant_name(session, source_index))
+}
+
 pub(crate) fn participant_name(session: &MatchSession, source_index: usize) -> String {
     session
         .network_setup()
@@ -571,19 +694,31 @@ pub(crate) fn participant_name(session: &MatchSession, source_index: usize) -> S
         .unwrap_or_default()
 }
 
+/// Participant `source`'s network "house" id: its constructed House's
+/// index. VERA shared control: while players share Houses, each sends as its
+/// own source instead.
 pub(crate) fn source_house(session: &MatchSession, sim: &Simulation, source: usize) -> Option<i32> {
-    let name = session.network_source_owner(source)?;
-    let owner = sim.interner().get(&name)?;
-    sim.houses()
-        .order()
-        .iter()
-        .position(|candidate| *candidate == owner)
-        .and_then(|index| i32::try_from(index).ok())
+    let owner = sim.interner().get(&session.network_source_owner(source)?)?;
+    let index = sim.houses().index_of(owner)?;
+    if !sim.session().shares_houses() {
+        return i32::try_from(index).ok();
+    }
+    let sender = session.network_source_sender(source)?;
+    (sim.session().network_source_house(sender) == Some(index)).then_some(i32::from(sender))
 }
 
+/// The participant whose network "house" id is `house`.
 pub(crate) fn house_source(session: &MatchSession, sim: &Simulation, house: i32) -> Option<usize> {
-    let owner = sim.houses().order().get(usize::try_from(house).ok()?)?;
-    session.network_owner_source(sim.interner().resolve(*owner))
+    if !sim.session().shares_houses() {
+        let owner = sim.houses().order().get(usize::try_from(house).ok()?)?;
+        return session
+            .network_owner_sources(sim.interner().resolve(*owner))
+            .first()
+            .copied();
+    }
+    let sender = i8::try_from(house).ok()?;
+    sim.session().network_source_house(sender)?;
+    session.network_sender_source(sender)
 }
 
 /// Numeric projections only: never format transports, endpoints, errors or
@@ -676,15 +811,26 @@ pub(crate) fn encode_kick_proposal(
 pub(crate) fn decode_kick_proposal(
     session: &MatchSession,
     sim: &Simulation,
+    sender: std::net::SocketAddrV4,
     packet: &[u8],
 ) -> Option<NetworkMatchEvent> {
     if packet.len() != 455 || packet[..4] != 0x1c_u32.to_le_bytes() {
         return None;
     }
     let target = i32::from_le_bytes(packet[0x2f..0x33].try_into().ok()?);
-    let voter = i32::from_le_bytes(packet[0x33..0x37].try_into().ok()?);
+    let voter = house_source(
+        session,
+        sim,
+        i32::from_le_bytes(packet[0x33..0x37].try_into().ok()?),
+    )?;
+    // VERA transport security: 649120 trusts the voter field, so one peer
+    // could vote as every other node and reach the nodeCount - 1 kick
+    // tally alone. Only the sender's own authenticated endpoint votes.
+    if session.network_endpoint_source(sender) != Some(voter) {
+        return None;
+    }
     Some(NetworkMatchEvent::KickVote {
-        voter: house_source(session, sim, voter)?,
+        voter,
         target: house_source(session, sim, target)?,
     })
 }
@@ -965,6 +1111,21 @@ pub(crate) fn service_wait(state: &mut AppState, now_ms: u64) -> WaitPass {
     // framing cannot substitute a controlled-service progress row for it.
     let live = state.match_state.live_network.is_some();
     if live {
+        let frame = state
+            .match_state
+            .sim_runtime
+            .as_ref()
+            .map_or(0, |rt| rt.simulation.session().binary_frame());
+        if state
+            .match_state
+            .live_network
+            .as_ref()
+            .is_some_and(|live| exit_awaits_unreachable_relay(live, now_ms as u32, frame))
+        {
+            log::warn!("The relay is unreachable; leaving without the queued EXIT");
+            state.match_state.network_wait.wait = None;
+            return WaitPass::Leave;
+        }
         let info = state
             .match_state
             .live_network
@@ -1121,6 +1282,25 @@ pub(crate) fn service_wait(state: &mut AppState, now_ms: u64) -> WaitPass {
         return WaitPass::Running;
     }
     WaitPass::Waiting
+}
+
+/// VERA relay adaptation: Abort's EXIT reaches the other players only once
+/// the relay sequences it, none is submitted before the relay starts the
+/// match, and silence never fails a relay match. While a confirmed EXIT waits
+/// on an unreachable relay, the player leaves by Quit Game's route instead;
+/// the returned transport's relay Leave departs this source in the others'
+/// timeline. Dialog 0xEA stays off relay waits: its timeout and votes remove
+/// peers locally (`0x0064B410`), which only the relay may do in a relay match.
+fn exit_awaits_unreachable_relay(
+    live: &crate::net::live_commands::LiveCommandSession,
+    now_millis: u32,
+    frame: u32,
+) -> bool {
+    // A rejoining process submits nothing until it has caught up.
+    live.exit_requested()
+        && (live.restoring_match()
+            || live.recovery_status(now_millis, frame)
+                == Some(crate::net::live_commands::NetworkRecoveryStatus::Reconnecting))
 }
 
 /// Quit Game 2 (`0x0064AE50` WM_COMMAND 2): the result cell becomes 2 and
@@ -1387,12 +1567,13 @@ mod tests {
         guest.name = "G\u{0100}uest".into();
         guest.raw_slot_index = Some(1);
         guest.slot.color_index = 2;
+        guest.slot.start_position = crate::skirmish_launch::LaunchStartPosition::Auto;
         launch.humans.push(guest);
         launch.local_player_index = 1;
         let mut session = MatchSession::default();
         session.enter_network(super::super::session::NetworkReturnContext::LanLobby);
         session
-            .accept_network_setup(launch, false, Some(7))
+            .accept_network_setup(launch, false, Some(7), false)
             .unwrap();
         let mut sim = Simulation::new();
         // Deliberately distinct participant and native House ordering.
@@ -1413,27 +1594,46 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_kick_proposal_is_queued_once() {
+        let mut wait = NetworkMatchWait::default();
+        for _ in 0..3 {
+            wait.queue_vote(1, 0);
+        }
+        wait.queue_vote(2, 0);
+        assert_eq!(wait.received_votes, [(1, 0), (2, 0)]);
+    }
+
+    #[test]
     fn global_kick_codec_uses_native_house_ids_and_existing_string_conversion() {
-        let (session, sim) = vote_fixture();
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        let (mut session, sim) = vote_fixture();
+        let voter = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 30121);
+        let other = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 30122);
+        for (source, endpoint) in [(1, voter), (0, other)] {
+            let name = session.network_source_owner(source).unwrap();
+            session.bind_network_endpoint(&name, endpoint).unwrap();
+        }
         let packet = encode_kick_proposal(&session, &sim, 0).unwrap();
         assert_eq!(&packet[..4], &0x1c_u32.to_le_bytes());
         assert_eq!(&packet[4..7], b"G\0\0");
         assert_eq!(&packet[0x2f..0x33], &1_i32.to_le_bytes());
         assert_eq!(&packet[0x33..0x37], &0_i32.to_le_bytes());
         assert_eq!(
-            decode_kick_proposal(&session, &sim, &packet),
+            decode_kick_proposal(&session, &sim, voter, &packet),
             Some(NetworkMatchEvent::KickVote {
                 voter: 1,
                 target: 0
             })
         );
-        assert!(decode_kick_proposal(&session, &sim, &packet[..54]).is_none());
+        // Another node cannot cast source 1's vote.
+        assert!(decode_kick_proposal(&session, &sim, other, &packet).is_none());
+        assert!(decode_kick_proposal(&session, &sim, voter, &packet[..54]).is_none());
         let mut invalid = packet;
         invalid[0x2f..0x33].copy_from_slice(&(-1_i32).to_le_bytes());
-        assert!(decode_kick_proposal(&session, &sim, &invalid).is_none());
+        assert!(decode_kick_proposal(&session, &sim, voter, &invalid).is_none());
         invalid = packet;
         invalid[0] = 0x19;
-        assert!(decode_kick_proposal(&session, &sim, &invalid).is_none());
+        assert!(decode_kick_proposal(&session, &sim, voter, &invalid).is_none());
     }
 
     #[test]
@@ -1541,7 +1741,9 @@ mod tests {
             let (mut session, mut sim) = vote_fixture();
             let launch = session.network_setup().unwrap().clone();
             session.enter_network(super::super::session::NetworkReturnContext::Wol);
-            session.accept_network_setup(launch, false, None).unwrap();
+            session
+                .accept_network_setup(launch, false, None, false)
+                .unwrap();
             session.prepare_wol_timing([0; 2], false).unwrap();
             let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 30125);
             let remote_name = session.network_setup().unwrap().humans[0].name.clone();
@@ -1656,6 +1858,149 @@ mod tests {
         }
     }
 
+    /// A started two-player WOL relay match whose relay never answers.
+    fn relay_fixture() -> (
+        MatchSession,
+        Simulation,
+        crate::net::live_commands::LiveCommandSession,
+    ) {
+        use crate::net::reliable::{LanConnectionConfig, LanConnections, RetryTiming};
+        use crate::net::udp::test_support::{SecretKey, derive_packet_key};
+        use crate::net::udp::{
+            LanUdpTransport, OrderingCertificate, RelayTicket, UdpBindConfig, relay_peer_endpoint,
+        };
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        use std::num::{NonZeroU8, NonZeroU32};
+
+        let (mut session, mut sim) = vote_fixture();
+        let launch = session.network_setup().unwrap().clone();
+        session.enter_network(super::super::session::NetworkReturnContext::Wol);
+        session
+            .accept_network_setup(launch, false, None, false)
+            .unwrap();
+        session.prepare_wol_timing([0; 2], false).unwrap();
+        let remote_name = session.network_setup().unwrap().humans[0].name.clone();
+        let endpoint = relay_peer_endpoint(0).unwrap();
+        session
+            .bind_network_endpoint(&remote_name, endpoint)
+            .unwrap();
+        session.freeze_network_start(19).unwrap();
+        let local = sim.houses().order()[0];
+        sim.session_mut_for_test().set_game_mode(SessionMode::Wol);
+        sim.session_mut_for_test()
+            .set_current_house_for_test(Some(local));
+        sim.install_network_timing(session.network_max_ahead_frames().unwrap());
+        sim.network_command_queues()
+            .install_timing(1, NonZeroU8::new(1).unwrap(), [0, 1]);
+        let key = SecretKey::new([5; 32]);
+        let ticket = RelayTicket {
+            room: [3; 16],
+            source: 1,
+            expires: u64::MAX / 2,
+            nonce: [2; 16],
+            player: [2; 16],
+            generation: 1,
+        }
+        .sign(&key)
+        .unwrap();
+        let mut connections = LanConnections::new(
+            LanConnectionConfig::default(),
+            RetryTiming::LAN_GUEST_COMPLETED_GLOBAL,
+        );
+        connections.add_peer(1, endpoint).unwrap();
+        let bind = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
+        let mut transport = LanUdpTransport::bind(
+            UdpBindConfig {
+                primary: bind,
+                alternate: bind,
+            },
+            connections,
+        )
+        .unwrap();
+        transport
+            .enable_relay(
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9),
+                &ticket,
+                *derive_packet_key(&key, &ticket).expose_for_https(),
+                [6; 32],
+            )
+            .unwrap();
+        let certificate = OrderingCertificate {
+            room: [3; 16],
+            sources_mask: 0b11,
+            tick_hz: 30,
+            expires: u64::MAX / 2,
+            pacing: Default::default(),
+        }
+        .sign(&key)
+        .unwrap();
+        transport
+            .set_ordering_certificate(certificate.to_vec())
+            .unwrap();
+        let mut live = crate::net::live_commands::LiveCommandSession::new(
+            crate::net::live_commands::StartupAgreement::new(
+                [(0, 1), (1, 0)],
+                [0, 1],
+                19,
+                10,
+                30,
+                NonZeroU32::new(1).unwrap(),
+                sim.state_hash(),
+            )
+            .unwrap(),
+            transport,
+            0,
+            19,
+            NonZeroU32::new(1).unwrap(),
+            LiveCommandMode::Wol,
+        )
+        .unwrap();
+        assert!(live.uses_sequenced_lockstep());
+        live.mark_sequenced_started_for_test();
+        (session, sim, live)
+    }
+
+    /// A confirmed Abort's EXIT needs the relay, also when it was queued
+    /// before the relay fell silent; after three silent seconds it leaves.
+    #[test]
+    fn a_queued_exit_leaves_only_once_the_relay_is_unreachable() {
+        let (_, _, mut live) = relay_fixture();
+        live.service_transport(0);
+        assert!(!exit_awaits_unreachable_relay(&live, 3_001, 0));
+        live.keep_running_for_exit();
+        assert!(!exit_awaits_unreachable_relay(&live, 3_000, 0));
+        assert!(exit_awaits_unreachable_relay(&live, 3_001, 0));
+    }
+
+    /// Relay-ordered play: the committed departure already carried the shared
+    /// EVENT_REMOVEPLAYER, so DestroyConnection retires only this client's
+    /// connection and posts its line.
+    #[test]
+    fn relay_connection_loss_only_retires_the_local_connection() {
+        let (mut session, mut sim, mut live) = relay_fixture();
+        let remote = sim.houses().order()[1];
+        let removed = destroy_connection(
+            &mut session,
+            &mut sim,
+            0,
+            ConnectionError::Lost,
+            Some(&mut live),
+        )
+        .unwrap();
+        assert_eq!(removed.owner, remote);
+        assert_eq!(removed.key, "TXT_CONNECTION_LOST");
+        assert_eq!(session.network_connected_source_indices(), &[1]);
+        assert!(live.connections().peers().next().is_none());
+        assert!(!sim.houses()[&remote].is_to_die());
+        assert!(
+            sim.network_command_queues()
+                .local_records()
+                .unwrap()
+                .is_empty(),
+            "a local EVENT_REMOVEPLAYER cannot enter the relay stream"
+        );
+    }
+
     #[test]
     fn asymmetric_initial_vote_aborts_without_certifying_different_worlds() {
         use crate::net::live_commands::{
@@ -1699,11 +2044,14 @@ mod tests {
             third.name = "Third".into();
             third.raw_slot_index = Some(2);
             third.slot.color_index = 3;
+            third.slot.start_position = crate::skirmish_launch::LaunchStartPosition::Auto;
             launch.humans.push(third);
             launch.local_player_index = local_source;
             let mut session = MatchSession::default();
             session.enter_network(super::super::session::NetworkReturnContext::Wol);
-            session.accept_network_setup(launch, false, None).unwrap();
+            session
+                .accept_network_setup(launch, false, None, false)
+                .unwrap();
             let name = session.network_source_owner(2).unwrap();
             let owner = sim.intern(&name);
             sim.houses_mut_for_test()

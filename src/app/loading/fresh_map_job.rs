@@ -13,10 +13,16 @@ pub(crate) struct FreshMapLoadServices<'a> {
     pub(crate) prepared_noncampaign_prefix:
         &'a mut Option<crate::rules::process_owner::NativeNonCampaignPrefixPreparation>,
     pub(crate) audio: Option<&'a crate::app::process_assets::ProcessAudioCatalog>,
+    pub(crate) themes: Option<&'a crate::rules::theme_ini::ThemeCatalog>,
     pub(crate) shared_cell_dummy: crate::map::resolved_terrain::SharedCellDummy,
     pub(crate) tile_variant_selector_cache:
         &'a mut crate::map::tile_variant_selector::TileVariantSelectorCache,
     pub(crate) progress: &'a mut dyn crate::app::loading::pump::LoadingProgressSink,
+    /// `[VERA] HouseColorStrength=`: how strongly this battle's `[Colors]`
+    /// team-color bands are boosted. Presentation only, read once while the
+    /// world's colours are built, so the atlas, the voxel ramp texture, the
+    /// radar dots and the target lines all share one table.
+    pub(crate) house_color_strength: u8,
 }
 
 pub(super) struct FreshMapLoadContinuation {

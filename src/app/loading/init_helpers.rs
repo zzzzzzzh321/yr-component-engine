@@ -22,14 +22,11 @@ use crate::render::tile_atlas::{self, TileAtlas};
 use crate::render::unit_atlas::{self, UnitAtlas};
 use crate::rules::effect_asset_catalog::tolerant_anim_class_roots;
 use crate::rules::ini_parser::IniFile;
-use crate::rules::process_owner::NativeRulesProcessOwner;
 #[cfg(test)]
 use crate::rules::retail_sources::load_startup_rules;
 use crate::rules::ruleset::RuleSet;
 
 use crate::sim::world::Simulation;
-
-use crate::app::frontend::skirmish::deployable_building_types;
 
 pub(crate) fn build_sidebar_cameo_atlas(
     gpu: &GpuContext,
@@ -95,6 +92,17 @@ pub(crate) fn load_sidebar_cameo_palette(asset_manager: &AssetManager) -> Option
     }
     log::warn!("Sidebar cameo palette not found");
     None
+}
+
+/// `RA2_DEBUG_SPAWN_UNITS` owner: the scenario's current House (`A83D4C`), so
+/// every run spawns for the local player. A world without one has no player to
+/// own the spawn, and the spawn is skipped.
+pub(crate) fn debug_spawn_owner(sim: &Simulation) -> Option<String> {
+    let owner = crate::app::match_runtime::state::scenario_local_owner(sim).map(str::to_owned);
+    if owner.is_none() {
+        log::warn!("RA2_DEBUG_SPAWN_UNITS ignored: the scenario has no current House");
+    }
+    owner
 }
 
 /// `RA2_DEBUG_SPAWN_UNITS` stress spawn list: `TYPE` places one, `TYPE:COUNT`
@@ -304,36 +312,6 @@ pub(crate) fn load_rules_with_prefix_for_test(
     Some((rules, processed_ini, fixed_art_ini, receipt))
 }
 
-/// Resolve the neutral tech buildings the random map generator may place.
-///
-/// The type list lives in `[AI] NeutralTechBuildings` and each footprint in
-/// `Foundation=`, so RULESMD/LANGRULE and fixed ARTMD are both needed.
-/// An unavailable INI yields an empty catalog, which the placement phase
-/// treats as "place nothing" rather than as an error.
-pub(crate) fn load_neutral_tech_types(
-    owner: Option<&NativeRulesProcessOwner>,
-) -> Vec<crate::map::rmg::phases::tech_buildings::TechType> {
-    let Some(owner) = owner else {
-        log::warn!("random map: startup rules/art unavailable; placing no neutral tech buildings");
-        return Vec::new();
-    };
-    let Ok(processed) = owner.startup_compatibility_projection() else {
-        log::warn!(
-            "random map: startup rules projection failed; placing no neutral tech buildings"
-        );
-        return Vec::new();
-    };
-    let types = crate::map::rmg::tech_catalog::resolve(
-        processed.neutral_tech_buildings(),
-        owner.fixed_art(),
-    );
-    log::info!(
-        "random map: resolved {} neutral tech building type(s)",
-        types.len()
-    );
-    types
-}
-
 /// Install the process-selected ART metadata before terrain construction or
 /// saved-cell rebinding. RulesLoad675210 restores type state, while the
 /// hierarchy/theater loaders rebind resident images (LoadContent67E730).
@@ -354,11 +332,13 @@ pub(crate) fn bind_rules_art_metadata(
 /// complete retained scheduler closure, including authored animations that
 /// have since expired, rather than constructing their objects again. The
 /// Terrain phase preserves the distinct fresh/saved shape residency.
+/// Map-authored trigger and script animations bind tolerantly; the ones that
+/// bind join that closure.
 pub(crate) fn bind_rules_asset_closure(
     rules: &mut RuleSet,
-    fixed_art: &IniFile,
     overlay_registry: &crate::rules::overlay_types::OverlayTypeRegistry,
     roots: &[String],
+    authored_anim_roots: &[String],
     assets: &AssetManager,
     theater_ext: &str,
     theater_name: &str,
@@ -369,14 +349,12 @@ pub(crate) fn bind_rules_asset_closure(
     let tolerant_roots = tolerant_anim_class_roots(rules);
     let unbound = rules.bind_anim_class_assets(&tolerant_roots, assets, theater_ext, theater_name);
     crate::rules::effect_asset_catalog::log_unbound_combat_explosion_roots(unbound);
+    rules.bind_anim_class_assets(authored_anim_roots, assets, theater_ext, theater_name);
     rules.bind_effect_assets(assets, theater_ext, theater_name);
     rules.bind_building_buildup_assets(assets, theater_name);
     rules.bind_building_rubble_assets(assets, theater_ext, theater_name);
     rules.bind_terrain_assets(assets, theater_ext, terrain_phase);
-    let _alpha_image_bindings =
-        crate::rules::alpha_image_assets::bind(rules, overlay_registry, assets);
-    let sequences = crate::rules::infantry_sequence::parse_infantry_sequence_registry(fixed_art);
-    rules.bind_animation_sequences(&sequences);
+    rules.bind_alpha_images(overlay_registry, assets);
     Ok(())
 }
 
@@ -401,9 +379,7 @@ pub(crate) fn startup_crate_anim_remap_keys(
         let tiberium = overlay_registry
             .tiberium_type_for_overlay(&rules.tiberium_types, overlay_id)
             .and_then(|type_id| rules.tiberium_types.get(type_id))?;
-        let color = tiberium.color.as_deref()?;
-        let entry = crate::rules::color_scheme::scheme_entry_by_name(&rules.color_schemes, color)?;
-        let color = u8::try_from(entry)
+        let color = u8::try_from(tiberium.color_scheme() / 2)
             .ok()
             .map(crate::rules::house_colors::HouseColorIndex)?;
         Some((
@@ -530,21 +506,14 @@ pub(crate) fn prepare_presentation_manifest(
             Some(sim.interner()),
         )
     });
-    // Pre-load building types that can be spawned at runtime (e.g., ConYards from MCV deploy).
-    let extra_buildings: Vec<&str> = deployable_building_types(rules);
-    let mut anim_remap_keys = sprite_atlas::collect_anim_remap_base_keys(sim, house_colors);
+    // Mid-match growth collects the same coverage; only the scenario-start
+    // crate remaps are load-only.
+    let mut coverage = sprite_atlas::EntityAtlasCoverage::collect(sim, rules, house_colors);
     if let Some(rules) = rules {
-        anim_remap_keys.extend(startup_crate_anim_remap_keys(rules, overlay_registry));
+        coverage
+            .anim_remap_keys
+            .extend(startup_crate_anim_remap_keys(rules, overlay_registry));
     }
-    let cell_drawer_type_ids: HashSet<String> = sim
-        .resolved_terrain()
-        .into_iter()
-        .flat_map(|terrain| terrain.tile_animations())
-        .map(|anim| anim.anim_name.to_ascii_uppercase())
-        .collect();
-    let frozen_keys = rules.map_or_else(HashSet::new, |rules| {
-        sprite_atlas::collect_fogged_sprite_keys(sim, rules, house_colors)
-    });
     let sprite_work = palette.map(|pal| {
         sprite_atlas::prepare_sprite_atlas(
             gpu.device.limits().max_texture_dimension_2d,
@@ -556,10 +525,10 @@ pub(crate) fn prepare_presentation_manifest(
             rules,
             art,
             house_colors,
-            &extra_buildings,
-            &anim_remap_keys,
-            &cell_drawer_type_ids,
-            &frozen_keys,
+            &coverage.extra_buildings,
+            &coverage.anim_remap_keys,
+            &coverage.cell_drawer_type_ids,
+            &coverage.frozen_keys,
             theater_iso_palette,
             None, // initial build — no existing cache
             Some(sim.interner()),
@@ -626,10 +595,18 @@ pub(crate) fn finish_presentation_assets(
     }
     let sidebar_cameo_atlas = build_sidebar_cameo_atlas(gpu, batch, asset_manager, Some(rules));
     #[cfg(feature = "phobos")]
-    let sw_sidebar_ui = asset_manager
-        .get_ref("UIMD.INI")
+    let uimd_bytes = asset_manager.get_ref("UIMD.INI");
+    #[cfg(feature = "phobos")]
+    let sw_sidebar_ui = uimd_bytes
         .map(crate::rules::phobos_sw_sidebar::SuperWeaponSidebarUi::from_uimd_bytes)
         .unwrap_or_default();
+    // The same loaded `uimd.ini` carries the pause-menu switch; Phobos reads
+    // both from `[Sidebar]` at startup.
+    #[cfg(feature = "phobos")]
+    let center_pause_menu_background = uimd_bytes
+        .map(crate::rules::phobos_pause_menu::PauseMenuUi::from_uimd_bytes)
+        .unwrap_or_default()
+        .center_background;
     #[cfg(feature = "phobos")]
     let sw_sidebar_art = sw_sidebar_ui
         .enabled
@@ -673,6 +650,35 @@ pub(crate) fn finish_presentation_assets(
     } else {
         None
     };
+    // `[EndGameScreens]` may name the local player's own country a win/lose
+    // card. It takes the retail `GRFXTXT` banner's slot in the tactical
+    // viewport, so it is built with the world like the banner art above; the
+    // player's Custom End Game Banner switch is read when it is drawn.
+    let end_game_banner = {
+        let country = simulation
+            .session()
+            .current_house()
+            .and_then(|house| simulation.houses().get(&house))
+            .and_then(|house| house.country())
+            .map(|country| simulation.resolve(country).to_owned());
+        match country {
+            Some(country) => crate::app::presentation::outcome_banner::EndGameBanner::build(
+                gpu,
+                batch,
+                asset_manager,
+                rules.end_game_screens(),
+                &country,
+            ),
+            None => {
+                if !rules.end_game_screens().is_empty() {
+                    log::warn!(
+                        "[EndGameScreens]: no local country at load; the retail end-game banner stays"
+                    );
+                }
+                None
+            }
+        }
+    };
     let fnt_file = asset_manager.get_ref("GAME.FNT").and_then(|data| {
         crate::assets::fnt_file::FntFile::from_bytes(data)
             .map_err(|error| log::warn!("Failed to parse GAME.FNT: {error}"))
@@ -709,8 +715,11 @@ pub(crate) fn finish_presentation_assets(
         #[cfg(feature = "phobos")]
         sw_sidebar_ui,
         #[cfg(feature = "phobos")]
+        center_pause_menu_background,
+        #[cfg(feature = "phobos")]
         sw_sidebar_art,
         outcome_banner_side_art,
+        end_game_banner,
         software_cursor,
         overlay_names: overlays.overlay_names,
         overlay_radar_colors: overlays.overlay_radar_colors,
@@ -912,14 +921,7 @@ mod tests {
             .tiberium_type_for_overlay(&rules.tiberium_types, overlay_id)
             .and_then(|type_id| rules.tiberium_types.get(type_id))
             .expect("tiberium authority for startup crate CellAnim");
-        assert_eq!(tiberium.color.as_deref(), Some("NeonGreen"));
-        assert_eq!(
-            crate::rules::color_scheme::scheme_entry_by_name(
-                &rules.color_schemes,
-                tiberium.color.as_deref().unwrap(),
-            ),
-            Some(1)
-        );
+        assert_eq!(tiberium.color_scheme(), 3);
 
         assert_eq!(
             startup_crate_anim_remap_keys(&rules, &overlay_registry),

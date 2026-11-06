@@ -42,18 +42,15 @@ pub(crate) fn house_color_map_for_launch_session(
     let mut colors = HouseColorMap::new();
     colors.insert("Neutral".to_string(), neutral_color);
     colors.insert("Special".to_string(), neutral_color);
+    // CreateHouses builds only the participants and these two literal Houses,
+    // which take the roster's spelling when it defines them
+    // (`populate_special_houses`). No other roster House exists in a launched
+    // game, so none other gets a color. The two keep CreateHouses' explicit
+    // color rather than campaign Color=.
     for house in &house_roster.houses {
-        if !is_playable_faction_name(&house.name) {
-            // Preserve authored identity casing, but these two skirmish houses
-            // use CreateHouses' explicit color rather than campaign Color=.
-            let color = if house.name.eq_ignore_ascii_case("Neutral")
-                || house.name.eq_ignore_ascii_case("Special")
-            {
-                neutral_color
-            } else {
-                house.color
-            };
-            colors.insert(house.name.clone(), color);
+        if house.name.eq_ignore_ascii_case("Neutral") || house.name.eq_ignore_ascii_case("Special")
+        {
+            colors.insert(house.name.clone(), neutral_color);
         }
     }
     for slot in normalized_launch_slots(session) {
@@ -65,39 +62,6 @@ pub(crate) fn house_color_map_for_launch_session(
         colors.insert(slot.owner_name, HouseColorIndex(entry));
     }
     colors
-}
-
-/// Returns true for faction names that represent real players (not neutral/civilian).
-fn is_playable_faction_name(name: &str) -> bool {
-    let up = name.to_ascii_uppercase();
-    !matches!(
-        up.as_str(),
-        "NEUTRAL" | "SPECIAL" | "CIVILIAN" | "GOODGUY" | "BADGUY" | "JP"
-    )
-}
-
-/// Collect building type IDs that can be spawned at runtime and need atlas pre-loading.
-///
-/// Scans all objects with `DeploysInto=` set in rules.ini to find deploy targets
-/// (e.g., AMCV→GACNST). Data-driven — no hardcoded MCV/ConYard type pairs. It
-/// covers every object type in the rules, since units with DeploysInto can
-/// appear via production or scripted events even without being on the map yet.
-pub fn deployable_building_types(rules: Option<&RuleSet>) -> Vec<&str> {
-    let Some(rules) = rules else {
-        return Vec::new();
-    };
-    let mut result: Vec<&str> = Vec::new();
-    for obj in rules.all_objects() {
-        if let Some(target_id) = &obj.deploys_into
-            && let Some(target_obj) = rules.object(target_id)
-            && !result
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(&target_obj.id))
-        {
-            result.push(&target_obj.id);
-        }
-    }
-    result
 }
 
 /// Resident overlay, bridge and radar presentation derived from already-bound
@@ -716,7 +680,7 @@ mod tests {
     /// cells read the shared Dummy's Clear row.
     fn test_terrain(width: u16, height: u16) -> ResolvedTerrainGrid {
         let mut terrain = crate::map::resolved_terrain::test_grid(width, height, |rx, ry| {
-            test_terrain_cell(rx, ry, Some(100))
+            test_terrain_cell(rx, ry, Some(crate::util::native_x87::NativeF32Bits::ONE))
         });
         terrain.set_land_speed_rules_for_test(
             &crate::map::resolved_terrain::test_retail_clear_rules(),
@@ -724,15 +688,21 @@ mod tests {
         terrain
     }
 
-    fn test_terrain_cell(rx: u16, ry: u16, track_cost: Option<u8>) -> ResolvedTerrainCell {
+    fn test_terrain_cell(
+        rx: u16,
+        ry: u16,
+        track_cost: Option<crate::util::native_x87::NativeF32Bits>,
+    ) -> ResolvedTerrainCell {
         ResolvedTerrainCell {
             speed_costs: SpeedCostProfile {
                 track: track_cost,
+                winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
                 ..Default::default()
             },
             zone_type: zone_class::GROUND,
             base_speed_costs: SpeedCostProfile {
                 track: track_cost,
+                winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
                 ..Default::default()
             },
             ..crate::map::resolved_terrain::test_flat_cell(rx, ry)
@@ -774,9 +744,13 @@ mod tests {
             return;
         };
         let schemes = crate::rules::color_scheme::parse_color_schemes(&rules);
+        let mut roster = roster_with_neutral_and_playable();
+        let mut civilian = roster.houses[0].clone();
+        civilian.name = "Civilian".to_string();
+        roster.houses.push(civilian);
         let colors = house_color_map_for_launch_session(
             &test_session(),
-            &roster_with_neutral_and_playable(),
+            &roster,
             &schemes,
             SkirmishColorMode::VANILLA,
         );
@@ -789,7 +763,9 @@ mod tests {
         assert_eq!(colors.get("Special"), Some(&HouseColorIndex(2)));
         assert_eq!(colors.get("Player"), Some(&HouseColorIndex(5)));
         assert_eq!(colors.get("Computer1"), Some(&HouseColorIndex(10)));
+        // Roster Houses CreateHouses does not build own nothing in the game.
         assert!(!colors.contains_key("Americans"));
+        assert!(!colors.contains_key("Civilian"));
     }
 
     /// Phobos SkirmishUnlimitedColors: the spawner's colour index is the
@@ -1005,8 +981,9 @@ mod tests {
     fn native_gather_rejects_a_blocked_cell_inside_the_8x8_rect() {
         let mut terrain = test_terrain(32, 32);
         let blocked = terrain.cell_mut_for_test(11, 11).unwrap();
-        blocked.speed_costs.track = Some(0);
-        blocked.base_speed_costs.track = Some(0);
+        blocked.speed_costs.track = Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
+        blocked.base_speed_costs.track =
+            Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
         blocked.zone_type = zone_class::IMPASSABLE;
         let occupancy = crate::sim::occupancy::OccupancyGrid::new();
         let diamond = PlayfieldBounds {
@@ -1071,8 +1048,9 @@ mod tests {
         let map = test_map_with_starts(&[authored]);
         let mut terrain = test_terrain(64, 64);
         let blocked = terrain.cell_mut_for_test(61, 28).unwrap();
-        blocked.speed_costs.track = Some(0);
-        blocked.base_speed_costs.track = Some(0);
+        blocked.speed_costs.track = Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
+        blocked.base_speed_costs.track =
+            Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
         blocked.zone_type = zone_class::IMPASSABLE;
         let bounds = NativeStartBounds {
             min_rx: 0,
@@ -1363,7 +1341,8 @@ mod tests {
                 group: -1,
                 recruitable_a: true,
                 recruitable_b: true,
-                structure_upgrades: [None, None, None],
+                follows: None,
+                structure_columns: Default::default(),
                 structure_ai_sellable: false,
                 structure_ai_repairable: false,
                 structure_online: true,
@@ -1501,8 +1480,7 @@ mod tests {
             difficulty: Default::default(),
         });
         let slots = normalized_launch_slots(&session);
-        let alliances =
-            launch_alliance_map(&roster_with_neutral_and_playable(), &slots, &session.mode);
+        let alliances = launch_alliance_map(&slots, &session.mode);
 
         assert!(
             alliances
@@ -1537,8 +1515,7 @@ mod tests {
         });
         let slots = normalized_launch_slots(&session);
 
-        let alliances =
-            launch_alliance_map(&roster_with_neutral_and_playable(), &slots, &session.mode);
+        let alliances = launch_alliance_map(&slots, &session.mode);
 
         assert!(
             alliances
@@ -1898,10 +1875,12 @@ mod tests {
                 &terrain,
                 &launch_descriptor(&session),
             );
-            let owner = result
-                .local_owner
-                .as_deref()
-                .expect("explicit launch must return its pinned local owner");
+            let owner = sim
+                .session()
+                .current_house()
+                .map(|house| sim.interner().resolve(house).to_owned())
+                .expect("explicit launch must pin its local owner");
+            let owner = owner.as_str();
             assert_eq!(owner, "Commander");
 
             let side = crate::app::presentation::sidebar_render::project_sidebar_side(
@@ -2530,7 +2509,12 @@ mod tests {
             );
             assert_eq!(result.spawned_mcvs, 0);
             assert!(sim.entities().is_empty());
-            assert_eq!(result.local_owner.as_deref(), Some("Player"));
+            assert_eq!(
+                sim.session()
+                    .current_house()
+                    .map(|house| sim.interner().resolve(house)),
+                Some("Player")
+            );
             assert_eq!(
                 sim.scenario_rng().native_state_hex(),
                 row["force_tail_rng_hex"].as_str().unwrap()

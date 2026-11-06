@@ -13,14 +13,14 @@ use crate::ui::main_menu_dialogs::options::shell::{
     LauncherLabelAlign, LauncherOptionsLayout, LauncherStatusHelp,
 };
 use crate::ui::main_menu_dialogs::options::{
-    LauncherCheckboxId, LauncherComboId, LauncherTrackbarId, OptionsDialogState, Zoom,
+    HealthBarMode, LauncherButton, LauncherCheckboxId, LauncherComboId, OptionsDialogState, Zoom,
 };
 use crate::ui::shell::geom::{RectPx, ShellScale};
 use crate::util::time::Instant;
 
 /// A Zoom row: the zoom and the battle's size in game pixels in this window,
 /// what `App::sync_zoom_pass` will give the match.
-fn zoom_label(zoom: Zoom, (width, height): (u32, u32), original_shape: bool) -> String {
+pub(crate) fn zoom_label(zoom: Zoom, (width, height): (u32, u32), original_shape: bool) -> String {
     use crate::render::upscale_pass::{FrameShape, ZoomGeometry};
     let shape = if original_shape {
         FrameShape::Original
@@ -79,6 +79,7 @@ fn build_controls(
                 rect,
                 thumb_left: dialog.shell_trackbar_thumb_left(id, rect, scale),
                 plaque: id.plaque_reserve() > 0,
+                disabled: !dialog.trackbar_enabled(id),
             },
             scale,
         );
@@ -108,16 +109,47 @@ fn build_controls(
             scale,
         );
     }
-    for &(id, rect) in layout.buttons.iter().filter(|_| buttons) {
-        push_right_panel_button_shp(
-            &mut out,
-            atlas,
-            rect,
-            dialog.shell_button_pressed(id),
-            false,
-            SHELL_CONTROL_DEPTH,
-        );
+    let mut page_buttons = Vec::new();
+    for &(id, rect) in &layout.buttons {
+        let pressed = dialog.shell_button_pressed(id);
+        if id == LauncherButton::CheckForUpdates {
+            page_buttons.push(crate::render::shell_paint::ModalButton {
+                rect,
+                pressed,
+                enabled: true,
+            });
+        } else if buttons {
+            // The page that shows keeps its category button lit in the
+            // owner-draw highlight frame (612B70 record+C5, SDBTNANM 3).
+            push_right_panel_button_shp(
+                &mut out,
+                atlas,
+                rect,
+                crate::ui::shell::button::ButtonVisual {
+                    pressed,
+                    highlighted: dialog.shell_button_selected(id),
+                },
+                false,
+                SHELL_CONTROL_DEPTH,
+            );
+        }
     }
+    // Check for Updates is drawn as Sound Options' Play and Stop are
+    // (609FC7..609FE2/60A330): owner-draw type 3, MNBTTN centred on the
+    // control, so it paints with the page's other controls during the slide.
+    let (width, height) = layout.screen();
+    out.extend(crate::render::shell_paint::paint_modal_sprites(
+        None,
+        type3_button_frames(atlas),
+        RectPx::new(0, 0, width as i32, height as i32),
+        &page_buttons,
+        scale,
+        crate::render::shell_paint::ModalDepths {
+            background: SHELL_CONTROL_DEPTH,
+            button: SHELL_CONTROL_DEPTH,
+            text: SHELL_CONTROL_TEXT_DEPTH,
+        },
+    ));
     out
 }
 
@@ -186,16 +218,13 @@ fn build_text(
         ));
     }
     for &(id, rect) in &layout.trackbars {
-        if matches!(
-            id,
-            LauncherTrackbarId::Score | LauncherTrackbarId::Sound | LauncherTrackbarId::Voice
-        ) {
+        if id.plaque_reserve() > 0 {
             out.push(text_draw(
                 font,
-                &dialog.trackbar_position(id).to_string(),
+                &dialog.trackbar_plaque_text(id),
                 crate::ui::shell::trackbar::value_text_rect(rect, scale),
                 ShellAlign::H_CENTER | ShellAlign::V_CENTER,
-                if dialog.launcher_audio_available() {
+                if dialog.trackbar_enabled(id) {
                     SHELL_LABEL_TEXT_RGB
                 } else {
                     SHELL_DISABLED_TEXT_RGB_FROM_PACKED_0000009F
@@ -218,6 +247,7 @@ fn build_text(
             ),
             LauncherComboId::Sidebar => dialog.shell_selected_sidebar(layout).label().to_owned(),
             LauncherComboId::Display => dialog.shell_display_label(),
+            LauncherComboId::HealthBars => dialog.shell_selected_health_bars().label().to_owned(),
         };
         out.push(text_draw(
             font,
@@ -228,7 +258,11 @@ fn build_text(
             glyph,
         ));
     }
-    for &(id, rect) in layout.buttons.iter().filter(|_| buttons) {
+    for &(id, rect) in layout
+        .buttons
+        .iter()
+        .filter(|(id, _)| buttons || *id == LauncherButton::CheckForUpdates)
+    {
         let pressed = dialog.shell_button_pressed(id);
         // 612B70 type1: ordinary press retains AC18A4 foreground; the text
         // rectangle changes at61358D..6135CD, independently of SHP geometry.
@@ -294,23 +328,21 @@ pub(crate) fn render_launcher_options(
 ) -> anyhow::Result<()> {
     use crate::app::frontend::shell_transition::ShellSlideKind;
     let now = Instant::now();
-    let page = state
+    let category = state
         .frontend
         .options_dialog
         .as_ref()
         .expect("launcher active")
-        .page();
-    let layout = crate::app::frontend::shell_layout::launcher_options_layout(state, page);
+        .category();
+    let layout = crate::app::frontend::shell_layout::launcher_options_layout(state, category);
     let scale = layout.scale;
     // The teardown slide starts with a full dialog repaint (`0x00622C4F`) and
     // pumps no messages until it ends: every child stays blank. The entry
     // slide suppresses the heading, status line, monitor and column buttons
     // (`0x00606800`); the left-side controls paint.
-    let exit_wave = crate::app::frontend::shell_transition::shell_exit_wave(
-        state,
-        ShellSlideKind::options_page(page),
-    )
-    .cloned();
+    let exit_wave =
+        crate::app::frontend::shell_transition::shell_exit_wave(state, ShellSlideKind::Options)
+            .cloned();
     let leaving = exit_wave.is_some();
     let wave = exit_wave.or_else(|| state.frontend.shell_first_paint_slide.clone());
     let sliding = wave.is_some();
@@ -418,6 +450,10 @@ pub(crate) fn render_launcher_options(
                 .map(|size| size.label().to_owned())
                 .collect(),
             LauncherComboId::Display => dialog.shell_display_rows(),
+            LauncherComboId::HealthBars => HealthBarMode::choices()
+                .into_iter()
+                .map(|mode| mode.label().to_owned())
+                .collect(),
         };
         for (i, row_text) in rows.iter().enumerate() {
             let rect = popup.row_rect(i);

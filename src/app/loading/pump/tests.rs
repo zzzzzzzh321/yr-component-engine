@@ -7,6 +7,16 @@ use crate::skirmish_launch::{
     SkirmishLaunchMode, SkirmishLaunchOptions, SkirmishLocalSlot,
 };
 
+#[test]
+fn browser_peer_wait_starts_after_the_terminal_ack_drain() {
+    let mut wait = NetworkLoadWait::new(100, 0.5);
+    wait.start_pending = true;
+    assert_eq!(wait.poll(340, 0.75), NetworkLoadPoll::Pending);
+    assert_eq!(wait.poll(639, 0.75), NetworkLoadPoll::Pending);
+    assert_eq!(wait.poll(640, 0.75), NetworkLoadPoll::ReportProgress);
+    assert_eq!(wait.poll(3940, 0.75), NetworkLoadPoll::TimedOut);
+}
+
 pub(super) fn test_launch_session(country: LaunchCountry) -> SkirmishLaunchSession {
     SkirmishLaunchSession {
         mode: SkirmishLaunchMode {
@@ -126,7 +136,9 @@ fn sequenced_wol_cold_and_warm_rules_share_world_and_agreement_identity() {
     launch.rebuild_house_roster();
     let mut session = MatchSession::default();
     session.enter_network(NetworkReturnContext::Wol);
-    session.accept_network_setup(launch, true, Some(7)).unwrap();
+    session
+        .accept_network_setup(launch, true, Some(7), false)
+        .unwrap();
     session.prepare_wol_timing([0], true).unwrap();
     let startup = session.freeze_network_start(73).unwrap();
     let LoadingStartup::Network(admitted) = &startup else {
@@ -231,7 +243,12 @@ fn failed_network_load_retries_its_shell_without_installing_an_offline_fallback(
     let mut session = MatchSession::default();
     session.enter_network(NetworkReturnContext::LanLobby);
     session
-        .accept_network_setup(test_launch_session(LaunchCountry::America), true, Some(7))
+        .accept_network_setup(
+            test_launch_session(LaunchCountry::America),
+            true,
+            Some(7),
+            false,
+        )
         .unwrap();
     session.set_network_start_seed(77).unwrap();
     session.prepare_network_timing(2, || 0).unwrap();
@@ -313,7 +330,7 @@ fn admitted_network_start_preserves_canonical_humans_and_host_seed_in_fresh_load
     let mut session = MatchSession::default();
     session.enter_network(NetworkReturnContext::LanLobby);
     session
-        .accept_network_setup(launch, false, Some(7))
+        .accept_network_setup(launch, false, Some(7), false)
         .unwrap();
     session.prepare_network_timing(2, || 0).unwrap();
     let startup = session.freeze_network_start(0xabc123).unwrap();
@@ -476,6 +493,7 @@ pub(super) fn test_audio() -> crate::app::audio_runtime::AppAudioRuntime {
         launcher_audio_available: true,
         theme_startup_suppressed: false,
         master_groups: Default::default(),
+        restore_muted: false,
     }
 }
 
@@ -949,6 +967,24 @@ fn ctor_only_country_side_uses_nonzero_loading_text_scheme() {
     );
     native.resolve_player_colors(&schemes, &ramps);
     assert_eq!(native.text_rgb, normalize_rgb(hsv_to_rgb(schemes[1].hsv)));
+}
+
+#[test]
+fn loading_theme_country_uses_the_local_source_in_a_shared_roster() {
+    let mut launch = test_launch_session(LaunchCountry::America);
+    let mut guest = launch.humans[0].clone();
+    guest.slot.country = LaunchCountry::from_country_index(2);
+    guest.raw_slot_index = Some(1);
+    launch.humans.push(guest);
+    launch.local_player_index = 1;
+    assert_eq!(
+        loading_theme_country(&launch),
+        Some(launch.humans[1].slot.country.index())
+    );
+    assert_ne!(
+        loading_theme_country(&launch),
+        Some(launch.humans[0].slot.country.index())
+    );
 }
 
 #[test]
@@ -2215,9 +2251,16 @@ fn network_loading_wait_resends_rearms_on_regression_and_expires_before_completi
     assert_eq!(unchanged.poll(3600, 0.5), NetworkLoadPoll::TimedOut);
 }
 
-#[test]
-fn loading_timeout_retires_only_live_peer_and_flags_existing_house_before_install() {
-    use crate::app::match_runtime::session::{MatchSession, NetworkReturnContext};
+/// A two-human network start whose remote player is still loading; returns the
+/// local and remote House ids.
+fn network_load_with_remote_peer(
+    context: crate::app::match_runtime::session::NetworkReturnContext,
+) -> (
+    crate::app::match_runtime::session::MatchSession,
+    MapLoadResult,
+    crate::sim::intern::InternedId,
+    crate::sim::intern::InternedId,
+) {
     let mut launch = test_launch_session(LaunchCountry::America);
     launch.opponents.clear();
     launch.ai_player_count = 0;
@@ -2225,6 +2268,7 @@ fn loading_timeout_retires_only_live_peer_and_flags_existing_house_before_instal
     remote.name = "Remote".into();
     remote.raw_slot_index = Some(1);
     remote.slot.color_index = 1;
+    remote.slot.start_position = LaunchStartPosition::Position(1);
     launch.humans.push(remote);
     launch.rebuild_house_roster();
     let rules = crate::rules::ruleset::RuleSet::from_ini(
@@ -2243,13 +2287,23 @@ fn loading_timeout_retires_only_live_peer_and_flags_existing_house_before_instal
     );
     let local = sim.interner().get("Player").unwrap();
     let peer = sim.interner().get("Remote").unwrap();
-    let mut session = MatchSession::default();
-    session.enter_network(NetworkReturnContext::LanLobby);
-    session.accept_network_setup(launch, true, Some(7)).unwrap();
+    let mut session = crate::app::match_runtime::session::MatchSession::default();
+    session.enter_network(context);
+    session
+        .accept_network_setup(launch, true, Some(7), false)
+        .unwrap();
     session.prepare_network_timing(2, || 0).unwrap();
     let mut result = super::super::transitions::fallback_map_load_result();
     result.scenario.startup = session.freeze_network_start(1).unwrap();
     result.scenario.simulation = Some(sim);
+    (session, result, local, peer)
+}
+
+#[test]
+fn loading_timeout_retires_only_live_peer_and_flags_existing_house_before_install() {
+    let (mut session, mut result, local, peer) = network_load_with_remote_peer(
+        crate::app::match_runtime::session::NetworkReturnContext::LanLobby,
+    );
     let notices = apply_network_loading_disconnects(&mut session, &mut result, &[1]);
     assert_eq!(
         notices,
@@ -2257,6 +2311,7 @@ fn loading_timeout_retires_only_live_peer_and_flags_existing_house_before_instal
             crate::app::match_runtime::network_match::ConnectionDestroyed {
                 owner: peer,
                 key: "TXT_CONNECTION_LOST",
+                player: None,
             }
         ]
     );
@@ -2283,6 +2338,20 @@ fn loading_timeout_retires_only_live_peer_and_flags_existing_house_before_instal
     assert!(apply_network_loading_disconnects(&mut session, &mut result, &[1]).is_empty());
 }
 
+/// Online play orders commands through the relay, which departs a player who
+/// never becomes ready in the first frame. Retiring it locally as well would
+/// leave this client's roster short of the relay certificate.
+#[test]
+fn online_loading_timeout_leaves_the_departure_to_the_relay() {
+    let (mut session, mut result, _, peer) = network_load_with_remote_peer(
+        crate::app::match_runtime::session::NetworkReturnContext::Wol,
+    );
+    assert!(apply_network_loading_disconnects(&mut session, &mut result, &[1]).is_empty());
+    assert_eq!(session.network_connected_source_indices(), &[0, 1]);
+    let sim = result.scenario.simulation.as_ref().unwrap();
+    assert!(!sim.houses()[&peer].is_to_die());
+}
+
 #[cfg(target_os = "linux")]
 #[path = "campaign_miner_tests.rs"]
 mod campaign_miner;
@@ -2293,7 +2362,12 @@ fn a_network_start_installs_its_mode_and_timing_into_the_scenario() {
     let mut session = MatchSession::default();
     session.enter_network(NetworkReturnContext::LanLobby);
     session
-        .accept_network_setup(test_launch_session(LaunchCountry::America), true, Some(7))
+        .accept_network_setup(
+            test_launch_session(LaunchCountry::America),
+            true,
+            Some(7),
+            false,
+        )
         .unwrap();
     session.set_network_start_seed(77).unwrap();
     session.prepare_network_timing(2, || 0).unwrap();
@@ -2538,4 +2612,16 @@ fn local_network_completion_starts_peer_wait_and_preserves_its_admitted_lease() 
             .unwrap()
             .bytes,
     ));
+}
+
+#[test]
+fn a_loaded_network_screen_holds_until_its_install_time() {
+    let mut session = LoadingSession::from_request(LoadingRequest::generic_map_load("hold"));
+    assert!(
+        !session.holds_loaded_screen(0),
+        "no hold before every player loads"
+    );
+    session.install_after_ms = Some(1_000 + NETWORK_LOADED_HOLD_MS);
+    assert!(session.holds_loaded_screen(1_000 + NETWORK_LOADED_HOLD_MS - 1));
+    assert!(!session.holds_loaded_screen(1_000 + NETWORK_LOADED_HOLD_MS));
 }

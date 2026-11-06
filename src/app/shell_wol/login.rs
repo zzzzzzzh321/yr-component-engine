@@ -8,18 +8,17 @@ use super::{WolPage, WolVisit};
 use crate::app::frontend::{shell_layout, shell_transition};
 use crate::app::{App, AppState};
 use crate::ui::main_menu_dialogs::options::LauncherCue;
-use crate::ui::shell::combobox::ComboPopup;
+use crate::ui::shell::combobox::{ComboPopup, ComboPress};
+use crate::ui::shell::modal::WolAccountFormLayout;
 use crate::ui::skirmish_shell::{COMBO_DROPDOWN_ROW_H, COMBO_FACE_H};
+use crate::ui::wol_account::{
+    AccountDone, AccountFormAction, FORM_CANCEL, FORM_REMEMBER, WolAccountForm,
+};
 use crate::ui::wol_login::*;
 use winit::keyboard::KeyCode;
 
 pub(crate) fn login_layout(state: &AppState) -> WolLoginLayout {
     let (width, height) = shell_layout::shell_screen_size(state);
-    let layout = if shell_layout::fills_window(state) {
-        WolLoginLayout::responsive(width as i32, height as i32)
-    } else {
-        WolLoginLayout::new(width as i32, height as i32)
-    };
     let policy = if state
         .frontend
         .wol
@@ -30,7 +29,11 @@ pub(crate) fn login_layout(state: &AppState) -> WolLoginLayout {
     } else {
         LoginPolicy::Legacy
     };
-    layout.with_policy(policy)
+    if shell_layout::fills_window(state) {
+        WolLoginLayout::responsive(width as i32, height as i32, policy)
+    } else {
+        WolLoginLayout::new(width as i32, height as i32, policy)
+    }
 }
 
 /// `0x0072C600`: LoginScreen.shp through LoginScreen.PAL, only at 800 wide.
@@ -52,10 +55,21 @@ pub(crate) fn open_login_art(state: &mut AppState) -> bool {
     state.frontend.wol_login_art.is_some()
 }
 
+/// The open popup's rects on the login page's shell mapping.
+pub(crate) fn account_form_layout(state: &AppState) -> Option<WolAccountFormLayout> {
+    let form = state.frontend.wol.as_ref()?.login()?.account.as_ref()?;
+    Some(crate::ui::shell::modal::wol_account_form_layout_on(
+        POPUP_AREA,
+        form.fields.len(),
+        form.remember.is_some(),
+        login_layout(state).page.scale,
+    ))
+}
+
 /// The nickname combo's drop list. ComboDrop's internals are untraced: the
 /// list fills the template height below the face.
 pub(crate) fn combo_popup(login: &WolLoginState, layout: &WolLoginLayout) -> Option<ComboPopup> {
-    if login.policy == LoginPolicy::Online || !login.combo_open {
+    if login.policy == LoginPolicy::Online || login.popup.control.is_none() {
         return None;
     }
     let base = layout.page.scale.base_rect(layout.nickname_combo);
@@ -65,7 +79,7 @@ pub(crate) fn combo_popup(login: &WolLoginState, layout: &WolLoginLayout) -> Opt
         layout.page.scale,
         login.rows.len(),
         cap,
-        login.combo_top,
+        login.popup.top_index,
     ))
 }
 
@@ -73,15 +87,24 @@ pub(crate) fn combo_popup(login: &WolLoginState, layout: &WolLoginLayout) -> Opt
 /// art, the empty backdrop and `UI__BeginDialog(0x10F)`. The nickname is the
 /// process global the flow prefilled.
 pub(super) fn open(state: &mut AppState) {
+    let remembered = super::live_service::remembered_name(state);
+    let last = &state.persistence.options_profile.online_name;
     let Some(visit) = state.frontend.wol.as_mut() else {
         return;
     };
     let login = if visit.provider == super::WolProvider::Online {
-        WolLoginState::open_online(&mut state.frontend.wol_account)
+        WolLoginState::open_online(
+            &mut state.frontend.wol_account,
+            remembered.as_deref(),
+            Some(last.as_str()),
+        )
     } else {
         WolLoginState::open(&mut state.frontend.wol_account, &visit.credentials)
     };
     visit.page = WolPage::Login(Box::new(login));
+    if visit.provider == super::WolProvider::Online {
+        super::login_info::refresh(state);
+    }
     open_login_art(state);
     let _ = App::ensure_skirmish_shell_chrome(state);
     state.frontend.shell_controller.reset_to(DIALOG, true);
@@ -127,15 +150,70 @@ fn dispatch(state: &mut AppState, action: WolLoginAction) {
         // 0x00773E90 needs the registry URL `Manage` and an HTMLPath; a
         // retail install has neither and it returns.
         WolLoginAction::Manage => {}
+        WolLoginAction::ForgetSignIn => service::request(state, WolServiceRequest::ForgetSignIn),
     }
 }
 
+fn form_action(state: &mut AppState, action: AccountFormAction) {
+    match action {
+        AccountFormAction::Send(request) => {
+            service::request(state, WolServiceRequest::Account(request));
+        }
+        AccountFormAction::SignIn { sign_in, remember } => {
+            if let Some(action) = with_login(state, |login, globals, _| {
+                login.sign_in(sign_in, remember, globals)
+            }) {
+                dispatch(state, action);
+            }
+        }
+        AccountFormAction::ForgetSignIn => {
+            with_login(state, |login, _, _| login.forget_remembered());
+            dispatch(state, WolLoginAction::ForgetSignIn);
+        }
+        AccountFormAction::Close => {
+            with_login(state, |login, _, _| login.account = None);
+        }
+    }
+}
+
+/// The lobby answered the account popup: a refusal shows in it, a sent code
+/// moves it on, a confirmed account or new password signs in, and a deleted
+/// account's popup says so.
+pub(super) fn account_answered(state: &mut AppState, answer: Result<(), String>) {
+    let action = with_login(state, |login, globals, _| {
+        let form = login.account.as_mut().filter(|form| form.busy)?;
+        match form.answered(answer)? {
+            AccountDone::SignIn(sign_in) => Some(login.signed_up(sign_in, globals)),
+            AccountDone::Deleted { name } => {
+                login.account_deleted(&name);
+                None
+            }
+        }
+    })
+    .flatten();
+    update_geometry(state);
+    if let Some(action) = action {
+        dispatch(state, action);
+    }
+    state.platform.window.request_redraw();
+}
+
 /// `0x10F`'s teardown has run: Back returns 0 to `WOL_Main` (the welcome
-/// again); Login starts the connect over the empty backdrop.
+/// again); Login starts the connect over the empty backdrop. The online
+/// sign-in is the visit's first page, so its Back leaves WOL.
 pub(super) fn commit_close(state: &mut AppState, result: u16) {
     state.frontend.wol_login_art = None;
     if result != LOGIN {
-        App::reopen_wol_welcome(state);
+        if state
+            .frontend
+            .wol
+            .as_ref()
+            .is_some_and(|visit| visit.modern_ui())
+        {
+            App::return_from_wol(state);
+        } else {
+            App::reopen_wol_welcome(state);
+        }
         return;
     }
     if let Some(visit) = state.frontend.wol.as_mut() {
@@ -146,6 +224,7 @@ pub(super) fn commit_close(state: &mut AppState, result: u16) {
 
 pub(super) fn update_geometry(state: &mut AppState) {
     let layout = login_layout(state);
+    let form_rects = account_form_layout(state);
     let font = &state.renderer.bit_font;
     let Some(WolPage::Login(login)) = state.frontend.wol.as_mut().map(|visit| &mut visit.page)
     else {
@@ -158,11 +237,19 @@ pub(super) fn update_geometry(state: &mut AppState) {
         .scroll_to_caret((scale.base_rect(text).w - 3).max(0) as u32, |value| {
             font.text_width(value)
         });
-    if login.policy == LoginPolicy::Legacy {
-        login.password.scroll_to_caret(
-            (scale.base_rect(layout.password).w - 3).max(0) as u32,
-            |value| font.text_width(value),
-        );
+    login.password.scroll_to_caret(
+        (scale.base_rect(layout.password).w - 3).max(0) as u32,
+        |value| font.text_width(value),
+    );
+    if let Some(form) = login.account.as_mut()
+        && let Some(&(_, edit)) = form_rects
+            .as_ref()
+            .and_then(|rects| rects.fields.get(form.focused))
+        && let Some(focused) = form.focused_edit_mut()
+    {
+        focused.scroll_to_caret((scale.base_rect(edit).w - 3).max(0) as u32, |value| {
+            font.text_width(value)
+        });
     }
 }
 
@@ -177,10 +264,34 @@ pub(super) fn key_press(state: &mut AppState, code: Option<KeyCode>, text: Optio
         Some(KeyCode::End) => Some(WolEditKey::End),
         Some(KeyCode::Tab) => Some(WolEditKey::Tab { reverse }),
         Some(KeyCode::Enter | KeyCode::NumpadEnter) => Some(WolEditKey::Enter),
-        // The NewEdits consume Escape; the proc has no IDCANCEL case.
-        Some(KeyCode::Escape) => return,
         _ => None,
     };
+    let escape = code == Some(KeyCode::Escape);
+    // An open account popup takes every key; Escape is its Cancel.
+    let in_form = with_login(state, |login, _, _| {
+        let form = login.account.as_mut()?;
+        Some(match key {
+            _ if escape => form.activate(FORM_CANCEL),
+            Some(key) => form.edit_key(key),
+            None => {
+                form.insert_text(text.unwrap_or_default());
+                None
+            }
+        })
+    })
+    .flatten();
+    if let Some(action) = in_form {
+        update_geometry(state);
+        if let Some(action) = action {
+            form_action(state, action);
+        }
+        state.platform.window.request_redraw();
+        return;
+    }
+    // The NewEdits consume Escape; the proc has no IDCANCEL case.
+    if escape {
+        return;
+    }
     let action = with_login(state, |login, globals, credentials| match key {
         Some(key) => login.edit_key(key, globals, credentials),
         None => {
@@ -198,16 +309,16 @@ pub(super) fn key_press(state: &mut AppState, code: Option<KeyCode>, text: Optio
 
 pub(super) fn cursor_moved(state: &mut AppState) {
     let layout = login_layout(state);
+    let form_rects = account_form_layout(state);
     let (x, y) = state.match_state.input.cursor_px();
     with_login(state, |login, _, _| {
+        if let (Some(form), Some(rects)) = (login.account.as_mut(), &form_rects) {
+            form.buttons.hovered = WolAccountForm::control_at(rects, x, y);
+            return;
+        }
         login.buttons.hovered = layout.control_at(x, y);
         if let Some(popup) = combo_popup(login, &layout) {
-            if let Some(row) = popup.row_at(x, y) {
-                login.combo_hot_row = Some(row);
-            }
-            login
-                .combo_scroll
-                .pointer_moved(popup.scroll_geometry(), &mut login.combo_top, x, y);
+            login.popup.pointer_moved(popup, x, y);
         }
     });
     state.platform.window.request_redraw();
@@ -222,11 +333,15 @@ enum Press {
 pub(super) fn mouse(state: &mut AppState, pressed: bool) {
     let layout = login_layout(state);
     let (x, y) = state.match_state.input.cursor_px();
+    if let Some(rects) = account_form_layout(state) {
+        account_mouse(state, &rects, pressed, x, y);
+        return;
+    }
     let over = layout.control_at(x, y);
     let scale = layout.page.scale;
     if !pressed {
         let action = with_login(state, |login, globals, _| {
-            login.combo_scroll.cancel();
+            login.popup.cancel_pointer();
             login
                 .buttons
                 .release(over)
@@ -242,35 +357,30 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
     }
     let press = with_login(state, |login, globals, credentials| {
         if let Some(popup) = combo_popup(login, &layout) {
-            if let Some(part) = popup.scroll_part_at(x, y) {
-                login.combo_scroll.press(
-                    part,
-                    popup.scroll_geometry(),
-                    &mut login.combo_top,
-                    y,
-                    Instant::now(),
-                );
-                return Press::Nothing;
+            let press = login.popup.press_list(popup, x, y, Instant::now());
+            if let ComboPress::Pick(row) = press {
+                login.select_row(row, globals, credentials);
             }
-            match popup.row_at(x, y).filter(|row| *row < login.rows.len()) {
-                Some(row) => login.select_row(row, globals, credentials),
-                None => login.combo_open = false,
-            }
-            return Press::Cue(LauncherCue::ComboClose);
+            return press
+                .cue()
+                .map_or(Press::Nothing, |cue| Press::Cue(cue.into()));
         }
         match over {
             Some(NICKNAME) => {
-                if login.policy == LoginPolicy::Legacy
-                    && crate::ui::skirmish_shell::combo_arrow_hit_rect(layout.nickname_face, scale)
-                        .contains(x, y)
-                {
-                    login.combo_open = true;
-                    login.combo_top = 0;
-                    login.combo_hot_row = login
+                // The editable combo's edit child takes every press outside
+                // the arrow zone, so only an opening press reaches the combo.
+                if login.policy == LoginPolicy::Legacy {
+                    let selected = login
                         .rows
                         .iter()
                         .position(|row| row.nickname.eq_ignore_ascii_case(&globals.nickname));
-                    return Press::Cue(LauncherCue::ComboOpen);
+                    let press =
+                        login
+                            .popup
+                            .press_face((), layout.nickname_face, scale, selected, x, y);
+                    if press == ComboPress::Open {
+                        return Press::Cue(LauncherCue::ComboOpen);
+                    }
                 }
                 login.focus(NICKNAME);
                 Press::Nothing
@@ -310,6 +420,59 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
     state.platform.window.request_redraw();
 }
 
+/// The popup over the page takes the pointer. Remember password toggles on
+/// a press on its box, as the Create Game box's checkboxes.
+fn account_mouse(
+    state: &mut AppState,
+    rects: &WolAccountFormLayout,
+    pressed: bool,
+    x: i32,
+    y: i32,
+) {
+    let over = WolAccountForm::control_at(rects, x, y);
+    let scale = login_layout(state).page.scale;
+    let on_box = rects.remember.is_some_and(|rect| {
+        crate::ui::skirmish_shell::checkbox_icon_rect(rect, scale).contains(x, y)
+    });
+    let (press, action) = with_login(state, |login, _, _| {
+        let form = login.account.as_mut()?;
+        Some(if !pressed {
+            let action = form
+                .buttons
+                .release(over)
+                .and_then(|control| form.activate(control));
+            (Press::Nothing, action)
+        } else if over == Some(FORM_REMEMBER) {
+            form.buttons.press(None);
+            if on_box {
+                (
+                    Press::Cue(LauncherCue::Checkbox),
+                    form.activate(FORM_REMEMBER),
+                )
+            } else {
+                (Press::Nothing, None)
+            }
+        } else if form.press(over) {
+            (Press::Button, None)
+        } else {
+            (Press::Nothing, None)
+        })
+    })
+    .flatten()
+    .unwrap_or((Press::Nothing, None));
+    match press {
+        Press::Cue(cue) => App::play_launcher_options_cue(state, cue),
+        // Owner-draw buttons play GUIMainButtonSound on the press.
+        Press::Button => App::play_main_menu_button_sound(state),
+        Press::Nothing => {}
+    }
+    if let Some(action) = action {
+        form_action(state, action);
+    }
+    update_geometry(state);
+    state.platform.window.request_redraw();
+}
+
 /// Shared scrollbar repeats of the open drop list.
 pub(crate) fn poll_scroll_repeat(state: &mut AppState) -> Option<Instant> {
     let layout = login_layout(state);
@@ -318,14 +481,14 @@ pub(crate) fn poll_scroll_repeat(state: &mut AppState) -> Option<Instant> {
         return None;
     };
     let popup = combo_popup(login, &layout)?;
-    if login.combo_scroll.poll(
+    if login.popup.scroll.poll(
         popup.scroll_geometry(),
-        &mut login.combo_top,
+        &mut login.popup.top_index,
         x,
         y,
         Instant::now(),
     ) {
         state.platform.window.request_redraw();
     }
-    login.combo_scroll.repeat_at()
+    login.popup.scroll.repeat_at()
 }

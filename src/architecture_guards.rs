@@ -8,7 +8,9 @@
 //! A separate guard checks the entire sim tree, including tests, for upper-layer
 //! references. Other guards pin frame API and raw INI walk callers and
 //! AppState owner boundaries, and keep test fixtures out of `include_str!` and
-//! `include_bytes!`.
+//! `include_bytes!`. Determinism guards pin the engine files that read
+//! platform- or process-dependent values (libm math, clocks, environment,
+//! directory order, thread count) and the engine's per-client reads.
 //!
 //! The app pseudo-root matches crate::app paths and retired root app_* modules.
 //! The ui rule also forbids the retired skirmish_scenarios root. These checks
@@ -28,7 +30,8 @@ const LAYER_RULES: &[(&str, &[&str])] = &[
     ("rules", &["sim", "map"]),
     ("map", &["sim", "render", "app"]),
     ("render", &["app"]),
-    ("ui", &["app", "skirmish_scenarios"]),
+    // render draws ui view models; ui stays render-agnostic.
+    ("ui", &["app", "render", "skirmish_scenarios"]),
     ("sim", &["render", "ui", "audio", "net"]),
 ];
 
@@ -71,8 +74,9 @@ fn production_dependency_edges_match_frozen_ledger_inventory() {
 
 /// F09: `Simulation::advance_master_frame` and `advance_app_frame` accept
 /// swappable rules/map/path resources, so their production call sites are
-/// pinned — the master frame is reached only inside `sim/world/mod.rs`, the
-/// app frame only there and in `SimRuntime::advance_frame`. Every other
+/// pinned — the master frame is reached only inside
+/// `sim/world/master_frame.rs`, the app frame only there and in
+/// `SimRuntime::advance_frame`. Every other
 /// caller must be `#[cfg(test)]` (the `advance_tick` fixture adapter and the
 /// replay `run_fixture*` runners are compile-time gated already); production
 /// and tooling advance exclusively through the bound-resource runtime.
@@ -80,8 +84,11 @@ fn production_dependency_edges_match_frozen_ledger_inventory() {
 fn master_frame_adapters_have_pinned_production_callers() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let allowed: &[(&str, &[&str])] = &[
-        ("advance_master_frame", &["sim/world/mod.rs"]),
-        ("advance_app_frame", &["sim/world/mod.rs", "sim/runtime.rs"]),
+        ("advance_master_frame", &["sim/world/master_frame.rs"]),
+        (
+            "advance_app_frame",
+            &["sim/world/master_frame.rs", "sim/runtime.rs"],
+        ),
     ];
     let mut violations: Vec<String> = Vec::new();
     for file in source_files(&src_root) {
@@ -132,7 +139,6 @@ fn raw_ini_walks_have_pinned_production_callers() {
                 // Includes parse_registry copying already resolved stored IDs.
                 ("rules/ruleset.rs", 3),
                 ("rules/smudge_type.rs", 1),
-                ("rules/tiberium_type.rs", 1),
             ],
         ),
     ];
@@ -161,6 +167,388 @@ fn raw_ini_walks_have_pinned_production_callers() {
         "raw INI walks called outside their pinned production sites, or a pin \
          is stale. Read values through the `ini_value` readers; pin a new \
          caller only to copy or show entries as stored."
+    );
+}
+
+/// vera20k-core's modules: the engine, whose results every peer and
+/// platform must share.
+const ENGINE: &[&str] = &[
+    "assets/",
+    "map/",
+    "net/",
+    "rules/",
+    "sim/",
+    "util/",
+    "core_lib.rs",
+    "headless_scenario.rs",
+    "rng_continuation.rs",
+    "skirmish_launch.rs",
+    "skirmish_modes.rs",
+];
+
+/// (path from `src/`, production text) of the engine's production files,
+/// without the modules declared under a test gate.
+fn engine_production_files() -> Vec<(&'static str, &'static str)> {
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = source_files(&src_root);
+    let gated = test_gated_files(files);
+    files
+        .iter()
+        .filter(|file| ENGINE.iter().any(|root| file.rel.starts_with(root)))
+        .filter(|file| !gated.contains(&file.rel))
+        .filter_map(|file| Some((file.rel.as_str(), file.production.as_deref()?)))
+        .collect()
+}
+
+/// Float functions whose last bits differ by platform, since Rust calls the
+/// host's libm for them. Arithmetic and `sqrt` round exactly everywhere, and
+/// the `libm` crate is the portable replacement.
+const PLATFORM_MATH: &[&str] = &[
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh",
+    "atanh", "sin_cos", "exp", "exp2", "exp_m1", "ln", "ln_1p", "log", "log2", "log10", "powf",
+    "powi", "cbrt", "hypot",
+];
+
+/// Engine reads whose answers can differ by platform, process or run, and
+/// the files that make them. Each pinned use was reviewed: none reaches
+/// simulation state, a state hash or the multiplayer checksum. A needle that
+/// starts with `.` is a method call; any other is a whole identifier or path.
+#[test]
+fn engine_platform_and_process_reads_have_pinned_files() {
+    let math: Vec<String> = PLATFORM_MATH
+        .iter()
+        .flat_map(|name| {
+            [
+                format!(".{name}("),
+                format!("f32::{name}"),
+                format!("f64::{name}"),
+            ]
+        })
+        .collect();
+    let groups: Vec<(&str, Vec<&str>)> = vec![
+        ("platform math", math.iter().map(String::as_str).collect()),
+        ("clock", vec!["Instant", "SystemTime", "UNIX_EPOCH"]),
+        (
+            "OS randomness",
+            vec![
+                "thread_rng",
+                "OsRng",
+                "getrandom",
+                "fastrand",
+                "rand::random",
+            ],
+        ),
+        (
+            "unseeded or unspecified hasher",
+            vec![
+                "DefaultHasher",
+                "RandomState",
+                "SipHasher",
+                "FxHasher",
+                "ahash",
+            ],
+        ),
+        (
+            "environment",
+            vec![
+                "env::var",
+                "env::var_os",
+                "env::vars",
+                "env::vars_os",
+                "env::args",
+                "env::args_os",
+            ],
+        ),
+        ("directory order", vec!["read_dir", "WalkDir"]),
+        (
+            "thread count or identity",
+            vec![
+                "available_parallelism",
+                "current_num_threads",
+                "current_thread_index",
+                "thread::current",
+                "ThreadId",
+            ],
+        ),
+    ];
+    let pinned: &[(&str, &[&str])] = &[
+        (
+            "platform math",
+            &[
+                // Bink audio decoding and team-color ramps are presentation.
+                "assets/bink_audio.rs",
+                "rules/house_colors.rs",
+                // The retail sine table's own methods. AcosTable's asin build
+                // clears every truncation boundary by 37,325 ulps or more.
+                "util/retail_trig.rs",
+            ],
+        ),
+        (
+            "clock",
+            &[
+                // Saved-seed names, map cache ages, network transport and
+                // logs.
+                "map/rmg/saved_seeds.rs",
+                "map/source/cache.rs",
+                "net/live_commands/sequenced.rs",
+                "net/udp.rs",
+                "util/logging.rs",
+                "util/logging_telemetry.rs",
+                // The browser file system's modification times.
+                "util/file_system.rs",
+                // Opt-in frame timing that no hash reads; path budgets count
+                // search steps, not time.
+                "sim/frame_profile.rs",
+                "sim/movement/path_batch.rs",
+            ],
+        ),
+        (
+            "environment",
+            &[
+                // Tool and settings paths, and the log filter.
+                "assets/xcc_database.rs",
+                "sim/parity_digest.rs",
+                "util/config.rs",
+                "util/logging.rs",
+                // Switches that only remove debug assertions.
+                "util/debug_checks.rs",
+                "sim/world/master_frame.rs",
+                // Retail probes that movement_bridge_retail_tests.rs includes
+                // by `#[path]`, which the test-gate scan cannot see.
+                "sim/movement/bridge_restamp_retail_probe.rs",
+                "sim/movement/bridge_tile_retail_probe.rs",
+            ],
+        ),
+        (
+            "directory order",
+            &[
+                // The listing owner. Archives and loose files register in NTFS
+                // or byte order.
+                "util/file_system.rs",
+                "assets/asset_manager.rs",
+                "util/case_insensitive_path.rs",
+                // Menu lists and map cache eviction.
+                "map/rmg/saved_seeds.rs",
+                "map/scenario_sources.rs",
+                "map/source/cache.rs",
+                // A received map's case-folded name check; a file it finds is
+                // kept only when it holds the same verified bytes.
+                "map/source.rs",
+            ],
+        ),
+        (
+            "thread count or identity",
+            &[
+                // Results keep item order whatever the thread count.
+                "sim/parallel.rs",
+            ],
+        ),
+    ];
+    let expected: BTreeSet<(&str, &str)> = pinned
+        .iter()
+        .flat_map(|&(group, files)| files.iter().map(move |&file| (group, file)))
+        .collect();
+    let mut found = BTreeSet::new();
+    for (file, production) in engine_production_files() {
+        for (group, needles) in &groups {
+            let mentions = |needle: &&str| {
+                if needle.starts_with('.') {
+                    production.contains(*needle)
+                } else {
+                    count_identifier(production, needle) > 0
+                }
+            };
+            if needles.iter().any(mentions) {
+                found.insert((*group, file));
+            }
+        }
+    }
+    assert_eq!(
+        found, expected,
+        "engine code reads a platform- or process-dependent value outside its \
+         pinned files, or a pin is stale. Simulation inputs are SimFixed, the \
+         retail tables, the `libm` crate, the seeded scenario RNG and the frame \
+         count; pin a file only when its use reaches no simulation state, hash \
+         or multiplayer checksum."
+    );
+}
+
+/// Engine reads of what differs per client: PlayerPtr (`current_house`), the
+/// observer Houses, IsHumanPlayer (`0x0050B6F0`, `is_human_player` and its
+/// `house_is_human_player` wrapper), Techno+0x41A and +0x41B
+/// (`owned_by_current_house`, `discovered_by_current_house`) and the local
+/// player's name and defeat. In a network game no decision every peer shares
+/// may depend on them; `shared_owned_by_current_house` and HasOccurred53 show
+/// the adaptation. Each read pinned here, by file and count, was reviewed: it
+/// feeds drawing, sound, EVA or input, runs in campaigns only, is
+/// network-adapted, or is unreachable.
+#[test]
+fn engine_per_client_reads_have_pinned_callers() {
+    let pinned: &[(&str, &[(&str, usize)])] = &[
+        (
+            "current_house",
+            &[
+                ("sim/anim_class.rs", 1),
+                ("sim/campaign_carry_over.rs", 2),
+                ("sim/cheats.rs", 1),
+                ("sim/cloak_disguise.rs", 2),
+                ("sim/combat/aircraft_release.rs", 1),
+                ("sim/combat/world_fire.rs", 1),
+                ("sim/combat/world_receiver.rs", 1),
+                ("sim/flashing.rs", 1),
+                ("sim/house_diplomacy.rs", 1),
+                ("sim/miner/ore_scan.rs", 1),
+                ("sim/production/factory_lifecycle.rs", 4),
+                ("sim/production/production_placement.rs", 4),
+                ("sim/production/production_queue.rs", 1),
+                ("sim/production/production_tech.rs", 1),
+                ("sim/scenario_bootstrap.rs", 5),
+                ("sim/scenario_session.rs", 5),
+                ("sim/snapshot.rs", 2),
+                ("sim/superweapon/lightning_storm.rs", 1),
+                ("sim/superweapon/psychic_reveal.rs", 1),
+                ("sim/team_script_vm/actions.rs", 1),
+                ("sim/team_script_vm/reinforcements.rs", 2),
+                ("sim/trigger_runtime.rs", 1),
+                ("sim/world/aircraft_fire_location.rs", 1),
+                ("sim/world/camera_home.rs", 2),
+                ("sim/world/command_schedule.rs", 3),
+                ("sim/world/fog_objects.rs", 1),
+                ("sim/world/gap_generator.rs", 1),
+                ("sim/world/house_defeat.rs", 9),
+                ("sim/world/jumpjet_cruise.rs", 1),
+                ("sim/world/lifecycle.rs", 6),
+                ("sim/world/mod.rs", 7),
+                ("sim/world/object_turn.rs", 1),
+                ("sim/world/planning.rs", 2),
+                ("sim/world/shroud_refresh.rs", 18),
+                ("sim/world/techno_ai.rs", 1),
+                ("sim/world/techno_ai/mission_handlers.rs", 1),
+                ("sim/world/techno_ai_cloak.rs", 3),
+                ("sim/world/world_commands.rs", 6),
+                ("sim/world/world_orders.rs", 2),
+                ("sim/world/world_spawn.rs", 1),
+                ("sim/world/world_spawn/construction.rs", 1),
+                ("sim/world/world_spawn/wall_unlimbo.rs", 1),
+            ],
+        ),
+        (
+            "observer_houses",
+            &[("sim/scenario_session.rs", 6), ("sim/snapshot.rs", 1)],
+        ),
+        (
+            "is_observer_house",
+            &[
+                ("sim/scenario_session.rs", 1),
+                ("sim/score.rs", 1),
+                ("sim/world/house_defeat.rs", 2),
+            ],
+        ),
+        (
+            "is_human_player",
+            &[
+                ("sim/world/crash.rs", 1),
+                ("sim/world/mod.rs", 1),
+                ("sim/world/world_orders.rs", 2),
+            ],
+        ),
+        (
+            "house_is_human_player",
+            &[
+                ("sim/building_art.rs", 2),
+                ("sim/building_entry.rs", 1),
+                ("sim/building_power.rs", 2),
+                ("sim/capture_manager.rs", 1),
+                ("sim/combat/destruction_effects.rs", 1),
+                ("sim/combat/parasite.rs", 2),
+                ("sim/combat/world_receiver.rs", 2),
+                ("sim/docking/hospital.rs", 1),
+                ("sim/flashing.rs", 1),
+                ("sim/infantry.rs", 1),
+                ("sim/movement/per_cell.rs", 1),
+                ("sim/passenger.rs", 1),
+                ("sim/production/can_build.rs", 1),
+                ("sim/production/production_repair.rs", 1),
+                ("sim/temporal.rs", 1),
+                ("sim/vehicle_theft.rs", 1),
+                ("sim/world/camera_home.rs", 1),
+                ("sim/world/fly_process.rs", 1),
+                ("sim/world/lifecycle.rs", 1),
+                ("sim/world/move_cell_input.rs", 3),
+                ("sim/world/planning.rs", 1),
+                ("sim/world/selection_voice.rs", 4),
+                ("sim/world/shroud_refresh.rs", 2),
+                ("sim/world/techno_ai.rs", 1),
+                ("sim/world/world_commands.rs", 2),
+                ("sim/world/world_orders.rs", 12),
+            ],
+        ),
+        (
+            "owned_by_current_house",
+            &[
+                ("sim/cloak_disguise.rs", 13),
+                ("sim/combat/greatest_threat.rs", 1),
+                ("sim/game_entity.rs", 3),
+                ("sim/miner/ore_scan.rs", 1),
+                ("sim/world/camera_home.rs", 1),
+                ("sim/world/lifecycle.rs", 8),
+                ("sim/world/object_entry.rs", 1),
+            ],
+        ),
+        (
+            "discovered_by_current_house",
+            &[
+                ("sim/combat/greatest_threat.rs", 1),
+                ("sim/combat/world_fire.rs", 1),
+                ("sim/house_state.rs", 5),
+                ("sim/power_system.rs", 2),
+                ("sim/production/production_tech.rs", 1),
+                ("sim/trigger_runtime.rs", 1),
+                ("sim/world/lifecycle.rs", 11),
+                ("sim/world/mod.rs", 1),
+                ("sim/world/shroud_refresh.rs", 1),
+                ("sim/world/world_commands.rs", 1),
+                ("sim/world/world_hash.rs", 1),
+            ],
+        ),
+        (
+            "local_player_name",
+            &[("sim/snapshot/scenario_resources.rs", 6)],
+        ),
+        (
+            "local_player_defeated",
+            &[
+                ("sim/house_diplomacy.rs", 1),
+                ("sim/superweapon/lightning_storm.rs", 3),
+                ("sim/world/house_defeat.rs", 1),
+                ("sim/world/mod.rs", 1),
+            ],
+        ),
+    ];
+    let expected: BTreeSet<(&str, &str, usize)> = pinned
+        .iter()
+        .flat_map(|&(symbol, files)| {
+            files
+                .iter()
+                .map(move |&(file, count)| (file, symbol, count))
+        })
+        .collect();
+    let mut found = BTreeSet::new();
+    for (file, production) in engine_production_files() {
+        for &(symbol, _) in pinned {
+            let count = count_identifier(production, symbol);
+            if count > 0 {
+                found.insert((file, symbol, count));
+            }
+        }
+    }
+    assert_eq!(
+        found, expected,
+        "engine code reads a per-client value outside its pinned sites, or a \
+         pin is stale. In a network game a decision every peer shares (state, \
+         RNG draws, hashed fields) must not depend on it: keep the read to \
+         drawing, sound or input, or adapt it as `shared_owned_by_current_house` \
+         does, then update the pin."
     );
 }
 
@@ -1224,7 +1612,6 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "install_receipt",
             "the map read builds the tube receipt in place once; binding takes it once",
         ),
-        ("net/lockstep.rs", "payload_mut", PAYLOAD),
         (
             "net/udp.rs",
             "deref_mut",
@@ -1277,6 +1664,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
              through vt+0x38 (0x00540D10) only when its bool argument is set",
         ),
         (
+            "net/live_commands/sequenced.rs",
+            "set_presentation_hidden",
+            "whether the game window is hidden, reported by the app: a hidden window, which \
+             its system may throttle, never reports falling behind the relay's clock",
+        ),
+        (
             "net/reliable.rs",
             "set_timing",
             "Set_Timing (0x00540C60) stores the manager's +0x58..+0x60 and copies them into \
@@ -1323,10 +1716,21 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "the +0x6CC writers and PointerExpired's clear",
         ),
         (
+            "sim/building_entry.rs",
+            "set_nearest_occupiable_seek",
+            "Ares writes the +0x691 seek latch with its scan's answer (0x10046A8B/0x10046ACC)",
+        ),
+        (
             "sim/combat/attack_target.rs",
             "set",
             "the TarCom class setter; callers port each native writer, such as \
              PointerExpired's NULL store (0x00707A33)",
+        ),
+        (
+            "sim/cloak_disguise.rs",
+            "set_attached",
+            "Ares RecalculateStats 0x1004613B/0x1004617D commits the cloak aggregate \
+             derived from the canonical attachment vector; permanent crate capability stays separate",
         ),
         (
             "sim/combat/base_defense_response.rs",
@@ -1341,8 +1745,14 @@ fn mutable_handouts_and_setters_are_owner_operations() {
         (
             "sim/combat/object_health.rs",
             "set",
-            "the Strength store of the native death paths (Crush 0x007416A0, \
-             KillPassengers 0x00707CB0, KillOccupants 0x004585C0)",
+            "the native +0x6C stores outside ReceiveDamage listed on Health::set, \
+             such as a crash's kill (0x004DEC72) and a parasite's death (0x0062A46A)",
+        ),
+        (
+            "sim/game_entity.rs",
+            "set_useless",
+            "Mission_Harvest alone writes Techno+3D0 at 0x0073E8FA/0x0073E925; \
+             depot admission reads the same latch",
         ),
         (
             "sim/house_state.rs",
@@ -1390,6 +1800,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "TActions 74/75 store only House+1F2 (0x006DF2FA, 0x006DF339)",
         ),
         (
+            "sim/house_state.rs",
+            "set_personality",
+            "VERA's skirmish launch draw (`crate::rules::personality`): the one write of a \
+             computer house's commander, installed by scenario bootstrap before the match starts",
+        ),
+        (
             "sim/mission/state.rs",
             "set_handler_state",
             "the handler-state dword native mission handlers write while executing",
@@ -1427,6 +1843,18 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "Techno+0x271, cleared by TimerCheck's expiry and state 7",
         ),
         (
+            "sim/object_fall.rs",
+            "set_attached_anim_flag",
+            "Object+84: SetOwnerObject 0x00424B50 sets it when an Anim attaches and the last \
+             detach (0x00424B79, 0x0042291A) clears it, both through anim_class",
+        ),
+        (
+            "sim/object_fall.rs",
+            "set_parachute_animation",
+            "ObjectClass::Paradrop publishes Object+88 at 0x005F5AF1 before \
+             SetOwnerObject 0x005F5AFE; creation failure and matching expiry clear it",
+        ),
+        (
             "sim/pathfinding/zone_map.rs",
             "set_bridge_redirect",
             "the zone grid's derived bridge redirect table, rebuilt at zone build and bridge repair",
@@ -1454,6 +1882,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
              carry-over restores that word separately from the incoming restart record",
         ),
         (
+            "sim/snapshot.rs",
+            "set_sw_sidebar_expanded",
+            "the save boundary copies the app-owned Phobos SWSidebar_Enable into its \
+             neutral presentation envelope; this does not mutate live simulation state",
+        ),
+        (
             "sim/snapshot/scenario_resources.rs",
             "set_elapsed_buckets",
             "ScenarioSave stops +0x614 into the +0x61C accumulator (0x00689360..0x0068936F) \
@@ -1479,6 +1913,18 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "sim/superweapon/mod.rs",
             "set_recharge_time",
             "SuperClass::SetRechargeTime (0x006CC280, TAction 132) changes only Super+24",
+        ),
+        (
+            "sim/vehicle_theft.rs",
+            "set_killed_from_owner",
+            "Ares copies the new owner's MultiplayPassive into the driver-killed flag \
+             (0x100456E8..0x100456F5)",
+        ),
+        (
+            "sim/vehicle_theft.rs",
+            "set_vehicle_seek",
+            "the Ares vehicle-seek latch (Ext+0xB0), written by its scan and by script actions \
+             64/67 (dispatcher 0x1003A110)",
         ),
         (
             "sim/world/mod.rs",

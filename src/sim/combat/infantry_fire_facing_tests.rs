@@ -260,26 +260,25 @@ fn infantry_speed_refusal_at_fire_frame_clears_firing_latch() {
 /// `[RocketeerSequence]`) hovering at 500 over (5, 5), firing at a GI three
 /// cells off.
 fn rocketeer_pair() -> (EntityStore, RuleSet) {
-    let mut rules = RuleSet::from_ini(&IniFile::from_str(
-        "[InfantryTypes]\n0=JJ\n1=E2\n\
+    let art_ini = IniFile::from_str(
+        "[ROCK]\nSequence=RocketeerSequence\nFireUp=2\n\
+         [RocketeerSequence]\nReady=0,1,1\nGuard=0,1,1\nWalk=8,6,6\nFireUp=164,6,6\n\
+         Fly=292,6,6\nHover=292,6,6\nFireFly=370,6,6\n",
+    );
+    let mut rules = RuleSet::from_ini_with_fixed_art_for_test(
+        &IniFile::from_str(
+            "[InfantryTypes]\n0=JJ\n1=E2\n\
          [JJ]\nStrength=125\nArmor=flak\nSpeed=9\nImage=ROCK\nPrimary=M60\nJumpJet=yes\n\
          BalloonHover=yes\nLocomotor={92612C46-F71F-11d1-AC9F-006008055BB5}\n\
          SpeedType=Hover\nMovementZone=Fly\nJumpjetSpeed=30\nJumpjetHeight=500\n\
          [E2]\nStrength=125\nArmor=flak\nSpeed=4\n\
          [M60]\nDamage=25\nROF=20\nRange=5\nWarhead=SA\n\
          [SA]\nVerses=100%,100%,100%,90%,70%,0%,100%,25%,25%,0%,0%\n",
-    ))
+        ),
+        &art_ini,
+    )
     .unwrap();
-    let art_ini = IniFile::from_str(
-        "[ROCK]\nSequence=RocketeerSequence\nFireUp=2\n\
-         [RocketeerSequence]\nReady=0,1,1\nGuard=0,1,1\nWalk=8,6,6\nFireUp=164,6,6\n\
-         Fly=292,6,6\nHover=292,6,6\nFireFly=370,6,6\n",
-    );
     rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art_ini));
-    let registry = crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art_ini);
-    rules.replace_animation_sequences_for_test(
-        crate::rules::animation_sequence::build_animation_sequence_catalog(&rules, Some(&registry)),
-    );
     let mut store = EntityStore::new();
     let mut firer = make_infantry_entity(1, "JJ", 5, 5, 125);
     firer.body_facing = FacingClass::new(0x4000, 127);
@@ -387,7 +386,7 @@ fn production_rules(fire_up: u32) -> RuleSet {
     // The receiver-only fixture has the default Sight=1. Give this full-frame
     // scenario the retail GI sight/locomotor inputs so its target three cells
     // away is visible through the ordinary fog update and firing gates.
-    let mut rules = RuleSet::from_ini(&IniFile::from_str(
+    let rules_ini = &IniFile::from_str(
         "[InfantryTypes]\n0=E1\n1=E2\n[BuildingTypes]\n0=TARGET\n\
          [E1]\nStrength=125\nArmor=flak\nSpeed=4\nSight=5\nImage=GI\nPrimary=M60\n\
          Locomotor={4A582744-9839-11d1-B709-00A024DDAFD1}\nMovementZone=Infantry\n\
@@ -395,16 +394,13 @@ fn production_rules(fire_up: u32) -> RuleSet {
          [TARGET]\nStrength=125\nArmor=flak\nFoundation=2x3\n\
          [M60]\nDamage=25\nROF=20\nRange=5\nWarhead=SA\n\
          [SA]\nVerses=100%,100%,100%,90%,70%,0%,100%,25%,25%,0%,0%\n",
-    ))
-    .unwrap();
+    );
     let art_ini = IniFile::from_str(&format!(
         "[GI]\nFireUp={fire_up}\nPrimaryFireFLH=80,20,40\nSequence=GISequence\n\
          [GISequence]\nReady=0,1,1\nGuard=0,1,1\nFireUp=8,6,6\n",
     ));
+    let mut rules = RuleSet::from_ini_with_fixed_art_for_test(&rules_ini, &art_ini).unwrap();
     rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art_ini));
-    rules.bind_animation_sequences(
-        &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art_ini),
-    );
     rules
 }
 

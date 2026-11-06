@@ -165,7 +165,7 @@ pub(super) fn decode(
                 "community map absent from snapshot"
             );
         }
-        SpawnGame::Campaign(_) => {
+        SpawnGame::Campaign(_) | SpawnGame::Network(_) => {
             anyhow::bail!("community protocol v1 supports offline skirmish only")
         }
     }

@@ -4,6 +4,7 @@
 
 #[cfg(feature = "verax")]
 pub(crate) mod autoload;
+pub(crate) mod build_repeat;
 pub(crate) mod camera;
 pub(crate) mod chat;
 pub(crate) mod commands;
@@ -22,6 +23,7 @@ pub(crate) mod in_game_options;
 pub(crate) mod messages;
 pub(crate) mod pause_menu;
 pub(crate) mod planning_mode;
+pub(crate) mod precedence;
 pub(crate) mod radar;
 pub(crate) mod sidebar_eva;
 pub(crate) mod state;
@@ -42,7 +44,8 @@ mod bridge_click_tests;
 pub(crate) mod sound;
 
 pub(crate) mod keyboard;
-pub(crate) mod network_options;
+#[cfg(target_os = "macos")]
+pub(crate) mod mac_pointer;
 pub(crate) mod multiplayer_setup;
 pub(crate) mod campaign_input;
 pub(crate) mod touch;

@@ -22,7 +22,7 @@ mod tests {
     /// The canonical comparison retains native world offsets and transparent
     /// pixels; no translation search, resizing or best-match alignment occurs.
     #[test]
-    #[ignore = "requires extracted retail GTNK assets and original-executable all-facing observations"]
+    #[ignore = "requires VERA20K_VOXEL_PROBE_DIR with extracted retail GTNK assets and original-executable all-facing observations"]
     fn native_grizzly_hull_matches_retail_all_facings() {
         use crate::assets::{hva_file::HvaFile, vpl_file::VplFile};
         use std::{fs, path::PathBuf};
@@ -60,8 +60,9 @@ mod tests {
                 facing: step * 8,
                 ..Default::default()
             };
-            let prepared = vxl_raster::prepare_native_draw(&vxl, Some(&hva), &params, Some(&vpl))
-                .expect("stock GTNK must use the encoded native path");
+            let prepared =
+                vxl_raster::prepare_native_draw(&vxl, Some(&hva), &params, Some(&vpl), None)
+                    .expect("stock GTNK must use the encoded native path");
             assert_eq!(prepared.rect, rect, "all six native GTNK crop outputs");
             let sprite = vxl_raster::render_vxl(&vxl, Some(&hva), &params, Some(&vpl));
             assert_eq!(

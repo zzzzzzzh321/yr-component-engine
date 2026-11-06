@@ -82,6 +82,18 @@ pub(crate) struct WolLoginAccepted {
     pub(crate) motd: String,
 }
 
+/// The game's own message of the day for an accepted login, used when the
+/// lobby sends no operator welcome: a welcome, and how to page with the chat's
+/// `TXT_PAGE_COMMAND`, since the online screens have no Page button.
+pub(super) fn vera_motd(state: &AppState) -> String {
+    let page = App::csf_label(state, "TXT_PAGE_COMMAND", "TXT_PAGE_COMMAND");
+    format!(
+        "Welcome to VERA20K Online!\n\
+         Create a game or join one, and chat with everyone here.\n\
+         To send a private message, type {page} <name> <message>."
+    )
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum WolServiceRequest {
     /// `WOL__EnsureWolapiObject` `0x00786390`.
@@ -96,13 +108,23 @@ pub(crate) enum WolServiceRequest {
     /// ends the visit and with it the service session; nothing is queued.
     CancelWait,
     /// `0x007864C0`: API+0x14 with the selected record, the nickname and
-    /// password copied into it (+0xE4/+0xEE) and the changed byte.
+    /// password copied into it (+0xE4/+0xEE) and the changed byte. VERA
+    /// online: an empty password enters as a guest or, with `remember`, as
+    /// the account this computer remembers (docs/lobby-protocol.md
+    /// "Accounts").
     Connect {
         server: WolServer,
         nickname: String,
         password: String,
         changed: bool,
+        remember: bool,
     },
+    /// VERA online: a lobby account request; the answer is
+    /// [`WolServiceEvent::Account`].
+    Account(crate::ui::wol_account::AccountRequest),
+    /// VERA online: Remember password was unticked for the remembered
+    /// account; this computer forgets its sign-in, here and at the lobby.
+    ForgetSignIn,
     /// Forget Account: API+0x94(slot, "", "", 1).
     ForgetCredential { slot: u32 },
     /// Remember after a login: `0x00789500(nickname, password, changed,
@@ -135,8 +157,13 @@ pub(crate) enum WolServiceRequest {
     /// API+0x34 from the logout `0x00785EA0`.
     Logout,
     /// `0x00789B60`: API+0x1C with the new game channel's record and its
-    /// key at `+0xD7`.
-    CreateChannel { channel: WolChannel, key: String },
+    /// key at `+0xD7`. `ranked` false is VERA's unticked Ranked game, which
+    /// asks its lobby to keep the room's games unranked.
+    CreateChannel {
+        channel: WolChannel,
+        key: String,
+        ranked: bool,
+    },
     /// `0x0077E1D0`, the pager `0x0078A6B0`/`0x0078A8F0` or the locate
     /// `0x0078A470` from the lobby; `to` are the selected users of a
     /// private line.
@@ -247,9 +274,12 @@ pub(crate) enum WolServiceEvent {
         kind: u32,
         channels: Vec<WolChannel>,
     },
-    /// The chat sink's OnJoin `0x007A5E40` for this user: the joined
+    /// The chat sink's OnJoin `0x007A5890` for this user: the joined
     /// channel with its users, or the result code.
     Joined(Result<super::lobby::WolJoined, u32>),
+    /// VERA: the match ended and the lobby gave back the game room this
+    /// player stayed in (`room_reopened`), owner first.
+    RoomReopened(super::lobby::WolJoined),
     /// OnJoin for another user of the current channel.
     UserJoined(WolMember),
     /// OnPart of another user (by name).
@@ -301,6 +331,9 @@ pub(crate) enum WolServiceEvent {
     },
     /// The page-send result sink `CChatEventSink+0x6C` (`0x007A9800`).
     PageResult(Result<(), u32>),
+    /// VERA online: the lobby's answer to a
+    /// [`WolServiceRequest::Account`], or the message to show.
+    Account(Result<(), String>),
     /// A chat or action line from another user: the chat sinks
     /// `0x007A8DA0` (public), `0x007A8FC0` (private), `0x007AB170` (public
     /// action), `0x007AAFB0` (private action) and, without `ansi`, their
@@ -315,6 +348,9 @@ pub(crate) enum WolServiceEvent {
         action: bool,
         ansi: bool,
         options: Option<Box<crate::app::shell_network_setup::HostOptions>>,
+        /// When VERA20K Online's lobby sent it (Unix seconds); a notice's
+        /// is when it was set.
+        sent_at: Option<u64>,
     },
     /// The find sink `0x007A9970`: the channel the located user is in, or
     /// the result code.
@@ -719,28 +755,20 @@ fn connect(state: &mut AppState, server: WolServer, auto: bool, remember_locale:
         .wol
         .as_ref()
         .is_some_and(|visit| visit.provider == WolProvider::Online);
-    let (nickname, password, changed) = if online {
-        // The shared native request retains its credential fields for the
-        // test service; modern HTTPS admission uses only this username.
-        (
-            state.frontend.wol_account.nickname.clone(),
-            String::new(),
-            false,
-        )
-    } else {
-        let globals = &state.frontend.wol_account;
-        (
-            globals.nickname.clone(),
-            globals.password.clone(),
-            globals.changed,
-        )
-    };
+    let globals = &state.frontend.wol_account;
+    let (nickname, password, changed, remember) = (
+        globals.nickname.clone(),
+        globals.password.clone(),
+        globals.changed && !online,
+        globals.remember && online,
+    );
     let visit = state.frontend.wol.as_mut().expect("WOL visit");
     visit.requests.push(WolServiceRequest::Connect {
         server: server.clone(),
         nickname,
         password,
         changed,
+        remember,
     });
     visit.awaiting = Awaiting::Connect {
         deadline: Instant::now() + WAIT_LIMIT,
@@ -881,6 +909,10 @@ pub(crate) fn service_event(state: &mut AppState, event: WolServiceEvent) {
         return;
     }
     let event = match event {
+        WolServiceEvent::Account(result) => {
+            super::login::account_answered(state, result);
+            return;
+        }
         WolServiceEvent::Page { from, text, ansi } => {
             super::lobby::page_received(state, from, text, ansi);
             return;
@@ -896,6 +928,7 @@ pub(crate) fn service_event(state: &mut AppState, event: WolServiceEvent) {
             action,
             ansi,
             options,
+            sent_at,
         } => {
             super::lobby::message_received(
                 state,
@@ -906,6 +939,7 @@ pub(crate) fn service_event(state: &mut AppState, event: WolServiceEvent) {
                     action,
                     ansi,
                     options,
+                    sent_at,
                 },
             );
             return;
@@ -971,6 +1005,7 @@ pub(crate) fn service_event(state: &mut AppState, event: WolServiceEvent) {
         }
         event @ (WolServiceEvent::Channels { .. }
         | WolServiceEvent::Joined(_)
+        | WolServiceEvent::RoomReopened(_)
         | WolServiceEvent::UserJoined(_)
         | WolServiceEvent::UserLeft(_)
         | WolServiceEvent::ChannelLeft
@@ -1022,6 +1057,27 @@ pub(super) fn message_box_text(state: &AppState, body: String, yes_no: bool) -> 
 
 /// A live-service refusal whose reason no CSF label carries: the box its
 /// failure opened shows `body` instead. False when no box is open.
+/// A VERA-specific box over the WOL welcome, which returns to it. False
+/// outside the welcome.
+pub(super) fn show_text_box(state: &mut AppState, body: &str) -> bool {
+    if state.frontend.shell_route != crate::app::shell_route::ShellRoute::Wol {
+        return false;
+    }
+    let message = message_box_text(state, body.to_owned(), false);
+    let dialog = message.dialog();
+    let Some(visit) = state.frontend.wol.as_mut() else {
+        return false;
+    };
+    visit.status_help = None;
+    visit.page = WolPage::Message {
+        message,
+        then: WolBoxThen::Welcome,
+    };
+    state.frontend.shell_controller.reset_to(dialog, false);
+    state.platform.window.request_redraw();
+    true
+}
+
 pub(super) fn replace_open_box_body(state: &mut AppState, body: &str) -> bool {
     match state.frontend.wol.as_mut().map(|visit| &mut visit.page) {
         Some(WolPage::Message { message, .. }) => {
@@ -1380,8 +1436,14 @@ fn poll_deadline(state: &mut AppState) -> Option<Instant> {
         return Some(deadline);
     }
     let step = match std::mem::take(&mut visit.awaiting) {
-        // 0x007866E4: no box from the wait itself.
-        Awaiting::Connect { .. } => visit.connect_failed(),
+        // 0x007866E4: no box from the wait itself. A sign-in still queued
+        // behind an old logout must not start after the wait gave up.
+        Awaiting::Connect { .. } => {
+            visit
+                .requests
+                .retain(|request| !matches!(request, WolServiceRequest::Connect { .. }));
+            visit.connect_failed()
+        }
         _ => WolStep::LocaleDecided,
     };
     apply(state, step);
@@ -1461,11 +1523,19 @@ mod tests {
         use crate::ui::wol_login::{LoginPolicy, WolAccountGlobals, WolLoginState};
         let mut visit = visit();
         let mut globals = WolAccountGlobals::default();
-        visit.page = WolPage::Login(Box::new(WolLoginState::open_online(&mut globals)));
+        visit.page = WolPage::Login(Box::new(WolLoginState::open_online(
+            &mut globals,
+            None,
+            None,
+        )));
         let modern = visit.login().unwrap().policy.page_spec();
         assert_eq!(modern, LoginPolicy::Online.page_spec());
         let column = ShellSlideKind::WolLogin.column(9, Some(modern));
-        assert_eq!((column.top_buttons, column.bottom_button), (1, true));
+        assert_eq!(
+            (column.top_buttons, column.bottom_button),
+            (5, true),
+            "Login, Play as Guest and the three account buttons"
+        );
         visit.page = WolPage::Login(Box::new(WolLoginState::open(&mut globals, &[])));
         let native = visit.login().unwrap().policy.page_spec();
         assert_eq!(native, LoginPolicy::Legacy.page_spec());

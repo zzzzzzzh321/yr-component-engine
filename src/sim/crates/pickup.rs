@@ -307,7 +307,7 @@ pub(crate) fn multiplayer_eligible_slot(
                 // Installed Firepower1@1005F940 returns481D52 directly,
                 //bypassing stock Is_Armed just as Speed1 bypasses Aircraft.
                 && (effect_policy.allow_unarmed_firepower_crates || object.is_some_and(|object| {
-                    crate::sim::combat::combat_weapon::is_armed(actor, object)
+                    crate::sim::combat::combat_weapon::is_armed(actor, object, &sim.substrate.entities, rules, &sim.interner)
                 }))
         }
         // `0x00481C91`: a Techno actor whose type is not `Trainable=`, or
@@ -715,7 +715,7 @@ pub(crate) fn pickup_crate(
 
 /// `0x004832F5..0x00483389`: the slot's `[Powerups]` anim 200 leptons above
 /// the crate centre, `AnimClass(type, coord, 0, 1, 0x600, 0, 0)`; a slot whose
-/// anim name resolved to no AnimType (`-1`) spawns nothing. Always true.
+/// retained animation index is `-1` spawns nothing. Always true.
 fn spawn_pickup_anim(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -723,7 +723,10 @@ fn spawn_pickup_anim(
     cell: (i16, i16),
     receiver: Option<NativeCellIdentity>,
 ) -> bool {
-    let Some(anim) = rules.powerups.anims.get(slot).and_then(Option::as_deref) else {
+    // Preserve the existing bounded lookup for a saved index whose Type was
+    // deleted without a replacement. Native only checks -1 before indexing.
+    let Some(anim) = rules.anim_type_runtime_key_by_index(rules.powerups.animation_index(slot))
+    else {
         return true;
     };
     let (Ok(rx), Ok(ry)) = (u16::try_from(cell.0), u16::try_from(cell.1)) else {
@@ -731,7 +734,7 @@ fn spawn_pickup_anim(
     };
     // 483307..483334 rereads the retained Cell only for an admitted anim.
     let center = crate_center(sim, cell, receiver);
-    let type_name = sim.interner.intern(anim);
+    let type_name = sim.interner.intern(&anim);
     let mut descriptor = crate::sim::components::AnimClassSpawnDescriptor::new(
         type_name,
         rx,
@@ -745,9 +748,9 @@ fn spawn_pickup_anim(
     descriptor.draw_flags = 0x600;
     descriptor.z_adjust = 0;
     descriptor.reverse = false;
-    // An unregistered anim name is native's `-1` index: no anim. Every other
-    // failure is a loader gap (`effect_asset_catalog::anim_class_roots` binds
-    // the `[Powerups]` names), worth a warning rather than silence.
+    // The retained index selects the current AnimTypeArray (483371..48337E),
+    // including a reused slot after Type reset. No later name lookup admits a
+    // failed INI read. Missing bound artwork remains an asset-loader gap.
     if let Err(error) = sim.spawn_anim_at_world(
         rules,
         descriptor,

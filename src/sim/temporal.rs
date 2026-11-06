@@ -106,10 +106,6 @@
 //!     House4F92D2→Building4456D0 membership pass does honor the online latch:
 //!     existing cameos may stay dark while new additions wait for release.
 //!     `0x0044017E` reads660 for Tesla charging, not construction options.
-//! - A building's erase kills its garrison through `0x004585C0(0)` and deletes
-//!   absorbed passengers outright before Record_The_Kill; VERA's carrier
-//!   UnInit purges both inside the building's UnInit (each at health 0 with no
-//!   killer, booking a loss). Draws inside `0x004585C0` are not established.
 //! - SlaveManager release with the attacker as liberator (`0x006B0AE0`):
 //!   VERA models no slave release on any master death.
 //! - `WarpPerStep` (`+0x4C`, written each step, read by no sim function) and
@@ -276,7 +272,8 @@ impl GameEntity {
 /// built before a map reader sets veterancy, as for the CaptureManager).
 pub(crate) fn init_temporal(object_type: &ObjectType, rules: &RuleSet) -> TemporalState {
     let temporal = crate::sim::combat::combat_weapon::weapon_for_index(object_type, 0, 0)
-        .and_then(|(weapon_name, _)| rules.weapon(weapon_name))
+        .and_then(|record| record.weapon_id)
+        .and_then(|weapon_name| rules.weapon(weapon_name))
         .and_then(|weapon| weapon.warhead.as_deref())
         .and_then(|warhead| rules.warhead(warhead))
         .is_some_and(|warhead| warhead.temporal);
@@ -361,12 +358,14 @@ impl Simulation {
                             requested,
                             Some((rules, &self.interner)),
                         );
-                        if let Some(firer_entity) = self.substrate.entities.get_mut(firer) {
-                            crate::sim::mission::concrete_effects::represented_assign_target_admitted(
+                        if let Some(firer_entity) = self.substrate.entities.get_mut(firer)
+                            && crate::sim::mission::concrete_effects::represented_assign_target_admitted(
                                 firer_entity,
                                 requested,
                                 stored,
-                            );
+                            )
+                        {
+                            self.assign_target_fire_teardown(firer, rules, registry);
                         }
                         Some(bunker)
                     }
@@ -679,11 +678,30 @@ impl Simulation {
         };
         let facts = crate::sim::combat::combat_weapon::attacker_facts(entity, object);
         let index = crate::sim::combat::combat_weapon::what_weapon_should_i_use(
-            rules, object, &facts, None,
+            rules,
+            object,
+            &facts,
+            None,
+            |index| {
+                crate::sim::combat::combat_weapon::get_weapon(
+                    entity,
+                    object,
+                    index,
+                    &self.substrate.entities,
+                    rules,
+                    &self.interner,
+                )
+            },
         );
-        crate::sim::combat::combat_weapon::weapon_for_index(object, entity.veterancy.rank(), index)
-            .and_then(|(weapon, _)| rules.weapon(weapon))
-            .map_or(0, |weapon| weapon.damage)
+        crate::sim::combat::combat_weapon::get_weapon(
+            entity,
+            object,
+            index,
+            &self.substrate.entities,
+            rules,
+            &self.interner,
+        )
+        .map_or(0, |weapon| weapon.damage)
     }
 
     /// `TechnoClass+0x82` InOpenTransport: inside an `OpenTopped=` transport.

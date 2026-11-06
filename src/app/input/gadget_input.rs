@@ -39,20 +39,11 @@ pub(crate) const ID_SCROLL_UP: u16 = 0x00C8; // −1 page, Kind 0
 /// slot index. Mirrors the gamemd id space and the A4 tooltip id base
 /// (`tooltips::CAMEO_TIP_ID_BASE`).
 pub(crate) const ID_CAMEO_BASE: u16 = 1000;
-/// Sidebar control/dev button id base (A6): 4 slots in a fixed order —
-/// cycle-owner, starter-base, spawn-test-units, producer. These have NO gamemd
-/// counterpart (sandbox/control utilities); ids are app-local and chosen clear
-/// of the tab/repair/sell/scroll/cameo ranges.
-const ID_CONTROL_BASE: u16 = 0x0200;
-/// Number of control-button slots (A6).
-const CONTROL_SLOTS: usize = 4;
-/// Control-button mask (A6): left + right press, fire-on-press, no held bits —
-/// preserves the legacy "any click fires" behavior of `sidebar::hit_test`
-/// (which ignored the right/left distinction for these buttons).
-const CONTROL_FLAGS: u16 = 0x0011;
 /// Scroll mask: presses + releases for BOTH buttons, no held bits — no
 /// hold-repeat (G23); right-release fires `ID|0xC000`, consumer masks it off.
 const SCROLL_FLAGS: u16 = 0x0055;
+/// VERA-only local timer list; outside the native cameo/control ID ranges.
+const ID_TIMER_DOCK: u16 = 0x0200;
 /// The single in-game gadget list (ListId uniqueness is app-owned).
 const IN_GAME_LIST: ListId = ListId(1);
 
@@ -98,11 +89,8 @@ pub(crate) struct InGameGadgets {
     /// Minimap/radar click region (A3): invisible sticky region over the radar
     /// minimap; disabled when the radar is offline / minimap absent.
     pub minimap: Option<GadgetHandle>,
-    /// Control/dev button gadgets (A6): fixed 6-slot set built once, synced from
-    /// the view each frame (rect + presence); the optional pause/producer slots
-    /// disable when absent. Slot order matches `apply_gadget_result`'s mapping.
-    pub controls: Option<[GadgetHandle; CONTROL_SLOTS]>,
     pub command_bar: Option<[GadgetHandle; 12]>,
+    timer_dock: Option<GadgetHandle>,
 }
 
 impl InGameGadgets {
@@ -115,8 +103,8 @@ impl InGameGadgets {
             cameos: Vec::new(),
             tactical: None,
             minimap: None,
-            controls: None,
             command_bar: None,
+            timer_dock: None,
         }
     }
 
@@ -224,18 +212,19 @@ fn sync_gadgets(state: &mut AppState, view: &SidebarView) {
             Some(active),
         );
     }
+    // Native never disables Repair/Sell (`SidebarGadgetState::repair_frame`).
     sync(
         &mut gadgets.list,
         handles.repair,
         repair_rect,
-        view.repair_button.disabled,
+        false,
         Some(view.repair_button.active),
     );
     sync(
         &mut gadgets.list,
         handles.sell,
         sell_rect,
-        view.sell_button.disabled,
+        false,
         Some(view.sell_button.active),
     );
     sync(
@@ -263,75 +252,31 @@ fn sync_gadgets(state: &mut AppState, view: &SidebarView) {
     }
     sync_regions(state, view);
     sync_cameos(state, view);
-    sync_controls(state, view);
     command_bar::sync(state);
+    let rect = state
+        .match_state
+        .match_presentation
+        .super_timer_dock
+        .toggle_rect();
+    sync_timer_dock(
+        &mut state.match_state.match_presentation.in_game_gadgets,
+        rect,
+    );
 }
 
-/// Control/dev button gadgets (A6): build the fixed 6-slot set once, then sync
-/// each slot's rect + presence from the view. Control behavior (fire-on-press,
-/// post `id|0x8000`), mask 0x11 (left+right press), NOT sticky. Slot order is
-/// fixed and mirrored by `apply_gadget_result`: 0 cancel, 1 cycle-owner,
-/// 2 starter-base, 3 spawn-test-units, 4 pause, 5 producer. The optional
-/// pause/producer slots disable when the view omits them. Appended after the
-/// cameos — disjoint rects, so order is observationally irrelevant (O7/G20).
-fn sync_controls(state: &mut AppState, view: &SidebarView) {
-    let frame = state.sidebar_frame();
-    if state
-        .match_state
-        .match_presentation
-        .in_game_gadgets
-        .controls
-        .is_none()
-    {
-        let zero = GadgetRect::new(0, 0, 0, 0);
-        let mut handles = [GadgetHandle(0); CONTROL_SLOTS];
-        for (i, h) in handles.iter_mut().enumerate() {
-            let mut spec = GadgetSpec::new(zero, CONTROL_FLAGS, false);
-            spec.id = ID_CONTROL_BASE + i as u16;
-            spec.behavior = GadgetBehavior::Control;
-            *h = state
-                .match_state
-                .match_presentation
-                .in_game_gadgets
-                .list
-                .add_tail(spec);
-        }
-        state
-            .match_state
-            .match_presentation
-            .in_game_gadgets
-            .controls = Some(handles);
-    }
-    let handles = state
-        .match_state
-        .match_presentation
-        .in_game_gadgets
-        .controls
-        .expect("built above");
-    let slots: [Option<GadgetRect>; CONTROL_SLOTS] = [
-        Some(rect_px(frame, view.cycle_owner_button.rect)),
-        Some(rect_px(frame, view.starter_base_button.rect)),
-        Some(rect_px(frame, view.spawn_test_units_button.rect)),
-        view.producer_button
-            .as_ref()
-            .map(|b| rect_px(frame, b.rect)),
-    ];
-    for (i, h) in handles.iter().enumerate() {
-        if let Some(g) = state
-            .match_state
-            .match_presentation
-            .in_game_gadgets
+/// Reuse the ordinary gadget capture/cancel/release owner. Head insertion puts
+/// this tiny control before the full-tactical catcher, without catching timer
+/// text or transparent space. No tooltip is registered for it.
+fn sync_timer_dock(gadgets: &mut InGameGadgets, rect: Option<GadgetRect>) {
+    let zero = GadgetRect::new(0, 0, 0, 0);
+    let handle = *gadgets.timer_dock.get_or_insert_with(|| {
+        gadgets
             .list
-            .get_mut(*h)
-        {
-            match slots[i] {
-                Some(r) => {
-                    g.rect = r;
-                    g.is_disabled = false;
-                }
-                None => g.is_disabled = true,
-            }
-        }
+            .add_head(GadgetSpec::button(zero, ID_TIMER_DOCK, ToggleKind::Plain))
+    });
+    if let Some(gadget) = gadgets.list.get_mut(handle) {
+        gadget.rect = rect.unwrap_or(zero);
+        gadget.is_disabled = rect.is_none();
     }
 }
 
@@ -424,8 +369,12 @@ fn sync_regions(state: &mut AppState, _view: &SidebarView) {
 /// per visible item, id = ID_CAMEO_BASE + slot, rect from the item; the unused
 /// tail is disabled (skipped by hit-test + walk). Cameos are appended after the
 /// chrome buttons — all groups occupy disjoint rects, so order is observationally
-/// irrelevant (one pinned order for hit + draw, O7/G20). The pool grows on
-/// demand and is never auto-shrunk; growth is gated to NOT run while a region
+/// irrelevant (one pinned order for hit + draw, O7/G20). StripClass Activate
+/// 6A8330 / ActivateButtons 6A93F0 add a select button for every visible slot
+/// and Deactivate 6A83E0 / RemoveButtons 6A94B0 remove all 60. Disabling the
+/// empty tail matches: on an empty slot SelectClass::Action only sets the
+/// normal cursor (6AAD61) and passes flags 0 on (6AAD79 -> 6AB94F).
+/// The pool grows on demand and is never auto-shrunk; growth is gated to NOT run while a region
 /// holds capture (defensive — cameos themselves are never sticky).
 fn sync_cameos(state: &mut AppState, view: &SidebarView) {
     let frame = state.sidebar_frame();
@@ -514,6 +463,18 @@ pub(crate) fn handle_mouse_button_event(
     if crate::app::input::campaign_input::is_locked(state) {
         return GadgetConsume::Consumed;
     }
+    // VERA's radar order owns one button. The retail gadget's sticky byte
+    // releases on either button, so keep unrelated edges out of that walk
+    // until the owning release; otherwise capture can escape to the map.
+    if state.persistence.options_profile.right_click_orders
+        && state
+            .match_state
+            .input
+            .minimap_press_button()
+            .is_some_and(|owner| owner != button)
+    {
+        return GadgetConsume::Consumed;
+    }
     let Some(view) = current_sidebar_view(state).cloned() else {
         return GadgetConsume::NotConsumed;
     };
@@ -543,7 +504,7 @@ pub(crate) fn idle_tick(state: &mut AppState) {
         return;
     }
     let _ = run_tick(state, &view, 0);
-    crate::app::presentation::sidebar_render::refresh_sidebar_projection(state);
+    crate::app::presentation::sidebar_render::republish_sidebar_projection(state);
 }
 
 fn run_tick(state: &mut AppState, view: &SidebarView, key: u16) -> GadgetConsume {
@@ -689,6 +650,11 @@ fn apply_gadget_result(state: &mut AppState, view: &SidebarView, result: u16) {
     }
     let id = result & !(RESULT_BUTTON | RESULT_RIGHT);
     match id {
+        ID_TIMER_DOCK => state
+            .match_state
+            .match_presentation
+            .super_timer_dock
+            .toggle(),
         _ if (ID_TAB_BASE..ID_TAB_BASE + 4).contains(&id) => {
             let tab = SidebarTab::all()[(id - ID_TAB_BASE) as usize];
             crate::app::input::dispatch::apply_sidebar_action(state, SidebarAction::SelectTab(tab));
@@ -717,9 +683,10 @@ fn apply_gadget_result(state: &mut AppState, view: &SidebarView, result: u16) {
         // plays ScoldSound and queues nothing. StripClass::AI rolls the queue.
         ID_SCROLL_DOWN | ID_SCROLL_UP => {
             let presentation = &mut state.match_state.match_presentation;
-            let queued = presentation.sidebar_projection.queue_page_scroll(
+            let queued = presentation.sidebar_projection.queue_scroll(
                 presentation.active_sidebar_tab,
                 id == ID_SCROLL_DOWN,
+                view.layout.side2_tile_count,
                 view.layout.side2_tile_count,
             );
             let sound = state.rules().and_then(|rules| {
@@ -744,20 +711,6 @@ fn apply_gadget_result(state: &mut AppState, view: &SidebarView, result: u16) {
                 let right = (result & RESULT_RIGHT) != 0;
                 let shift = crate::app::input::dispatch::is_shift_held(state);
                 let action = crate::ui::sidebar::hit_test_item(item, right, shift);
-                crate::app::input::dispatch::apply_sidebar_action(state, action);
-            }
-        }
-        // Control/dev button press (A6): apply the view button's own action.
-        // Slot order matches `sync_controls`.
-        _ if (ID_CONTROL_BASE..ID_CONTROL_BASE + CONTROL_SLOTS as u16).contains(&id) => {
-            let action = match id - ID_CONTROL_BASE {
-                0 => Some(view.cycle_owner_button.action.clone()),
-                1 => Some(view.starter_base_button.action.clone()),
-                2 => Some(view.spawn_test_units_button.action.clone()),
-                3 => view.producer_button.as_ref().map(|b| b.action.clone()),
-                _ => None,
-            };
-            if let Some(action) = action {
                 crate::app::input::dispatch::apply_sidebar_action(state, action);
             }
         }
@@ -793,6 +746,48 @@ fn publish_pressed_visuals(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_arrow_uses_gadget_capture_ahead_of_tactical_orders() {
+        let mut gadgets = InGameGadgets::new();
+        let tactical = gadgets.list.add_tail(GadgetSpec::click_region(
+            GadgetRect::new(0, 0, 800, 600),
+            TACTICAL_REGION_FLAGS,
+        ));
+        sync_timer_dock(&mut gadgets, Some(GadgetRect::new(780, 500, 16, 14)));
+        let button = gadgets.timer_dock.unwrap();
+        let mut input = GadgetInput {
+            queued_key: KEY_LMB_DOWN,
+            event_x: 785,
+            event_y: 505,
+            mouse_x: 785,
+            mouse_y: 505,
+            left_held: true,
+            ..Default::default()
+        };
+        tick(
+            &mut gadgets.list,
+            &mut gadgets.focus,
+            &input,
+            &mut gadgets.out,
+        );
+        assert_eq!(gadgets.focus.sticky, Some(button));
+        assert_ne!(gadgets.out.consumed_by, Some(tactical));
+        input.queued_key = KEY_LMB_UP;
+        input.left_held = false;
+        assert_eq!(
+            tick(
+                &mut gadgets.list,
+                &mut gadgets.focus,
+                &input,
+                &mut gadgets.out
+            ),
+            ID_TIMER_DOCK | RESULT_BUTTON
+        );
+        assert!(gadgets.focus.sticky.is_none());
+        sync_timer_dock(&mut gadgets, None);
+        assert!(gadgets.list.get(button).unwrap().is_disabled);
+    }
 
     #[test]
     fn cancelled_pointer_capture_cannot_fire_a_delayed_release() {

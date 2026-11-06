@@ -134,7 +134,6 @@ pub(crate) fn resolve_rows(
     let Some(player_index) = sim.houses().index_of(local) else {
         return empty;
     };
-    let observer = sim.session().observer_house();
     let allied = |asker, other| {
         crate::sim::combat::combat_weapon::is_ally_by_object(
             Some(sim.house_alliances()),
@@ -150,7 +149,8 @@ pub(crate) fn resolve_rows(
             .is_some_and(|country| rules.country_multiplay(sim.interner().resolve(country)))
     };
     let house_for_row = |row| house_for_row(row, player_index);
-    let allies_shown = switches.allies_allowed && observer != Some(local) && !switches.quick_coop;
+    let allies_shown =
+        switches.allies_allowed && !sim.session().is_observer_house(local) && !switches.quick_coop;
     let mut allies_header = false;
     let mut chat_header = false;
     // VERA extends the native eight rows using the same House-order swap.
@@ -200,7 +200,7 @@ pub(crate) fn resolve_rows(
                     chat,
                 });
             }
-            let is_observer = observer == Some(house);
+            let is_observer = sim.session().is_observer_house(house);
             // 0x00658393..0x006583CF: "LightGrey" for the observer, "Grey" once
             // defeated, else the House's own scheme.
             let named = |name| sources.named_scheme_rgb(name).unwrap_or([0xFF; 3]);
@@ -448,7 +448,9 @@ fn press_allies_box(state: &mut AppState, row: usize) {
 /// `Ally 0x00731840`: queue EVENT_ALLY toward `house` for the player's
 /// House. Gates (`0x00731840..0x00731877`): a nonzero GameMode, the
 /// Scenario's FixedAlliance bit (`0x400`) clear, AlliesAllowed and
-/// AllyChangeAllowed. FixedAlliance is set only by a WOL clan game's
+/// AllyChangeAllowed. VERA's room adds its In-game Allying checkbox
+/// (`GameOptions::ally_change_allowed`) beside the rules' AllyChangeAllowed.
+/// FixedAlliance is set only by a WOL clan game's
 /// Apply_Squad_Alliances (`0x0069B170`); `SpecialClass::Init 0x006B8AE0`
 /// clears it.
 /// RESIDUAL: a full OutList (128 records, `[0xA802C8]`) drops the event
@@ -466,6 +468,7 @@ pub(crate) fn ally(state: &mut AppState, house: InternedId) {
         || sim.session().fixed_alliance()
         || !rules.general.allies_allowed
         || !rules.general.ally_change_allowed
+        || !sim.session().game_options().ally_change_allowed
     {
         return;
     }

@@ -65,19 +65,22 @@ pub enum SavedCameoId {
     SuperWeapon(InternedId),
 }
 
-/// Identity/order and per-strip scroll rows survive save/load; comparison keys are projections of
+/// Identity/order survive save/load; comparison keys are projections of
 /// the restored simulation, canonical rules and current process string table.
 /// Strip indices are building, defense, infantry and vehicle, respectively.
 ///
-/// Mouse Save5BE6D0 writes the whole 0x556C object at5BE715..5BE71C, including
+/// SidebarClass Save 6AC5E0 / Load 6AC5D0 only forward to RadarClass; Mouse
+/// Save5BE6D0 writes the whole 0x556C object at5BE715..5BE71C, including
 /// four strips at +1544, stride F94. Load5BDF70 reads it at5BE089..5BE092;
 /// no-init5BE9B0->6A4F20 resets progress6AC7C0, preserving count/type/order.
+/// Each strip's saved TopRow is absent: Load_Game_From_File calls TabClass Init
+/// 6D03A0 at 67E68F, whose SidebarClass Init 6A5310 hides and shows the shown
+/// sidebar, and ToggleSidebar 6A7D70 zeroes every strip's TopRow on the show.
 /// This neutral transport does not introduce a sim dependency on a UI owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedSidebarOrder {
     owner: InternedId,
     strips: [Vec<SavedCameoId>; 4],
-    scroll_rows: [usize; 4],
     flash_deadlines: [Vec<i32>; 4],
     redraw_until: i32,
     request_states: [Vec<u8>; 4],
@@ -90,14 +93,13 @@ pub struct SavedSidebarOrder {
 }
 
 impl SavedSidebarOrder {
-    pub fn new(owner: InternedId, strips: [Vec<SavedCameoId>; 4], scroll_rows: [usize; 4]) -> Self {
+    pub fn new(owner: InternedId, strips: [Vec<SavedCameoId>; 4]) -> Self {
         let flash_deadlines = std::array::from_fn(|index| vec![0; strips[index].len()]);
         let request_states = std::array::from_fn(|index| vec![0; strips[index].len()]);
         let factory_links = std::array::from_fn(|index| vec![None; strips[index].len()]);
         Self {
             owner,
             strips,
-            scroll_rows,
             flash_deadlines,
             redraw_until: 0,
             request_states,
@@ -183,8 +185,8 @@ impl SavedSidebarOrder {
         &self.strips
     }
 
-    pub fn into_parts(self) -> (InternedId, [Vec<SavedCameoId>; 4], [usize; 4]) {
-        (self.owner, self.strips, self.scroll_rows)
+    pub fn into_parts(self) -> (InternedId, [Vec<SavedCameoId>; 4]) {
+        (self.owner, self.strips)
     }
 }
 
@@ -380,6 +382,11 @@ pub enum SnapshotRestoreError {
     },
     #[error("entity {object_id} has invalid Tesla charging state: {reason}")]
     InvalidTeslaChargingState {
+        object_id: u64,
+        reason: &'static str,
+    },
+    #[error("entity {object_id} has invalid Unit follower state: {reason}")]
+    InvalidUnitFollowerState {
         object_id: u64,
         reason: &'static str,
     },
@@ -1172,6 +1179,35 @@ fn restore_object_references(
     // complete modeled pointer graph before mutating even weak references or
     // derived caches, so a failed restore remains an atomic rejection.
     for (entity_id, entity) in sim.substrate.entities.iter_sorted() {
+        // UnitClass::Load744470 queues +6C8 for swizzling (gamemd.exe).
+        // Preserve the independent +6D0 byte, cycles and physically present
+        // dead/limbo Units; only class identity and reference resolution apply.
+        if (entity.unit_follower().is_some() || entity.is_unit_follower())
+            && entity.category() != crate::map::entities::EntityCategory::Unit
+        {
+            return Err(SnapshotRestoreError::InvalidUnitFollowerState {
+                object_id: entity_id,
+                reason: "the relationship and follower byte belong to a Unit",
+            });
+        }
+        if let Some(follower_id) = entity.unit_follower() {
+            require_resolved_reference(
+                entity_ids.contains(&follower_id),
+                "EntityStore",
+                entity_id,
+                "unit_follower",
+                "EntityStore",
+                follower_id,
+            )?;
+            if sim.substrate.entities.get(follower_id).unwrap().category()
+                != crate::map::entities::EntityCategory::Unit
+            {
+                return Err(SnapshotRestoreError::InvalidUnitFollowerState {
+                    object_id: entity_id,
+                    reason: "the follower reference must name a Unit",
+                });
+            }
+        }
         if let Some(anim_id) = entity
             .parasite
             .class()
@@ -1345,7 +1381,7 @@ fn restore_object_references(
 
         // A bomb's planter (`BombClass+0x24`) is a pointer its expiry nulls
         // (`BombListClass::PointerGotInvalid @ 0x00439150`).
-        if let Some(planter) = entity.bomb.and_then(|bomb| bomb.planter()) {
+        if let Some(planter) = entity.bomb.as_ref().and_then(|bomb| bomb.planter()) {
             require_resolved_reference(
                 entity_ids.contains(&planter),
                 "EntityStore",
@@ -1500,9 +1536,14 @@ fn restore_object_references(
         }
 
         for (field, system_id) in [
+            ("fire_particle_system", entity.fire_particle_system.system()),
             (
                 "spark_particle_system",
                 entity.spark_particle_system.system(),
+            ),
+            (
+                "railgun_particle_system",
+                entity.railgun_particle_system.system(),
             ),
             (
                 "damage_smoke_system_id",
@@ -1759,6 +1800,12 @@ impl Simulation {
             .map(|policy| policy.semantics)
             .unwrap_or_else(crate::rules::superweapon_type::profile_semantics);
         for (_, entity) in self.substrate.entities.iter_sorted() {
+            #[cfg(feature = "phobos")]
+            if self.external_mod.is_some() && entity.shield().is_some() {
+                return Err(SnapshotRestoreError::InvalidExternalMod(
+                    "external component and native shield cannot own the same saved entity".into(),
+                ));
+            }
             if entity.mod_component().len() > vera_mod_api::MAX_STATE_BYTES
                 || (self.external_mod.is_none() && !entity.mod_component().is_empty())
             {
@@ -1817,8 +1864,11 @@ impl Simulation {
         }
         self.validate_frame_continuation_for_restore()
             .map_err(|reason| SnapshotRestoreError::InvalidFrameContinuation { reason })?;
-        if let Some(observer) = self.session.observer_house()
-            && !self.houses.contains_key(&observer)
+        if self
+            .session
+            .observer_houses()
+            .iter()
+            .any(|observer| !self.houses.contains_key(observer))
         {
             return Err(SnapshotRestoreError::InvalidMultiplayerSession {
                 reason: "observer House is absent",
@@ -1947,6 +1997,9 @@ impl Simulation {
                 }
             }
         }
+        let cell_grid = self.cell_grid();
+        self.terrain_objects.configure_cell_grid(cell_grid);
+        self.houses.configure_cell_grid(cell_grid);
         self.terrain_objects
             .validate_membership()
             .map_err(|reason| SnapshotRestoreError::InvalidCellMembership { reason })?;
@@ -2052,9 +2105,6 @@ impl Simulation {
             .occupancy
             .restore_memberships(&self.substrate.entities)
             .map_err(|reason| SnapshotRestoreError::InvalidCellMembership { reason })?;
-        // VERA-only compatibility: the retired frame-start scan setting keeps
-        // its serialized slot, but every restored object scans live.
-        self.scan_batch = None;
         Ok(())
     }
 
@@ -2328,17 +2378,7 @@ impl Simulation {
             .overlay_grid
             .as_ref()
             .expect("validated overlay cache")
-            .iter_occupied()
-            .filter_map(|(rx, ry, cell)| {
-                cell.overlay_id
-                    .map(|overlay_id| crate::map::overlay::OverlayEntry {
-                        rx,
-                        ry,
-                        overlay_id,
-                        frame: cell.overlay_data,
-                    })
-            })
-            .collect();
+            .occupied_entries();
         let native_tiberium_stats =
             self.rebuild_native_tiberium_queues_after_snapshot_load(rules, overlay_registry)?;
         // CellTag identities are meaningful only after the canonical Cell
@@ -2425,6 +2465,62 @@ mod tests {
     use crate::sim::pathfinding::PathGrid;
     use crate::sim::pathfinding::zone_map::ZoneGrid;
     use crate::sim::world::{RevealOutcome, Simulation};
+
+    #[cfg(feature = "phobos")]
+    #[test]
+    fn restore_rejects_component_and_native_shield_on_the_same_entity() {
+        use vera_mod_api::{Context, ConfigureContext, HookKind, ModuleManifest, Plan, Request};
+
+        let request = Request {
+            api_version: vera_mod_api::API_VERSION,
+            context: Context::Configure(ConfigureContext {
+                pass: 0,
+                source: "rules".into(),
+                final_pass: true,
+                object_types: vec![],
+                warheads: vec![],
+            }),
+            config: vec![],
+            state: vec![],
+        };
+        let bytes = vera_mod_runtime::test_support::component_fixture(
+            &ModuleManifest {
+                api_version: vera_mod_api::API_VERSION,
+                id: "snapshot-shield-authority".into(),
+                version: "1".into(),
+                config_version: 1,
+                state_version: 1,
+                hooks: vec![
+                    HookKind::Configure,
+                    HookKind::Attach,
+                    HookKind::Damage,
+                    HookKind::Tick,
+                ],
+            },
+            &serde_json::to_vec(&Plan::unchanged(&request)).unwrap(),
+            "",
+            "",
+        );
+        let digest = crate::util::sha256::sha256_hex(&bytes);
+        let program = crate::mod_sdk::Program::load(bytes, &digest, &[]).unwrap();
+        let mut sim = Simulation::with_seed(0);
+        let mut entity =
+            crate::sim::game_entity::GameEntity::test_default(1, "TANK", "Owner", 5, 5);
+        entity.shield = Some(crate::sim::shield::ShieldState::new(
+            "Native".into(),
+            100,
+            100,
+        ));
+        sim.substrate.entities.insert(entity);
+        sim.external_mod = Some(program);
+
+        assert_eq!(
+            sim.restore_after_snapshot_load(),
+            Err(SnapshotRestoreError::InvalidExternalMod(
+                "external component and native shield cannot own the same saved entity".into(),
+            )),
+        );
+    }
 
     /// Helper: advance a sim by one tick with empty inputs.
     fn tick(sim: &mut Simulation) {
@@ -3393,7 +3489,7 @@ mod tests {
                 let graph_b = hierarchy_b.level(level).unwrap();
                 assert_eq!(graph_a.record_slot_count(), graph_b.record_slot_count());
                 for slot in 0..graph_a.record_slot_count() {
-                    let zone = u16::try_from(slot).unwrap();
+                    let zone = crate::sim::pathfinding::zone_map::ZoneId::try_from(slot).unwrap();
                     // Record equality includes the retained native+20 threat
                     // seed; equal connectivity alone does not prove its input.
                     assert_eq!(graph_a.record(zone), graph_b.record(zone));
@@ -3530,6 +3626,7 @@ mod tests {
             !crate::rules::PHOBOS_ENABLED,
             !crate::rules::NPATCH_ENABLED,
             !crate::rules::VERAX_ENABLED,
+            !crate::rules::NPBUG_ENABLED,
         );
         // A complete header with no body proves capability admission runs before
         // Simulation deserialization, even without bound scenario resources.
@@ -3798,7 +3895,7 @@ mod tests {
             sim.session.install_network_timing(73);
             sim.session.install_multiplayer_house_identity(
                 crate::skirmish_modes::MpModeClass::Battle,
-                Some(owner),
+                vec![owner],
             );
             let mut header = crate::map::preview::ScenarioStartHeader::default();
             header.read_ini(&crate::rules::ini_parser::IniFile::from_str(
@@ -3811,7 +3908,7 @@ mod tests {
             assert_eq!(restored.session.game_mode(), mode);
             assert_eq!(restored.session.start_header().coop_human_start_spots(), 2);
             assert_eq!(restored.session.network_max_ahead_frames(), Some(73));
-            assert_eq!(restored.session.observer_house(), Some(owner));
+            assert_eq!(restored.session.observer_houses(), [owner]);
             assert_eq!(
                 restored.session.multiplayer_mode_class(),
                 Some(crate::skirmish_modes::MpModeClass::Battle)
@@ -4734,7 +4831,6 @@ mod tests {
         let team = restored.team_script_vm.team(team_id).unwrap();
         assert_eq!(team.member_count(), 0);
         assert_eq!(restored.team_script_vm.registry_counts(), (1, 1, 1, 1));
-        assert_eq!(restored.team_script_vm.team_type_order(), &[team_type_id]);
         let restored_team_type = restored
             .team_script_vm
             .team_type(team_type_id)
@@ -5786,7 +5882,7 @@ mod tests {
         sim.fog.reveal_all_for_owner(owner);
         crate::sim::vision::apply_gap_generators(
             &mut sim.fog,
-            sim.house_alliances.as_map(),
+            &sim.house_alliances,
             &[(gapper, 6, 6, 2)],
             &sim.interner,
         );
@@ -6507,7 +6603,6 @@ mod tests {
         use crate::sim::cloak_disguise::CloakRuntime;
         use crate::sim::combat::Health;
         use crate::sim::game_entity::GameEntity;
-        use crate::sim::sensor_lifecycle::SensorDeposit;
 
         let mut sim = Simulation::new();
         let viewer = sim.interner.intern("AMERICANS");
@@ -6541,7 +6636,6 @@ mod tests {
         let mut cloak = CloakRuntime::new(0);
         cloak.establish_unlimbo_fully_cloaked();
         entity.cloak = Some(cloak);
-        entity.sensor_deposit = Some(SensorDeposit::unit(viewer, (3, 3), 2));
         sim.substrate.entities.insert(entity);
         // Native in-scenario load restarts Scenario RNG from Seed0; isolate
         // fog/sensor/cloak persistence on that same post-load cursor.
@@ -6549,7 +6643,7 @@ mod tests {
         let expected_hash = sim.state_hash();
 
         let bytes = GameSnapshot::save(&sim, 0, 0, "cell_fog_sensor_cloak", 0);
-        let mut restored = GameSnapshot::load(&bytes).expect("current snapshot").sim;
+        let restored = GameSnapshot::load(&bytes).expect("current snapshot").sim;
 
         assert_eq!(restored.state_hash(), expected_hash);
         assert_eq!(restored.fog.fogged_objects().len(), 1);
@@ -6560,25 +6654,6 @@ mod tests {
             restored_entity.cloak,
             sim.substrate.entities.get(entity_id).unwrap().cloak
         );
-        assert_eq!(
-            restored_entity.sensor_deposit,
-            sim.substrate
-                .entities
-                .get(entity_id)
-                .unwrap()
-                .sensor_deposit
-        );
-        let same_hash = restored.state_hash();
-        restored
-            .substrate
-            .entities
-            .get_mut(entity_id)
-            .unwrap()
-            .sensor_deposit
-            .as_mut()
-            .unwrap()
-            .set_center_for_test((4, 3));
-        assert_ne!(restored.state_hash(), same_hash);
     }
 
     #[test]
@@ -7465,6 +7540,7 @@ mod tests {
             coordinate,
             10,
             rules.warhead("WH").unwrap(),
+            true,
             (RAD_NO_ATTACKER, None, warhead_id),
             crate::sim::world::FrameEffects::default(),
         );

@@ -26,11 +26,14 @@ pub(crate) mod ai_base_defense;
 pub(crate) mod ai_base_site;
 pub mod ammo;
 pub mod anim_class;
+pub mod attach_effect;
 pub(crate) mod object_fall;
 #[cfg(any(test, feature = "test-support"))]
 pub mod arena_fixture;
 pub(crate) mod build_site;
 pub mod building_art;
+#[cfg(feature = "ares")]
+pub mod bounty;
 pub(crate) mod building_upgrades;
 pub(crate) mod building_power;
 pub(crate) mod building_entry;
@@ -51,6 +54,8 @@ pub mod crates; // scenario-start crate placement (Post_Map_Init step 3)
 pub mod credit_income; // oil-derrick ProduceCash + Floating Disc money drain (object-loop money)
 pub(crate) mod conversion_health;
 pub(crate) mod crew_survival; // building SpawnSurvivors and vehicle crew escape
+#[cfg(feature = "ares")]
+pub(crate) mod vehicle_theft;
 pub mod economy; // per-house wallet/storage/statistics value-type (production+economy substrate)
 pub(crate) mod factory_owners;
 #[cfg(feature = "telemetry")]
@@ -67,6 +72,7 @@ pub(crate) mod estimated_health;
 pub(crate) mod flashing;
 pub mod game_entity;
 pub(crate) mod house_threat;
+pub(crate) mod hunter_seeker;
 pub mod intern;
 pub(crate) mod kamikaze; // missiles out of their launcher's control (0x00ABC5F8)
 pub(crate) mod lifecycle_request;
@@ -75,8 +81,10 @@ pub(crate) mod powered_unit; // Robot Tanks offline without a PowersUnit= buildi
 pub mod light_sources;
 pub mod multiplayer_checksum;
 pub mod native_identity;
+// A wasm build has no threads (the browser package, the headless WASI run)
+// unless the browser package opts into its Web Worker pool.
 #[cfg_attr(
-    all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"),
+    all(target_arch = "wasm32", not(feature = "wasm-threads")),
     path = "parallel_web.rs"
 )]
 pub(crate) mod parallel; // order-preserving work over scoped threads
@@ -93,11 +101,12 @@ pub mod sensor_lifecycle;
 pub mod spy_infiltration; // BuildingClass::Infiltrate (a spy's effects on the building it enters)
 pub(crate) mod stage;
 pub use stage::StageClass;
-pub(crate) mod state_hasher;
+pub(crate) mod state_hasher; // parallel digests over util::state_hasher
 pub mod temporal;
 pub(crate) mod tesla_charging;
 pub mod timer; // signed frame-anchored countdown primitive
 pub(crate) mod touch_log; // which stored objects were handed out mutably, per reader
+pub use touch_log::live_read_check_enabled;
 pub mod type_handle_table; // InternedId -> TypeHandle, one-hop entity->type resolution
 
 // --- Pure read-only deterministic engine-data services (gamemd-exact lookup tables) ---
@@ -133,6 +142,8 @@ pub mod house_eva; // HouseClass::Update EVA advice timers (funds nag, low power
 pub mod power_system;
 pub mod superweapon;
 pub mod vision;
+#[cfg(feature = "phobos")]
+pub mod warhead_anim;
 
 // --- Animation, building overlays, bridge state ---
 pub mod animation;
@@ -193,7 +204,7 @@ pub mod tiberium_germinate;
 
 // --- Per-match settings, per-player state ---
 pub mod game_options;
-pub(crate) mod house_diplomacy; // ally graph: install, MakeAlly/MakeEnemy, Computer_Paranoid
+pub mod house_diplomacy; // ally graph: install, MakeAlly/MakeEnemy, Computer_Paranoid
 pub mod house_state;
 pub mod houses;
 pub(crate) mod house_strategy;
@@ -228,3 +239,7 @@ pub mod particles;
 mod deploy_tests;
 
 pub(crate) mod airstrike;
+
+// Optional native fallback, disabled by the shield owner for component games.
+#[cfg(feature = "phobos")]
+pub mod shield;

@@ -30,8 +30,21 @@ impl GameEntity {
     pub(crate) fn emp_remaining(&self) -> i32 {
         self.emp.remaining
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_emp_remaining_for_test(&mut self, remaining: i32) {
+        self.emp.remaining = remaining;
+    }
     pub(crate) fn emp_sparkle(&self) -> Option<u64> {
         self.emp.sparkle
+    }
+    /// UpdateSparkle10062FE0 holds its new sparkle, through
+    /// [`EntityStore::write_held_anim`](crate::sim::entity_store::EntityStore::write_held_anim).
+    pub(crate) fn hold_emp_sparkle(
+        &mut self,
+        anim: u64,
+        _: crate::sim::entity_store::AnimHolderAuthority,
+    ) {
+        self.emp.sparkle = Some(anim);
     }
     pub(crate) fn emp_anim_pointer_expired(&mut self, expired: u64) {
         if self.emp.sparkle == Some(expired) {
@@ -324,7 +337,7 @@ mod receiver {
                 .map(|source| source.owner());
             let allied = source_owner.is_some_and(|owner| {
                 crate::sim::combat::combat_weapon::is_ally_by_object(
-                    Some(self.house_alliances.as_map()),
+                    Some(&self.house_alliances),
                     &self.interner,
                     owner,
                     victim.owner(),
@@ -358,7 +371,10 @@ mod receiver {
                 }
                 _ => return EmpDelivery::Unsupported,
             };
-            if kind.immune().unwrap_or(default_immune) || kind.rank_immune(victim.veterancy.rank())
+            if kind.immune().unwrap_or(default_immune)
+                || object
+                    .promotion_abilities()
+                    .is_some_and(|abilities| abilities.emp_immune(victim.veterancy.rank()))
             {
                 return EmpDelivery::Rejected;
             }
@@ -635,7 +651,22 @@ mod receiver {
             };
             //100628B2 tests AbstractFlags bit4 before Foot recovery. Buildings
             //never queue Hunt, even in a computer House.
-            if !entity.category().is_foot() || self.owner_is_human(entity.owner()) {
+            if !entity.category().is_foot() {
+                return;
+            }
+            // DisableEMP100628C2 precedes the human/AI recovery choice.
+            #[cfg(feature = "ares")]
+            if entity.driver_killed() {
+                let _ = self.mission_queue_exact(
+                    target,
+                    crate::sim::mission::MissionId::from_known(MissionType::Harmless),
+                    1,
+                    self.session.binary_frame(),
+                    &crate::sim::mission::authority::LiveReadyInputProvider { rules },
+                );
+                return;
+            }
+            if self.owner_is_human(entity.owner()) {
                 return;
             }
             let mission = rules
@@ -709,9 +740,11 @@ mod receiver {
             };
             if let Ok(anim) = self.spawn_anim_at_world(rules, descriptor, world) {
                 self.set_anim_owner_object(anim, Some(target), rules);
-                if let Some(entity) = self.substrate.entities.get_mut(target) {
-                    entity.emp.sparkle = Some(anim);
-                }
+                self.substrate
+                    .entities
+                    .write_held_anim(target, |entity, authority| {
+                        entity.hold_emp_sparkle(anim, authority)
+                    });
             }
         }
         fn retire_ares_emp_sparkle(&mut self, target: u64) {
@@ -787,7 +820,8 @@ mod receiver {
                 &Default::default(),
                 None,
                 None,
-                crate::rules::ruleset::RuleSet::empty_for_test(),
+                None,
+                &crate::rules::ruleset::RuleSet::empty_for_test(),
             );
         }
         fn tagged_emp_scene(
@@ -987,7 +1021,14 @@ mod receiver {
                     .as_bytes(),
                 )
                 .unwrap();
-                sim.initialize_trigger_definitions(&map, &Default::default(), None, None, &rules);
+                sim.initialize_trigger_definitions(
+                    &map,
+                    &Default::default(),
+                    None,
+                    None,
+                    None,
+                    &rules,
+                );
                 sim.attach_object_trigger_tag(target, Some("EMP"));
                 sim.deliver_ares_emp(
                     target,
@@ -2720,8 +2761,13 @@ mod receiver {
                     .loop_remaining,
                 0
             );
+            sim.substrate
+                .entities
+                .write_held_anim(target, |victim, authority| {
+                    victim.hold_emp_sparkle(held, authority)
+                })
+                .unwrap();
             let victim = sim.substrate.entities.get_mut(target).unwrap();
-            victim.emp.sparkle = Some(held);
             victim.emp_anim_pointer_expired(held + 1);
             assert_eq!(victim.emp_sparkle(), Some(held));
             sim.notify_anim_pointer_expired(held);

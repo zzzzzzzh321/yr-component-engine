@@ -241,7 +241,7 @@ fn the_land_row_refuses_after_the_wall_arm() {
         .cell_mut_for_test(16, 15)
         .unwrap()
         .speed_costs
-        .foot = Some(0);
+        .foot = Some(crate::rules::terrain_rules::test_speed_percent(0));
     assert_eq!(entry(&sim, &rules, &registry, WALLI), Ok(7));
 }
 
@@ -304,6 +304,7 @@ fn assert_retail_wall_fire_profile(
     // App apply_map_load_result installs these execution modes before the
     // first Logic turn. Headless load deliberately defaults to serial mode.
     scene.runtime.simulation.batch_path_searches();
+    scene.runtime.simulation.batch_target_scans();
     // Periodic frame hashes feed replay and sync checks, which nothing here
     // reads; an interval no tick reaches skips them (11-12% of each frame in
     // this unoptimized test build).
@@ -1063,6 +1064,7 @@ fn assert_retail_wall_history(native_path: &'static str, wall_name: &str, direct
                         ProjectileCoord::new(center.x, center.y, center.z),
                         weapon.damage,
                         warhead,
+                        true,
                         (crate::sim::combat::RAD_NO_ATTACKER, None, ap),
                         FrameEffects::default(),
                     );
@@ -1251,6 +1253,7 @@ fn retail_mtnk_move_crushes_fences_through_per_cell_with_body_rocking() {
     )
     .unwrap();
     scene.runtime.simulation.batch_path_searches();
+    scene.runtime.simulation.batch_target_scans();
     // Periodic frame hashes feed replay and sync checks, which nothing here
     // reads; an interval no tick reaches skips them (11-12% of each frame in
     // this unoptimized test build).

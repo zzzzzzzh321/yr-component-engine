@@ -286,7 +286,7 @@ fn install_tag(sim: &mut Simulation, rules: &RuleSet, target: u64, source: u64) 
         .as_bytes(),
     )
     .unwrap();
-    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, rules);
+    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None, rules);
     sim.attach_object_trigger_tag(target, Some("EMP"));
 }
 

@@ -128,11 +128,11 @@ impl IonBlastGpu {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<BlastInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &attributes,
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -235,7 +235,7 @@ impl IonBlastGpu {
 impl TerrainDrawRenderer {
     /// The ripple frames, which take about 75 ms to generate. Native generates
     /// them once per process at start-up: `Init_Game` (`0x0052C946`) ->
-    /// `Show_Loading_Screen` (`0x00531758`) -> `0x0053D330`, gated by
+    /// `Init_Bulk_Data` (`0x00531758`) -> `0x0053D330`, gated by
     /// `0x00AA014C`.
     pub(crate) fn generate_ion_blast_frames(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let frames = RippleFrames::shared();

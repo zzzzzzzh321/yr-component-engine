@@ -627,7 +627,8 @@ impl PaidSuperRecord {
             && if self.action == PaidSuperAction::Cancel {
                 self.cell == (0, 0)
             } else {
-                (0..512).contains(&self.cell.0) && (0..512).contains(&self.cell.1)
+                (0..crate::map::cell_index::MAX_CELL_SIDE as i16).contains(&self.cell.0)
+                    && (0..crate::map::cell_index::MAX_CELL_SIDE as i16).contains(&self.cell.1)
             }
     }
     pub fn encode(self) -> Option<CommandRecord> {
@@ -1400,9 +1401,10 @@ pub enum Command {
     SellBuilding { entity_id: u64 },
     /// Toggle repair mode on a building (spend credits to heal over time).
     ToggleRepair { entity_id: u64 },
-    /// Eject the occupant of a friendly occupied tank bunker. Targets the bunker
-    /// (the hidden occupant is not selectable in this slice); the occupant
-    /// reappears on a passable cell SW of the bunker and drives out.
+    /// VERA-only: release a tank bunker's occupant through
+    /// `bunker_link::release_normal` at command time. No player input sends
+    /// it; the D key and a click on the tank reach the same release through
+    /// the tank's Unload mission (`0x0073D66D`). Removal: #3675.
     EjectBunker { bunker_id: u64 },
     /// Order a transport or garrison to unload: the Unload mission of its class.
     UnloadPassengers { transport_id: u64 },
@@ -1488,10 +1490,11 @@ pub enum Command {
     /// Observe results 3/4 (`0x0048CA34`, `0x0048CAB2`) queue it for the
     /// local House. Appended to preserve existing serialized variant indices.
     Destruct,
-    /// EVENT_REMOVEPLAYER for the House at registration index `house_index`
+    /// EVENT_REMOVEPLAYER for the lost network source `source`, its House's
+    /// registration index unless players share Houses
     /// (`EventClass::Execute 0x004C7B73`): Flag_To_Die when it is human.
     /// Appended to preserve existing serialized variant indices.
-    RemovePlayer { house_index: i32 },
+    RemovePlayer { source: i32 },
     /// The MoveFlash a Move click on a Cell spawns there
     /// (`FootClass::ClickedAction_Cell`, `0x004D7EB5..0x004D8065`). Native
     /// constructs it at the click, outside the event queue; VERA carries it
@@ -1559,6 +1562,11 @@ pub enum Command {
     /// with no selected IDs. Appended to preserve existing variant indices.
     /// Native hotkey535CC0/Tab6D07FE write directly, without an EventClass
     /// record or RNG; retain through local frame ingress for saves/replay.
+    /// No peer sees the write, so a network game stores it in the local
+    /// player's slot (`GameEntity::control_group`), not the +214 that
+    /// Recruit6EAA90 and WakeupGroup6E03B0 (trigger action 84) read: there a
+    /// player's regrouping no longer changes what that player's own teams
+    /// recruit or which group an action 84 wakes.
     AssignControlGroup { group: i32, entity_ids: Vec<u64> },
 }
 
@@ -1854,7 +1862,7 @@ mod tests {
             source: 3,
             destination: 4,
             sequence: u64::MAX,
-            cell: (511, 0),
+            cell: (1023, 0),
         };
         let record = paid.encode().unwrap();
         assert_eq!(PaidSuperRecord::decode(&record), Some(paid));
@@ -1877,7 +1885,7 @@ mod tests {
         assert!(PaidSuperRecord { source: -1, ..paid }.encode().is_none());
         assert!(
             PaidSuperRecord {
-                cell: (512, 0),
+                cell: (1024, 0),
                 ..paid
             }
             .encode()

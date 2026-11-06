@@ -785,9 +785,11 @@ pub struct ScenarioSession {
     /// Accepted MPMode factory class. Runtime completion queries its virtual
     /// policy directly; no independent cooperative-win flag is retained.
     multiplayer_mode_class: Option<crate::skirmish_modes::MpModeClass>,
-    /// NativeAC1198, assigned by each observer's CreateHouses688116. The last
-    /// observer in House creation order owns this native presentation identity.
-    observer_house: Option<InternedId>,
+    /// Native `[0xAC1198]`, assigned by each observer's CreateHouses688116:
+    /// one pointer, so the last observer in House creation order owns the
+    /// observer's presentation. VERA's own game rooms admit several observers,
+    /// so this holds every observer House in creation order and each gets it.
+    observer_houses: Vec<InternedId>,
     /// Native Session+318/A8B550, admitted from the start/timing service.
     /// It is independent of local command scheduling preferences.
     network_max_ahead_frames: Option<i32>,
@@ -795,6 +797,16 @@ pub struct ScenarioSession {
     /// installs their roster once; a new scenario discards the old measurements.
     #[serde(default)]
     network_command_timing: Option<crate::sim::command_queue::NetworkCommandTiming>,
+    /// VERA shared control: the House index each command sender (network
+    /// source) controls, when players share Houses. Empty otherwise: every
+    /// sender is then its House index, as in gamemd. Launch installs it once.
+    #[serde(default)]
+    shared_house_sources: Vec<u8>,
+    /// This process's own sender while players share Houses; `None`
+    /// otherwise, when its sender is its current House's index. Local
+    /// identity, like `current_house`.
+    #[serde(default)]
+    local_shared_house_source: Option<i8>,
     /// Scenario+11E4 is included in Save689372's complete Scenario block and
     /// retained by Load6894A8/NoInit683560. Fresh Clear_Scene starts at4.
     #[serde(default)]
@@ -1170,6 +1182,15 @@ impl ScenarioSession {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    pub fn install_shared_house_sources_for_test(
+        &mut self,
+        source_houses: Vec<u8>,
+        local_source: Option<i8>,
+    ) {
+        self.install_shared_house_sources(source_houses, local_source);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_scenario_side_for_test(&mut self, side: i32) {
         self.install_scenario_side(side);
     }
@@ -1265,6 +1286,21 @@ impl ScenarioSession {
         self.network_command_timing.as_ref()
     }
 
+    /// EventClass::Add @0x00652230 (gamemd.exe instructions65223A..652258):
+    /// generated DoList events use the next send boundary, without MaxAhead.
+    /// Currently admitted sessions use native protocol2 (Session6973FF).
+    /// Offline keeps the constructor's FrameSendRate5 (6975DF); network
+    /// admission and TIMING already own its overrides, including relay rate1.
+    pub(crate) fn generated_event_frame(&self) -> u32 {
+        let rate = self
+            .network_command_timing()
+            .map_or(5, |timing| u32::from(timing.frame_send_rate().get()));
+        self.binary_frame
+            .wrapping_add(rate)
+            .wrapping_div(rate)
+            .wrapping_mul(rate)
+    }
+
     pub(crate) fn configure_sequenced_clock(&mut self, frames_per_second: u16) {
         let ahead = self.network_max_ahead_frames.expect("installed timing") as u16;
         let timing = self
@@ -1281,6 +1317,53 @@ impl ScenarioSession {
             },
             ahead,
         );
+    }
+
+    pub(crate) fn install_shared_house_sources(
+        &mut self,
+        source_houses: Vec<u8>,
+        local_source: Option<i8>,
+    ) {
+        self.shared_house_sources = source_houses;
+        self.local_shared_house_source = local_source;
+    }
+
+    /// VERA shared control: whether any players share a House, so that
+    /// senders differ from House indices.
+    pub fn shares_houses(&self) -> bool {
+        !self.shared_house_sources.is_empty()
+    }
+
+    /// The House index a command record's sender controls. VERA shared
+    /// control: a sender is a network source, which is its House index
+    /// unless players share Houses.
+    pub fn network_source_house(&self, source: i8) -> Option<usize> {
+        let source = usize::try_from(source).ok()?;
+        if self.shared_house_sources.is_empty() {
+            return Some(source);
+        }
+        self.shared_house_sources
+            .get(source)
+            .map(|&house| usize::from(house))
+    }
+
+    /// Every command sender with the House index it controls, in source
+    /// order: each of the `house_count` Houses unless players share Houses.
+    pub fn network_sources(&self, house_count: usize) -> impl Iterator<Item = (i8, usize)> + '_ {
+        let count = if self.shared_house_sources.is_empty() {
+            house_count
+        } else {
+            self.shared_house_sources.len()
+        };
+        (0..count).filter_map(|source| {
+            let source = i8::try_from(source).ok()?;
+            Some((source, self.network_source_house(source)?))
+        })
+    }
+
+    /// This process's sender while players share Houses.
+    pub(crate) fn local_shared_house_source(&self) -> Option<i8> {
+        self.local_shared_house_source
     }
 
     /// Retire the existing admitted timing row at a shared EXIT/REMOVEPLAYER
@@ -1345,16 +1428,20 @@ impl ScenarioSession {
     pub const fn multiplayer_mode_class(&self) -> Option<crate::skirmish_modes::MpModeClass> {
         self.multiplayer_mode_class
     }
-    pub const fn observer_house(&self) -> Option<InternedId> {
-        self.observer_house
+    /// Whether `house` is an observer's (`[0xAC1198]`).
+    pub fn is_observer_house(&self, house: InternedId) -> bool {
+        self.observer_houses.contains(&house)
+    }
+    pub fn observer_houses(&self) -> &[InternedId] {
+        &self.observer_houses
     }
     pub(crate) fn install_multiplayer_house_identity(
         &mut self,
         class: crate::skirmish_modes::MpModeClass,
-        observer: Option<InternedId>,
+        observers: Vec<InternedId>,
     ) {
         self.multiplayer_mode_class = Some(class);
-        self.observer_house = observer;
+        self.observer_houses = observers;
     }
 
     pub fn install_waypoints(
@@ -1634,7 +1721,7 @@ impl ScenarioSession {
             timing.hash(hasher);
         }
         s.start_header.hash(hasher);
-        // observer_house, like current_house, selects process-local presentation
+        // observer_houses, like current_house, selects process-local presentation
         // and accepted outcome, and skips the observer's terminal score draw
         // (every peer holds the same node data, and the RNG state is hashed).
         // It is saved and reference-validated, not shared CRC input.
@@ -1811,6 +1898,7 @@ impl ScenarioSession {
         opts.multi_engineer.hash(hasher);
         opts.harvester_truce.hash(hasher);
         opts.ally_change_allowed.hash(hasher);
+        opts.bans.hash(hasher);
         opts.starting_credits.hash(hasher);
         opts.unit_count.hash(hasher);
         opts.tech_level.hash(hasher);
@@ -1870,13 +1958,15 @@ impl ScenarioSession {
     pub fn from_descriptor(desc: &ScenarioDescriptor) -> Self {
         Self {
             seed: u64::from(desc.seed),
-            map_name: desc.map_name.clone(),
+            map_name: crate::map::source::portable_map_name(&desc.map_name).to_owned(),
             theater: desc.theater.clone(),
             game_mode: ScenarioGameMode::from_legacy_nonzero(desc.game_mode_nonzero),
             multiplayer_mode_class: None,
-            observer_house: None,
+            observer_houses: Vec::new(),
             network_max_ahead_frames: None,
             network_command_timing: None,
+            shared_house_sources: Vec::new(),
+            local_shared_house_source: None,
             start_header: crate::map::preview::ScenarioStartHeader::default(),
             campaign: None,
             campaign_map_stage: 0,
@@ -2173,7 +2263,8 @@ mod tests {
                 recruitable_a: true,
                 recruitable_b: true,
                 group: -1,
-                structure_upgrades: [None, None, None],
+                follows: None,
+                structure_columns: Default::default(),
                 structure_ai_sellable: false,
                 structure_ai_repairable: false,
                 structure_online: true,
@@ -2238,6 +2329,25 @@ mod tests {
 
     /// AT-4: scenario identity (map name, theater) is sim-resident and
     /// survives a snapshot round-trip.
+    /// A -SPAWN map's rooted path differs per launch; the hash must not.
+    #[test]
+    fn rooted_map_paths_share_the_scenario_name_and_hash() {
+        let hash = |map_name: &str| {
+            let sim = Simulation::from_descriptor(&ScenarioDescriptor {
+                map_name: map_name.into(),
+                ..Default::default()
+            });
+            assert_eq!(sim.session().map_name(), "spawnmap.ini");
+            sim.state_hash()
+        };
+        let rooted = if cfg!(windows) {
+            "C:\\a\\spawnmap.ini"
+        } else {
+            "/a/spawnmap.ini"
+        };
+        assert_eq!(hash(rooted), hash("spawnmap.ini"));
+    }
+
     #[test]
     fn scenario_identity_is_sim_resident() {
         let desc = ScenarioDescriptor {

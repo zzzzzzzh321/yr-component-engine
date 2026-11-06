@@ -39,6 +39,9 @@ pub enum NetworkInterruption {
     QueueFull,
     #[error("network connection stopped responding")]
     ConnectionFailed,
+    /// VERA relay adaptation: the relay sent a record this build cannot read.
+    #[error("this online match needs a newer VERA20k")]
+    NewerClientRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -71,13 +74,17 @@ impl Simulation {
     /// is the first remaining admitted human in shared House order, after
     /// synchronized EXIT/REMOVEPLAYER retires the old timing row. Neither a
     /// local peer list nor a second cached host participates in this decision.
+    ///
+    /// The result is a command sender, which is its House's index unless
+    /// players share Houses (VERA shared control).
     pub fn network_timing_host_house(&self) -> Option<i8> {
         let timing = self.session.network_command_timing()?;
         let wol = self.session.game_mode() == crate::sim::scenario_session::ScenarioGameMode::Wol;
-        let eligible = |house_id: i8| {
-            timing.admits_source(house_id)
-                && usize::try_from(house_id)
-                    .ok()
+        let eligible = |sender: i8| {
+            timing.admits_source(sender)
+                && self
+                    .session
+                    .network_source_house(sender)
                     .and_then(|index| self.houses.order().get(index))
                     .and_then(|owner| self.houses.get(owner))
                     .is_some_and(|house| {
@@ -87,12 +94,10 @@ impl Simulation {
         if wol && eligible(timing.host_house()) {
             return Some(timing.host_house());
         }
-        self.houses
-            .order()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, _)| i8::try_from(index).ok())
-            .find(|&house| eligible(house))
+        self.session
+            .network_sources(self.houses.order().len())
+            .map(|(sender, _)| sender)
+            .find(|&sender| eligible(sender))
     }
 
     /// Borrow the existing EventClass queues for a post-Logic network pass.
@@ -111,7 +116,7 @@ impl Simulation {
     pub fn network_mirror_allowance(&self) -> usize {
         let synchronized = self.synchronized_network_command_count();
         if self.session.game_mode().is_network() {
-            let source_house = self.local_command_house().unwrap_or(0);
+            let source_house = self.local_command_source().unwrap_or(0);
             NETWORK_COMMAND_CAPACITY.saturating_sub(synchronized).min(
                 NETWORK_SOURCE_DOLIST_CAPACITY
                     .saturating_sub(self.pending_commands.native_house_len(source_house)),
@@ -195,17 +200,46 @@ impl<'a> NetworkCommandQueues<'a> {
     /// cannot silently turn into a locally executed network command: its native
     /// producer must be supplied before this transport can send it.
     pub fn local_records(&self) -> Result<Vec<&CommandRecord>, NetworkQueueError> {
+        self.local_records_after(std::iter::empty())
+    }
+
+    /// Verify an immutable in-flight prefix against OutList, then borrow the
+    /// unreserved suffix under the same mirror capacity. Accepted batches
+    /// still retire through `commit_local_submission`; this read never drains
+    /// or creates a second authoritative command queue.
+    pub fn local_records_after<'r>(
+        &self,
+        reserved: impl IntoIterator<Item = &'r CommandRecord>,
+    ) -> Result<Vec<&CommandRecord>, NetworkQueueError> {
+        let mut sources = self.sim.local_commands.iter();
+        let mut reserved_count = 0;
+        for retained in reserved {
+            let source = sources
+                .next()
+                .ok_or(NetworkQueueError::ChangedLocalEvent {
+                    index: reserved_count,
+                })?
+                .record()
+                .ok_or(NetworkQueueError::UnencodedLocalEvent {
+                    index: reserved_count,
+                })?;
+            if source.opcode() != retained.opcode() || source.payload() != retained.payload() {
+                return Err(NetworkQueueError::ChangedLocalEvent {
+                    index: reserved_count,
+                });
+            }
+            reserved_count += 1;
+        }
         let mut records = Vec::new();
-        for (index, entry) in self
-            .sim
-            .local_commands
-            .iter()
+        for (offset, entry) in sources
             .take(
                 self.mirror_allowance()
-                    .min(crate::sim::command_queue::OUT_LIST_CAPACITY),
+                    .min(crate::sim::command_queue::OUT_LIST_CAPACITY)
+                    .saturating_sub(reserved_count),
             )
             .enumerate()
         {
+            let index = reserved_count + offset;
             match entry.record() {
                 Some(record) => records.push(record),
                 None if records.is_empty() => {
@@ -244,6 +278,7 @@ impl<'a> NetworkCommandQueues<'a> {
                     diagnostic_issue_tick,
                 },
                 true,
+                crate::sim::command_queue::DoListInsertion::Back,
             );
             assert!(
                 accepted,

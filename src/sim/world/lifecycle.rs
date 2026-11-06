@@ -64,11 +64,11 @@ impl BuildingLight {
 }
 
 /// Two type facts the removal paths read, copied onto the object:
-/// - `ObjectClass::Limbo` (`0x005F4D30`) dirties the tactical rect of the
-///   object's extent when the type's `+0xAC` pointer is set
-///   ([`LifecycleOutput::DirtyTacticalRect`]). VERA keeps the fact false
-///   unless a caller has positive evidence and never infers it from category
-///   or render representation; no production path sets it.
+/// - `ObjectClass::Limbo` (`0x005F4D30`) dirties the AlphaImage-sized rect
+///   around GetCoords when the type's AlphaImage (`+0xAC`) loaded
+///   ([`LifecycleOutput::DirtyTacticalRect`]). No production path sets the
+///   fact: that rect only clears the object's glow, and the tactical A plane
+///   redraws whenever its glow list changes (`alpha_shape`).
 /// - `Occupier=`, which `FootClass::PointerExpired` (`0x004D9960`) tests to
 ///   keep a capturing infantryman's NavCom on an expiring target.
 ///   Construction stamps it ([`Self::stamp_occupier`]).
@@ -492,9 +492,14 @@ pub enum PlacementEvidence {
     /// An Unlimbo request for the class admission
     /// ([`Simulation::unlimbo_class_entry`]), which fixed/runtime constructors
     /// use so a later placement rejection can retain the spent constructor.
-    /// What reaches Reveal unconverted (a building, or a map-less fixture)
-    /// runs VERA's playfield gate before Mark(PUT); see
-    /// `reveal_position_is_in_playfield`.
+    /// What reaches Reveal unconverted (a building its admission accepted, or
+    /// a map-less fixture) goes straight to Mark(PUT): no Unlimbo layer
+    /// refuses on the playfield (Building `0x00440580..0x004415E6`, Techno
+    /// `0x006F6CA0`, Object `0x005F4EC0`). A building's playfield refusal is
+    /// its own Can_Enter_Cell (`0x00449440`), reached through Object
+    /// Unlimbo's +1AC call (`0x005F4F3C`), whose CanPlaceAt asks
+    /// Is_Clear_To_Build (`0x0047C620`; playfield test at `0x0047C878`) of
+    /// each foundation cell unless the type is `PlaceAnywhere=`.
     EvaluateMark,
     /// Object5F4F1B accepted a Foot's admission (Unit, Infantry or Aircraft):
     /// either its class +1AC receiver returned zero or the caller's A8E7AC
@@ -616,7 +621,7 @@ const NULL_TARGET_CELL_SENTINEL: (i16, i16) = (0, 0);
 /// would overflow and return `None`. No retail map approaches that bound.
 /// Native's own guard against a bad coordinate is the (0, 0) sentinel, checked
 /// at the callback instead, so this arm is not the sentinel's analogue.
-pub(super) fn object_get_coords_cell(
+pub(crate) fn object_get_coords_cell(
     entity: &crate::sim::game_entity::GameEntity,
 ) -> Option<(u16, u16)> {
     let [world_x, world_y] = crate::sim::movement::ground_pose::object_center_xy(entity);
@@ -730,6 +735,14 @@ pub enum LifecycleOutput {
         category: crate::sim::production::ProductionCategory,
         construction_order: u64,
     },
+    /// StripAI6A8E48 -> SetSidebarTabObject734250 publishes the actual held
+    /// Building on each consumed changed+complete edge. The local sidebar
+    /// owns this reference's history; Factory owns the object's readiness.
+    ProductionBuildingReady {
+        owner: InternedId,
+        category: crate::sim::production::ProductionCategory,
+        stable_id: u64,
+    },
     /// Local HouseAbandon4FAB74 enters Sidebar6ABAD0. Its private strip
     /// owner determines whether the cursor prefix precedes settlement (no
     /// link) or follows the first linked FactoryAbandon/destructor.
@@ -737,6 +750,9 @@ pub enum LifecycleOutput {
         owner: InternedId,
         category: crate::sim::production::ProductionCategory,
         construction_order: u64,
+        /// StripAbandon6ABBB6 clears only an actual held Building reference.
+        /// None means the nonnull/Building gate skipped the helper entirely.
+        held_building: Option<u64>,
     },
     /// Strip6ABBDF clears every matching link after the linked destructor,
     /// before the House cursor prefix and successor Begin. Queued-only
@@ -759,6 +775,13 @@ pub enum LifecycleOutput {
     /// strip owner derives this effect from the admitted House begin/end
     /// facts, preserving its link-dependent order around product expiry.
     BuildingProductionAbandoned {
+        owner: InternedId,
+    },
+    /// BuildingChangeOwner448C9A..448CD6: a Construction Yard leaving a
+    /// human player (IsHumanPlayer50B6F0) clears that player's current
+    /// placement (Display PendingObject/Type/House) and cursor (4A8BF0).
+    /// The saved retry and the ready product stay.
+    ConstructionYardCaptured {
         owner: InternedId,
     },
     /// Logic55AFB0 increments the process FPS sample even on terminal frames.
@@ -1261,12 +1284,6 @@ impl Simulation {
         if entity.lifecycle.cell_marked || request.placement == PlacementEvidence::RejectedEarly {
             return RevealOutcome::Failed(RevealFailure::RejectedEarly);
         }
-        if request.placement == PlacementEvidence::EvaluateMark
-            && !self.object_placement_scope_active()
-            && !self.reveal_position_is_in_playfield(request.position, context)
-        {
-            return RevealOutcome::Failed(RevealFailure::RejectedEarly);
-        }
 
         if let Some(entity) = self.substrate.entities.get_mut(stable_id) {
             entity.lifecycle.in_limbo = false;
@@ -1668,7 +1685,10 @@ impl Simulation {
             // Building440D2D, after native House building registration.
             entity.reset_building_health_sample_at_unlimbo();
         }
+        // Residual (invisible): native marks at 0x00440C34, before
+        // 0x00440D07..0x00440D2D above; only House AI reads the marks.
         self.mark_building_base_reservation_with_arg(stable_id, false, context);
+        self.light_building_at_unlimbo(stable_id, context);
         self.discover_building_owner_after_unlimbo(stable_id, context);
         self.construct_spotlight(stable_id, context.rules());
         // Unlimbo44119C clears this object's retained primary before
@@ -1697,6 +1717,8 @@ impl Simulation {
         } else {
             false
         };
+        // Unlimbo's AlphaShapeClass block follows the Logic registration.
+        self.construct_alpha_shape(stable_id, context.rules());
         // Building4415D8: successful normal Unlimbo after opening/base-plan.
         // The early dead/failed paths do not reach this call.
         let rules = context.rules();
@@ -1746,6 +1768,37 @@ impl Simulation {
             && let Some(entity) = substrate.entities.get_mut(stable_id)
         {
             entity.ai_sell_repair.make_repairable();
+        }
+    }
+
+    /// `BuildingClass::Unlimbo 0x00440D25..0x00440D6C`: only a campaign
+    /// building the player has discovered (`+0x41B`), or whose Unlimbo cell's
+    /// ground is not open to the player (`Cell+0x12C & 0x10`), is lit here
+    /// ([`Self::light_building`]). Any other takes DiscoveredBy(PlayerPtr)
+    /// (`0x00440D61`, [`Self::discover_by_player`]) and is lit when it
+    /// opens. That call mostly repeats CellPUT's, which tests the
+    /// height-projected cell's mapped bit instead; where CellPUT missed the
+    /// building, a human-owned one opens and lights here.
+    fn light_building_at_unlimbo(&mut self, id: u64, context: UninitContext<'_>) {
+        let Some(entity) = self
+            .substrate
+            .entities
+            .get(id)
+            .filter(|entity| entity.category() == EntityCategory::Structure)
+        else {
+            return;
+        };
+        let (rx, ry) = (entity.position.rx(), entity.position.ry());
+        let lit = !self.session.game_mode_nonzero()
+            && (entity.discovery.discovered_by_current_house()
+                || !self
+                    .session
+                    .current_house()
+                    .is_some_and(|player| self.fog.is_ground_open(player, rx, ry)));
+        if lit {
+            self.light_building(id, context.rules());
+        } else {
+            self.discover_by_player(id, None, context);
         }
     }
 
@@ -1799,6 +1852,22 @@ impl Simulation {
                 .checked_shl(ordinal as u32)
                 .expect("admitted network human count fits the30-player discovery mask"),
         )
+    }
+
+    /// `+0x41A` as a decision every peer shares reads it: VisualCharacter's
+    /// (`0x00703860`) answer for an `Invisible=` object in the cloak tick,
+    /// GetFireError and the Behind indicator. VERA network adaptation, as
+    /// HasOccurred53's: PlayerPtr differs per client, so in a network game no
+    /// shared decision sees the current house own the object. Drawing reads
+    /// the actual byte.
+    /// RESIDUAL: online, an invisible object's owner gets what other players
+    /// natively got. A player's hidden `InvisibleInGame=` lamp post takes no
+    /// BEHIND anim, and the owner's force-fire on it, unsensed, is Cant; only
+    /// maps that give a player a lamp post reach these. An owned `Invisible=`
+    /// cloaker (no retail type) finishes cloaking at once and never finishes
+    /// uncloaking.
+    pub(crate) fn shared_owned_by_current_house(&self, entity: &GameEntity) -> bool {
+        !self.session.game_mode().is_network() && entity.discovery.owned_by_current_house()
     }
 
     /// Retained discovery for a specified logical map, rather than this
@@ -2087,15 +2156,17 @@ impl Simulation {
         true
     }
 
-    /// CellAddContent47E953..47E9DC's discovery gate. In active YR the
-    /// IsFogged5865E0 body always returns false. Any noncampaign CellPUT
+    /// DiscoveredBy(PlayerPtr) for every represented player map: CellPUT's
+    /// (CellAddContent47E953..47E9DC, `cell_put` holds its Cell) and Building
+    /// Unlimbo's when it does not light (`0x00440D61`, `None`). In active YR
+    /// the IsFogged5865E0 body always returns false. Any noncampaign CellPUT
     /// therefore calls DiscoveredBy(PlayerPtr); campaigns do so only when
     /// the height-projected Cell coordinate is unshrouded. Reuse the existing
     ///586360 and Fog authority instead of a presentation visibility cache.
-    pub(crate) fn discover_cell_put_object(
+    pub(crate) fn discover_by_player(
         &mut self,
         id: u64,
-        cell: (u16, u16),
+        cell_put: Option<(u16, u16)>,
         context: UninitContext<'_>,
     ) {
         if self.session.game_mode().is_network() {
@@ -2120,14 +2191,16 @@ impl Simulation {
                     .network_discovery_view_bit(viewer)
                     .expect("represented human")
             });
-            // Cell47E9DC has one shared gameplay receiver. Its represented
+            // Each call has one shared gameplay receiver. Its represented
             // maps are admitted atomically; choose a foreign new viewer when
             // present so the native Tag4/House1F4 side effects are not lost.
             self.discover_techno_in_views(id, viewer, context, mask);
             return;
         }
         for viewer in self.represented_player_maps() {
-            if !self.session.game_mode_nonzero() {
+            if let Some(cell) = cell_put
+                && !self.session.game_mode_nonzero()
+            {
                 let Some(terrain) = context.terrain().or(self.resolved_terrain.as_ref()) else {
                     return;
                 };
@@ -2270,7 +2343,7 @@ impl Simulation {
                 self.substrate
                     .occupancy
                     .add(rx, ry, stable_id, layer, None, insertion);
-                self.discover_cell_put_object(stable_id, (rx, ry), context);
+                self.discover_by_player(stable_id, Some((rx, ry)), context);
             }
             #[cfg(any(test, feature = "test-support"))]
             self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationListLinked);
@@ -2310,23 +2383,9 @@ impl Simulation {
     }
 
     /// IsCellInPlayfield (`0x00578460`, mode 1) of the Reveal position's
-    /// origin Cell. Unbounded synthetic fixtures retain their historical
-    /// permissive behavior. Two consumers:
-    /// - an aircraft's Unlimbo Z ([`Self::unlimbo_z`]), as AircraftClass::
-    ///   Unlimbo asks it through `0x005785F0` (`0x00414352`);
-    /// - VERA's gate before Mark(PUT) for [`PlacementEvidence::EvaluateMark`]
-    ///   outside the `0x00A8E7AC` scope.
-    ///
-    /// RESIDUAL (#2393): the gate has no native counterpart. No Unlimbo layer
-    /// refuses on the playfield: Building (`0x00440580..0x004415E6`), Techno
-    /// (`0x006F6CA0`) and Object (`0x005F4EC0`), nor the Foot layers (see
-    /// [`PlacementEvidence::FootEntryAdmitted`]). With rules only a building
-    /// reaches it, since a Foot's admission comes back converted. Trigger: a
-    /// building revealed outside the scope whose origin Cell is outside the
-    /// playfield. Effect: the placement fails here, where native's Unlimbo
-    /// places it unless its caller refused first; those callers' own checks
-    /// were not traced. Frequency not counted. Downstream, the caller's
-    /// failure path runs instead of a placed building.
+    /// origin Cell, which AircraftClass::Unlimbo asks through `0x005785F0`
+    /// (`0x00414352`) for its Z ([`Self::unlimbo_z`]). Unbounded synthetic
+    /// fixtures retain their historical permissive behavior.
     fn reveal_position_is_in_playfield(
         &self,
         position: RevealPosition,
@@ -3753,9 +3812,12 @@ impl Simulation {
             //returns before this BuildingDetach arm.
             crate::sim::radio::broadcast_break(self, stable_id, context.rules(), context.effects());
         }
-        // The Foot prelude (`0x004D9744`) leaves the object's team, before
-        // Limbo is set, so the object still takes its idle mode.
-        self.leave_team(stable_id, false, context.rules(), context.effects());
+        // The Foot prelude leaves the object's team before Limbo is set, so
+        // the object still takes its idle mode. It skips that inside an
+        // object-placement scope (`[0x00A8E7AC]`, `0x004D9736..0x004D9744`).
+        if !self.object_placement_scope_active() {
+            self.leave_team(stable_id, false, context.rules(), context.effects());
+        }
         // This Detach_All(1) (`0x005F4D61`) also visits the concealed object
         // itself, so a live spawner's Limbo runs its SpawnManager's owner arm:
         // docked children UnInit with a zero regen timer, and airborne ones
@@ -4044,6 +4106,23 @@ impl Simulation {
         if !context.rules().external_effects_enabled() {
             self.limbo_ares_attach_effects(stable_id, context.rules());
         }
+        // Phobos `TechnoClass_Limbo_Wrapper` replaces the Limbo entry
+        // (vtable + the Foot/Building call sites) and runs its
+        // DiscardOn=Entry pass before calling the original body. Its work
+        // therefore precedes the hooks inside that body; the Ares extension's
+        // relative position is unobserved and kept as the AttachEffect branch
+        // had it.
+        #[cfg(feature = "phobos")]
+        self.limbo_phobos_attach_effects(
+            stable_id,
+            context.rules(),
+            context.registry(),
+            context.effects(),
+        );
+        // Techno Remove6F6AC9 ->1004B140/1004B1A9 flushes even a repeated
+        // Limbo, before the base's alive/InLimbo and sight-release branches.
+        #[cfg(feature = "ares")]
+        self.flush_bounty_display(stable_id, context.rules(), context.effects(), true);
         if self
             .substrate
             .entities
@@ -4176,58 +4255,17 @@ impl Simulation {
         outcome
     }
 
-    /// Guard UnInit's legacy uncredited-loss fallback. Routed RecordTheKill
-    /// callbacks already book their immediate House statistics, including
-    /// Temporal's full-health callback. Unrouted destruction sites still book
-    /// only their loss here; this does not certify their missing kill callback.
-    /// House quantities move through Removed_From_Game and Remove_Tracking.
-    pub(crate) fn record_destruction_once(
-        substrate: &mut ObjectSubstrate,
-        houses: &mut Houses,
-        stable_id: u64,
-    ) {
-        let Some((
-            owner,
-            category,
-            already_recorded,
-            destroyed,
-            dont_score,
-            suppress_building_loss,
-        )) = substrate.entities.get(stable_id).map(|entity| {
-            (
-                entity.owner(),
-                entity.category(),
-                entity.kill_record.is_recorded(),
-                // A Temporal erase leaves at full health with its kill
-                // already booked (`combat::record_kill::record_kill_credit`);
-                // a crashing infantryman falls at Health 1 (`0x0051BC57`)
-                // after the kill that booked its loss.
-                entity.health.current() == 0
-                    || entity.kill_record.killer().is_some()
-                    || entity.crash.is_crashing(),
-                entity.tracking_facts.dont_score(),
-                entity.category() == EntityCategory::Structure
-                    && entity.building_loss_index() == -1,
-            )
-        })
-        else {
-            return;
-        };
-        if already_recorded {
-            return;
-        }
+    /// Close `stable_id`'s kill record ([`crate::sim::combat::KillRecord`])
+    /// at UnInit and at ReceiveDamage's Destroy. It books nothing: the House
+    /// loss counts (`+0x5434` units, `+0x5488` buildings) have no writer but
+    /// RecordKill `0x00702D40` and RegisterKill `0x00703230`, so an object
+    /// removed without either is no loss. Such removals: a zero-health map
+    /// building at its first Update (`0x00440072..0x004400F1`), a parasite
+    /// that dies leaving its victim (ExitUnit `0x0062A4A0`, PointerExpired
+    /// `0x0062A260`) and a dropped Crashable unit (Notice `0x00746100`).
+    pub(crate) fn close_kill_record(substrate: &mut ObjectSubstrate, stable_id: u64) {
         if let Some(entity) = substrate.entities.get_mut(stable_id) {
-            entity.kill_record.mark_fallback_recorded();
-        }
-        if destroyed
-            && !dont_score
-            // A synchronous sale Tag action can enter UnInit before the
-            // outer RecordKill books its guard. The native +53C sentinel
-            // still suppresses the building loss at that nested boundary.
-            && !suppress_building_loss
-            && let Some(house) = houses.get_mut(&owner)
-        {
-            house.stats_mut().record_loss(category);
+            entity.kill_record.close();
         }
     }
 
@@ -4239,7 +4277,8 @@ impl Simulation {
     /// Callers:
     /// * `all`: the exact-zero Destroy callback of `ObjectClass::ReceiveDamage`
     ///   (`0x005F5765..0x005F57AF`), after the kill callback and before
-    ///   TechnoClass's death arm, and the Stun of a living object.
+    ///   TechnoClass's death arm, and every Stun (death, crash, sinking,
+    ///   lift release and sale).
     /// * not `all`: `TechnoClass::StartCloaking @ 0x00703770` and the cloak's
     ///   1 → 2 completion (`0x006FBA98`).
     ///
@@ -4286,7 +4325,7 @@ impl Simulation {
         let allied_with = |sim: &Self, contact: u64| {
             sim.substrate.entities.get(contact).is_some_and(|contact| {
                 crate::sim::combat::combat_weapon::is_ally_by_object(
-                    Some(sim.house_alliances.as_map()),
+                    Some(&sim.house_alliances),
                     &sim.interner,
                     owner,
                     contact.owner(),
@@ -4336,9 +4375,10 @@ impl Simulation {
                 }
             }
             EntityCategory::Unit | EntityCategory::Infantry | EntityCategory::Aircraft => {
-                if all {
-                    // `0x004D9744`: the Foot prelude leaves the object's team
-                    // first.
+                // The Foot prelude leaves the object's team first, unless an
+                // object-placement scope is open (`[0x00A8E7AC]`,
+                // `0x004D9736..0x004D9744`).
+                if all && !self.object_placement_scope_active() {
                     self.leave_team(stable_id, false, context.rules(), context.effects());
                 }
                 if let Some(contact) = self
@@ -4569,11 +4609,18 @@ impl Simulation {
     /// then its Foot-class gate. Techno ctor `0x006F2B40` ORs AbstractFlags
     /// bit 0 at `0x006F3228`; Foot ctor `0x004D31E0` ORs bit 2 (`4`) at
     /// `0x004D34DA`, so the native `+0x14 & 4` test identifies Foot, not an
-    /// active-state predicate. Only a Foot with `+0x6AD == 0` runs
-    /// Kill_All_Spawns (`0x006B7100`), ClearAllTargets (`0x006B7BB0`) and
-    /// Detach_All(1); Deselect follows on every class. Foot's constructor
-    /// clears `+0x6AD` at `0x004D3414`; ImbueLocomotor sets the lift latch at
-    /// `0x00710352`, and the Jumpjet landing paths clear it.
+    /// active-state predicate. A non-Foot object (`JZ 0x006FCD7B`) and a Foot
+    /// with `+0x6AD == 0` run Kill_All_Spawns (`0x006B7100`), ClearAllTargets
+    /// (`0x006B7BB0`) and Detach_All(1); only a lifted Foot skips them.
+    /// Deselect follows on every class. Foot's constructor clears `+0x6AD` at
+    /// `0x004D3414`; ImbueLocomotor sets the lift latch at `0x00710352`, and
+    /// the Jumpjet landing paths clear it. A Building reaches this from
+    /// `TechnoClass::ReceiveDamage`'s death arm (`0x00702206..0x00702210`),
+    /// usually after the Destroy callback's own Detach_All(1)
+    /// (`0x005F5765..0x005F57AF`), so it detaches a second time like native.
+    /// A further hit on a building already at Health 0 skips Destroy
+    /// (`0x005F5752..0x005F575F`) but still takes the death arm, so this is
+    /// its only detach.
     fn techno_stun(&mut self, stable_id: u64, context: UninitContext<'_>) {
         let Some(entity) = self.substrate.entities.get(stable_id) else {
             return;
@@ -4605,14 +4652,14 @@ impl Simulation {
         }
         crate::sim::radio::broadcast_break(self, stable_id, context.rules(), context.effects());
         // `0x006FCD6B..0x006FCD79`: a lifted Foot keeps its spawns, their
-        // targets and its listeners. The `+0x14 & 4` test guards the whole
-        // block before the Foot-only `+0x6AD` read.
+        // targets and its listeners. The `+0x14 & 4` test only guards the
+        // Foot-only `+0x6AD` read; every other object runs the block.
         let foot_lifted = self
             .substrate
             .entities
             .get(stable_id)
             .is_some_and(|entity| entity.category().is_foot() && entity.lift.swap_active());
-        if category.is_foot() && !foot_lifted {
+        if !foot_lifted {
             crate::sim::spawn_manager::kill_all_spawns_with_context(self, stable_id, context);
             crate::sim::spawn_manager::clear_all_spawn_targets(
                 self,
@@ -4652,7 +4699,7 @@ impl Simulation {
         // recovery path here: it converts coordinates and stops sounds early.
         // Ordinary21slots have no Anim owner+CC and survive this broadcast;
         // Building43BDC5 clears them only at deferred scalar destruction.
-        Self::record_destruction_once(&mut self.substrate, &mut self.houses, stable_id);
+        Self::close_kill_record(&mut self.substrate, stable_id);
         crate::sim::docking::bunker_link::break_links_on_despawn(&mut self.substrate, stable_id);
         #[cfg(any(test, feature = "test-support"))]
         self.trace_lifecycle_for_test(LifecycleTestEvent::UninitClassPre { stable_id });
@@ -4669,13 +4716,7 @@ impl Simulation {
     /// VERA-only: feeds the expiry-listener index (`ExpiryListeners`) so the
     /// `0x007258D0` broadcast skips entities; the listener's fields are the truth.
     pub(super) fn entity_expiry_holds(listener: &GameEntity, mut name: impl FnMut(u64)) -> bool {
-        if let Some(anim) = listener.parachute_animation() {
-            name(anim);
-        }
-        if let Some(anim) = listener.emp_sparkle() {
-            name(anim);
-        }
-        listener.attached_effect_anims().for_each(&mut name);
+        listener.held_anims().for_each(&mut name);
         for target in [
             listener.attack_target.target(),
             listener.suspended_attack_target.target(),
@@ -4712,10 +4753,14 @@ impl Simulation {
             .filter_map(|target| target.object_id())
             .for_each(&mut name);
         [
+            listener.unit_follower(),
             listener.passenger_role.inside_transport_id(),
+            listener.passenger_role.transporter(),
             listener.pending_entry(),
             listener.spawn_owner_id.owner(),
+            listener.fire_particle_system.system(),
             listener.spark_particle_system.system(),
+            listener.railgun_particle_system.system(),
             listener.damage_smoke_system_id.system(),
             listener.ammo().and_then(|ammo| ammo.dock()),
             listener
@@ -4730,12 +4775,6 @@ impl Simulation {
         .into_iter()
         .flatten()
         .for_each(&mut name);
-        listener
-            .parasite
-            .class()
-            .and_then(|class| class.grapple_anim())
-            .into_iter()
-            .for_each(&mut name);
         listener.mega_mission.referenced_ids().for_each(&mut name);
         listener.distributed_fire_references().for_each(&mut name);
         // The SpawnManager, CaptureManager and TemporalClass forwards act on
@@ -4898,6 +4937,11 @@ impl Simulation {
         registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
         effects: FrameEffects<'_>,
     ) -> TargetingSweepReceipt {
+        // VERA-only: the sweep releases a batched target scan's pick as it
+        // does a TarCom (`techno_ai::scan_batch`).
+        if let TargetKind::Entity(target_id) = target {
+            self.release_batched_scan_pick(target_id);
+        }
         #[cfg(any(test, feature = "test-support"))]
         let mut cell_detaches = Vec::new();
         let mut listeners = self.substrate.entities.keys_sorted();
@@ -5218,7 +5262,9 @@ impl Simulation {
         // exact match, including damage-Smoke+310. It precedes the control
         // gate707AE7 and is independent of the target's sensor/owner guards.
         let clear_damage_smoke = listener.damage_smoke_system_id.system() == Some(expired_id);
+        let clear_fire_system = listener.fire_particle_system.system() == Some(expired_id);
         let clear_spark_system = listener.spark_particle_system.system() == Some(expired_id);
+        let clear_railgun_system = listener.railgun_particle_system.system() == Some(expired_id);
         // Techno707AE7..707B03 clears ArchiveTarget+218 on control1. The
         // later Foot4D99F1..4D99FC clears a still-matching archive on both
         // controls, independent of sensors and same-owner target exemptions.
@@ -5276,12 +5322,14 @@ impl Simulation {
         // Steam gamemd, TechnoPointerExpired7078B2..7078DB:
         // Transporter+11C survives a live hull's ordinary Limbo announcement,
         // for either control. Clear only on Object+90==0, exact Health==0 or
-        // ScenarioInit(A8E7AC)!=0. Negative live HP is not this zero test.
-        let clear_passenger_role = listener.passenger_role.inside_transport_id()
-            == Some(expired_id)
-            && (!expired_object_alive
-                || expired_health == 0
-                || self.object_placement_scope_active());
+        // ScenarioInit(A8E7AC)!=0 (`0x007078D5`). Negative live HP is not
+        // this zero test. VERA's carrier relation follows the same test.
+        let hull_gone =
+            !expired_object_alive || expired_health == 0 || self.object_placement_scope_active();
+        let clear_transporter =
+            hull_gone && listener.passenger_role.transporter() == Some(expired_id);
+        let clear_passenger_role =
+            hull_gone && listener.passenger_role.inside_transport_id() == Some(expired_id);
         let clear_c4_source = listener
             .pending_c4_detonation
             .pending()
@@ -5309,7 +5357,9 @@ impl Simulation {
         let clear_spotlight = listener.category() == EntityCategory::Structure
             && listener.building_light.light() == Some(expired_id);
         if !(clear_suspended_target
+            || clear_fire_system
             || clear_spark_system
+            || clear_railgun_system
             || clear_damage_smoke
             || clear_archive_target
             || clear_suspended_nav_com
@@ -5318,6 +5368,7 @@ impl Simulation {
             || prune_nav_queue
             || clear_dock
             || clear_airfield
+            || clear_transporter
             || clear_passenger_role
             || clear_c4_source
             || expire_mega_pointer
@@ -5339,8 +5390,14 @@ impl Simulation {
         if clear_damage_smoke {
             listener.damage_smoke_system_id.forget();
         }
+        if clear_fire_system {
+            listener.fire_particle_system.forget();
+        }
         if clear_spark_system {
             listener.spark_particle_system.forget();
+        }
+        if clear_railgun_system {
+            listener.railgun_particle_system.forget();
         }
         if clear_archive_target {
             listener.set_archive_target(None);
@@ -5367,6 +5424,9 @@ impl Simulation {
         }
         if clear_airfield && let Some(ammo) = listener.ammo_mut() {
             ammo.set_dock(None);
+        }
+        if clear_transporter {
+            listener.passenger_role.clear_transporter();
         }
         if clear_passenger_role {
             listener.passenger_role.clear_carrier_relation();
@@ -5591,9 +5651,11 @@ impl Simulation {
         if !self.substrate.anims.contains_key(expired_id) {
             return;
         }
-        let holders = self
-            .expiry_listeners
-            .entities_reached_by(&mut self.substrate.entities, expired_id);
+        // VERA-only: each callback below clears only its own entity's fields
+        // that name the Anim (`GameEntity::held_anims`) and draws nothing, so
+        // visiting just the entities the anim-holder index finds, ascending,
+        // changes exactly what visiting every entity would.
+        let holders = self.substrate.entities.take_anim_holders(expired_id);
         for owner in holders {
             if let Some(entity) = self.substrate.entities.get_mut(owner) {
                 // Techno's Anim callback710455 reaches Object5F6DA0.
@@ -5649,6 +5711,13 @@ impl Simulation {
         control: PointerExpiryControl,
         context: UninitContext<'_>,
     ) {
+        // VERA-only: a batched target scan holds its pick across the turns
+        // before its scanner's as a TarCom does (`techno_ai::scan_batch`).
+        self.release_batched_scan_pick(expired_id);
+        // `AlphaShapeClass::PointerExpired @ 0x00420E70` listens whatever the
+        // control and touches no other listener's state, so its place among
+        // the listeners changes nothing.
+        self.alpha_shapes.pointer_expired(expired_id);
         // `DispatchPointerExpiredCleanup @ 0x007258D0` calls
         // `BombListClass::PointerGotInvalid @ 0x00439150` after its listener
         // loop (0x00725961) whatever the control, so a cloaking planter loses
@@ -6065,6 +6134,15 @@ impl Simulation {
                     context.rules(),
                     context.effects(),
                 );
+                // UnitClass::PointerExpired7446E0 runs the full Foot forward
+                // first, then clears matching +6C8 at7446FF for either control
+                // value. It leaves the independent +6D0 byte alone (gamemd).
+                if let Some(entity) = self.substrate.entities.get_mut_if(listener_id, |entity| {
+                    entity.category() == EntityCategory::Unit
+                        && entity.unit_follower() == Some(expired_id)
+                }) {
+                    entity.set_unit_follower(None);
+                }
                 #[cfg(any(test, feature = "test-support"))]
                 if let Some(before) = passed_over {
                     assert_eq!(
@@ -6307,7 +6385,12 @@ impl Simulation {
         }
         // ObjectClass::UnInit's first statement (`0x005F65F3`) defuses a
         // carried bomb silently: sold, crushed, erased.
-        Self::bomb_defuse(&mut self.substrate, &mut self.bombs, stable_id);
+        Self::bomb_defuse(
+            &mut self.substrate,
+            &mut self.bombs,
+            &mut self.sound_events,
+            stable_id,
+        );
         self.notify_pointer_expired(stable_id, context);
 
         match kind {
@@ -6747,7 +6830,12 @@ impl Simulation {
             entity.lifecycle.object_alive = false;
         }
         // The ObjectClass destructor's defensive Defuse (`0x005F3BA6`).
-        Self::bomb_defuse(&mut self.substrate, &mut self.bombs, stable_id);
+        Self::bomb_defuse(
+            &mut self.substrate,
+            &mut self.bombs,
+            &mut self.sound_events,
+            stable_id,
+        );
         self.team_script_vm.object_deleted(stable_id);
         Self::release_house_base_tracking(&self.substrate, &mut self.houses, stable_id);
         // Selected original Foot destructor4D3632..4D366E clears only its
@@ -6824,9 +6912,10 @@ impl Simulation {
         if kind == Some(ObjectKind::Anim) {
             self.notify_anim_pointer_expired(stable_id);
             self.substrate.clear_damage_fire_anim_reference(stable_id);
-            self.conceal_anim(stable_id);
+            self.substrate.release_last_anim_owner_flag(stable_id);
             self.substrate.release_anim_owner_reference(stable_id);
             self.substrate.clear_building_anim_reference(stable_id);
+            self.conceal_anim(stable_id);
         }
         // The native Object field+34 disappears with storage. This is not
         // SetTag(nullptr): the shared Tag owner preserves its native counter.

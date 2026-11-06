@@ -37,6 +37,11 @@ const _: () = assert!(
     cfg!(feature = "verax") == rules::VERAX_ENABLED,
     "enable VeraX through the vera20k package's verax feature"
 );
+// The same boundary for the NPBUG bug-fix capability.
+const _: () = assert!(
+    cfg!(feature = "npbug") == rules::NPBUG_ENABLED,
+    "enable NPBUG through the vera20k package's npbug feature"
+);
 
 // Opaque process-RNG cursor receipt shared by map generation and simulation.
 use vera20k_core::rng_continuation;
@@ -51,6 +56,9 @@ pub mod render;
 
 // Menus, dialogs and the in-game sidebar: layout and state, drawn by app/ and render/.
 pub mod ui;
+
+// VERA's own localized text, layered over the retail CSF (`[VERA] Language=`).
+pub mod i18n;
 
 // Sound/music via rodio.
 pub mod audio;
@@ -68,3 +76,12 @@ use vera20k_core::test_fixture;
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
+
+// Browser protocol tests run on the host without linking JavaScript APIs.
+#[cfg(all(feature = "wasm", any(test, all(target_arch = "wasm32", target_os = "unknown"))))]
+#[path = "web/lifecycle.rs"]
+mod browser_lifecycle;
+
+#[cfg(all(feature = "wasm", any(test, all(target_arch = "wasm32", target_os = "unknown"))))]
+#[path = "web/ime_protocol.rs"]
+mod browser_ime;

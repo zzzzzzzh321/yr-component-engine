@@ -162,7 +162,7 @@ fn paid_ready_fixture() -> Option<Fixture> {
     )?;
 
     let options = production::all_build_options_for_owner(&sim, &rules, "Americans");
-    let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[], &[]);
+    let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[]);
     let additions = production::initial_construction_options(&sim, &rules);
     projection.reconcile_cameos(owner, &candidates, 12, &additions);
     let starting_credits = production::credits_for_owner(&sim, "Americans");
@@ -241,7 +241,6 @@ fn refresh_fixture_sidebar(
         None,
         fixture.owner,
         &options,
-        &ready,
         &[],
     );
     let layout_spec = SidebarChromeLayoutSpec::stock();
@@ -284,7 +283,6 @@ fn refresh_fixture_sidebar(
         &options,
         &ready,
         armed.as_ref(),
-        &[],
         Some(fixture.sim.interner()),
         &[],
         &SidebarGadgetState::new(),
@@ -517,6 +515,36 @@ fn arm_gapowr_with_preview(fixture: &mut Fixture) -> production::BuildingPlaceme
     preview
 }
 
+/// `BuildingClass::ChangeOwner` (`0x00448C9A..0x00448CD6`): a captured
+/// Construction Yard clears only the local player's current placement; both
+/// ready products stay for a later cameo click.
+#[test]
+fn a_captured_construction_yard_clears_the_local_placement() {
+    let Some(mut fixture) = paid_ready_fixture() else {
+        return;
+    };
+    arm_gapowr_with_preview(&mut fixture);
+    let owner = fixture.owner;
+    let other = fixture.sim.intern("Russians");
+    consume_lifecycle_output(
+        &mut fixture,
+        &LifecycleOutput::ConstructionYardCaptured { owner: other },
+        Some(owner),
+    );
+    assert_eq!(fixture.input.building_placement_issuer(), Some(owner));
+    consume_lifecycle_output(
+        &mut fixture,
+        &LifecycleOutput::ConstructionYardCaptured { owner },
+        Some(owner),
+    );
+    assert_eq!(fixture.input.building_placement_issuer(), None);
+    assert!(fixture.input.building_placement_preview.is_none());
+    assert_eq!(
+        production::ready_buildings_for_owner(&fixture.sim, &fixture.rules, "Americans").len(),
+        2
+    );
+}
+
 fn ready_identities(fixture: &Fixture) -> [(InternedId, u64); 2] {
     ["GAPOWR", "GAPILL"].map(|name| {
         let type_id = fixture.sim.interner().get(name).unwrap();
@@ -587,7 +615,9 @@ fn submit_current_building(fixture: &mut Fixture, cell: (u16, u16)) -> CommandEn
             ry: cell.1,
         },
     );
-    fixture.input.submit_building_placement();
+    fixture
+        .input
+        .submit_building_placement(&mut fixture.projection);
     assert!(fixture.input.targeting_mode.is_none());
     assert!(fixture.input.building_placement_preview.is_none());
     assert!(fixture.input.building_placement_issuer().is_none());
@@ -622,6 +652,151 @@ fn advance_commands(fixture: &mut Fixture, commands: &[CommandEnvelope]) -> SimF
             FrameEffects::default().with_production_strip(&visits, &clear_request),
         )
         .expect("ordinary authoritative command frame")
+}
+
+#[test]
+fn submitted_building_is_not_reoffered_by_tab_before_place_receipt() {
+    let Some(mut fixture) = paid_ready_fixture() else {
+        return;
+    };
+    let owner = fixture.owner;
+    let published = advance_commands(&mut fixture, &[]);
+    consume_frame_outputs(&mut fixture, &published, Some(owner));
+    let type_id = fixture.sim.interner().get("GAPOWR").unwrap();
+    let product = ready_product(&fixture, "GAPOWR");
+    assert_eq!(
+        fixture
+            .projection
+            .ready_building_for_tab(&fixture.sim, owner, SidebarTab::Building,),
+        Some((type_id, product)),
+    );
+
+    let _pending_place =
+        submit_ready_building(&mut fixture, "GAPOWR", SidebarTab::Building, (8, 4));
+    assert_eq!(ready_product(&fixture, "GAPOWR"), product);
+    // Original4ABBD7 clears734270 before PLACE is received. Factory
+    // completeness remains true, but535DAA's tab getter now returns NULL.
+    assert_eq!(
+        fixture
+            .projection
+            .ready_building_for_tab(&fixture.sim, owner, SidebarTab::Building,),
+        None,
+        "a submitted product is not offered again while PLACE awaits receipt",
+    );
+    // Direct cameo selection6AB2CC bypasses the tab's retained reference.
+    assert!(press_ready_cameo(
+        &mut fixture,
+        "GAPOWR",
+        SidebarTab::Building,
+    ));
+}
+
+#[test]
+fn loaded_ready_tabs_wait_for_the_saved_factory_changed_edge() {
+    for already_published in [false, true] {
+        let Some(mut fixture) = paid_ready_fixture() else {
+            return;
+        };
+        let owner = fixture.owner;
+        // The supplied clear arena still needs its empty map authority for
+        // the same validated world restore the ordinary loader uses.
+        let overlays = crate::sim::overlay_grid::OverlayGrid::new(
+            fixture.sim.session().map_width(),
+            fixture.sim.session().map_height(),
+        );
+        fixture.sim.install_overlay_grid_for_load(overlays);
+        if already_published {
+            let published = advance_commands(&mut fixture, &[]);
+            consume_frame_outputs(&mut fixture, &published, Some(owner));
+        }
+        let product = ready_product(&fixture, "GAPOWR");
+        let type_id = fixture.sim.interner().get("GAPOWR").unwrap();
+        roundtrip_fixture_save(&mut fixture, "ready-tab-history");
+        // PostLoad6851D9 clears734270 without changing the saved Factory
+        // byte or retained links. Completeness still drives the tab flash.
+        assert_eq!(
+            fixture
+                .projection
+                .ready_building_for_tab(&fixture.sim, owner, SidebarTab::Building,),
+            None,
+        );
+        assert_eq!(
+            fixture.projection.ready_building_tabs(&fixture.sim, owner),
+            [true, true],
+        );
+        let published = advance_commands(&mut fixture, &[]);
+        consume_frame_outputs(&mut fixture, &published, Some(owner));
+        assert_eq!(
+            fixture
+                .projection
+                .ready_building_for_tab(&fixture.sim, owner, SidebarTab::Building,),
+            (!already_published).then_some((type_id, product)),
+            "only the unconsumed changed edge registers the loaded reference",
+        );
+    }
+}
+
+#[test]
+fn building_and_defense_tab_history_outlives_the_single_saved_retry() {
+    let Some(mut fixture) = paid_ready_fixture() else {
+        return;
+    };
+    let owner = fixture.owner;
+    let published = advance_commands(&mut fixture, &[]);
+    consume_frame_outputs(&mut fixture, &published, Some(owner));
+    let held = ready_identities(&fixture);
+    let _building = submit_ready_building(&mut fixture, "GAPOWR", SidebarTab::Building, (8, 4));
+    let _defense = submit_ready_building(&mut fixture, "GAPILL", SidebarTab::Defense, (8, 4));
+    assert_eq!(ready_identities(&fixture), held);
+    assert_eq!(
+        fixture
+            .input
+            .building_placement_view()
+            .saved_retry
+            .unwrap()
+            .product_id,
+        Some(held[1].1),
+    );
+    assert_eq!(
+        [SidebarTab::Building, SidebarTab::Defense].map(|tab| {
+            fixture
+                .projection
+                .ready_building_for_tab(&fixture.sim, owner, tab)
+        }),
+        [None, None],
+        "the overwritten retry does not resurrect the Building tab reference",
+    );
+
+    // An admitted abandonment clears the actual held product even when no
+    // placement was submitted. The other tab retains its own reference.
+    let Some(mut fixture) = paid_ready_fixture() else {
+        return;
+    };
+    let owner = fixture.owner;
+    let published = advance_commands(&mut fixture, &[]);
+    consume_frame_outputs(&mut fixture, &published, Some(owner));
+    let defense =
+        fixture
+            .projection
+            .ready_building_for_tab(&fixture.sim, owner, SidebarTab::Defense);
+    assert!(defense.is_some());
+    let cancel = cancel_envelope(&fixture, "GAPOWR");
+    for commands in [&[cancel][..], &[][..]] {
+        let frame = advance_commands(&mut fixture, commands);
+        consume_frame_outputs(&mut fixture, &frame, Some(owner));
+    }
+    assert_eq!(
+        fixture
+            .projection
+            .ready_building_for_tab(&fixture.sim, owner, SidebarTab::Building),
+        None,
+    );
+    assert_eq!(
+        fixture
+            .projection
+            .ready_building_for_tab(&fixture.sim, owner, SidebarTab::Defense),
+        defense,
+    );
 }
 
 #[test]

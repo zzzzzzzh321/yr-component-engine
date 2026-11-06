@@ -46,7 +46,10 @@ where
             "unexpected replay verification argument"
         );
         let replay = crate::sim::replay::ReplayLog::load(&path)?;
-        let receipt = crate::sim::replay::ReplayRunner::verify(&retail_dir, &replay)?;
+        let map_sha256 = replay.standalone_startup()?.map_sha256();
+        let map_beside = map_beside_replay(&path, &replay.header.map_name, map_sha256)?;
+        let receipt =
+            crate::sim::replay::ReplayRunner::verify(&retail_dir, &replay, map_beside.as_deref())?;
         println!("{}", serde_json::to_string(&receipt)?);
         Ok(0)
     })())
@@ -77,6 +80,50 @@ where
     })())
 }
 
+/// `vera20k --probe [--ra2-dir <dir>] [--map <path>]` (docs/spawn.md): print
+/// one JSON object describing what a spawn launch on this installation is
+/// checked against, then exit. Headless: no logger, window or audio.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub fn try_probe<I>(args: I) -> Option<Result<i32>>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    if args.next().as_deref() != Some(OsStr::new("--probe")) {
+        return None;
+    }
+    Some((|| {
+        let (ra2_dir, map) = parse_probe_args(args)?;
+        let report = crate::app::spawn_probe::run_desktop(ra2_dir.as_deref(), map.as_deref())?;
+        println!("{}", serde_json::to_string(&report)?);
+        Ok(0)
+    })())
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn parse_probe_args(
+    args: impl Iterator<Item = OsString>,
+) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+    const USAGE: &str = "usage: vera20k --probe [--ra2-dir <retail-directory>] [--map <map-file>]";
+    let mut args = args;
+    let (mut ra2_dir, mut map) = (None, None);
+    while let Some(flag) = args.next() {
+        let slot = if flag == OsStr::new("--ra2-dir") {
+            &mut ra2_dir
+        } else if flag == OsStr::new("--map") {
+            &mut map
+        } else {
+            bail!("unexpected probe argument {flag:?}; {USAGE}");
+        };
+        ensure!(slot.is_none(), "{flag:?} given twice; {USAGE}");
+        *slot =
+            Some(PathBuf::from(args.next().with_context(|| {
+                format!("{flag:?} needs a value; {USAGE}")
+            })?));
+    }
+    Ok((ra2_dir, map))
+}
+
 #[derive(Debug)]
 pub enum AppLaunchMode {
     /// Ordinary launch, carrying whatever the retail switch table decided.
@@ -90,6 +137,8 @@ pub enum AppLaunchMode {
     Usage,
     ShellCapture(ShellCaptureRequest),
     TacticalCapture(TacticalCaptureRequest),
+    /// A hidden run that draws one map's picture for the setup screens.
+    MapPicture(crate::app::map_picture::MapPictureRequest),
 }
 
 #[derive(Debug)]
@@ -98,6 +147,31 @@ pub struct ReplayLaunchRequest {
     pub(crate) retail_dir: PathBuf,
     pub(crate) capture_output: Option<PathBuf>,
     pub(crate) replay_sha256: String,
+    /// The recorded map beside the replay file or one folder up: a -SPAWN
+    /// game's map exists in no game folder. A file with other bytes is ignored.
+    pub(crate) map_beside: Option<String>,
+}
+
+/// The replay's own folder, then the one above it. A `-SPAWN` launch keeps
+/// its map beside `spawn.ini` in the folder it runs in (`resolve_client_map`),
+/// and the game writes its replays to `replays/` there.
+fn map_beside_replay(replay: &Path, map_name: &str, map_sha256: &str) -> Result<Option<String>> {
+    // A rooted path's scenario name is only its file name, so a logical
+    // name with a directory must keep resolving through the game folder.
+    if map_name.contains(['/', '\\']) {
+        return Ok(None);
+    }
+    Ok(replay
+        .canonicalize()?
+        .ancestors()
+        .skip(1)
+        .take(2)
+        .map(|directory| directory.join(map_name))
+        .find(|map| {
+            std::fs::read(map)
+                .is_ok_and(|bytes| crate::util::sha256::sha256_hex(&bytes) == map_sha256)
+        })
+        .and_then(|map| map.to_str().map(str::to_owned)))
 }
 
 fn parse_replay_args(args: Vec<OsString>) -> Result<AppLaunchMode> {
@@ -148,8 +222,10 @@ fn parse_replay_args(args: Vec<OsString>) -> Result<AppLaunchMode> {
     };
     ensure!(args.next().is_none(), "unexpected replay argument");
     let (replay, replay_sha256) = crate::sim::replay::ReplayLog::load_bound(&path)?;
-    replay.standalone_startup()?;
+    let map_sha256 = replay.standalone_startup()?.map_sha256();
+    let map_beside = map_beside_replay(&path, &replay.header.map_name, map_sha256)?;
     Ok(AppLaunchMode::Replay(ReplayLaunchRequest {
+        map_beside,
         replay: std::sync::Arc::new(replay),
         retail_dir,
         capture_output,
@@ -283,6 +359,10 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let args: Vec<OsString> = args.into_iter().collect();
+    // The menus start this run with a map name that must reach it untouched.
+    if crate::app::map_picture::is_invocation(args.iter().cloned()) {
+        return crate::app::map_picture::parse_args(args).map(AppLaunchMode::MapPicture);
+    }
     if args
         .iter()
         .any(|arg| arg == OsStr::new("--replay") || arg == OsStr::new("--replay-capture"))
@@ -445,6 +525,32 @@ mod tests {
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
     #[test]
+    fn probe_dispatch_is_strict_and_only_first() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(try_probe(args(&["-WIN", "--probe"])).is_none());
+        assert!(try_probe(args(&["-SPAWN"])).is_none());
+        for bad in [
+            &["--bogus"][..],
+            &["--map"],
+            &["--ra2-dir"],
+            &["--map", "a", "--map", "b"],
+            &["--ra2-dir", "a", "-WIN"],
+        ] {
+            assert!(parse_probe_args(args(bad).into_iter()).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            parse_probe_args(args(&["--map", "m.ini", "--ra2-dir", "r"]).into_iter()).unwrap(),
+            (Some(PathBuf::from("r")), Some(PathBuf::from("m.ini")))
+        );
+        assert_eq!(parse_probe_args(std::iter::empty()).unwrap(), (None, None));
+        // The interactive parser does not treat --probe as a launch mode.
+        assert!(!matches!(
+            parse_launch_args(args(&["--probe"])),
+            Ok(AppLaunchMode::Spawn(_))
+        ));
+    }
+
+    #[test]
     fn standalone_replay_dispatch_is_strict_and_does_not_enter_interactive_startup() {
         assert!(try_replay_verify([OsString::from("-WIN")]).is_none());
         assert!(
@@ -499,6 +605,59 @@ mod tests {
         );
         assert_eq!(std::fs::read(output).unwrap(), b"preserve");
         assert!(parse_launch_args([OsString::from("--replay-capture")]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_replay_uses_the_map_beside_it_only_when_present() {
+        let root = test_directory("replay-map-beside");
+        let replay = root.join("replay.json");
+        std::fs::write(&replay, b"{}").unwrap();
+        let sha256 = crate::util::sha256::sha256_hex(b"map");
+        assert_eq!(
+            map_beside_replay(&replay, "spawnmap.ini", &sha256).unwrap(),
+            None
+        );
+        std::fs::create_dir(root.join("Maps")).unwrap();
+        std::fs::write(root.join("Maps/spawnmap.ini"), b"map").unwrap();
+        assert_eq!(
+            map_beside_replay(&replay, "Maps/spawnmap.ini", &sha256).unwrap(),
+            None
+        );
+        let map = root.join("spawnmap.ini");
+        std::fs::write(&map, b"other").unwrap();
+        assert_eq!(
+            map_beside_replay(&replay, "spawnmap.ini", &sha256).unwrap(),
+            None
+        );
+        std::fs::write(&map, b"map").unwrap();
+        let found = map_beside_replay(&replay, "spawnmap.ini", &sha256)
+            .unwrap()
+            .unwrap();
+        assert_eq!(PathBuf::from(found), map.canonicalize().unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A `-SPAWN` game saves its replay to `replays/` in the folder that
+    /// holds its `spawnmap.ini`; two folders up is not searched.
+    #[test]
+    fn a_spawn_games_replay_finds_the_map_in_the_folder_above() {
+        let root = test_directory("replay-map-above");
+        std::fs::create_dir_all(root.join("game/replays")).unwrap();
+        let replay = root.join("game/replays/replay_tick90_1.json");
+        std::fs::write(&replay, b"{}").unwrap();
+        let sha256 = crate::util::sha256::sha256_hex(b"map");
+        std::fs::write(root.join("spawnmap.ini"), b"map").unwrap();
+        assert_eq!(
+            map_beside_replay(&replay, "spawnmap.ini", &sha256).unwrap(),
+            None
+        );
+        let map = root.join("game/spawnmap.ini");
+        std::fs::write(&map, b"map").unwrap();
+        let found = map_beside_replay(&replay, "spawnmap.ini", &sha256)
+            .unwrap()
+            .unwrap();
+        assert_eq!(PathBuf::from(found), map.canonicalize().unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 

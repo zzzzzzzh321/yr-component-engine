@@ -388,8 +388,27 @@ impl Simulation {
         self.begin_phobos_map_objects();
         let result = self.with_object_placement_scope(|sim| {
             let mut count: u32 = 0;
+            let mut follows = Vec::new();
+            let mut unit_reader_finished = false;
+            // ReadScenarioBuildings sets its three upgrade slots to -1 once,
+            // before the loop (`0x0044F838..0x0044F846`): a line that stops
+            // short of a token keeps the slot the previous admitted line wrote.
+            // Residual: native also writes them for a line whose Unlimbo then
+            // fails off-map; the map reader drops a negative cell line first,
+            // so its tokens never reach these slots (custom maps only).
+            let mut upgrade_slots: [Option<String>; 3] = Default::default();
 
             for (entity_index, map_ent) in entities.iter().enumerate() {
+                // Full_Init687AA7 completes UnitReadINI743664 before entering
+                // Aircraft41B110. Generated rows preconsume construction and
+                // do not run this authored Unit reader a second time.
+                if generated_inits.is_none()
+                    && !unit_reader_finished
+                    && map_ent.category != EntityCategory::Unit
+                {
+                    sim.link_authored_unit_followers(&follows);
+                    unit_reader_finished = true;
+                }
                 let Some(owner) = sim.map_entity_owner_before_constructor(
                     map_ent,
                     rules,
@@ -403,6 +422,24 @@ impl Simulation {
                     );
                     continue;
                 };
+                // Each present token goes through BuildingTypeClass's
+                // FindIndexByName (`0x0045E7B0`) into its slot after the House
+                // and Type admission and before the constructor
+                // (`0x0044FA82..0x0044FAAB`); an unknown name or `None` is -1.
+                if map_ent.category == EntityCategory::Structure {
+                    for (slot, token) in upgrade_slots
+                        .iter_mut()
+                        .zip(&map_ent.structure_columns.upgrade_tokens)
+                    {
+                        let Some(token) = token.as_deref() else {
+                            continue;
+                        };
+                        *slot = rules
+                            .object(token)
+                            .is_some_and(|object| object.category == ObjectCategory::Building)
+                            .then(|| token.to_owned());
+                    }
+                }
                 // Unit ReadUnits7434F3 writes OnBridge from HIGH itself; its
                 // 7434FB..743510 coordinate is Map578080 ground plus B1D0AC.
                 // HasBridge and navigation's bridge_walkable do not admit that
@@ -541,6 +578,15 @@ impl Simulation {
                     .author_recruitable(map_ent.recruitable_a, map_ent.recruitable_b);
                 // gamemd.exe Unit7434CA/Aircraft41B33D/Infantry51FD89, before Unlimbo.
                 ge.assign_object_group(map_ent.group);
+                // UnitReadINI74351B..743575 appends before Unlimbo. A failed
+                // placement deletes its Unit but retains this vector entry,
+                // shifting later Unit-array pairings in the final pass.
+                if generated_inits.is_none()
+                    && map_ent.category == EntityCategory::Unit
+                    && let Some(index) = map_ent.follows
+                {
+                    follows.push(index);
+                }
 
                 Self::install_techno_components(&mut sim.interner, &sim.session, &sim.houses,
                     &mut ge,
@@ -582,12 +628,29 @@ impl Simulation {
                 if matches!(outcome, RevealOutcome::Revealed { .. }) {
                     Self::initialize_cloak_after_unlimbo(&sim.interner, &sim.session, &mut sim.substrate, stable_id, rules);
                     sim.add_unit_sensor_after_unlimbo(stable_id, rules, overlay_registry);
-                    sim.add_building_sensor_array_if_powered(stable_id, rules, overlay_registry);
+                    // ReadScenarioBuildings (0x0044F820) makes no sensor call:
+                    // a map building stamps only if the first opening its
+                    // Unlimbo already ran (0x00440D61 / 0x00440E76) passed
+                    // Is_Operational.
                 }
-                Self::commit_map_placement_mission(&sim.session, &mut sim.substrate, stable_id, map_ent.mission);
+                sim.commit_map_placement_mission(stable_id, map_ent.mission, rules);
                 // ReadINI44FC1B..44FD23: the factory callback is inside
                 // an admitted transition, not unconditional after Unlimbo.
                 if map_ent.category == EntityCategory::Structure {
+                    // `0x0044FC07..0x0044FC16`: field 11 goes to the light
+                    // Unlimbo gave a HasSpotlight building, through
+                    // BuildingLightClass::SetBehaviour (`0x00436BE0`).
+                    if let Some(light) = sim
+                        .substrate
+                        .entities
+                        .get(stable_id)
+                        .and_then(|entity| entity.building_light.light())
+                    {
+                        sim.set_spotlight_behavior(
+                            light,
+                            map_ent.structure_columns.light_behaviour,
+                        );
+                    }
                     if map_ent.structure_online {
                         sim.go_building_online(stable_id, rules, FrameEffects::default());
                     } else {
@@ -602,21 +665,17 @@ impl Simulation {
                     // upgrade constructors even if a shared callback changed
                     // the parent owner. The raw authored name is not a key.
                     let original_owner = sim.interner.resolve(owner_id).to_owned();
-                    for upgrade_type in &map_ent.structure_upgrades {
+                    // `0x0044FD50..0x0044FDC3` walks `count` slots from the
+                    // first and skips -1. A count above three reads past
+                    // native's slot array into its coordinate locals; Rust
+                    // stops at three.
+                    let declared = usize::try_from(map_ent.structure_columns.upgrade_count)
+                        .unwrap_or(0)
+                        .min(3);
+                    for upgrade_type in &upgrade_slots[..declared] {
                         let Some(upgrade_type) = upgrade_type.as_deref() else {
                             continue;
                         };
-                        let valid_upgrade = rules
-                            .object(upgrade_type)
-                            .is_some_and(|object| object.category == ObjectCategory::Building);
-                        if !valid_upgrade {
-                            log::warn!(
-                                "Skipping unresolved authored upgrade {} on {}",
-                                upgrade_type,
-                                map_ent.type_id
-                            );
-                            continue;
-                        }
                         if sim
                             .spawn_authored_building_upgrade(
                                 upgrade_type,
@@ -635,12 +694,49 @@ impl Simulation {
                 }
             }
 
+            if generated_inits.is_none() && !unit_reader_finished {
+                sim.link_authored_unit_followers(&follows);
+            }
             log::info!("Spawned {} entities", count);
             Ok(count)
         });
         #[cfg(feature = "phobos")]
         self.finish_phobos_map_objects();
         result
+    }
+
+    /// UnitClass::ReadINI743664..7436AA (original gamemd instructions): pair
+    /// initialized operands with the surviving Unit array, not with map keys
+    /// or successful rows. There are no callbacks inside this post-read pass.
+    fn link_authored_unit_followers(&mut self, follows: &[i32]) {
+        let units: Vec<_> = self.substrate.entities.unit_registry_ids().collect();
+        for (&id, &index) in units.iter().zip(follows) {
+            let peer = usize::try_from(index)
+                .ok()
+                .and_then(|index| units.get(index))
+                .copied();
+            self.substrate
+                .entities
+                .get_mut(id)
+                .unwrap()
+                .set_unit_follower(peer);
+            if let Some(peer) = peer {
+                self.substrate
+                    .entities
+                    .get_mut(peer)
+                    .unwrap()
+                    .set_is_unit_follower(true);
+            }
+        }
+        if follows.len() < units.len() {
+            // Native indexes uninitialized backing memory for a short line;
+            // keep the unmatched constructor state and report that boundary.
+            log::warn!(
+                "UnitReadINI743664 has {} Units but only {} initialized FOLLOWS operands; unmatched native reads are unsupported",
+                units.len(),
+                follows.len()
+            );
+        }
     }
 
     fn map_entity_owner_before_constructor(
@@ -655,9 +751,15 @@ impl Simulation {
             // Only BuildingReadINI44F8CB..44F8DB compares the current House
             // in nonzero modes, before resolving Type or entering its ctor.
             // Native controls: input_oracle/campaign_house_names.
+            // VERA network adaptation: PlayerPtr differs per client, so a map
+            // owner naming a human ("<human player>" in LAN, a WOL handle)
+            // dropped the structure on that human's peer alone. A network game
+            // keeps it on every peer, answering as if there were no local
+            // player, as HasOccurred53 does. No retail map gives a human one.
             let owner = Self::scenario_house_named(&self.houses, &map_ent.owner)?;
             if map_ent.category == EntityCategory::Structure
                 && self.session.game_mode_nonzero()
+                && !self.session.game_mode().is_network()
                 && self.session.current_house() == Some(owner)
             {
                 return None;
@@ -813,54 +915,49 @@ impl Simulation {
         Some(stable_id)
     }
 
-    /// Commit the `MISSION=` column a map placement authored, at the position
-    /// the scenario reader does it: immediately after the object is unlimboed
-    /// onto the map.
-    ///
-    /// Retail runs `Queue_Mission(<name>, 0)` and then its readiness check plus
-    /// `Commence` on the same line, and `Queue` refuses the `-1` sentinel — so
-    /// an absent or unrecognised name leaves the object on the mission it was
-    /// born with. Because the queue slot is empty at birth, `Commence`'s field
-    /// writes are exactly `Assign`'s, which is the verb used here; the residual
-    /// is that retail's Unit path can leave the promotion one tick late when
-    /// its readiness predicate says no, and this cannot.
-    ///
-    /// Dispatchable miners keep the Harvest their Unlimbo idle mode gave them —
-    /// the native creation-mission family is its own recorded UNCHECKED and the
-    /// harvest FSM needs a truthful `current` from birth.
+    /// The `MISSION=` column of a map placement, right after the reader's
+    /// successful Unlimbo. `UnitClass::Read_INI` queues it (`Queue_Mission(m,
+    /// 0)`, vt+0x1E8, `0x0074361B..0x00743623`) and commences only when
+    /// Ready_To_Commence (vt+0x200) answers yes (`0x0074362D..0x0074363B`);
+    /// `InfantryClass::Read_INI` (`0x0051FEA6..0x0051FEB0`) and
+    /// `AircraftClass::Read_INI` (`0x0041B3EE..0x0041B3F8`, through the
+    /// Aircraft Queue filter `0x0041BA90`) queue and commence without asking.
+    /// Harvesters take the same path, so an authored Sleep miner sleeps. An
+    /// unrecognised name (`-1`), or the mission Unlimbo already made current,
+    /// queues nothing, and Commence then promotes only what Unlimbo left
+    /// queued.
     ///
     /// A building's `[Structures]` line has no mission column. Its existing
     /// discovery/GrandOpening and UpdateAnimation owners alone set readiness;
     /// the reader must not ready a campaign turret hidden in the shroud.
     fn commit_map_placement_mission(
-        session: &ScenarioSession,
-        substrate: &mut ObjectSubstrate,
+        &mut self,
         stable_id: u64,
         authored: Option<crate::sim::mission::MissionType>,
+        rules: &RuleSet,
     ) {
-        // A harvester keeps the Harvest that Unlimbo's idle mode gave it
-        // (`UnitClass::Enter_Idle_Mode @ 0x00738970`, harvester arm
-        // `0x00738BD8`, owned by `techno_unlimbo_idle_mode`).
-        let harvester = substrate
+        let Some(category) = self
+            .substrate
             .entities
             .get(stable_id)
-            .is_some_and(crate::sim::game_entity::GameEntity::is_harvester);
-        let building = substrate
-            .entities
-            .get(stable_id)
-            .is_some_and(|entity| entity.category() == EntityCategory::Structure);
-        if harvester || building {
-            return;
-        }
-        let Some(mission) = authored else {
+            .map(GameEntity::category)
+        else {
             return;
         };
-        let now = session.binary_frame();
-        let _ = substrate.mission_assign_exact(
-            stable_id,
-            crate::sim::mission::MissionId::from_known(mission),
-            now,
+        if category == EntityCategory::Structure {
+            return;
+        }
+        let now = self.session.binary_frame();
+        let requested = authored.map_or(
+            crate::sim::mission::MissionId::NONE,
+            crate::sim::mission::MissionId::from_known,
         );
+        let readiness = crate::sim::mission::authority::LiveReadyInputProvider { rules };
+        let _ = self.mission_queue_exact(stable_id, requested, 0, now, &readiness);
+        if category == EntityCategory::Unit && !self.mission_ready_to_commence(stable_id, rules) {
+            return;
+        }
+        let _ = self.substrate.mission_commence_exact(stable_id, now);
     }
 
     /// `BuildingClass::Enter_Idle_Mode @ 0x0044D6A0` (vt+0x484), shared by
@@ -1511,13 +1608,6 @@ impl Simulation {
             // Infantry51E114 restores its class water sentinel after Foot.
             entity.mission_leaf.reset_infantry_water_state();
         }
-        Self::allocate_building_light(
-            &self.interner,
-            &self.substrate,
-            &mut self.lighting_sources,
-            stable_id,
-            rules,
-        );
         Self::initialize_cloak_after_unlimbo(
             &self.interner,
             &self.session,
@@ -1616,10 +1706,10 @@ impl Simulation {
         placed
     }
 
-    /// Foot4DF510 (all three Foot-class vtables' +490), Steam gamemd.
+    /// Foot4DF510 (all three Foot-class vtables' +490).
     /// Temporarily Limbo non-Building Technos on the target ground Cell,
     /// then call the concrete ordinary Unlimbo. Refusal restores old Locations;
-    /// success restores old objects nearby, with allowBridge=false (4DF732).
+    /// success restores old objects nearby, bridge cells allowed (4DF729).
     /// Building458A80 owns its separate foundation/overlay prelude.
     pub(crate) fn place_foot_with_cleared_cell(
         &mut self,
@@ -1731,7 +1821,7 @@ impl Simulation {
     }
 
     ///458A80 and4DF510 share their reverse ordinary Unlimbo/F8 owner.
-    /// Both native nearby callers reject bridge cells. Raw Location is read after
+    /// Both native nearby callers allow bridge cells. Raw Location is read after
     /// previous callbacks, not captured before Limbo or the new placement.
     fn restore_displaced_placement_technos(
         &mut self,
@@ -1762,19 +1852,18 @@ impl Simulation {
                             i32::from(crate::util::lepton::lepton_to_cell_packed(location.x)),
                             i32::from(crate::util::lepton::lepton_to_cell_packed(location.y)),
                         ),
-                        NearbyArgs {
-                            // Both original callers push0:458CF8/4DF732.
-                            allow_bridge_cells: false,
-                            ..NearbyArgs::plain(
-                                PassabilityArgs {
-                                    speed_type: object.speed_type,
-                                    required_zone_id: None,
-                                    movement_zone: MovementZone::Normal,
-                                    bridge_aware_zone: false,
-                                },
-                                NearbyFootprint::SINGLE,
-                            )
-                        },
+                        // Both callers push 1 as FNPC's argument 12
+                        // (`0x00458CEF`, `0x004DF729`), the bridge filter's
+                        // allow flag (`0x0056DE6C`).
+                        NearbyArgs::plain(
+                            PassabilityArgs {
+                                speed_type: object.speed_type,
+                                required_zone_id: None,
+                                movement_zone: MovementZone::Normal,
+                                bridge_aware_zone: false,
+                            },
+                            NearbyFootprint::SINGLE,
+                        ),
                     )
                     // Original FNPC's failed output is Cell::Empty, and this
                     // caller still performs its Map lookup and Unlimbo.
@@ -1999,8 +2088,8 @@ impl Simulation {
     }
 
     /// Store a new object, then place it through active
-    /// `ObjectClass::Reveal @ 0x005F4EC0`: coordinates commit, the mode-one
-    /// playfield gate and Mark(PUT) own the result, and eligible logic
+    /// `ObjectClass::Reveal @ 0x005F4EC0`: coordinates commit, Mark(PUT)
+    /// owns the result, and eligible logic
     /// registration happens last. A failed attempt keeps the constructed
     /// identity in limbo for its caller to retain or discard.
     #[cfg(any(test, feature = "test-support"))]
@@ -2132,13 +2221,6 @@ impl Simulation {
                 .with_unlimbo_facing(facing),
         );
         if matches!(outcome, RevealOutcome::Revealed { .. }) {
-            Self::allocate_building_light(
-                &self.interner,
-                &self.substrate,
-                &mut self.lighting_sources,
-                stable_id,
-                rules,
-            );
             if self
                 .substrate
                 .entities
@@ -2158,12 +2240,13 @@ impl Simulation {
                 if let Some(entity) = self.substrate.entities.get_mut(stable_id) {
                     entity.initialize_building_idle_body(self.session.binary_frame() as i32);
                 }
-                // BuildingUnlimbo440D25..440D6C discovers for Player only on
-                // revealed ground in campaign mode;440E5C..440E76 discovers
-                // for an AI owner. The shared discovery owner already ran
-                // both admitted routes. Do not add an eager human opening:
-                // GrandOpening4467C9 and UpdateAnimation451145..451218 own
-                // readiness, and a hidden turret must keep Guard queued.
+                // BuildingUnlimbo440D25..440D6C lights a campaign building or
+                // discovers it for Player, and 440E5C..440E76 discovers it for
+                // an AI owner: the Unlimbo above already ran both through the
+                // shared discovery owner. Do not add
+                // an eager human opening: GrandOpening4467C9 and
+                // UpdateAnimation451145..451218 own readiness, and a hidden
+                // turret must keep Guard queued.
             }
         }
         (stable_id, outcome)
@@ -2277,8 +2360,10 @@ impl Simulation {
             {
                 return PlacementEvidence::RejectedEarly;
             }
-            // Keep the Reveal playfield gate (see its residual) and Mark. The
-            // class decision does not make PlaceAnywhere bypass the gate.
+            // These admissions hold the building's only playfield refusal:
+            // CanPlaceAt asks Is_Clear_To_Build (`0x0047C620`) of each
+            // foundation cell unless the type is PlaceAnywhere. No later
+            // Unlimbo layer asks; Mark(PUT) owns the rest.
             return PlacementEvidence::EvaluateMark;
         }
         match self.foot_can_enter(
@@ -2368,11 +2453,43 @@ impl Simulation {
     /// type can stand at its origin turns to the type's `DeployFacing=` or,
     /// already facing it, becomes that building. False when it refuses.
     ///
-    /// Not carried over to the building: the unit's Group (`+0x214`,
-    /// `0x007397C6`; VERA's control groups live in the app), its AttachedTag
+    /// Not carried over to the building: the unit's AttachedTag
     /// (`+0x34`, `0x007399EE`), its looping sound handles (`+0x4DC..+0x4F4`,
     /// `0x00739971`), `DiscoveredBy(owner)` (vt+0x198, `0x00739848`) and the
     /// turret facing a `+0x16CA`/`+0x16C4` type starts at (`0x007397FB`).
+    /// Phobos `TechnoExt::SyncInvulnerability` (`Techno/Body.cpp:156`): a
+    /// deploy or undeploy conversion carries an active curtain to the new
+    /// object when the source type's `KeptOnDeploy` (else its global) allows
+    /// it. The copied state keeps the timer, kind and tint stage;
+    /// `IronTintTimer` restarts, as Phobos copies only those fields.
+    #[cfg(feature = "phobos")]
+    fn curtain_to_carry(
+        &self,
+        from: u64,
+        rules: &RuleSet,
+    ) -> Option<crate::sim::superweapon::invulnerability::InvulnerabilityState> {
+        use crate::sim::superweapon::invulnerability::InvulnKind;
+        let source = self.substrate.entities.get(from)?;
+        let frame = self.session.binary_frame() as i32;
+        let state = source
+            .invulnerability
+            .as_ref()
+            .filter(|state| state.is_active(frame))?;
+        let object = self.interner.object_type(source.type_ref(), rules)?;
+        let globals = rules.invulnerability_globals();
+        let (kept, fallback) = match state.kind() {
+            InvulnKind::IronCurtain => (
+                object.phobos_invulnerability.iron_curtain.kept_on_deploy,
+                globals.iron_curtain.kept_on_deploy,
+            ),
+            InvulnKind::ForceShield => (
+                object.phobos_invulnerability.force_shield.kept_on_deploy,
+                globals.force_shield.kept_on_deploy,
+            ),
+        };
+        kept.unwrap_or(fallback).then(|| state.synced())
+    }
+
     pub(crate) fn deploy_mcv(
         &mut self,
         stable_id: u64,
@@ -2423,7 +2540,7 @@ impl Simulation {
                 (
                     entity.selection.is_selected(),
                     entity.veterancy.clone(),
-                    entity.object_group(),
+                    entity.object_group_copy(),
                     entity.attack_target.target(),
                 ),
                 // Native rounds FacingClass::Current, including wrap at 0xff80.
@@ -2637,6 +2754,10 @@ impl Simulation {
         // slot initialization. Otherwise full-health animations consume IDs/RNG
         // here and ActuallyPlaced suppresses the real completion callback.
         converted_health.apply(&mut destination);
+        #[cfg(feature = "phobos")]
+        {
+            destination.invulnerability = self.curtain_to_carry(stable_id, rules);
+        }
         // RESIDUAL: native Selects the placed building (vt+0x14C,
         // `0x007399D4`) after its Unlimbo with the voice latch cleared
         // (`0x007399BD`) and before the MCV's tag moves over (`0x007399F8`),
@@ -2714,7 +2835,7 @@ impl Simulation {
         }
         // gamemd.exe UnitClass::Deploy7393C0 copies Techno+214 at7397CC.
         if let Some(building) = self.substrate.entities.get_mut(new_sid) {
-            building.assign_object_group(source_group);
+            building.assign_object_group_copy(source_group);
         }
         // 0x007397D2..0x007397DE: the unit's veterancy (`+0x150`); the rank
         // cache (`+0x13C`) stays the building's own.
@@ -2868,8 +2989,7 @@ impl Simulation {
     /// class setter `vt+0x480(archive, 1)` and `Queue_Mission(Move, 0)`
     /// (`0x0044A091..0x0044A0AE`), and the listed attackers target the unit
     /// (`0x0044A146..0x0044A167`). The building's UnInit comes last. Not
-    /// carried over: its Group (`+0x214`, `0x0044A04C`; VERA's control groups
-    /// live in the app), AttachedTag (`+0x34`, `0x0044A0B4`) and looping sound
+    /// carried over: its AttachedTag (`+0x34`, `0x0044A0B4`) and looping sound
     /// handles (`+0x4DC..+0x4F4`). A refused Unit Unlimbo refunds the cached
     /// building value to its current owner and retains the limbo constructor
     /// (`0x0044A16B..0x0044A176`).
@@ -2917,7 +3037,7 @@ impl Simulation {
                     health,
                     building.archive_target(),
                     building.veterancy.clone(),
-                    building.object_group(),
+                    building.object_group_copy(),
                 ))
             })
         else {
@@ -2944,10 +3064,18 @@ impl Simulation {
             );
             return;
         };
+        #[cfg(feature = "phobos")]
+        let unit = {
+            let mut unit = unit;
+            unit.invulnerability = self.curtain_to_carry(sid, rules);
+            unit
+        };
         let (new_sid, position) = self.store_with_constructor_managers(unit, rules, frame_effects);
         // Selling449E74/449E80 caches the building's refund before its Limbo
         // and the new Unit's Unlimbo. Those callbacks may change the owner.
         let failed_unlimbo_refund = production::techno_refund(self, rules, sid);
+        // Selling449F12..449F1E turns the light off before the attacker list.
+        self.lighting_sources.set_building_light_active(sid, false);
         let targeters: Vec<u64> = self
             .substrate
             .entities
@@ -3015,7 +3143,7 @@ impl Simulation {
                 unit.selection.select();
             }
             // gamemd.exe BuildingClass::Mission_Selling copies +214 at44A052.
-            unit.assign_object_group(source_group);
+            unit.assign_object_group_copy(source_group);
             // The VeterancyClass (`+0x150`); the rank cache (`+0x13C`) stays
             // the unit's own.
             unit.veterancy.inherit(&veterancy);

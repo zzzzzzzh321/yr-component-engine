@@ -27,12 +27,18 @@
 pub mod aim_coord;
 mod airburst;
 mod attack_target;
+#[cfg(feature = "phobos")]
+mod phobos_airburst;
 pub(crate) mod base_defense_response;
 pub mod burst;
 pub(crate) mod cell_spread;
 pub(crate) mod combat_aoe;
 pub(crate) mod combat_targeting;
 pub mod combat_weapon;
+#[cfg(feature = "phobos")]
+pub(crate) mod crit;
+#[cfg(all(test, feature = "phobos"))]
+mod crit_tests;
 pub(crate) mod damage;
 pub(crate) mod destruction_effects;
 pub(crate) mod detonation_anim;
@@ -51,6 +57,7 @@ mod object_health;
 pub(crate) mod parasite;
 mod projectile_delivery;
 pub mod radiation_beam;
+pub(crate) mod railgun;
 mod receiver_call;
 mod receiver_health;
 mod record_kill;
@@ -72,6 +79,8 @@ pub(crate) mod receiver_fixture;
 
 #[cfg(test)]
 mod aegis_launch_tests;
+#[cfg(all(test, feature = "phobos"))]
+mod airstrike_target_tests;
 #[cfg(all(test, feature = "ares"))]
 mod ares_armor_tests;
 #[cfg(test)]
@@ -93,10 +102,14 @@ mod electric_bolt_tests;
 #[cfg(test)]
 mod fireat_launch_tests;
 #[cfg(test)]
+mod fire_particles_tests;
+#[cfg(test)]
 mod garrison_oracle_tests;
 #[cfg(test)]
 mod homing_shipyard_tests;
-#[cfg(test)]
+// Phobos `ROF.RandomDelay` (`0x006FD0B5`) redraws the full-rearm jitter, so
+// this stock golden only holds without the capability.
+#[cfg(all(test, not(feature = "phobos")))]
 mod ifv_fireat_tests;
 /// Ordinary launch-height, resolved impact presentation and damage-effect
 /// wiring. Bridge Cell+58 launch and +48/+58 impact comparisons use the native
@@ -113,6 +126,8 @@ mod open_topped_fire_tests;
 mod prone_damage_tests;
 #[cfg(test)]
 mod radiation_beam_tests;
+#[cfg(test)]
+mod railgun_tests;
 #[cfg(test)]
 mod screen_shake_tests;
 #[cfg(test)]
@@ -168,9 +183,7 @@ use shrapnel::emit_projectile_shrapnel;
 use techno_death::{ConcreteDeathSmudgePlan, throw_debris_for_death};
 
 #[cfg(any(test, feature = "test-support"))]
-pub use attack_target::{
-    install_cell_attack_target_for_test, install_entity_attack_target_for_test,
-};
+pub use attack_target::{install_cell_attack_target_for_test, install_entity_attack_target_for_test};
 #[cfg(any(test, feature = "test-support"))]
 use destruction_effects::building_center_smudge_request;
 #[cfg(any(test, feature = "test-support"))]
@@ -195,7 +208,6 @@ use std::collections::BTreeSet;
 use self::combat_targeting::{AttackerSnapshot, GarrisonSnapshot};
 use self::combat_weapon::WeaponSlot;
 use crate::map::entities::EntityCategory;
-use crate::map::houses::HouseAllianceMap;
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
 use crate::rules::animation_sequence::SequenceSet;
 use crate::rules::object_type::ObjectType;
@@ -207,6 +219,7 @@ use crate::sim::bridge_state::BridgeDamageEvent;
 #[cfg(any(test, feature = "test-support"))]
 use crate::sim::bridge_state::BridgeRuntimeState;
 use crate::sim::entity_store::EntityStore;
+use crate::sim::house_diplomacy::HouseAlliances;
 use crate::sim::house_state::HouseState;
 use crate::sim::house_strategy::update_anger_nodes;
 use crate::sim::infantry;
@@ -370,4 +383,56 @@ pub(crate) struct CombatEmit {
 pub(crate) struct LogicProjectileCommit {
     pub(crate) effects: DeathEffects,
     pub(crate) under_attack_events: Vec<UnderAttackEvent>,
+}
+
+/// `TechnoExt::IsHealthInThreshold` (`Ext/Techno/Body.cpp:752..759`): the
+/// interval `(above, below]`, `above` inclusive at zero health; a
+/// zero-health, zero-strength object matches unconditionally. A positive
+/// health over a zero strength is the native `inf` and misses every finite
+/// bound.
+#[cfg(feature = "phobos")]
+pub(crate) fn health_in_threshold(health: i32, strength: i32, above: f64, below: f64) -> bool {
+    if health == 0 && strength == 0 {
+        return true;
+    }
+    let ratio = f64::from(health) / f64::from(strength);
+    (if ratio > 0.0 {
+        ratio > above
+    } else {
+        ratio >= above
+    }) && ratio <= below
+}
+
+/// `EnumFunctions::CanTargetHouse` (`EnumFunctions.cpp:5..16`): `All` always
+/// matches, the owner takes its bucket, a neutral target its Neutral flag, an
+/// ally's, otherwise the enemy's. Presentation's DigitalDisplay visibility
+/// asks it with the viewer as the target.
+#[cfg(feature = "phobos")]
+pub fn can_target_house(
+    flags: crate::rules::phobos_shields::AffectedHouse,
+    source: InternedId,
+    target: InternedId,
+    houses: &crate::sim::houses::Houses,
+    alliances: &HouseAlliances,
+    interner: &StringInterner,
+) -> bool {
+    use crate::rules::phobos_shields::AffectedHouse;
+    if flags == AffectedHouse::ALL {
+        return true;
+    }
+    if source == target {
+        return flags.contains(AffectedHouse::OWNER);
+    }
+    if houses
+        .get(&target)
+        .is_some_and(|house| house.multiplay_passive())
+        && flags.contains(AffectedHouse::NEUTRAL)
+    {
+        return true;
+    }
+    if alliances.is_allied(interner, source, target) {
+        flags.contains(AffectedHouse::ALLIES)
+    } else {
+        flags.contains(AffectedHouse::ENEMIES)
+    }
 }

@@ -103,9 +103,7 @@ mod layered_enum_history {
     use crate::rules::superweapon_type::SuperWeaponKind;
     use crate::sim::command::Command;
     use crate::sim::scenario_session::ScenarioGameMode;
-    use crate::sim::superweapon::{
-        construct_house_supers, pre_dependent, superweapon_views_for_owner,
-    };
+    use crate::sim::superweapon::{construct_house_supers, pre_dependent, superweapon_views_for_owner};
     use crate::sim::world::{FrameEffects, Simulation};
 
     const OWNER: &str = "Americans";
@@ -439,6 +437,7 @@ fn initial_unknown_type_keeps_provider_trigger_and_saved_click_lifecycle() {
     sim.initialize_trigger_definitions(
         &map,
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
+        None,
         None,
         None,
         &rules,

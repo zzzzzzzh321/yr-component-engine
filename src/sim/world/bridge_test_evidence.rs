@@ -25,8 +25,8 @@ pub(super) fn navigation_snapshot(
             let records: Vec<_> =
                 (0..graph.record_slot_count())
                     .map(|index| {
-                        graph.record(index as u16).map_or(Value::Null, |record| {
-                let edges: Vec<_> = graph.edges(index as u16).iter()
+                        graph.record(index as crate::sim::pathfinding::zone_map::ZoneId).map_or(Value::Null, |record| {
+                let edges: Vec<_> = graph.edges(index as crate::sim::pathfinding::zone_map::ZoneId).iter()
                     .map(|edge| [u32::from(edge.neighbor), u32::from(edge.flag)]).collect();
                 json!({"parent":record.parent,"zone_type":record.zone_type,"edges":edges})
             })
@@ -67,7 +67,7 @@ pub(super) fn navigation_snapshot(
             "bridge_flags": c.bridge_facts.raw_flags,
             "overlay": sim.overlay_grid.as_ref().unwrap().cell(x, y).overlay_id,
             "cached_class": base.movement_classes()[index], "cached_height": base.levels()[index],
-            "base_id": cluster, "raw_row7": base.raw_zone_ids_by_row()[7].get(usize::from(cluster)),
+            "base_id": cluster, "raw_row7": base.raw_zone_ids_by_row()[7].get(cluster as usize),
         }))
     }).collect();
     json!({
@@ -184,6 +184,7 @@ pub fn visit_starting_mtnk_concrete_attack(
     )
     .unwrap();
     scene.runtime.simulation.batch_path_searches();
+    scene.runtime.simulation.batch_target_scans();
     // Periodic frame hashes feed replay and sync checks, which nothing here
     // reads; an interval no tick reaches skips them (11-12% of each frame in
     // this unoptimized test build).

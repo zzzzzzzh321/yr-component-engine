@@ -276,7 +276,7 @@ impl Simulation {
             };
             let source_is_ally = source_house.is_some_and(|source| {
                 crate::sim::combat::combat_weapon::is_ally_by_object(
-                    Some(self.house_alliances.as_map()),
+                    Some(&self.house_alliances),
                     &self.interner,
                     source,
                     victim.owner(),

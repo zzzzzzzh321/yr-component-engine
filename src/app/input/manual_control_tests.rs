@@ -103,7 +103,15 @@ fn deployed_c4_uses_early_attack_while_spy_keeps_the_later_deployment_gate() {
         CursorFeedbackKind::Demolish
     );
     assert_eq!(
-        infantry_c4_orders(&sim, &rules, &[seal], &target),
+        infantry_c4_orders(
+            &sim,
+            &rules,
+            &[seal],
+            &target,
+            OrderModifier::Normal,
+            false,
+            None
+        ),
         vec![Command::PlantC4 {
             attacker_id: seal,
             target_building_id: plant
@@ -117,7 +125,18 @@ fn deployed_c4_uses_early_attack_while_spy_keeps_the_later_deployment_gate() {
             ..Default::default()
         },
     );
-    assert!(infantry_c4_orders(&sim, &rules, &[seal], &target).is_empty());
+    assert!(
+        infantry_c4_orders(
+            &sim,
+            &rules,
+            &[seal],
+            &target,
+            OrderModifier::Normal,
+            false,
+            None
+        )
+        .is_empty()
+    );
     assert_ne!(
         cursor(&sim, &rules, seal, &target),
         CursorFeedbackKind::Demolish
@@ -139,7 +158,21 @@ fn no_manual_fire_reaches_c4_and_spy_consumers_without_changing_simulation_admis
         .unwrap();
     let target = hover(target, HoverTargetKind::EnemyStructure);
     assert_eq!(
-        infantry_c4_action(&sim, &rules, seal, &target, false),
+        infantry_c4_action(
+            &sim,
+            &rules,
+            seal,
+            &target,
+            infantry_arm_attacks(
+                &sim,
+                &rules,
+                seal,
+                target.stable_id,
+                OrderModifier::Normal,
+                false,
+                None
+            ),
+        ),
         Some(InfantryC4Action::Sabotage)
     );
     assert!(infantry_infiltration_action(
@@ -163,7 +196,24 @@ fn no_manual_fire_reaches_c4_and_spy_consumers_without_changing_simulation_admis
     rules.bind_input_policy_for_test("SEAL", policy);
     rules.bind_input_policy_for_test("SPY", policy);
     let before = (sim.state_hash(), sim.rng_state());
-    assert_eq!(infantry_c4_action(&sim, &rules, seal, &target, false), None);
+    assert_eq!(
+        infantry_c4_action(
+            &sim,
+            &rules,
+            seal,
+            &target,
+            infantry_arm_attacks(
+                &sim,
+                &rules,
+                seal,
+                target.stable_id,
+                OrderModifier::Normal,
+                false,
+                None
+            ),
+        ),
+        None
+    );
     assert!(!infantry_infiltration_action(
         &sim,
         &rules,
@@ -172,7 +222,15 @@ fn no_manual_fire_reaches_c4_and_spy_consumers_without_changing_simulation_admis
     ));
     let mut selected = vec![spy];
     assert_eq!(
-        infiltrator_capture_orders(&sim, &rules, &mut selected, &target),
+        infiltrator_capture_orders(
+            &sim,
+            &rules,
+            None,
+            &mut selected,
+            &target,
+            OrderModifier::Normal,
+            false
+        ),
         None
     );
     assert_eq!(selected, [spy]);

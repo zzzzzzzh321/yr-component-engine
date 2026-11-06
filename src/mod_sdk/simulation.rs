@@ -109,11 +109,8 @@ fn damage_context(
     let source = event.source_house.or_else(|| attacker.map(|a| a.owner()));
     let source_is_owner = source.is_some_and(|s| s == target.owner());
     let source_is_ally = source.is_some_and(|s| {
-        crate::map::houses::is_allied_with(
-            sim.house_alliances(),
-            sim.interner.resolve(s),
-            sim.interner.resolve(target.owner()),
-        )
+        sim.house_alliances()
+            .is_allied(&sim.interner, s, target.owner())
     });
     let neutral = sim
         .houses
@@ -133,6 +130,7 @@ fn damage_context(
         .collect();
     let armor_multiplier = f64::from(f32::from_bits(divisors.house_type_armor.bits()))
         * f64::from_bits(divisors.unit_armor.bits())
+        * divisors.ae_armor
         * divisors
             .rank_armor
             .map_or(1.0, |v| f64::from_bits(v.bits()));
@@ -207,9 +205,17 @@ pub(crate) fn preview_receive_damage(
     if entity.mod_component.is_empty() {
         return Ok(None);
     }
-    let object = sim.interner.object_type(entity.type_ref(), rules);
-    let divisors =
-        crate::sim::combat::receiver_divisors(entity, object, rules, &sim.interner, &sim.houses);
+    let object =
+        sim.interner
+            .object_type_in_category(entity.type_ref(), entity.category().into(), rules);
+    let divisors = crate::sim::combat::receiver_divisors(
+        entity,
+        object,
+        rules,
+        &sim.interner,
+        &sim.houses,
+        entity.phobos_armor_multiplier(),
+    );
     let Some(context) = damage_context(sim, rules, event, input, &divisors) else {
         return Ok(None);
     };

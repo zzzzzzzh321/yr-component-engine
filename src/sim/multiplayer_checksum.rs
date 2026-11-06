@@ -4,8 +4,11 @@
 //! network checksum is a narrow 32-bit diagnostic fold over class arrays,
 //! display-layer order, LogicClass order, and one Scenario RNG sample. Computing
 //! it also consumes one additional Scenario RNG sample for the native diagnostic
-//! snapshot path. An admitted external gameplay module adds a separate,
-//! canonical state domain after that native fold; it consumes no RNG.
+//! snapshot path. The frame checksum clients exchange appends VERA-only money,
+//! health and trigger terms to it
+//! ([`Simulation::compute_multiplayer_frame_checksum`]). An admitted external
+//! gameplay module adds a separate canonical state domain after that native
+//! fold; it consumes no RNG.
 
 use std::collections::BTreeMap;
 
@@ -238,6 +241,43 @@ impl Simulation {
         Ok(MultiplayerChecksumFrame {
             value: checksum.value(),
             diagnostic_rng_sample,
+        })
+    }
+
+    /// The checksum a multiplayer frame stores and its FRAMEINFO carries:
+    /// the retail fold ([`Self::compute_retail_multiplayer_checksum`]) and
+    /// its two Scenario samples, then VERA's own coverage terms, folded
+    /// the same way after the retail ones.
+    ///
+    /// VERA-only: `0x0064DAB0` folds no money, health or trigger state, so
+    /// retail sees such a divergence only once it moves an object or shifts
+    /// the Scenario RNG. Native folds them only in the per-class CRC bodies
+    /// (AbstractClass vt+0x34): `HouseClass::ComputeCRC @ 0x00502D60`
+    /// (Balance), `ObjectClass::ComputeCRC @ 0x005F6250` (Health `+0x6C`)
+    /// and `TriggerClass::ComputeCRC @ 0x00726790`, whose aggregate
+    /// `0x0067C6E0` has no static reference. Matches are VERA-to-VERA, so every
+    /// client folds these alike: each House's balance in registration
+    /// order, each Techno's health in stable-ID order (one pass, beside the
+    /// retail fold's three), then
+    /// [`TriggerRuntime::fold_match_checksum`](crate::sim::trigger_runtime::TriggerRuntime::fold_match_checksum).
+    /// A world without Houses, Technos, triggers or set variables folds
+    /// nothing more.
+    pub(crate) fn compute_multiplayer_frame_checksum(
+        &mut self,
+    ) -> Result<MultiplayerChecksumFrame, MultiplayerChecksumError> {
+        let frame = self.compute_retail_multiplayer_checksum()?;
+        let mut checksum = RetailChecksumAccumulator { value: frame.value };
+        for house in self.houses.in_order() {
+            checksum.fold_value(house.economy().credits() as u32);
+        }
+        for entity in self.substrate.entities.values_sorted() {
+            checksum.fold_value(entity.health.current() as u32);
+        }
+        self.trigger_runtime
+            .fold_match_checksum(self.session.binary_frame() as i32, &mut checksum);
+        Ok(MultiplayerChecksumFrame {
+            value: checksum.value(),
+            ..frame
         })
     }
 
@@ -574,12 +614,15 @@ mod tests {
     /// admission/execution (which the SDK runtime tests cover with real Wasm).
     fn sdk_scene(config: &[u8], identity: &str, reversed: bool) -> Simulation {
         let mut sim = Simulation::with_seed(0x22_11);
-        sim.external_mod = Some(serde_json::from_value(serde_json::json!({
-            "bytes":[],"digest":identity,
-            "manifest":{"api_version":1,"id":"test.authority","version":"1",
-                "state_version":1,"config_version":1,"hooks":["tick"]},
-            "config":config
-        })).unwrap());
+        sim.external_mod = Some(
+            serde_json::from_value(serde_json::json!({
+                "bytes":[],"digest":identity,
+                "manifest":{"api_version":1,"id":"test.authority","version":"1",
+                    "state_version":1,"config_version":1,"hooks":["tick"]},
+                "config":config
+            }))
+            .unwrap(),
+        );
         for id in if reversed { [20, 10] } else { [10, 20] } {
             let mut entity = GameEntity::test_default(id, "UNIT", "Owner", 3, 4);
             entity.mod_component = vec![id as u8];
@@ -592,7 +635,12 @@ mod tests {
     fn sdk_component_bytes_enter_real_crc_without_extra_scenario_draws() {
         let mut a = sdk_scene(&[1], &"1".repeat(64), false);
         let mut b = sdk_scene(&[1], &"1".repeat(64), false);
-        b.substrate.entities.get_mut(10).unwrap().mod_component.push(9);
+        b.substrate
+            .entities
+            .get_mut(10)
+            .unwrap()
+            .mod_component
+            .push(9);
         assert_ne!(a.state_hash(), b.state_hash());
         let mut reference = a.scenario_rng.clone();
         reference.next_u32();
@@ -600,7 +648,10 @@ mod tests {
         let expected_next = reference.next_u32();
         let ca = a.compute_retail_multiplayer_checksum().unwrap();
         let cb = b.compute_retail_multiplayer_checksum().unwrap();
-        assert_ne!(ca.value, cb.value, "opaque state must reach actual FRAMEINFO CRC");
+        assert_ne!(
+            ca.value, cb.value,
+            "opaque state must reach actual FRAMEINFO CRC"
+        );
         assert_eq!(ca.diagnostic_rng_sample, diagnostic);
         assert_eq!(cb.diagnostic_rng_sample, diagnostic);
         assert_eq!(a.scenario_rng.next_u32(), expected_next);
@@ -617,9 +668,24 @@ mod tests {
         assert_ne!(a.state_hash(), configured.state_hash());
         assert_ne!(a.state_hash(), replaced.state_hash());
         let original = a.compute_retail_multiplayer_checksum().unwrap();
-        assert_eq!(original, reordered.compute_retail_multiplayer_checksum().unwrap());
-        assert_ne!(original.value, configured.compute_retail_multiplayer_checksum().unwrap().value);
-        assert_ne!(original.value, replaced.compute_retail_multiplayer_checksum().unwrap().value);
+        assert_eq!(
+            original,
+            reordered.compute_retail_multiplayer_checksum().unwrap()
+        );
+        assert_ne!(
+            original.value,
+            configured
+                .compute_retail_multiplayer_checksum()
+                .unwrap()
+                .value
+        );
+        assert_ne!(
+            original.value,
+            replaced
+                .compute_retail_multiplayer_checksum()
+                .unwrap()
+                .value
+        );
     }
 
     #[test]
@@ -627,7 +693,12 @@ mod tests {
         let mut sim = sdk_scene(&[1], &"1".repeat(64), false);
         sim.external_mod = None;
         let before = sim.state_hash();
-        sim.substrate.entities.get_mut(10).unwrap().mod_component.push(99);
+        sim.substrate
+            .entities
+            .get_mut(10)
+            .unwrap()
+            .mod_component
+            .push(99);
         assert_eq!(before, sim.state_hash());
         let mut expected = sim.fold_checksum_objects().unwrap();
         let mut reference = sim.scenario_rng.clone();
@@ -815,6 +886,84 @@ mod tests {
             Simulation::with_seed(0x6476).rng_state().scenario
         );
         assert_eq!(multi.rng_state().scenario, expected_rng.logical_state());
+    }
+
+    /// The retail fold misses a client whose wallet, unit health or trigger
+    /// variables diverge; the checksum a LAN frame stores catches each.
+    #[test]
+    fn lan_frame_checksum_covers_money_health_and_trigger_state() {
+        use crate::sim::house_state::HouseState;
+        use crate::sim::world::{FrameEffects, TickLane};
+        fn world(diverge: fn(&mut Simulation)) -> Simulation {
+            let mut sim = Simulation::with_seed(0x30c);
+            let owner = sim.intern("Americans");
+            sim.houses
+                .register(HouseState::new(owner, 0, None, true, 1000, 10));
+            sim.session
+                .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::Lan);
+            sim.session.install_network_timing(10);
+            let id = sim.substrate.allocate_stable_id();
+            let tank = GameEntity::new_at_frame_zero_for_test(
+                id,
+                3,
+                4,
+                0,
+                0,
+                owner,
+                crate::sim::combat::Health::new(300),
+                sim.intern("MTNK"),
+                EntityCategory::Unit,
+                0,
+                5,
+                true,
+            );
+            sim.substrate.entities.insert(tank);
+            diverge(&mut sim);
+            sim
+        }
+        let stored = |sim: &mut Simulation| {
+            let output = sim
+                .advance_app_frame(
+                    &[],
+                    crate::rules::ruleset::RuleSet::empty_for_test(),
+                    None,
+                    67,
+                    TickLane::Ordinary,
+                    FrameEffects::default(),
+                )
+                .expect("the frame completes");
+            output.multiplayer_checksum.unwrap().checksum.unwrap().value
+        };
+        let retail = |sim: &mut Simulation| sim.compute_retail_multiplayer_checksum().unwrap();
+        let divergences: [fn(&mut Simulation); 3] = [
+            |sim| {
+                let owner = sim.intern("Americans");
+                let house = sim.houses.get_mut(&owner).unwrap();
+                house.economy_mut_for_test().add_credits(1);
+            },
+            |sim| {
+                let tank = sim.substrate.entities.values_sorted().next().unwrap();
+                let id = tank.stable_id();
+                let tank = sim.substrate.entities.get_mut(id).unwrap();
+                tank.health.set_for_test(299);
+            },
+            |sim| {
+                Simulation::set_trigger_variable(
+                    &sim.session,
+                    &mut sim.scenario_rng,
+                    &mut sim.trigger_runtime,
+                    true,
+                    3,
+                    true,
+                );
+                assert!(sim.global_variables()[3]);
+            },
+        ];
+        let baseline = stored(&mut world(|_| {}));
+        for diverge in divergences {
+            assert_eq!(retail(&mut world(diverge)), retail(&mut world(|_| {})));
+            assert_ne!(stored(&mut world(diverge)), baseline);
+        }
     }
 
     #[test]

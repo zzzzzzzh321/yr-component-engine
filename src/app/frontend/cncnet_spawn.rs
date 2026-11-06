@@ -7,29 +7,142 @@
 //! `GameLobbyBase.WriteSpawnIni` and `CampaignSelector.LaunchMission`:
 //! https://github.com/CnCNet/xna-cncnet-client/tree/develop/DXMainClient/DXGUI
 //!
-//! This boundary admits one local human, Battle and stock YR campaigns. Ares
-//! builds or an explicitly admitted component also carry custom Country
-//! identities into Battle startup.
-//! External campaigns pass an explicit Scenario independently of record0.
-//! It does not load native saves, run network sessions or load extension DLLs.
+//! This boundary admits one local human, stock YR modes and campaigns.
+//! Ares builds or an admitted component carry custom Country identities.
+//! External campaigns pass Scenario independently of record0. Multiplayer
+//! files normalize into a canonical source-ordered session and relay/direct
+//! transport. Native saves and extension DLLs are not loaded here.
 
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::assets::startup_resources::SpawnIdentityPolicy;
 use crate::rules::ini_parser::{IniFile, IniSection};
 use crate::skirmish_launch::{
     AiDifficulty, LaunchCountry, LaunchHumanRole, LaunchStartPosition, LaunchTeam,
-    PreFillHouseRoster, SkirmishAiSlot, SkirmishHumanSlot, SkirmishLaunchMode,
-    SkirmishLaunchOptions, SkirmishLaunchSession, SkirmishLocalSlot,
+    NETWORK_PLAYER_SLOT_COUNT, PreFillHouseRoster, SKIRMISH_PLAYER_SLOT_COUNT, SkirmishAiSlot,
+    SkirmishHumanSlot, SkirmishLaunchMode, SkirmishLaunchOptions, SkirmishLaunchSession,
+    SkirmishLocalSlot,
 };
+use crate::skirmish_modes::ModeStartEffect;
 
 #[derive(Debug)]
 pub(crate) struct SpawnRequest {
     pub(crate) game: SpawnGame,
     pub(crate) game_speed: i32,
     pub(crate) seed: Option<u32>,
+    /// *(VERA)* Optional `[Settings] Expected*` values a launcher read from
+    /// `vera20k --probe`; the launch is rejected at start when they differ.
+    pub(crate) expected: SpawnExpectations,
+}
+
+/// The stock Battle row, `GameMode`'s default; `--probe` digests the rules
+/// through its mode file.
+pub(crate) fn spawn_battle_mode() -> SkirmishLaunchMode {
+    SkirmishLaunchMode::stock(crate::skirmish_launch::BATTLE_MODE_ID).expect("stock Battle row")
+}
+
+/// The stock rows a spawn may select. A Cooperative launch is one mission: it
+/// holds no campaign progress record for its Start (`0x005C1D80`) to bind, so
+/// `+0xA0` (`0x005C3710`) records nothing and no next mission follows.
+pub(crate) fn spawn_modes() -> impl Iterator<Item = SkirmishLaunchMode> {
+    (1..=9).filter_map(SkirmishLaunchMode::stock)
+}
+
+/// `[Settings] GameMode`. The launcher owns which maps a mode may use: the file
+/// names one fixed map, so `IsValidMap` (`0x005D63E0`) has no list to filter.
+fn spawn_mode(settings: &IniSection) -> Result<SkirmishLaunchMode> {
+    let id = integer(settings, "GameMode", crate::skirmish_launch::BATTLE_MODE_ID)?;
+    spawn_modes()
+        .find(|mode| mode.id == id)
+        .with_context(|| format!("GameMode={id} is not a stock YR mode"))
+}
+
+/// The team choices network setup offers a mode (`view.rs`' Team column and
+/// `team_choices`): none without AlliesAllowed, no "None" with MustAlly.
+fn validate_mode_teams(mode: &SkirmishLaunchMode, teams: &[LaunchTeam]) -> Result<()> {
+    if !mode.allies_allowed {
+        ensure!(
+            teams.iter().all(|team| *team == LaunchTeam::None),
+            "GameMode={} does not allow teams",
+            mode.id
+        );
+    }
+    if mode.must_ally {
+        ensure!(
+            !teams.contains(&LaunchTeam::None),
+            "GameMode={} requires every house on a team",
+            mode.id
+        );
+    }
+    Ok(())
+}
+
+/// `[Settings] ExpectedVersion`, `ExpectedRulesDigest`, `ExpectedMapDigest`
+/// (docs/spawn.md). Absent values are not checked.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnExpectations {
+    pub(crate) version: Option<String>,
+    /// Lowercase SHA-256 hex of the multiplayer rules agreement.
+    pub(crate) rules_digest: Option<String>,
+    /// Lowercase SHA-256 hex of the client map's physical bytes.
+    pub(crate) map_digest: Option<String>,
+}
+
+impl SpawnExpectations {
+    fn parse(settings: &IniSection) -> Result<Self> {
+        let digest = |key: &str| -> Result<Option<String>> {
+            if !settings.is_present(key) {
+                return Ok(None);
+            }
+            let value = text(settings, key)?.to_ascii_lowercase();
+            ensure!(
+                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "[Settings] {key} must be 64 hexadecimal digits"
+            );
+            Ok(Some(value))
+        };
+        Ok(Self {
+            version: settings
+                .is_present("ExpectedVersion")
+                .then(|| text(settings, "ExpectedVersion"))
+                .transpose()?,
+            rules_digest: digest("ExpectedRulesDigest")?,
+            map_digest: digest("ExpectedMapDigest")?,
+        })
+    }
+
+    /// The first expectation this build, its rules or the map contradicts.
+    pub(crate) fn mismatch(
+        &self,
+        version: &str,
+        rules_digest: impl FnOnce() -> Result<String>,
+        map_digest: impl FnOnce() -> Result<String>,
+    ) -> Result<()> {
+        if let Some(expected) = &self.version {
+            ensure!(
+                expected == version,
+                "ExpectedVersion {expected:?} does not match this build's version {version:?}"
+            );
+        }
+        if let Some(expected) = &self.rules_digest {
+            let actual = rules_digest()?;
+            ensure!(
+                *expected == actual,
+                "ExpectedRulesDigest {expected} does not match the local rules digest {actual}"
+            );
+        }
+        if let Some(expected) = &self.map_digest {
+            let actual = map_digest()?;
+            ensure!(
+                *expected == actual,
+                "ExpectedMapDigest {expected} does not match the client map's SHA-256 {actual}"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// A fully parsed client request whose identity ranges are not yet approved.
@@ -43,6 +156,77 @@ pub(crate) struct PendingSpawnRequest {
 pub(crate) enum SpawnGame {
     Skirmish(Box<SkirmishLaunchSession>),
     Campaign(CampaignSpawn),
+    Network(Box<NetworkSpawn>),
+}
+
+/// A multiplayer Battle launch. `session.humans` is in canonical SourceIndex
+/// order and every row index is shared, so each participant derives the same
+/// session apart from `local_player_index`.
+#[derive(Debug)]
+pub(crate) struct NetworkSpawn {
+    pub(crate) session: SkirmishLaunchSession,
+    pub(crate) transport: SpawnTransport,
+}
+
+#[derive(Debug)]
+pub(crate) enum SpawnTransport {
+    Relay(RelaySpawn),
+    /// Desktop direct UDP between the listed endpoints (VERA LAN protocol).
+    Direct(DirectSpawn),
+}
+
+/// The `game_started` identity and grant a launcher service handed over.
+pub(crate) struct RelaySpawn {
+    pub(crate) address: SocketAddrV4,
+    pub(crate) match_id: String,
+    pub(crate) player_id: String,
+    pub(crate) grant: crate::app::shell_wol::DecodedRelayGrant,
+    /// HTTPS origin (loopback HTTP allowed) of the match API.
+    pub(crate) service_url: String,
+    /// `[Relay] GatewayUrl`: the browser build's WebSocket gateway to `address`
+    /// (WSS origin, loopback WS allowed); without it, the compiled one. Desktop
+    /// sends UDP to `address` and does not use it.
+    pub(crate) gateway_url: Option<String>,
+    /// Bearer for `service_url`.
+    pub(crate) token: String,
+    /// The launch speed the ordering certificate's fixed clock names.
+    pub(crate) game_speed: i32,
+    /// `[Relay] AdmissionTimeout`: each admission barrier's client deadline.
+    pub(crate) admission_timeout: crate::util::time::Duration,
+    /// `[Relay] ResumePings`/`ResumeCursor`: this process replaces one that
+    /// left a match already under way.
+    pub(crate) resume: Option<RelayResume>,
+}
+
+/// What a returning player's new process cannot measure or read again: the
+/// agreed timing every client started with, and where its event history ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelayResume {
+    pub(crate) pings: Vec<i32>,
+    pub(crate) cursor: u64,
+}
+
+// The grant and bearer are credentials; never let a launch log print them.
+impl std::fmt::Debug for RelaySpawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelaySpawn")
+            .field("address", &self.address)
+            .field("match_id", &self.match_id)
+            .field("player_id", &self.player_id)
+            .field("service_url", &self.service_url)
+            .field("gateway_url", &self.gateway_url)
+            .field("game_speed", &self.game_speed)
+            .field("admission_timeout", &self.admission_timeout)
+            .field("resume", &self.resume)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DirectSpawn {
+    pub(crate) local_port: u16,
+    /// Indexed by SourceIndex; `None` at the local source.
+    pub(crate) peers: Vec<Option<SocketAddrV4>>,
 }
 
 #[derive(Debug)]
@@ -111,31 +295,18 @@ impl PendingSpawnRequest {
             .with_context(|| format!("cannot read CnCNet launch file {}", path.display()))?;
         let mut request = Self::parse(&text)
             .with_context(|| format!("invalid CnCNet launch file {}", path.display()))?;
-        let absolute = std::path::absolute(path)?;
+        // The browser's in-memory paths are rooted already, and
+        // `std::path::absolute` is unsupported on wasm32-unknown-unknown
+        // (where `is_absolute` also requires a Windows-style prefix).
+        let absolute = if path.is_absolute() || cfg!(target_os = "unknown") && path.has_root() {
+            path.to_owned()
+        } else {
+            std::path::absolute(path)?
+        };
         let directory = absolute.parent().context("launch file has no directory")?;
         match &mut request.request.game {
-            SpawnGame::Skirmish(session) => {
-                // The client writes the final map beside spawn.ini, not in the
-                // separate retail asset root. Require that exact file: falling
-                // back to an old retail spawnmap.ini could start the wrong game.
-                let scenario = directory.join(
-                    session
-                        .selected_map_file
-                        .as_deref()
-                        .expect("parsed scenario"),
-                );
-                ensure!(
-                    scenario.is_file(),
-                    "client map not found: {}",
-                    scenario.display()
-                );
-                session.selected_map_file = Some(
-                    scenario
-                        .to_str()
-                        .context("client map path is not UTF-8")?
-                        .to_owned(),
-                );
-            }
+            SpawnGame::Skirmish(session) => resolve_client_map(directory, session)?,
+            SpawnGame::Network(network) => resolve_client_map(directory, &mut network.session)?,
             SpawnGame::Campaign(campaign) => {
                 // Keep the logical mission identity for MISSIONMD/MAPSELMD.
                 // Campaign startup resolves loose files from this directory;
@@ -163,44 +334,47 @@ impl PendingSpawnRequest {
             extended_countries: crate::rules::ARES_ENABLED,
             campaign_side_byte: crate::rules::ARES_ENABLED,
         });
-        match &self.request.game {
-            SpawnGame::Skirmish(session) => {
-                // PopulateWithCountryNames4E3A91 caps Country+B8 at9;
-                // Ares4E3A6A ->1001E2C0/1001E39B keeps the actual ordinal.
-                // Final allocation is checked by the shared scenario owner.
-                let maximum = if policy.extended_countries {
-                    u16::MAX
-                } else {
-                    9
-                };
-                for human in &session.humans {
-                    ensure!(
-                        human.slot.country.raw_index() <= maximum,
-                        "[Settings] Side for human Multi{} must be 0..{maximum}",
-                        usize::from(human.raw_slot_index.unwrap_or(0)) + 1
-                    );
-                }
-                for opponent in &session.opponents {
-                    ensure!(
-                        opponent.country.raw_index() <= maximum,
-                        "[HouseCountries] Multi{} must be 0..{maximum}",
-                        usize::from(opponent.raw_slot_index) + 1
-                    );
-                }
-            }
-            SpawnGame::Campaign(campaign) => {
-                // This byte is client metadata, not a Country/Side or campaign
-                // record index. StartScenario683AB0 still receives record0.
-                let maximum = if policy.campaign_side_byte {
-                    u8::MAX
-                } else {
-                    1
-                };
+        let session = match &self.request.game {
+            SpawnGame::Skirmish(session) => Some(session.as_ref()),
+            SpawnGame::Network(network) => Some(&network.session),
+            SpawnGame::Campaign(_) => None,
+        };
+        if let Some(session) = session {
+            // PopulateWithCountryNames4E3A91 caps Country+B8 at9;
+            // Ares4E3A6A ->1001E2C0/1001E39B keeps the actual ordinal.
+            // Final allocation is checked by the shared scenario owner.
+            let maximum = if policy.extended_countries {
+                u16::MAX
+            } else {
+                9
+            };
+            for human in &session.humans {
                 ensure!(
-                    campaign.side <= maximum,
-                    "[Settings] Side must be 0..{maximum}"
+                    human.slot.country.raw_index() <= maximum,
+                    "[Settings] Side for human Multi{} must be 0..{maximum}",
+                    usize::from(human.raw_slot_index.unwrap_or(0)) + 1
                 );
             }
+            for opponent in &session.opponents {
+                ensure!(
+                    opponent.country.raw_index() <= maximum,
+                    "[HouseCountries] Multi{} must be 0..{maximum}",
+                    usize::from(opponent.raw_slot_index) + 1
+                );
+            }
+        }
+        if let SpawnGame::Campaign(campaign) = &self.request.game {
+            // This byte is client metadata, not a Country/Side or campaign
+            // record index. StartScenario683AB0 still receives record0.
+            let maximum = if policy.campaign_side_byte {
+                u8::MAX
+            } else {
+                1
+            };
+            ensure!(
+                campaign.side <= maximum,
+                "[Settings] Side must be 0..{maximum}"
+            );
         }
         Ok(self.request)
     }
@@ -218,10 +392,16 @@ impl PendingSpawnRequest {
             !boolean(settings, "ForceMultiplayer", false)?,
             "multiplayer launches are unsupported"
         );
-        ensure!(
-            integer(settings, "PlayerCount", 1)? == 1,
-            "exactly one local human is required"
-        );
+        let player_count = ranged(
+            settings,
+            "PlayerCount",
+            1,
+            1,
+            NETWORK_PLAYER_SLOT_COUNT as i32,
+        )? as usize;
+        // A launcher may host one human against AI while the relay and match
+        // service still own the clock and lifecycle.
+        let multiplayer = player_count > 1 || ini.section("Relay").is_some();
         ensure!(
             !boolean(settings, "IsSpectator", false)?,
             "spectator launches are unsupported"
@@ -234,14 +414,14 @@ impl PendingSpawnRequest {
             !boolean(settings, "ReadMissionSection", false)?,
             "custom [GameMissionConfig] metadata is unsupported"
         );
-        for index in 1..=7 {
+        for index in player_count..NETWORK_PLAYER_SLOT_COUNT {
             ensure!(
                 ini.section(&format!("Other{index}")).is_none(),
                 "[Other{index}] requests an additional human player"
             );
         }
 
-        let game_speed = ranged(
+        let mut game_speed = ranged(
             settings,
             "GameSpeed",
             0,
@@ -253,12 +433,23 @@ impl PendingSpawnRequest {
             .then(|| integer(settings, "Seed", 0))
             .transpose()?
             .map(|seed| seed as u32);
+        // Every participant must draw the same match RNG stream.
+        ensure!(
+            !multiplayer || seed.is_some(),
+            "multiplayer launches require [Settings] Seed"
+        );
+        let expected = SpawnExpectations::parse(settings)?;
         let scenario = settings.read_string("Scenario", "spawnmap.ini", 260);
         ensure!(
             !scenario.is_empty(),
             "[Settings] Scenario must not be empty"
         );
         let game = if boolean(settings, "IsSinglePlayer", false)? {
+            ensure!(!multiplayer, "multiplayer campaigns are unsupported");
+            ensure!(
+                expected.rules_digest.is_none() && expected.map_digest.is_none(),
+                "ExpectedRulesDigest and ExpectedMapDigest apply to Battle launches only"
+            );
             let difficulty = ranged(settings, "DifficultyModeHuman", 1, 0, 2)?;
             let computer = ranged(settings, "DifficultyModeComputer", 1, 0, 2)?;
             ensure!(
@@ -274,46 +465,185 @@ impl PendingSpawnRequest {
                 difficulty,
                 build_off_ally: boolean(settings, "BuildOffAlly", false)?,
             })
+        } else if multiplayer {
+            let mut session = skirmish(&ini, settings, scenario, game_speed, player_count)?;
+            let transport = transport(&ini, settings, &session)?;
+            if let SpawnTransport::Relay(relay) = &transport {
+                // The relay runs the certificate's fixed clock; a different
+                // local speed would desynchronize every participant.
+                ensure!(
+                    !settings.is_present("GameSpeed") || game_speed == relay.game_speed,
+                    "[Settings] GameSpeed={game_speed} disagrees with the relay clock (GameSpeed={})",
+                    relay.game_speed
+                );
+                game_speed = relay.game_speed;
+                session.options.game_speed = game_speed;
+            }
+            SpawnGame::Network(Box::new(NetworkSpawn { transport, session }))
         } else {
-            SpawnGame::Skirmish(Box::new(skirmish(&ini, settings, scenario, game_speed)?))
+            SpawnGame::Skirmish(Box::new(skirmish(
+                &ini,
+                settings,
+                scenario,
+                game_speed,
+                player_count,
+            )?))
         };
         Ok(SpawnRequest {
             game,
             game_speed,
             seed,
+            expected,
         })
     }
 }
 
+fn resolve_client_map(directory: &Path, session: &mut SkirmishLaunchSession) -> Result<()> {
+    // The client writes the final map beside spawn.ini, not in the
+    // separate retail asset root. Require that exact file: falling
+    // back to an old retail spawnmap.ini could start the wrong game.
+    let scenario = directory.join(
+        session
+            .selected_map_file
+            .as_deref()
+            .expect("parsed scenario"),
+    );
+    ensure!(
+        crate::util::file_system::is_file(&scenario),
+        "client map not found: {}",
+        scenario.display()
+    );
+    session.selected_map_file = Some(
+        scenario
+            .to_str()
+            .context("client map path is not UTF-8")?
+            .to_owned(),
+    );
+    Ok(())
+}
+
+/// House slot `MultiN` is index N-1: the local human is house 0, `[OtherK]`
+/// house K, and AI houses follow every human. Session rows are shared by all
+/// participants instead: a human's row is its SourceIndex and an AI's row is
+/// its house slot, so both forms coincide for a single player.
 fn skirmish(
     ini: &IniFile,
     settings: &IniSection,
     scenario: String,
     game_speed: i32,
+    player_count: usize,
 ) -> Result<SkirmishLaunchSession> {
-    ensure!(
-        integer(settings, "GameMode", 1)? == 1,
-        "only stock YR Battle (GameMode=1) is supported"
-    );
+    let mode = spawn_mode(settings)?;
     // The supplied client profile writes No. SpecialHouseIsAlly is a Spawner
     // extension, not part of the stock offline Session's alliance owner.
     ensure!(
         !boolean(settings, "SpecialHouseIsAlly", true)?,
         "SpecialHouseIsAlly=Yes is unsupported; use the VERA client profile"
     );
-    let ai_count = ranged(settings, "AIPlayers", 0, 0, 7)? as usize;
-    let mut active = vec![0usize];
-    let mut opponents = Vec::new();
-    let mut used_colors = [false; COLOR_SLOTS];
-    let mut used_starts = [false; 8];
-    let local_country = country(settings, "Side")?;
-    let local_color = color(settings, "Color", &mut used_colors)?;
-    let local_start = start(ini, 0, &mut used_starts)?;
-    validate_house_extensions(ini, 0)?;
+    let multiplayer = player_count > 1 || ini.section("Relay").is_some();
+    // *(VERA)* One human is admitted as a network room admits it, in any stock
+    // mode and with up to thirty houses, because a lobby plays every one-human
+    // game without a relay. Retail Skirmish lists only Battle and Free for All
+    // (`0x005D6263`), which VERA's Skirmish screen keeps.
+    let ai_count = ranged(
+        settings,
+        "AIPlayers",
+        0,
+        0,
+        (NETWORK_PLAYER_SLOT_COUNT - player_count) as i32,
+    )? as usize;
+    let handicaps = ini.section_or_empty("HouseHandicaps");
+    let mut active = Vec::new();
+    let mut rows = Vec::new();
+    let mut colors = Vec::new();
+    let mut used_starts = [false; NETWORK_PLAYER_SLOT_COUNT];
+    let mut humans: Vec<Option<SkirmishHumanSlot>> = vec![None; player_count];
+    let mut names = std::collections::BTreeSet::new();
+    let mut local_player_index = 0;
 
-    for raw_slot in 1..8 {
+    for house in 0..player_count {
+        let section = if house == 0 {
+            settings
+        } else {
+            ini.section(&format!("Other{house}"))
+                .with_context(|| format!("PlayerCount={player_count} requires [Other{house}]"))?
+        };
+        let source = if multiplayer {
+            source_index(section, player_count)?
+        } else {
+            0
+        };
+        ensure!(humans[source].is_none(), "duplicate SourceIndex {source}");
+        let name = if multiplayer {
+            let name = section.read_string("Name", "", 512);
+            ensure!(!name.is_empty(), "[{}] Name is required", section.name);
+            // Network sessions bind peers by name; native names are
+            // case-insensitive.
+            ensure!(
+                names.insert(name.to_lowercase()),
+                "duplicate player name {name:?}"
+            );
+            name
+        } else {
+            section.read_string("Name", "Player", 512)
+        };
+        // docs/spawn.md: a multiplayer human may watch. Spectators take no
+        // country, colour or start; scenario startup normalizes them.
+        let observer = spectator(ini, house)?;
+        ensure!(
+            multiplayer || !observer,
+            "Multi{} is a spectator",
+            house + 1
+        );
+        let (country, color) = if observer {
+            (LaunchCountry::from_country_index(0), 0)
+        } else {
+            (country(section, "Side")?, color(section, "Color")?)
+        };
+        let start = start(ini, house, &mut used_starts)?;
+        ensure!(
+            !observer || start == LaunchStartPosition::Auto,
+            "spectator Multi{} cannot have a start location",
+            house + 1
+        );
+        validate_house_extensions(ini, house)?;
+        // MultiN of a human is never an additional AI slot.
+        let key = format!("Multi{}", house + 1);
+        ensure!(
+            integer(handicaps, &key, -1)? == -1,
+            "[HouseHandicaps] {key} conflicts with a human player"
+        );
+        if house == 0 {
+            local_player_index = source;
+        }
+        active.push(house);
+        rows.push(source as u8);
+        if !observer {
+            colors.push(color);
+        }
+        humans[source] = Some(SkirmishHumanSlot {
+            raw_slot_index: Some(source as u8),
+            name,
+            slot: SkirmishLocalSlot {
+                country,
+                country_random: false,
+                color_index: color,
+                color_random: false,
+                start_position: start,
+                team: LaunchTeam::None,
+            },
+            role: LaunchHumanRole::from_observer(observer),
+        });
+    }
+    // Each source in 0..PlayerCount was taken exactly once above.
+    let mut humans: Vec<_> = humans
+        .into_iter()
+        .map(|human| human.expect("SourceIndex permutation"))
+        .collect();
+
+    let mut opponents = Vec::new();
+    for raw_slot in player_count..NETWORK_PLAYER_SLOT_COUNT {
         let key = format!("Multi{}", raw_slot + 1);
-        let handicaps = ini.section_or_empty("HouseHandicaps");
         let difficulty = integer(handicaps, &key, -1)?;
         ensure!(
             (-1..=2).contains(&difficulty),
@@ -327,13 +657,17 @@ fn skirmish(
             );
             continue;
         }
+        ensure!(!spectator(ini, raw_slot)?, "{key} is a spectator");
         validate_house_extensions(ini, raw_slot)?;
+        let color_index = color(ini.section_or_empty("HouseColors"), &key)?;
         active.push(raw_slot);
+        rows.push(raw_slot as u8);
+        colors.push(color_index);
         opponents.push(SkirmishAiSlot {
             raw_slot_index: raw_slot as u8,
             country: country(ini.section_or_empty("HouseCountries"), &key)?,
             country_random: false,
-            color_index: color(ini.section_or_empty("HouseColors"), &key, &mut used_colors)?,
+            color_index,
             color_random: false,
             start_position: start(ini, raw_slot, &mut used_starts)?,
             team: LaunchTeam::None,
@@ -350,15 +684,70 @@ fn skirmish(
         "AIPlayers={ai_count} does not match {} active HouseHandicaps entries",
         opponents.len()
     );
-    // Multi1 is the local human, never an additional AI slot.
+    // The lobby's start admission (docs/lobby-protocol.md): spectators
+    // exclude AI, and at least two participants play. Each spectator takes
+    // an observer House (`ScenarioSession::observer_houses`).
+    let spectators = humans.iter().filter(|human| human.is_observer()).count();
     ensure!(
-        integer(ini.section_or_empty("HouseHandicaps"), "Multi1", -1)? == -1,
-        "[HouseHandicaps] Multi1 conflicts with the local human"
+        spectators == 0 || ai_count == 0,
+        "games with spectators cannot include AI players"
     );
-    let teams = teams(ini, &active)?;
-    for (opponent, team) in opponents.iter_mut().zip(teams.iter().skip(1)) {
+    ensure!(
+        !multiplayer || humans.len() - spectators + ai_count >= 2,
+        "a multiplayer launch needs at least two playing participants"
+    );
+    // Network rooms reuse YR's eight colours once more than eight houses
+    // play (see `network_color_in_use`); up to eight they stay distinct.
+    if colors.len() <= SKIRMISH_PLAYER_SLOT_COUNT {
+        let mut used = [false; COLOR_SLOTS];
+        for &index in &colors {
+            ensure!(
+                !std::mem::replace(&mut used[usize::from(index)], true),
+                "duplicate player color {index}"
+            );
+        }
+    }
+    // `active` lists the humans' houses first, then the AI houses in order.
+    let teams = teams(ini, &active, &rows)?;
+    for (row, team) in rows.iter().zip(&teams).take(player_count) {
+        let human = &mut humans[usize::from(*row)];
+        ensure!(
+            !human.is_observer() || *team == LaunchTeam::None,
+            "spectator {} cannot belong to a team",
+            human.name
+        );
+        human.slot.team = *team;
+    }
+    for (opponent, team) in opponents.iter_mut().zip(&teams[player_count..]) {
         opponent.team = *team;
     }
+    // Cooperative's AI rows come from its mode+68 (`0x005C30C0`), whose rows the
+    // launcher writes here, so it admits them though setup offers none by hand.
+    ensure!(
+        ai_count == 0 || mode.class.lists_in_skirmish() || mode.class.uses_cooperative_setup(),
+        "GameMode={} cannot include AI players",
+        mode.id
+    );
+    // Vtable+BC (`0x005C4F00`) and +98 (`0x005C42C0`).
+    ensure!(
+        mode.class.allows_observers() || humans.iter().all(|human| !human.is_observer()),
+        "GameMode={} cannot have spectators",
+        mode.id
+    );
+    if let Some(limit) = mode.class.setup_player_limit() {
+        ensure!(
+            humans.len() <= limit,
+            "GameMode={} admits {limit} human players",
+            mode.id
+        );
+    }
+    let playing_teams: Vec<_> = humans
+        .iter()
+        .filter(|human| !human.is_observer())
+        .map(|human| human.slot.team)
+        .chain(opponents.iter().map(|opponent| opponent.team))
+        .collect();
+    validate_mode_teams(&mode, &playing_teams)?;
 
     let options = SkirmishLaunchOptions {
         starting_credits: ranged(settings, "Credits", 10000, 0, i32::MAX)?,
@@ -374,56 +763,71 @@ fn skirmish(
         crates: boolean(settings, "Crates", false)?,
         mcv_redeploy: boolean(settings, "MCVRedeploy", true)?,
         fog_of_war: boolean(settings, "FogOfWar", false)?,
-        // Spawner does not write these stock rules-owned switches. Battle's
-        // retail defaults remain shroud/growth enabled.
+        // Spawner does not write these stock rules-owned switches, and no stock
+        // mode INI sets them: shroud/growth stay enabled.
         shroud: true,
         tiberium_grows: true,
         multi_engineer: boolean(settings, "MultiEngineer", false)?,
         harvester_truce: boolean(settings, "HarvesterTruce", false)?,
         ally_change_allowed: boolean(settings, "AlliesAllowed", false)?,
+        bans: Default::default(),
     };
     let mut session = SkirmishLaunchSession {
-        // Exact stock descriptor accepted by the shared pre-Fill owner.
-        mode: SkirmishLaunchMode {
-            class: crate::skirmish_modes::MpModeClass::Battle,
-            id: 1,
-            ui_name_key: "GUI:Battle".to_string(),
-            tooltip_key: "STT:ModeBattle".to_string(),
-            override_file: "MPBattleMD.ini".to_string(),
-            map_filter: "standard".to_string(),
-            random_maps_allowed: true,
-            allies_allowed: true,
-            must_ally: false,
-        },
+        mode,
         selected_map_file: Some(scenario),
-        humans: vec![SkirmishHumanSlot {
-            raw_slot_index: Some(0),
-            name: settings.read_string("Name", "Player", 512),
-            slot: SkirmishLocalSlot {
-                country: local_country,
-                country_random: false,
-                color_index: local_color,
-                color_random: false,
-                start_position: local_start,
-                team: teams[0],
-            },
-            role: LaunchHumanRole::from_observer(false),
-        }],
-        local_player_index: 0,
+        humans,
+        local_player_index,
         ai_player_count: ai_count as i32,
         opponents,
         // Derived below by the canonical owner from the human and raw AI rows.
         pre_fill_house_roster: PreFillHouseRoster::new(Vec::new(), Vec::new()),
         options,
     };
+    // The gates network setup's host runs before its assignments: the mode's
+    // Start (`validate_setup_start`, vtable+14), then TXT_CANNOT_ALLY.
+    let roles: Vec<_> = session
+        .humans
+        .iter()
+        .map(|human| human.role.native_value())
+        .collect();
+    match session
+        .mode
+        .class
+        .validate_setup_start(session.options.bases, &roles)
+    {
+        Ok(ModeStartEffect::FreeForAllSourceRoles) => {
+            for (source, role) in session.free_for_all_source_roles() {
+                session.humans[source].role = role;
+            }
+        }
+        // No progress record to bind the partners into (see `spawn_modes`).
+        Ok(ModeStartEffect::None | ModeStartEffect::CooperativePartners) => {}
+        Err(_) => bail!(
+            "GameMode={} cannot start with these settings",
+            session.mode.id
+        ),
+    }
+    ensure!(!session.all_allied(), "every house is on one team");
     session.rebuild_house_roster();
     Ok(session)
 }
 
+/// The largest build-profile Country index advertised without a component.
+pub(crate) const fn max_spawn_country_index() -> i32 {
+    if crate::rules::ARES_ENABLED {
+        u16::MAX as i32
+    } else {
+        9
+    }
+}
+
+pub(crate) const fn max_spawn_color_index() -> i32 {
+    if crate::rules::PHOBOS_ENABLED { 255 } else { 7 }
+}
+
 fn country(section: &IniSection, key: &str) -> Result<LaunchCountry> {
-    // The client resolves Random before writing the actual Country ordinal.
-    // Parse only its representation here; PendingSpawnRequest::resolve owns
-    // profile/component admission after the formal startup declaration.
+    // Parse representation here; the pending owner admits identities only after
+    // the startup component declaration is available.
     let index = ranged(section, key, -1, 0, i32::from(u16::MAX))?;
     Ok(LaunchCountry::from_country_index(index as u32))
 }
@@ -431,7 +835,7 @@ fn country(section: &IniSection, key: &str) -> Result<LaunchCountry> {
 /// Colour slots this reader admits, one per byte the spawner can send.
 const COLOR_SLOTS: usize = 256;
 
-fn color(section: &IniSection, key: &str, used: &mut [bool; COLOR_SLOTS]) -> Result<u8> {
+fn color(section: &IniSection, key: &str) -> Result<u8> {
     // Client [MPColors] GameColorIndex is native color priority, not the
     // [Colors] scheme-entry index. Existing house color binding resolves it
     // through Game_GetLinkedColor (0x69A310).
@@ -440,16 +844,24 @@ fn color(section: &IniSection, key: &str, used: &mut [bool; COLOR_SLOTS]) -> Res
     // sends the [Colors] entry index instead; that build therefore accepts the
     // whole byte and the loaded rules decide which entries exist. Without the
     // feature the stock client only produces YR's eight priorities.
-    let maximum = if crate::rules::PHOBOS_ENABLED { 255 } else { 7 };
-    let index = ranged(section, key, -1, 0, maximum)? as usize;
-    ensure!(!used[index], "duplicate player color {index}");
-    used[index] = true;
-    Ok(index as u8)
+    Ok(ranged(section, key, -1, 0, max_spawn_color_index())? as u8)
 }
 
-fn start(ini: &IniFile, raw_slot: usize, used: &mut [bool; 8]) -> Result<LaunchStartPosition> {
+/// Waypoints 0..29, for one human as in network rooms; the map decides which
+/// exist.
+fn start(
+    ini: &IniFile,
+    raw_slot: usize,
+    used: &mut [bool; NETWORK_PLAYER_SLOT_COUNT],
+) -> Result<LaunchStartPosition> {
     let key = format!("Multi{}", raw_slot + 1);
-    let value = ranged(ini.section_or_empty("SpawnLocations"), &key, -2, -2, 7)?;
+    let value = ranged(
+        ini.section_or_empty("SpawnLocations"),
+        &key,
+        -2,
+        -2,
+        NETWORK_PLAYER_SLOT_COUNT as i32 - 1,
+    )?;
     if value < 0 {
         return Ok(LaunchStartPosition::Auto);
     }
@@ -458,12 +870,17 @@ fn start(ini: &IniFile, raw_slot: usize, used: &mut [bool; 8]) -> Result<LaunchS
     Ok(LaunchStartPosition::Position(value as u8))
 }
 
+/// `[IsSpectator] MultiN`; only multiplayer humans may set it.
+fn spectator(ini: &IniFile, raw_slot: usize) -> Result<bool> {
+    boolean(
+        ini.section_or_empty("IsSpectator"),
+        &format!("Multi{}", raw_slot + 1),
+        false,
+    )
+}
+
 fn validate_house_extensions(ini: &IniFile, raw_slot: usize) -> Result<()> {
     let key = format!("Multi{}", raw_slot + 1);
-    ensure!(
-        !boolean(ini.section_or_empty("IsSpectator"), &key, false)?,
-        "{key} is a spectator"
-    );
     ensure!(
         integer(ini.section_or_empty("HandicapDifficulty"), &key, -1)? == -1,
         "per-house HandicapDifficulty is unsupported ({key})"
@@ -475,7 +892,9 @@ fn validate_house_extensions(ini: &IniFile, raw_slot: usize) -> Result<()> {
     Ok(())
 }
 
-fn teams(ini: &IniFile, active: &[usize]) -> Result<Vec<LaunchTeam>> {
+/// `active` holds house slots (MultiN-1); `rows` the matching shared session
+/// rows, which name a team so that every participant derives the same value.
+fn teams(ini: &IniFile, active: &[usize], rows: &[u8]) -> Result<Vec<LaunchTeam>> {
     const KEYS: [&str; 8] = [
         "HouseAllyOne",
         "HouseAllyTwo",
@@ -486,10 +905,52 @@ fn teams(ini: &IniFile, active: &[usize]) -> Result<Vec<LaunchTeam>> {
         "HouseAllySeven",
         "HouseAllyEight",
     ];
-    let mut allies = [[false; 8]; 8];
-    for raw_slot in 0..8 {
-        let section = ini.section_or_empty(&format!("Multi{}_Alliances", raw_slot + 1));
+    let legacy = (0..NETWORK_PLAYER_SLOT_COUNT).any(|slot| {
+        ini.section(&format!("Multi{}_Alliances", slot + 1))
+            .is_some()
+    });
+    if let Some(section) = ini.section("HouseTeams") {
+        // VERA form: one shared team number per team is complete and
+        // symmetric by construction.
+        ensure!(
+            !legacy,
+            "[HouseTeams] cannot be combined with [MultiN_Alliances]"
+        );
+        for slot in 0..NETWORK_PLAYER_SLOT_COUNT {
+            let key = format!("Multi{}", slot + 1);
+            ensure!(
+                active.contains(&slot) || !section.is_present(&key),
+                "[HouseTeams] {key} names an inactive house"
+            );
+        }
+        return active
+            .iter()
+            .map(|slot| {
+                let key = format!("Multi{}", slot + 1);
+                Ok(if section.is_present(&key) {
+                    let last = NETWORK_PLAYER_SLOT_COUNT as i32 - 1;
+                    LaunchTeam::Team(ranged(section, &key, -1, 0, last)? as u8)
+                } else {
+                    LaunchTeam::None
+                })
+            })
+            .collect();
+    }
+    // Spawner alliances name houses 1..8 only.
+    for slot in SKIRMISH_PLAYER_SLOT_COUNT..NETWORK_PLAYER_SLOT_COUNT {
+        ensure!(
+            ini.section(&format!("Multi{}_Alliances", slot + 1))
+                .is_none(),
+            "[Multi{}_Alliances] is beyond the eight legacy houses; use [HouseTeams]",
+            slot + 1
+        );
+    }
+    let mut allies = [[false; NETWORK_PLAYER_SLOT_COUNT]; NETWORK_PLAYER_SLOT_COUNT];
+    for raw_slot in 0..NETWORK_PLAYER_SLOT_COUNT {
         allies[raw_slot][raw_slot] = true;
+    }
+    for raw_slot in 0..SKIRMISH_PLAYER_SLOT_COUNT {
+        let section = ini.section_or_empty(&format!("Multi{}_Alliances", raw_slot + 1));
         for key in KEYS {
             let target = ranged(section, key, -1, -1, 7)?;
             if target < 0 {
@@ -527,15 +988,194 @@ fn teams(ini: &IniFile, active: &[usize]) -> Result<Vec<LaunchTeam>> {
                 LaunchTeam::Team(
                     active
                         .iter()
-                        .copied()
-                        .find(|&other| allies[slot][other])
-                        .expect("self ally") as u8,
+                        .zip(rows)
+                        .filter(|&(&other, _)| allies[slot][other])
+                        .map(|(_, &row)| row)
+                        .min()
+                        .expect("self ally"),
                 )
             } else {
                 LaunchTeam::None
             }
         })
         .collect())
+}
+
+fn source_index(section: &IniSection, player_count: usize) -> Result<usize> {
+    ensure!(
+        section.is_present("SourceIndex"),
+        "[{}] SourceIndex is required in multiplayer",
+        section.name
+    );
+    Ok(ranged(section, "SourceIndex", -1, 0, player_count as i32 - 1)? as usize)
+}
+
+fn transport(
+    ini: &IniFile,
+    settings: &IniSection,
+    session: &SkirmishLaunchSession,
+) -> Result<SpawnTransport> {
+    let player_count = session.humans.len();
+    if let Some(relay) = ini.section("Relay") {
+        let address = text(relay, "Address")?
+            .parse::<SocketAddrV4>()
+            .map_err(|_| anyhow!("[Relay] Address must be IPv4:port"))?;
+        let match_id = text(relay, "MatchId")?;
+        let player_id = text(relay, "PlayerId")?;
+        // The lobby's decoder checks the ticket's match, player and source
+        // (RelayGrant.source_index is SourceIndex) and the key widths.
+        let grant = crate::app::shell_wol::decode_external_relay_grant(
+            address,
+            text(relay, "Ticket")?,
+            text(relay, "PacketKey")?,
+            text(relay, "PayloadKey")?,
+            text(relay, "OrderingCertificate")?,
+            // RelayGrant.federation: present when the service homes the match
+            // on several regional relays.
+            relay
+                .is_present("Federation")
+                .then(|| text(relay, "Federation"))
+                .transpose()?,
+            session.local_player_index as u8,
+            &match_id,
+            &player_id,
+        )
+        .context("invalid [Relay] grant")?;
+        let certificate = crate::net::udp::OrderingCertificate::parse(&grant.ordering_certificate)
+            .map_err(|_| anyhow!("invalid [Relay] OrderingCertificate"))?;
+        ensure!(
+            certificate.sources_mask == (1u32 << player_count) - 1,
+            "[Relay] OrderingCertificate roster does not match PlayerCount={player_count}"
+        );
+        // The lobby derives this clock from the launch speed table
+        // [60,45,30,20,15,12,10], the native PreCalcFrameRate rows.
+        let game_speed = crate::net::lockstep::game_speed_for_frame_rate(certificate.tick_hz)
+            .with_context(|| {
+                format!(
+                    "[Relay] OrderingCertificate clock {} Hz is not a launch speed",
+                    certificate.tick_hz
+                )
+            })?;
+        let token = text(relay, "Token")?;
+        ensure!(
+            token.bytes().all(|byte| byte.is_ascii_graphic()),
+            "[Relay] Token must be visible ASCII"
+        );
+        let admission_timeout = ranged(relay, "AdmissionTimeout", 30, 30, 180)?;
+        let resume = relay
+            .is_present("ResumePings")
+            .then(|| relay_resume(relay, player_count))
+            .transpose()?;
+        return Ok(SpawnTransport::Relay(RelaySpawn {
+            address,
+            match_id,
+            player_id,
+            grant,
+            service_url: service_origin(&text(relay, "ServiceUrl")?)?,
+            gateway_url: relay
+                .is_present("GatewayUrl")
+                .then(|| gateway_origin(&text(relay, "GatewayUrl")?))
+                .transpose()?,
+            token,
+            game_speed,
+            admission_timeout: crate::util::time::Duration::from_secs(admission_timeout as u64),
+            resume,
+        }));
+    }
+    let mut peers = vec![None; player_count];
+    for house in 1..player_count {
+        let section = ini
+            .section(&format!("Other{house}"))
+            .expect("validated human section");
+        let ip = text(section, "Ip")?
+            .parse::<Ipv4Addr>()
+            .map_err(|_| anyhow!("[{}] Ip must be an IPv4 address", section.name))?;
+        ensure!(
+            !ip.is_unspecified() && !ip.is_broadcast() && !ip.is_multicast(),
+            "[{}] Ip must name one host",
+            section.name
+        );
+        let endpoint = SocketAddrV4::new(ip, port(section)?);
+        ensure!(
+            !peers.contains(&Some(endpoint)),
+            "duplicate direct endpoint {endpoint}"
+        );
+        peers[source_index(section, player_count)?] = Some(endpoint);
+    }
+    Ok(SpawnTransport::Direct(DirectSpawn {
+        local_port: port(settings)?,
+        peers,
+    }))
+}
+
+fn port(section: &IniSection) -> Result<u16> {
+    let default = i32::from(crate::net::udp::DEFAULT_LAN_PORT);
+    Ok(ranged(section, "Port", default, 1, i32::from(u16::MAX))? as u16)
+}
+
+fn relay_resume(relay: &IniSection, player_count: usize) -> Result<RelayResume> {
+    let pings = text(relay, "ResumePings")?
+        .split(',')
+        .map(|ping| ping.trim().parse::<i32>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| anyhow!("[Relay] ResumePings must list whole numbers"))?;
+    ensure!(
+        pings.len() == player_count,
+        "[Relay] ResumePings does not match PlayerCount={player_count}"
+    );
+    let cursor = text(relay, "ResumeCursor")?
+        .parse::<u64>()
+        .map_err(|_| anyhow!("[Relay] ResumeCursor must be a whole number"))?;
+    Ok(RelayResume { pings, cursor })
+}
+
+/// `ServiceUrl` is an origin: HTTPS, or HTTP to a loopback host for
+/// development. Returned without a trailing slash.
+fn service_origin(url: &str) -> Result<String> {
+    relay_origin("ServiceUrl", url, "https", "http")
+}
+
+fn gateway_origin(url: &str) -> Result<String> {
+    relay_origin("GatewayUrl", url, "wss", "ws")
+}
+
+fn relay_origin(key: &str, url: &str, secure_scheme: &str, plain_scheme: &str) -> Result<String> {
+    let origin = url.strip_suffix('/').unwrap_or(url);
+    let (secure, authority) =
+        if let Some(authority) = origin.strip_prefix(&format!("{secure_scheme}://")) {
+            (true, authority)
+        } else if let Some(authority) = origin.strip_prefix(&format!("{plain_scheme}://")) {
+            (false, authority)
+        } else {
+            bail!("[Relay] {key} must be an {secure_scheme}:// origin");
+        };
+    ensure!(
+        !authority.is_empty()
+            && authority.bytes().all(|byte| byte.is_ascii_graphic())
+            && !authority.contains(['/', '\\', '@', '?', '#']),
+        "[Relay] {key} must be an origin without path, query or credentials"
+    );
+    let host = match authority.rfind(':') {
+        Some(colon) if !authority[colon..].contains(']') => &authority[..colon],
+        _ => authority,
+    };
+    ensure!(
+        secure
+            || host.eq_ignore_ascii_case("localhost")
+            || host == "[::1]"
+            || host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback()),
+        "[Relay] {key} must use {secure_scheme}:// ({plain_scheme}:// only for loopback)"
+    );
+    Ok(origin.to_owned())
+}
+
+/// Addresses and credentials: required, and never silently cut by ReadString.
+fn text(section: &IniSection, key: &str) -> Result<String> {
+    const LIMIT: usize = 4096;
+    let value = section.read_string(key, "", LIMIT + 2);
+    ensure!(!value.is_empty(), "[{}] {key} is required", section.name);
+    ensure!(value.len() <= LIMIT, "[{}] {key} is too long", section.name);
+    Ok(value)
 }
 
 fn boolean(section: &IniSection, key: &str, default: bool) -> Result<bool> {

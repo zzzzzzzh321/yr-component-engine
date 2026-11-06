@@ -157,7 +157,7 @@ fn action110_stops_elapsed_before_action67_cue_and_house_wait() {
     sim.session_mut_for_test()
         .set_current_house_for_test(Some(owner));
     let map = MapFile::from_bytes(b"[Map]\nTheater=TEMPERATE\nSize=0,0,2,1\nLocalSize=0,0,2,1\n[IsoMapPack5]\n1=DwALABwBAAIA/////wAAABEAAA==\n[Basic]\nNewINIFormat=4\n[Triggers]\nT=Russians,<none>,Pause then Win,0,1,1,1,0\n[Events]\nT=1,13,0,0\n[Actions]\nT=2,110,0,30,0,0,0,0,A,67,0,0,0,0,0,0,A\n[Tags]\nTAG=0,Pause then Win,T\n").unwrap();
-    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, &rules);
+    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None, &rules);
     sim.classify_map_triggers(&rules);
     sim.publish_scenario_started();
     let mut runtime = SimRuntime::from_simulation(sim);
@@ -219,5 +219,44 @@ fn action110_stops_elapsed_before_action67_cue_and_house_wait() {
             crate::sim::trigger_runtime::TriggerEffect::ScenarioPause { .. }
         )),
         "handled pause cannot re-arm after wait"
+    );
+}
+
+/// `Custom End Game Movie` moves only the result's EVA line and the exit
+/// router. The House still publishes on the frame its SavourDelay expires,
+/// the frame a headless or replay run publishes on.
+#[test]
+fn a_deferred_verdict_line_publishes_the_result_on_its_own_frame() {
+    let mut sim = Simulation::with_seed(0x004F_860B);
+    let owner = sim.intern("Human");
+    let mut house = HouseState::new(owner, 0, None, true, 0, 10);
+    assert!(house.accept_win_result(0, 0, false));
+    sim.houses_mut_for_test().register(house);
+    sim.session_mut_for_test()
+        .set_game_mode(ScenarioGameMode::Skirmish);
+    sim.session_mut_for_test()
+        .set_current_house_for_test(Some(owner));
+    let mut runtime = SimRuntime::from_simulation(sim);
+    let mut sounds = crate::audio::events::SoundEventQueue::new();
+    let mut radar = |_, _, _: &crate::rules::ruleset::RuleSet| false;
+    let mut pending = None;
+    let client = super::FrameClientBoundary::new(None, Some("Human"), &mut sounds, &mut radar)
+        .with_outcome_wait(&mut pending)
+        .with_deferred_verdict(true);
+    let output = runtime
+        .advance_frame(
+            &[],
+            67,
+            TickLane::Ordinary,
+            FrameEffects::for_sound(&client).with_outcome_wait(&client),
+        )
+        .unwrap();
+    assert!(!output.outcome_waiting);
+    assert_eq!(
+        runtime
+            .simulation
+            .ready_outcome_for_owner(owner)
+            .map(|outcome| outcome.kind),
+        Some(HouseOutcomeKind::Victory)
     );
 }

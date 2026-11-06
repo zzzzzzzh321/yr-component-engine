@@ -69,30 +69,49 @@ pub(super) struct TerrainPixel {
     pub color: [u8; 4],
 }
 
-/// Immutable projection pixels and their derived cell lookup. Replacing a
-/// playfield projection replaces both together; dirty radar updates never
-/// mutate these source pixels. The index retains the first pixel for duplicate
-/// coordinates, matching the former forward scan without scanning the whole
-/// map for every dirty cell in a large movement batch.
-pub(super) struct TerrainPixels {
-    pixels: Vec<TerrainPixel>,
-    by_cell: Vec<(u32, usize)>,
-}
+/// First-occurrence lookup from a cell to its slot in a retained radar list.
+/// Duplicate coordinates keep the first slot, matching a forward scan, so a
+/// dirty batch costs one binary search per cell instead of a list scan.
+#[derive(Debug, Clone)]
+pub(super) struct RadarCellIndex(Vec<(u32, usize)>);
 
-impl TerrainPixels {
-    pub fn new(pixels: Vec<TerrainPixel>) -> Self {
-        let mut by_cell: Vec<_> = pixels
-            .iter()
+impl RadarCellIndex {
+    pub fn new(cells: impl IntoIterator<Item = (u16, u16)>) -> Self {
+        let mut by_cell: Vec<_> = cells
+            .into_iter()
             .enumerate()
-            .map(|(index, pixel)| (Self::key(pixel.rx, pixel.ry), index))
+            .map(|(slot, (rx, ry))| (Self::key(rx, ry), slot))
             .collect();
         by_cell.sort_unstable();
         by_cell.dedup_by_key(|entry| entry.0);
-        Self { pixels, by_cell }
+        Self(by_cell)
     }
 
     fn key(rx: u16, ry: u16) -> u32 {
         (u32::from(rx) << 16) | u32::from(ry)
+    }
+
+    pub fn slot(&self, rx: u16, ry: u16) -> Option<usize> {
+        let entry = self
+            .0
+            .binary_search_by_key(&Self::key(rx, ry), |entry| entry.0)
+            .ok()?;
+        Some(self.0[entry].1)
+    }
+}
+
+/// Immutable projection pixels and their derived cell lookup. Replacing a
+/// playfield projection replaces both together; dirty radar updates never
+/// mutate these source pixels.
+pub(super) struct TerrainPixels {
+    pixels: Vec<TerrainPixel>,
+    by_cell: RadarCellIndex,
+}
+
+impl TerrainPixels {
+    pub fn new(pixels: Vec<TerrainPixel>) -> Self {
+        let by_cell = RadarCellIndex::new(pixels.iter().map(|pixel| (pixel.rx, pixel.ry)));
+        Self { pixels, by_cell }
     }
 
     pub fn len(&self) -> usize {
@@ -104,29 +123,22 @@ impl TerrainPixels {
     }
 
     pub fn cell(&self, rx: u16, ry: u16) -> Option<&TerrainPixel> {
-        let entry = self
-            .by_cell
-            .binary_search_by_key(&Self::key(rx, ry), |entry| entry.0)
-            .ok()?;
-        Some(&self.pixels[self.by_cell[entry].1])
+        self.by_cell.slot(rx, ry).map(|slot| &self.pixels[slot])
     }
 }
 
-pub(crate) fn minimap_overlay_datum(
-    rx: u16,
-    ry: u16,
+/// The kind of overlay `overlay_id` is, for the minimap and for VERA's map
+/// pictures' ore and gem marks (`app::map_picture`). Only Ore against Gem
+/// reads the stock three-character name family.
+pub(crate) fn overlay_classification(
     overlay_id: u8,
-    frame: u8,
     overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
-    rules: Option<&RuleSet>,
-) -> MinimapOverlayDatum {
+) -> OverlayClassification {
     let flags = overlay_registry.and_then(|registry| registry.flags(overlay_id));
-    let name = overlay_registry
-        .and_then(|registry| registry.name(overlay_id))
-        .unwrap_or("");
-    let is_tiberium = flags.is_some_and(|flags| flags.tiberium);
-    let has_cell_anim = flags.is_some_and(|flags| flags.cell_anim.is_some());
-    let classification = if is_tiberium {
+    if flags.is_some_and(|flags| flags.tiberium) {
+        let name = overlay_registry
+            .and_then(|registry| registry.name(overlay_id))
+            .unwrap_or("");
         if name
             .get(..3)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GEM"))
@@ -141,7 +153,21 @@ pub(crate) fn minimap_overlay_datum(
         OverlayClassification::Bridge
     } else {
         OverlayClassification::Other
-    };
+    }
+}
+
+pub(crate) fn minimap_overlay_datum(
+    rx: u16,
+    ry: u16,
+    overlay_id: u8,
+    frame: u8,
+    overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+    rules: Option<&RuleSet>,
+) -> MinimapOverlayDatum {
+    let flags = overlay_registry.and_then(|registry| registry.flags(overlay_id));
+    let is_tiberium = flags.is_some_and(|flags| flags.tiberium);
+    let has_cell_anim = flags.is_some_and(|flags| flags.cell_anim.is_some());
+    let classification = overlay_classification(overlay_id, overlay_registry);
     let has_tiberium_type = is_tiberium
         && overlay_registry
             .zip(rules)
@@ -161,18 +187,6 @@ pub(crate) fn minimap_overlay_datum(
             has_tiberium_type,
         },
     }
-}
-
-/// One generated-primary terrain pixel plus the exact cell gamemd queries for
-/// shroud/fog when `RenderCellPixel @ 0x00655C50` refreshes that pixel.
-#[derive(Clone, Copy)]
-pub(super) struct RadarSurfacePixel {
-    pub rx: u16,
-    pub ry: u16,
-    pub px: u32,
-    pub py: u32,
-    pub packed_rgb565: u16,
-    pub color: [u8; 4],
 }
 
 /// Compute the minimap color for a terrain cell.
@@ -459,21 +473,6 @@ pub fn default_minimap_rect(screen_h: f32) -> (f32, f32, f32, f32) {
     let mm_x = MINIMAP_MARGIN;
     let mm_y = screen_h - mm_h - MINIMAP_MARGIN;
     (mm_x, mm_y, mm_w, mm_h)
-}
-
-pub(super) fn surface_visibility_color(
-    local_owner: InternedId,
-    fog: &FogState,
-    pixel: &RadarSurfacePixel,
-) -> Option<[u8; 4]> {
-    if fog.is_cell_gap_covered(local_owner, pixel.rx, pixel.ry) {
-        return Some(COLOR_SHROUD);
-    }
-    if fog.is_cell_gap_fog(local_owner, pixel.rx, pixel.ry) {
-        return Some(super::terrain::half_bright_rgb565(pixel.packed_rgb565));
-    }
-    fog.is_cell_revealed(local_owner, pixel.rx, pixel.ry)
-        .then_some(pixel.color)
 }
 
 #[cfg(test)]

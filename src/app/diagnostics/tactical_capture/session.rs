@@ -5,8 +5,8 @@
 //! the real renderer, and publishes one transactional final readback. It does
 //! not focus the window, inject desktop input, or grant simulation state.
 
-use std::path::Path;
 use crate::util::time::{Duration, Instant};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -184,14 +184,10 @@ impl TacticalCaptureSession {
                     seed_name == crate::app::shell_random_map::RANDMAP_SED_FILE,
                     "generated capture requires the normal accepted RandMap.Sed record"
                 );
-                let path = state
-                    .platform
-                    .game_config
-                    .as_ref()
-                    .unwrap()
-                    .paths
-                    .ra2_dir
-                    .join(seed_name);
+                let path = crate::map::source::random_map_dir(
+                    &state.platform.game_config.as_ref().unwrap().paths.ra2_dir,
+                )
+                .join(seed_name);
                 let bytes = std::fs::read(&path).context("read capture setup seed")?;
                 let ini = crate::rules::ini_parser::IniFile::from_bytes(&bytes)
                     .context("parse capture setup seed")?;
@@ -218,6 +214,7 @@ impl TacticalCaptureSession {
             return Ok(());
         }
         let profile = self.request.profile()?;
+        profile.check_roster_mode(&state.frontend.skirmish_modes)?;
         let capture = &profile.capture;
         ensure!(
             state.renderer.gpu.config.width == capture.output_width
@@ -243,13 +240,6 @@ impl TacticalCaptureSession {
                 .usage
                 .contains(wgpu::TextureUsages::COPY_SRC),
             "tactical swapchain lacks COPY_SRC readback usage"
-        );
-        ensure!(
-            (state.match_state.match_presentation.ui_scale - capture.app_ui_scale as f32).abs()
-                <= f32::EPSILON,
-            "app UI scale {} differs from sealed {}",
-            state.match_state.match_presentation.ui_scale,
-            capture.app_ui_scale
         );
         ensure!(
             state.match_state.configured_input_delay_ticks
@@ -1124,7 +1114,7 @@ impl TacticalCaptureSession {
                 .keys_held
                 .iter()
                 .all(|key| state.match_state.input.planning.owns_key(*key))
-            && !state.match_state.input.minimap_dragging
+            && !state.match_state.input.minimap_press_active()
             && !state
                 .match_state
                 .match_presentation
@@ -1472,7 +1462,6 @@ impl TacticalCaptureSession {
                 state.renderer.gpu.config.width,
                 state.renderer.gpu.config.height,
             ],
-            state.match_state.match_presentation.ui_scale,
             bitmap_font,
         )?;
         let script = self
@@ -1613,7 +1602,6 @@ fn validate_loaded_resources(state: &AppState) -> Result<()> {
             && state.match_state.match_presentation.tile_atlas.is_some()
             && state.match_state.match_presentation.terrain_grid.is_some()
             && state.terrain_template().is_some()
-            && state.match_state.match_presentation.unit_atlas.is_some()
             && state.match_state.match_presentation.palette_set.is_some()
             && state.match_state.match_presentation.sprite_atlas.is_some()
             && state.match_state.match_presentation.overlay_atlas.is_some()

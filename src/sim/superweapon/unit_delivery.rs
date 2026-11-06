@@ -17,7 +17,7 @@ use crate::rules::superweapon_type::{DeliveryOwner, SuperWeaponType};
 use crate::sim::components::DriveCoord;
 use crate::sim::intern::InternedId;
 use crate::sim::mission::{MissionId, MissionType};
-use crate::sim::state_hasher::StateHasher;
+use crate::util::state_hasher::StateHasher;
 use crate::sim::world::Simulation;
 use crate::sim::world::{FrameEffects, SimSoundEvent};
 use std::hash::{Hash, Hasher};
@@ -115,18 +115,22 @@ fn delivery_owner(
     // Ares HouseExt::GetHouseKind delegates to the existing House finders.
     // FindCivilianSide scans House registration order, not country order.
     // Source: Ares 4f1d9299, src/Ext/House/Body.cpp, GetHouseKind.
-    match owner {
-        DeliveryOwner::Invoker => sim.houses.contains_key(&invoker).then_some(invoker),
-        DeliveryOwner::Civilian => sim.civilian_side_house(rules),
-        DeliveryOwner::Neutral | DeliveryOwner::Special => {
-            let name = if owner == DeliveryOwner::Neutral {
-                "Neutral"
-            } else {
-                "Special"
-            };
-            sim.house_by_country_index(rules.country_index(name)?, rules)
-        }
-    }
+    use crate::rules::ares_warhead::HouseSelector;
+    let selector = match owner {
+        DeliveryOwner::Invoker => HouseSelector::Invoker,
+        DeliveryOwner::Civilian => HouseSelector::Civilian,
+        DeliveryOwner::Neutral => HouseSelector::Neutral,
+        DeliveryOwner::Special => HouseSelector::Special,
+    };
+    sim.house_kind(
+        selector,
+        None,
+        sim.houses.contains_key(&invoker).then_some(invoker),
+        None,
+        None,
+        rules,
+        None,
+    )
 }
 
 /// Reject malformed extension requests before the common Fire_SW transaction.
@@ -195,16 +199,6 @@ pub(crate) fn launch(
         base_normal: config.base_normal,
         activation_sound: config.activation_sound.clone(),
     };
-    // The existing launch event retires the player's armed selection now,
-    // not when the delivery later appears. The placement cue is separate.
-    // This case plays no positional cue: the target cell's centre, with no
-    // Map lookup (a lookup off the map would stamp the shared Dummy).
-    let world = crate::sim::components::DriveCoord::cell(cell.0, cell.1, 0).into();
-    sim.sound_events.emit(SimSoundEvent::SuperWeaponLaunched {
-        owner,
-        sw_type,
-        world,
-    });
     if config.deferment == 0 {
         apply(sim, rules, request, registry, effects);
     } else {

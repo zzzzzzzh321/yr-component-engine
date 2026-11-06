@@ -391,17 +391,21 @@ impl IniFile {
         }
     }
 
-    /// Supply recorded native cache sections without physical parsing. Some
-    /// oracle controls contain stored-empty entries or sections, which the
-    /// physical reader would discard. Storage and first-section indexing stay
-    /// with this owner; production projection mutators remain private.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn from_sections_for_test(sections: impl IntoIterator<Item = IniSection>) -> Self {
+    /// Construct stored sections without parsing text. Native synthetic INIs
+    /// write names and values directly; punctuation in them is not syntax.
+    /// A repeated section replaces its first stored occurrence.
+    pub fn from_sections(sections: impl IntoIterator<Item = IniSection>) -> Self {
         let mut ini = Self::empty();
         for section in sections {
             ini.replace_first_section(section);
         }
         ini
+    }
+
+    /// Recorded cache controls may include empty entries the text reader drops.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn from_sections_for_test(sections: impl IntoIterator<Item = IniSection>) -> Self {
+        Self::from_sections(sections)
     }
 
     /// Parse arbitrary bytes by zero-extending each byte to a Unicode scalar.
@@ -768,9 +772,12 @@ impl IniFile {
         }
     }
 
-    /// Deterministic hash over native section occurrence and entry order.
+    /// Deterministic hash over native section occurrence and entry order,
+    /// the same on every platform
+    /// ([`StateHasher`](crate::util::state_hasher::StateHasher)): replays
+    /// carry a map's.
     pub fn content_hash(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = crate::util::state_hasher::StateHasher::new();
         for section in &self.sections {
             section.name.hash(&mut hasher);
             for key in section.keys() {

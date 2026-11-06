@@ -22,6 +22,7 @@ use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::components::DriveCoord;
 use crate::sim::game_entity::GameEntity;
+use crate::sim::trigger_runtime::TeamTagOrder;
 
 use crate::sim::world::FrameEffects;
 use crate::sim::world::Simulation;
@@ -220,6 +221,16 @@ impl Simulation {
         // multiplayer game, is destroyed.
         let team_rules = TeamRules::new(&rules.general, self.session.game_mode_nonzero());
         if team.dissolves(&team_rules, current_frame) {
+            // TeamClass::AI @0x006E9140, retail gamemd.exe:6E92D0..6E9320
+            // raises23 while the empty Team still exists for HasOccurred23.
+            if team.leaving_map {
+                self.raise_team_left_map_tags(
+                    TeamTagOrder::Forward,
+                    rules,
+                    registry,
+                    frame_effects,
+                );
+            }
             self.destroy_team(team_id, rules, frame_effects);
             return;
         }
@@ -320,7 +331,12 @@ impl Simulation {
                 if team.leaving_map {
                     //6EA49F..6EA4D2 raises23 while this empty Team still
                     //exists. Callbacks can destroy Teams or create new Tags.
-                    self.raise_team_left_map_tags(rules, registry, frame_effects);
+                    self.raise_team_left_map_tags(
+                        TeamTagOrder::Reverse,
+                        rules,
+                        registry,
+                        frame_effects,
+                    );
                 }
                 self.destroy_team(team_id, rules, frame_effects);
                 return false;
@@ -351,9 +367,9 @@ impl Simulation {
     /// `Calc_Center @ 0x006EAEE0` into the team's centre (`+0x34`) and
     /// closest member (`+0x38`): the mean XY (signed truncating division) of
     /// its live joined members in the playfield (`+0x3D5`), a
-    /// `GuardSlower=` team counting twice each member its weapon test
-    /// admits (`vt+0x4E0`); the cell there, unless the closest member
-    /// (nearest the team's move target by squared XY distance, the last in
+    /// `GuardSlower=` team counting twice each member of a slow kind
+    /// (`vt+0x4E0`, `guard_slower_weight`); the cell there, unless the
+    /// closest member (nearest the team's move target by squared XY distance, the last in
     /// list order while there is none; a naval transport never counts; the
     /// head when none does) cannot enter it (`vt+0x1AC`), when the centre is
     /// that member. Without such members both are cleared.
@@ -437,19 +453,17 @@ impl Simulation {
     }
 
     /// `FootClass vt+0x4E0` (`0x004DBFD0`), which a `GuardSlower=` team's
-    /// centre weights twice: unarmed (`GetWeapon(0)`), or of `TechLevel=-1`,
-    /// or `DeploysInto=` a building, or converted speed of 13 leptons/frame
-    /// or less (`TechnoTypeClass::Read_INI @ 0x0071465F`).
+    /// centre weights twice: a type of `TechLevel=-1`, or `DeploysInto=` a
+    /// building, or of converted speed 13 leptons/frame or less
+    /// (`TechnoTypeClass::Read_INI @ 0x0071465F`). Its first test, a NULL
+    /// `GetWeapon(0)` (`0x004DBFD7..0x004DBFE1`), never passes: GetWeapon
+    /// `0x0070E140` returns NULL only for index -1 and otherwise the address
+    /// of a weapon slot (`0x007177C0`/`0x007177E0`), so an unarmed member is
+    /// weighted by those three tests alone.
     fn guard_slower_weight(&self, entity: &GameEntity, rules: &RuleSet) -> bool {
         self.object_type(entity.type_ref(), rules)
             .is_some_and(|object| {
-                crate::sim::combat::combat_weapon::weapon_for_index(
-                    object,
-                    entity.veterancy.rank(),
-                    0,
-                )
-                .is_none()
-                    || self.object_tech_level(object) == -1
+                self.object_tech_level(object) == -1
                     || object.deploys_into.is_some()
                     || crate::util::fixed_math::ra2_speed_to_leptons_per_frame(object.speed) <= 13
             })
@@ -709,6 +723,7 @@ impl Simulation {
                         head.veterancy.rank(),
                         0,
                     )
+                    .and_then(|record| record.weapon_id)
                 })
                 .is_some();
             if head.category() == EntityCategory::Aircraft

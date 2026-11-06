@@ -2,13 +2,12 @@
 
 use crate::map::scenario_menu::MapMenuEntry;
 use crate::skirmish_launch::{
-    HOUSE_COLOR_COUNT, LaunchCountry, LaunchStartPosition, SKIRMISH_PLAYER_SLOT_COUNT,
+    HOUSE_COLOR_COUNT, LaunchCountry, LaunchStartPosition, NETWORK_PLAYER_SLOT_COUNT,
+    SKIRMISH_PLAYER_SLOT_COUNT,
 };
-use crate::ui::shell::combobox::ComboPopup;
+use crate::ui::shell::combobox::{ComboPopup, ComboPress};
 
-use super::super::layout::{
-    DropdownMetrics, RectPx, SkirmishShellLayout, combo_arrow_hit_rect, combo_face_rect,
-};
+use super::super::layout::{DropdownMetrics, RectPx, SkirmishShellLayout, combo_face_rect};
 use super::super::scroll::ScrollModel;
 use super::{
     DropdownScrollDragState, DropdownScrollbarPart, DropdownScrollbarPressState, OpenComboDropdown,
@@ -17,14 +16,22 @@ use super::{
     player_row_visible,
 };
 
-pub fn combo_rect(layout: &SkirmishShellLayout, id: SkirmishComboId) -> Option<RectPx> {
+/// The control rect of `id`'s player row; `None` while VERA's scrollbar
+/// shows other computer rows.
+pub fn combo_rect(
+    layout: &SkirmishShellLayout,
+    state: &SkirmishShellState,
+    id: SkirmishComboId,
+) -> Option<RectPx> {
+    let slot = state.row_slot(combo_player_row(id))?;
     match id {
-        SkirmishComboId::AiType(idx) => layout.rows.ai_type_combos.get(idx).copied(),
-        SkirmishComboId::Side(row) => layout.rows.side_combos.get(row).copied(),
-        SkirmishComboId::Color(row) => layout.color_combos.get(row).copied(),
-        SkirmishComboId::Start(row) => layout.rows.start_combos.get(row).copied(),
-        SkirmishComboId::Team(row) => layout.rows.team_combos.get(row).copied(),
+        SkirmishComboId::AiType(_) => layout.rows.ai_type_combos.get(slot.checked_sub(1)?),
+        SkirmishComboId::Side(_) => layout.rows.side_combos.get(slot),
+        SkirmishComboId::Color(_) => layout.color_combos.get(slot),
+        SkirmishComboId::Start(_) => layout.rows.start_combos.get(slot),
+        SkirmishComboId::Team(_) => layout.rows.team_combos.get(slot),
     }
+    .copied()
 }
 
 pub fn combo_dropdown_rect(
@@ -46,7 +53,7 @@ fn combo_popup(
     if !combo_enabled(state, maps, id) {
         return None;
     }
-    let rect = combo_rect(layout, id)?;
+    let rect = combo_rect(layout, state, id)?;
     let item_count = combo_items(state, maps, id).len() as i32;
     if item_count == 0 {
         return None;
@@ -261,16 +268,17 @@ pub fn combo_items(
                 .filter(|color| color_claimed_by_other_row(state, row, *color).is_some()),
         ),
         SkirmishComboId::Start(row) => {
+            // VERA lists a map's starts up to thirty, as its rooms do.
             let capacity = maps
                 .get(state.selected_map_idx)
                 .map(|map| {
                     map.player_capacity
-                        .clamp(0, SKIRMISH_PLAYER_SLOT_COUNT as i32) as usize
+                        .clamp(0, NETWORK_PLAYER_SLOT_COUNT as i32) as usize
                 })
                 .unwrap_or(SKIRMISH_PLAYER_SLOT_COUNT);
             available_start_choices(
                 selected_start_position(state, row),
-                (0..SKIRMISH_PLAYER_SLOT_COUNT)
+                (0..NETWORK_PLAYER_SLOT_COUNT)
                     .map(|index| LaunchStartPosition::Position(index as u8))
                     .filter(|start| start_position_taken_by_other_row(state, row, *start)),
                 capacity,
@@ -454,9 +462,12 @@ pub fn combo_enabled(
     maps: &[MapMenuEntry],
     id: SkirmishComboId,
 ) -> bool {
-    if !player_row_visible(state, maps, combo_player_row(id)) {
-        return false;
-    }
+    player_row_visible(state, maps, combo_player_row(id)) && combo_open(state, id)
+}
+
+/// Whether the combo takes a pick wherever its row shows: the row's player
+/// type and the mode's `AlliesAllowed` decide.
+pub(super) fn combo_open(state: &SkirmishShellState, id: SkirmishComboId) -> bool {
     match id {
         SkirmishComboId::AiType(_) => true,
         SkirmishComboId::Side(0) | SkirmishComboId::Color(0) | SkirmishComboId::Start(0) => true,
@@ -581,9 +592,10 @@ fn evict_other_color_claimants(state: &mut SkirmishShellState, row: usize, color
     }
 }
 
-fn combo_hit_order() -> Vec<SkirmishComboId> {
+fn combo_hit_order(state: &SkirmishShellState) -> Vec<SkirmishComboId> {
     let mut ids = Vec::new();
-    for row in (0..SKIRMISH_PLAYER_SLOT_COUNT).rev() {
+    for slot in (0..SKIRMISH_PLAYER_SLOT_COUNT).rev() {
+        let row = state.slot_row(slot);
         ids.push(SkirmishComboId::Team(row));
         ids.push(SkirmishComboId::Start(row));
         ids.push(SkirmishComboId::Color(row));
@@ -595,38 +607,19 @@ fn combo_hit_order() -> Vec<SkirmishComboId> {
     ids
 }
 
-fn combo_arrow_at(
-    state: &SkirmishShellState,
-    layout: &SkirmishShellLayout,
-    maps: &[MapMenuEntry],
-    x: i32,
-    y: i32,
-) -> Option<SkirmishComboId> {
-    combo_hit_order().into_iter().find(|id| {
-        combo_enabled(state, maps, *id)
-            && combo_rect(layout, *id)
-                .map(|rect| combo_arrow_hit_rect(rect, layout.scale).contains(x, y))
-                .unwrap_or(false)
-    })
-}
-
-/// A click anywhere on the collapsed combo face — not just the arrow zone.
-/// The owner-draw combo plays the open sound on any face click; only a click
-/// inside the rightmost arrow zone actually toggles the dropdown open. Splitting
-/// these two reachable areas lets us play the sound on a text-portion click
-/// while still gating the open on the arrow zone.
+/// The enabled combo whose collapsed face is under the press, with its
+/// control rect.
 fn combo_face_at(
     state: &SkirmishShellState,
     layout: &SkirmishShellLayout,
     maps: &[MapMenuEntry],
     x: i32,
     y: i32,
-) -> Option<SkirmishComboId> {
-    combo_hit_order().into_iter().find(|id| {
-        combo_enabled(state, maps, *id)
-            && combo_rect(layout, *id)
-                .map(|rect| combo_face_rect(rect, layout.scale).contains(x, y))
-                .unwrap_or(false)
+) -> Option<(SkirmishComboId, RectPx)> {
+    combo_hit_order(state).into_iter().find_map(|id| {
+        let rect = combo_rect(layout, state, id)?;
+        (combo_enabled(state, maps, id) && combo_face_rect(rect, layout.scale).contains(x, y))
+            .then_some((id, rect))
     })
 }
 
@@ -781,44 +774,26 @@ pub(super) fn handle_combo_mouse_down(
             }
             return true;
         }
-        if let Some(dropdown) = combo_dropdown_rect(state, layout, maps, open.id) {
-            if let Some(content) = combo_dropdown_content_rect(state, layout, maps, open.id)
-                && content.contains(x, y)
-            {
-                let row = open.top_index + ((y - content.y) / metrics.row_h) as usize;
-                if let Some(item) = combo_items(state, maps, open.id).get(row).copied() {
-                    apply_combo_selection(state, open.id, item);
-                }
-                state.open_combo_dropdown = None;
-                state.dropdown_scroll_drag = None;
-                state.dropdown_scroll_press = None;
-                state.push_ui_sound(SkirmishShellUiSound::GuiComboCloseSound);
-                return true;
-            }
-            if dropdown.contains(x, y) {
-                // The click landed in popup chrome rather than a row; native
-                // ComboDropWin consumes it without closing the popup.
-                return true;
-            }
+        // Past this dialog's own scrollbar, ComboDropWin picks or dismisses.
+        let press = combo_popup(state, layout, maps, open.id, open.top_index)
+            .map_or(ComboPress::Dismiss, |popup| popup.press(x, y));
+        if let ComboPress::Pick(row) = press
+            && let Some(item) = combo_items(state, maps, open.id).get(row).copied()
+        {
+            apply_combo_selection(state, open.id, item);
         }
-        // The open dropdown is a captured popup: any mouse-down outside its
-        // content/scrollbar is delivered to the popup, which plays the close
-        // sound and closes itself. Because the popup consumed the click, it
-        // does NOT propagate to a second combo — switching combos takes two
-        // clicks (this one closes, a later one opens). So even when the click
-        // lands on another combo's arrow, we only close here.
         state.open_combo_dropdown = None;
         state.dropdown_scroll_drag = None;
         state.dropdown_scroll_press = None;
-        state.push_ui_sound(SkirmishShellUiSound::GuiComboCloseSound);
+        if let Some(cue) = press.cue() {
+            state.push_ui_sound(SkirmishShellUiSound::combo(cue));
+        }
         return true;
     }
 
-    // A click anywhere on a collapsed combo face plays the open sound. Only a
-    // click inside the rightmost arrow zone actually opens the dropdown.
-    if let Some(id) = combo_face_at(state, layout, maps, x, y) {
-        state.push_ui_sound(SkirmishShellUiSound::GuiComboOpenSound);
-        if combo_arrow_at(state, layout, maps, x, y) == Some(id) {
+    if let Some((id, rect)) = combo_face_at(state, layout, maps, x, y) {
+        let press = ComboPress::on_face(rect, layout.scale, x, y);
+        if press == ComboPress::Open {
             state.open_combo_dropdown = Some(OpenComboDropdown {
                 id,
                 top_index: 0,
@@ -826,6 +801,9 @@ pub(super) fn handle_combo_mouse_down(
             });
             state.dropdown_scroll_drag = None;
             state.dropdown_scroll_press = None;
+        }
+        if let Some(cue) = press.cue() {
+            state.push_ui_sound(SkirmishShellUiSound::combo(cue));
         }
         return true;
     }

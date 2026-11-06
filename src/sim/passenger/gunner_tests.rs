@@ -22,6 +22,49 @@ use crate::sim::world::Simulation;
 
 const OWNER: &str = "Americans";
 
+/// Foot AddPassenger4DE630 selects the incoming gunner only when the
+/// committed cargo count is exactly one (4DE652), not on every boarding.
+#[test]
+fn multiple_passenger_gunner_keeps_the_first_boarded_weapon() {
+    use crate::sim::world::FrameEffects;
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let mut ini = (*retail.processed_rules).clone();
+    ini.merge(&crate::rules::ini_parser::IniFile::from_str(
+        "[FV]\nPassengers=2\n",
+    ));
+    let rules = RuleSet::from_ini_with_fixed_art_for_test(&ini, &retail.fixed_art).unwrap();
+    let (mut sim, _) = arena(&rules);
+    let ifv = sim.spawn_object("FV", OWNER, 16, 16, 64, &rules).unwrap();
+    let engineer = sim
+        .spawn_object("ENGINEER", OWNER, 16, 15, 64, &rules)
+        .unwrap();
+    let gi = sim.spawn_object("E1", OWNER, 15, 16, 64, &rules).unwrap();
+    assert!(super::board_passenger(
+        &mut sim,
+        &rules,
+        engineer,
+        ifv,
+        super::BoardingArm::InfantryTransport,
+        None,
+        FrameEffects::default()
+    ));
+    assert_selection(&sim, ifv, (1, 2));
+    assert!(super::board_passenger(
+        &mut sim,
+        &rules,
+        gi,
+        ifv,
+        super::BoardingArm::InfantryTransport,
+        None,
+        FrameEffects::default()
+    ));
+    assert_eq!(entity(&sim, ifv).passenger_role.passenger_count(), 2);
+    assert_selection(&sim, ifv, (1, 2));
+    assert_current_weapon(&sim, &rules, ifv, "RepairBullet");
+}
+
 fn arena(rules: &RuleSet) -> (Simulation, PathGrid) {
     let mut sim = Simulation::new();
     for (name, side) in [(OWNER, 0), ("Russians", 1)] {
@@ -834,9 +877,13 @@ fn retail_sniper_ifv_guard_scan_uses_its_boarded_weapon_range() {
         let target = sim
             .spawn_object("E2", "Russians", x + distance, y, 192, rules)
             .expect("spawn visible infantry target");
+        // The player has seen the enemy: the campaign scan gate needs +0x41B.
+        crate::sim::arena_fixture::discover(&mut sim, target);
         let owner = entity(&sim, ifv).owner();
         sim.fog.reveal_all_for_owner(owner);
-        let pick = sim.greatest_threat_represented(rules, None, ifv, ScanMission::Guard, None);
+        let pick = sim
+            .greatest_threat_represented(rules, None, ifv, ScanMission::Guard, None)
+            .and_then(crate::sim::combat::TargetKind::object_id);
         assert_eq!(
             pick,
             expected_pick.then_some(target),
@@ -849,7 +896,8 @@ fn retail_sniper_ifv_guard_scan_uses_its_boarded_weapon_range() {
         // accepting the distant infantry once its longer-range gunner leaves.
         unload_at_clear_exit(&mut sim, rules, ifv, passenger);
         assert_eq!(
-            sim.greatest_threat_represented(rules, None, ifv, ScanMission::Guard, None),
+            sim.greatest_threat_represented(rules, None, ifv, ScanMission::Guard, None)
+                .and_then(crate::sim::combat::TargetKind::object_id),
             None,
             "empty IFV Guard scan at {distance} cells"
         );
@@ -948,6 +996,9 @@ fn temporal_attack_arena(rules: &RuleSet) -> (Simulation, PathGrid, u64, u64, u6
 #[path = "gunner_temporal_tests.rs"]
 mod temporal;
 
+// Phobos `ROF.RandomDelay` (`0x006FD0B5`) redraws the full-rearm jitter, so
+// these stock goldens only hold without the capability.
+#[cfg(not(feature = "phobos"))]
 #[path = "gunner_temporal_oracle_tests.rs"]
 mod temporal_oracle;
 

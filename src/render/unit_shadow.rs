@@ -1,5 +1,6 @@
-//! Unit73C1D2..73C5C4's Jumpjet shadow suffix. Unlike Aircraft414687,
-//! it keeps the live height and draws after the body. Original execution:
+//! Unit73C1D2..73C5C4's shadow suffix as a lifted Unit (Jumpjet, Hover)
+//! draws it. Unlike Aircraft414687, it keeps the live height and draws after
+//! the body. Original execution:
 //! tools/voxel_oracle/aircraft_shadow.py --unit (unit_shadow.json).
 
 use crate::render::foot_depth::DepthCell;
@@ -28,6 +29,28 @@ pub(crate) struct UnitShadowPose {
     pub mask_offset: [i32; 2],
 }
 
+impl UnitShadowPose {
+    /// The atlas stencil drawn. The cache key (73B619, 73C21E..73C287)
+    /// carries no body HVA frame and 707280 samples frame zero; the grounded
+    /// mask has its own entry.
+    pub(crate) fn key(&self, type_id: &str) -> crate::render::unit_atlas::UnitSpriteKey {
+        use crate::render::unit_atlas::{GROUNDED_SHADOW_FRAME_FLAG, UnitSpriteKey, VxlLayer};
+        UnitSpriteKey {
+            type_id: type_id.to_owned(),
+            turret_index: 0,
+            facing: self.facing,
+            layer: VxlLayer::Shadow,
+            frame: if self.mask == UnitShadowMask::Retained {
+                GROUNDED_SHADOW_FRAME_FLAG
+            } else {
+                0
+            },
+            slope_type: self.slope,
+            barrel_pitch: 0,
+        }
+    }
+}
+
 pub(crate) fn pose(
     context: UnitShadowContext,
     lookup: impl FnOnce([i16; 2]) -> DepthCell,
@@ -45,7 +68,8 @@ pub(crate) fn pose(
     //sets key -1, while a grounded mask has its own high-bit cache entry.
     // Residual: 73C43F..73C457 takes that key change only for BalloonHover
     // (+D6A) or SpeedType Track/Wheel (+67C 1/2); other Jumpjets (stock
-    // SCHP, SHAD, HIND) keep the plain cached key with the mask present.
+    // SCHP, SHAD, HIND) and the Hover types (LCRF, ROBO, SAPC, YHVR) keep the
+    // plain cached key with the mask present.
     // Unported: those types take this path while grounded or in low flight,
     // likely a cached rather than fresh mask (a pixel-level difference).
     let high_flying = crate::sim::movement::air_movement::object_flight_predicate(

@@ -34,6 +34,49 @@ pub(crate) enum TacticalEntityPurpose {
     ScreenSelection,
 }
 
+/// Phobos `IsControlledByCurrentPlayer_Wrapper` (`Ext/Techno/Hooks.cpp:626`):
+/// in campaign, a human or player-controlled owner answers from the
+/// `DisguiseBlinkingVisibility` flags; every other viewer uses
+/// `CanTargetHouse` against the current player (observers answer true, which
+/// VERA approximates with the absence of a local House). Without the
+/// capability the original House50B6F0 flag stands.
+fn disguise_owner_visible(
+    sim: &crate::sim::world::Simulation,
+    entity: &GameEntity,
+    local_owner_id: Option<InternedId>,
+    rules: Option<&crate::rules::ruleset::RuleSet>,
+    owner_is_allied: bool,
+) -> bool {
+    #[cfg(feature = "phobos")]
+    if let Some(rules) = rules {
+        use crate::rules::phobos_shields::AffectedHouse;
+        let flags = rules.phobos_draw_globals().disguise_blinking_visibility;
+        let campaign = !sim.session().game_mode_nonzero();
+        let player_controlled = campaign
+            && sim
+                .houses()
+                .get(&entity.owner())
+                .is_some_and(|house| house.is_human() || house.player_control());
+        return if player_controlled {
+            (flags.contains(AffectedHouse::ALLIES) && owner_is_allied)
+                || flags.contains(AffectedHouse::OWNER)
+        } else {
+            local_owner_id.is_none_or(|observer| {
+                crate::sim::combat::can_target_house(
+                    flags,
+                    observer,
+                    entity.owner(),
+                    sim.houses(),
+                    sim.house_alliances(),
+                    sim.interner(),
+                )
+            })
+        };
+    }
+    let _ = (sim, entity, local_owner_id, rules, owner_is_allied);
+    sim.house_is_human_player(entity.owner())
+}
+
 /// Gather facts for the simulation-owned visual-character query without
 /// retaining a second ownership, alliance, sensor or Rules state in rendering.
 pub(crate) fn observer_draw_context(
@@ -45,7 +88,7 @@ pub(crate) fn observer_draw_context(
 ) -> crate::render::draw_state::ObserverDrawContext {
     let owner = sim.interner().resolve(entity.owner());
     let allied = local_owner.is_some_and(|observer| {
-        crate::map::houses::is_allied_with(sim.house_alliances(), observer, owner)
+        crate::map::houses::is_allied_with(sim.house_alliances().as_map(), observer, owner)
     });
     let object = rules.and_then(|r| sim.interner().object_type(entity.type_ref(), r));
     let disguise_cell = entity
@@ -62,17 +105,16 @@ pub(crate) fn observer_draw_context(
             );
             cells.coord(cell)
         });
+    let disguise_owner_visible = disguise_owner_visible(sim, entity, local_owner_id, rules, allied);
     crate::render::draw_state::ObserverDrawContext {
         owner_is_allied: allied,
         owner_is_mutually_allied: allied
             && local_owner.is_some_and(|observer| {
-                crate::map::houses::is_allied_with(sim.house_alliances(), owner, observer)
+                crate::map::houses::is_allied_with(sim.house_alliances().as_map(), owner, observer)
             }),
         observer_present: local_owner_id.is_some(),
-        detects_cloak: local_owner_id.is_some_and(|observer| {
-            sim.fog()
-                .has_sensor_for_house(observer, entity.position.rx(), entity.position.ry())
-        }),
+        detects_cloak: local_owner_id
+            .is_some_and(|observer| sim.fog().senses_object_for_house(observer, entity)),
         cloaking_stages: rules.map_or_else(
             || crate::rules::ruleset::GeneralRules::default().cloaking_stages,
             |r| r.general.cloaking_stages,
@@ -83,6 +125,7 @@ pub(crate) fn observer_draw_context(
         }),
         is_campaign: !sim.session().game_mode_nonzero(),
         owner_is_current_player: sim.house_is_human_player(entity.owner()),
+        disguise_owner_visible,
         disguise_cell_present: disguise_cell.is_some(),
         detects_disguise: local_owner_id
             .zip(disguise_cell)
@@ -158,14 +201,15 @@ pub(crate) fn tactical_entity_admission(
         || entity.lifecycle.in_limbo()
         || entity.passenger_role.is_inside_transport()
         || (requires_revealed_anchor
-            && !is_entity_visible_for_local_owner(
+            && !ignore_visibility
+            && !object_shown_to_local_owner(
                 local_owner,
+                local_owner_id,
                 fog,
                 alliances,
                 &entity.position,
                 owner,
-                ignore_visibility,
-                local_owner_id,
+                false,
             ))
     {
         return None;
@@ -270,7 +314,7 @@ fn compose_tactical_screen_entity_encounter_order(
                         local_owner,
                         local_owner_id,
                         fog,
-                        sim.house_alliances(),
+                        sim.house_alliances().as_map(),
                         ignore_visibility,
                         current_frame,
                         0,
@@ -438,33 +482,54 @@ pub(crate) fn interpolated_screen_position_entity(
     crate::render::locomotor_visual::screen_position(entity)
 }
 
-/// Check whether an entity is visible to the local player based on shroud.
+/// Is `owner`'s object at `pos` shown to the local player? The one rule
+/// tactical presentation (screen selection, VERA's translucent fog) and input
+/// picking (band preflight, TypeSelect's screen stage, translucent pick
+/// concealment) share; callers keep their own full-visibility switch.
 ///
-/// In standard YR (FogOfWar=false), once a cell is explored it stays fully
-/// visible forever. Entities of the local player's allies, as its house
-/// counts them, are always visible (VERA's policy, with no native ally test).
-/// Others are visible if the cell they occupy has been explored (revealed).
-pub(crate) fn is_entity_visible_for_local_owner(
+/// Without a known local player everything is shown. The local player's
+/// allies, as its house counts them, always are (VERA's policy, with no native
+/// ally test). Anyone else's object needs an explored anchor cell no hostile
+/// gap covers; `current_sight_only` (translucent fog under FogOfWar) also
+/// needs the viewer's current sight there.
+pub(crate) fn object_shown_to_local_owner(
     local_owner: Option<&str>,
+    local_owner_id: Option<InternedId>,
     fog: &FogState,
     alliances: &crate::map::houses::HouseAllianceMap,
     pos: &Position,
     owner: &str,
-    ignore_visibility: bool,
-    local_owner_id: Option<InternedId>,
+    current_sight_only: bool,
 ) -> bool {
-    if ignore_visibility {
-        return true;
-    }
     let Some(local_owner) = local_owner else {
         return true;
     };
-    if crate::map::houses::is_allied_with(alliances, local_owner, owner) {
-        return true;
-    }
-    let owner_id = local_owner_id.unwrap_or_default();
-    fog.is_cell_revealed(owner_id, pos.rx(), pos.ry())
-        && !fog.is_cell_gap_covered(owner_id, pos.rx(), pos.ry())
+    crate::map::houses::is_allied_with(alliances, local_owner, owner)
+        || cell_shows_objects(
+            local_owner_id.unwrap_or_default(),
+            fog,
+            pos.rx(),
+            pos.ry(),
+            current_sight_only,
+        )
+}
+
+/// Does `viewer` see another house's objects on this cell? Explored (with
+/// `current_sight_only`, currently seen) and not covered by a hostile gap.
+fn cell_shows_objects(
+    viewer: InternedId,
+    fog: &FogState,
+    rx: u16,
+    ry: u16,
+    current_sight_only: bool,
+) -> bool {
+    let lit = if current_sight_only {
+        fog.is_cell_visible(viewer, rx, ry)
+    } else {
+        // Standard YR has no fog-of-war layer: explored ground stays visible.
+        fog.is_cell_revealed(viewer, rx, ry)
+    };
+    lit && !fog.is_cell_gap_covered(viewer, rx, ry)
 }
 
 /// VERA's translucent fog removes the A buffer's native concealment, so what
@@ -481,37 +546,50 @@ pub(crate) fn translucent_fog_conceals_cell(
     let (Some(viewer), Some(fog)) = (viewer, fog) else {
         return false;
     };
-    let lit = if fog_of_war {
-        fog.is_cell_visible(viewer, rx, ry)
-    } else {
-        // Standard YR has no fog-of-war layer: explored ground stays visible.
-        fog.is_cell_revealed(viewer, rx, ry)
-    };
-    !lit || fog.is_cell_gap_covered(viewer, rx, ry)
+    !cell_shows_objects(viewer, fog, rx, ry, fog_of_war)
 }
 
-/// [`translucent_fog_conceals_cell`] for one owned object: allies keep drawing,
-/// everyone else follows the local viewer's current sight at the anchor cell.
+/// The local house VERA's translucent fog conceals other houses' unseen
+/// objects from, or `None` under the retail fog or full visibility. The draw
+/// plan and the tactical pickers ([`crate::app::input::entity_pick::presented`])
+/// both read it, so whatever the fog takes out of the plan no pick finds.
+pub(crate) fn translucent_fog_viewer(
+    state: &AppState,
+    sim: &crate::sim::world::Simulation,
+) -> Option<InternedId> {
+    if !state.translucent_fog_enabled() || state.match_state.sandbox_full_visibility {
+        return None;
+    }
+    let name = crate::app::input::commands::preferred_local_owner_name(state)?;
+    sim.interner().get(&name)
+}
+
+/// [`object_shown_to_local_owner`] as VERA's translucent fog applies it to
+/// one live object: everyone but the viewer's allies follows the viewer's
+/// sight at the anchor cell, current sight under FogOfWar.
+///
+/// Native draws such an object and lets the A buffer darken it: the IsFogged
+/// gates of `Tactical_ObjectRenderingLoop @ 0x006D8DB0` (`0x006D8FDA`,
+/// `0x006D920E`, `0x006D929F`, `0x006D965D`) call `MapClass::IsFogged @
+/// 0x005865E0`, which is `xor al, al; ret 4`. Its click stays pickable too:
+/// `DisplayClass::ProcessClickCoords @ 0x00692300` refuses the pick under
+/// FogOfWar (`0x006924A4..0x006924FA`) only for a fogged Building (`+0x6E7`)
+/// on the clicked cell, and otherwise asks that same stub.
 pub(crate) fn translucent_fog_conceals(
-    local_owner: Option<&str>,
-    fog: &FogState,
-    alliances: &crate::map::houses::HouseAllianceMap,
-    pos: &Position,
-    owner: &str,
-    ignore_visibility: bool,
-    local_owner_id: Option<InternedId>,
-    fog_of_war: bool,
+    sim: &crate::sim::world::Simulation,
+    viewer: InternedId,
+    entity: &GameEntity,
 ) -> bool {
-    if ignore_visibility {
-        return false;
-    }
-    let Some(local_owner) = local_owner else {
-        return false;
-    };
-    if crate::map::houses::is_allied_with(alliances, local_owner, owner) {
-        return false;
-    }
-    translucent_fog_conceals_cell(local_owner_id, Some(fog), pos.rx(), pos.ry(), fog_of_war)
+    let interner = sim.interner();
+    !object_shown_to_local_owner(
+        Some(interner.resolve(viewer)),
+        Some(viewer),
+        sim.fog(),
+        sim.house_alliances().as_map(),
+        &entity.position,
+        interner.resolve(entity.owner()),
+        sim.session().game_options().fog_of_war,
+    )
 }
 
 /// Enemy weapon projectiles and their trails are hidden under the same rule.
@@ -531,7 +609,7 @@ pub(crate) fn translucent_fog_conceals_bullet(
         .map(|entity| sim.interner().resolve(entity.owner()));
     let allied = source_owner.is_some_and(|owner| {
         local_owner.is_some_and(|local| {
-            crate::map::houses::is_allied_with(sim.house_alliances(), local, owner)
+            crate::map::houses::is_allied_with(sim.house_alliances().as_map(), local, owner)
         })
     });
     if allied {
@@ -915,6 +993,79 @@ mod tests {
     }
 
     #[test]
+    fn undeployable_building_band_uses_registered_screen_candidates() {
+        use crate::app::input::entity_pick::compute_box_selection_snapshot;
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch;
+
+        let Some(retail) = retail_battle_rules_for_map_with_patch(
+            "Hills.mmx",
+            &IniFile::from_str("[GAPILL]\nUndeploysInto=AMCV\n[GAPOWR]\nUndeploysInto=AMCV\n"),
+        ) else {
+            return;
+        };
+        let rules = &retail.rules;
+        assert!(rules.object("GAPILL").unwrap().is_1x1_with_undeploy());
+        assert!(!rules.object("GAPOWR").unwrap().is_1x1_with_undeploy());
+        let mut sim = crate::sim::arena_fixture::rival_arena(rules, 1);
+        let owner = sim.interner().get("Americans").unwrap();
+        sim.session_mut_for_test()
+            .set_current_house_for_test(Some(owner));
+        sim.intern_rule_type_ids(rules);
+        sim.resolve_type_handles(rules);
+        let pill = sim
+            .spawn_object("GAPILL", "Americans", 16, 16, 0, rules)
+            .unwrap();
+        let power = sim
+            .spawn_object("GAPOWR", "Americans", 20, 16, 0, rules)
+            .unwrap();
+        for id in [pill, power] {
+            assert!(sim.display_layers().layer_of(id).is_some());
+        }
+        let bounds = (-1.0e6, -1.0e6, 1.0e6, 1.0e6);
+        let order = |bulk| {
+            compose_tactical_screen_entity_encounter_order(
+                &sim,
+                bounds,
+                Some("Americans"),
+                Some(owner),
+                sim.fog(),
+                false,
+                0,
+                bulk,
+                Some(rules),
+            )
+        };
+        let ordinary = order(false);
+        let preflight = order(true);
+        for id in [pill, power] {
+            assert!(ordinary.contains(&id), "registered local building {id}");
+            assert!(preflight.contains(&id));
+        }
+        let mutation = compute_box_selection_snapshot(
+            sim.entities(),
+            &preflight,
+            &ordinary,
+            &[],
+            Some((sim.fog(), sim.house_alliances().as_map())),
+            Some("Americans"),
+            bounds.0,
+            bounds.1,
+            bounds.2,
+            bounds.3,
+            false,
+            Some(rules),
+            Some(sim.houses()),
+            Some(sim.interner()),
+        )
+        .expect("registered buildings consume the band");
+        // Building459C00 calls465D40 before Techno6FC030: Undeploy alone
+        // does not admit the larger power plant's fixed-ART foundation.
+        assert_eq!(mutation.select, [pill]);
+        assert!(mutation.clear);
+    }
+
+    #[test]
     fn item83_band_preflight_source_bulk_registers_hidden_live_building_only() {
         use crate::app::input::entity_pick::compute_box_selection_snapshot;
         use crate::sim::combat::Health;
@@ -1010,7 +1161,7 @@ mod tests {
             &preflight,
             &visible,
             &[],
-            Some((sim.fog(), sim.house_alliances())),
+            Some((sim.fog(), sim.house_alliances().as_map())),
             Some("Americans"),
             building_anchor.0 - 1.0,
             building_anchor.1 - 1.0,
@@ -1034,7 +1185,7 @@ mod tests {
                 &preflight,
                 &visible,
                 &[],
-                Some((sim.fog(), sim.house_alliances())),
+                Some((sim.fog(), sim.house_alliances().as_map())),
                 Some("Americans"),
                 mobile_anchor.0 - 1.0,
                 mobile_anchor.1 - 1.0,
@@ -1185,14 +1336,13 @@ mod tests {
         let enemy_entity = entity(enemy);
         let own_entity = entity(viewer);
         let conceal = |fog: &FogState, entity: &GameEntity, owner: &str, fog_of_war: bool| {
-            translucent_fog_conceals(
+            !object_shown_to_local_owner(
                 Some(viewer_name),
+                Some(viewer),
                 fog,
                 &Default::default(),
                 &entity.position,
                 owner,
-                false,
-                Some(viewer),
                 fog_of_war,
             )
         };

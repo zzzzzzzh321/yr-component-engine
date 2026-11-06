@@ -9,18 +9,36 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+#[cfg(not(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown")))]
+use std::net::UdpSocket;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::Duration;
 
-use vera20k_relay_protocol::{ClientSession, RelayError, ServerEvent};
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+#[path = "web_socket.rs"]
+mod web_socket;
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+use web_socket::UdpSocket;
+
+/// The compiled proxy origin: the built-in lobby's datagram and HTTPS adapters,
+/// and a spawn launch that names no `[Relay] GatewayUrl`.
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+pub fn browser_proxy_url() -> &'static str {
+    match option_env!("WS_PROXY_URL") {
+        Some(origin) => origin,
+        None => "wss://wss.vera20k.com",
+    }
+}
+
 pub use vera20k_relay_protocol::{
-    MAX_PEERS as RELAY_MAX_PEERS, OrderingCertificate, Ticket as RelayTicket,
+    CertificatePacing, MAX_PEERS as RELAY_MAX_PEERS, OrderingCertificate, Ticket as RelayTicket,
     peer_endpoint as relay_peer_endpoint,
 };
+use vera20k_relay_protocol::{ClientSession, RelayError, ServerEvent};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
@@ -34,6 +52,14 @@ use super::global::{
 };
 use super::lan_messages::{SessionScope, ingame::LoadingProgressMessage};
 use super::reliable::{LanConnections, ReceiveError, ReceivedMessage, udp_checksum};
+use crate::util::time::Instant;
+
+/// Receipt metadata belongs to the socket owner, before rendering or Logic
+/// can delay consumption of the authenticated ordering event.
+pub(super) struct ReceivedOrderEvent {
+    pub event: vera20k_relay_protocol::OrderEvent,
+    pub received_at: Instant,
+}
 
 /// Original UDP port data at841F30/841F38. The alternate socket is a separate
 /// receive path; it does not change the default destination port.
@@ -50,6 +76,13 @@ const IO_PUMP_INTERVAL: Duration = Duration::from_millis(6);
 // Scope admission precedes every global/private ACK, sequence and receive cache.
 const LAN_SCOPE_MAGIC: &[u8; 4] = b"VLS\x01";
 const LAN_SCOPE_HEADER_LEN: usize = 4 + 16 + 8;
+// Explicit Leave is resent every 16 wall buckets (256 ms) until the relay
+// acknowledges it. A relay that answers none of these attempts (about a
+// minute) is gone or unreachable: release the route rather than block every
+// later online admission. The relay then treats the place as a lost
+// connection, and the next match's newer generation supersedes it
+// (services/relay/README.md).
+const RELAY_LEAVE_ATTEMPTS: u16 = 235;
 
 /// One admitted route progresses from the existing global loading channel to
 /// private gameplay. Loading peers may finish on different service passes.
@@ -173,11 +206,20 @@ struct PendingDatagram {
     endpoint: SocketAddrV4,
     bytes: [u8; UDP_DATAGRAM_CAPACITY],
     length: usize,
+    failed_attempts: u8,
 }
 
+// VERA adaptation: native retains a failing head forever (7B3D8B..7B3DB0) and
+// grows without a cap (7B20E0). One unreachable destination, such as a dead
+// peer or a forged source an ACK answers, would then stall every later send.
+// A head is retired like WouldBlock after this many failed attempts.
+const MAX_HEAD_ATTEMPTS: u8 = 8;
+// Twice native7B20E0's 128 pooled slots; past this a new raw attempt is
+// retired like WouldBlock, and its reliable owner may retry it.
+const MAX_PENDING_DATAGRAMS: usize = 256;
+
 /// Winsock7B23B0/UDP7B3AA0 owns attempts independently of reliable messages.
-/// Native7B20E0 falls back to heap blocks after its128 pooled slots; there is
-/// no fixed admission cap here. Only this FIFO owns retained wire bytes.
+/// Only this FIFO owns retained wire bytes.
 #[derive(Debug, Default)]
 struct UdpSendQueue {
     pending: VecDeque<PendingDatagram>,
@@ -224,11 +266,16 @@ impl UdpSendQueue {
             .copy_from_slice(&udp_checksum(frame).to_le_bytes());
         bytes[scope_len + CHECKSUM_LEN..scope_len + CHECKSUM_LEN + frame.len()]
             .copy_from_slice(frame);
-        self.pending.push_back(PendingDatagram {
-            endpoint,
-            bytes,
-            length: scope_len + CHECKSUM_LEN + frame.len(),
-        });
+        if self.pending.len() < MAX_PENDING_DATAGRAMS {
+            self.pending.push_back(PendingDatagram {
+                endpoint,
+                bytes,
+                length: scope_len + CHECKSUM_LEN + frame.len(),
+                failed_attempts: 0,
+            });
+        } else {
+            report.send_would_block += 1;
+        }
         //7B24A6..7B24B9 synchronously dispatches one write callback. An older
         //retained head is attempted first; the newly admitted block can wait.
         self.service(channel, report, send);
@@ -240,7 +287,7 @@ impl UdpSendQueue {
         report: &mut UdpServiceReport,
         send: &mut impl FnMut(&[u8], SocketAddrV4) -> io::Result<usize>,
     ) {
-        let Some(head) = self.pending.front() else {
+        let Some(head) = self.pending.front_mut() else {
             return;
         };
         //Each native FD_WRITE callback7B3BA8..7B3EB8 attempts one head only.
@@ -257,8 +304,16 @@ impl UdpSendQueue {
                 report.send_would_block += 1;
             }
             //7B3D8B..7B3DB0 keeps the exact head for every other error,
-            //including Interrupted. No later datagram overtakes it.
-            Err(error) => record_io_error(report, channel, UdpIoOperation::Send, error),
+            //including Interrupted. No later datagram overtakes it until it
+            //exhausts its attempts.
+            Err(error) => {
+                record_io_error(report, channel, UdpIoOperation::Send, error);
+                head.failed_attempts += 1;
+                if head.failed_attempts == MAX_HEAD_ATTEMPTS {
+                    self.pending.pop_front();
+                    report.send_would_block += 1;
+                }
+            }
         }
     }
 }
@@ -281,8 +336,13 @@ struct UdpIo {
     global: GlobalChannel,
     broadcast_targets: Vec<SocketAddrV4>,
     relay: Option<RelayRoute>,
+    #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+    relay_gateway: Option<String>,
     lan_scope: Option<LanScopeState>,
     pending_report: UdpServiceReport,
+    // App play runs the IO pump: the relay session then times datagrams to
+    // the millisecond. Manual-clock consumers time them by `service`.
+    precise_relay_clock: bool,
 }
 
 struct IoPump {
@@ -360,12 +420,25 @@ impl LanUdpTransport {
     /// Logic/render/capture work. The App injects its existing native wall
     /// bucket function, and only this worker samples it after taking the lock.
     /// Thread creation is fallible; failure leaves a synchronous transport.
+    #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+    pub fn start_io_pump(&mut self, _: fn() -> u32) -> io::Result<()> {
+        // Browser callbacks only queue raw datagrams; App services the same
+        // protocol owner after returning to the event loop.
+        self.lock().use_precise_relay_clock();
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown")))]
     pub fn start_io_pump(&mut self, wall_bucket: fn() -> u32) -> io::Result<()> {
         if self.pump.is_some() {
             self.check_worker();
             return Ok(());
         }
-        self.lock().pending_report = UdpServiceReport::default();
+        {
+            let mut io = self.lock();
+            io.pending_report = UdpServiceReport::default();
+            io.use_precise_relay_clock();
+        }
         let io = Arc::clone(&self.io);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
@@ -504,6 +577,17 @@ impl LanUdpTransport {
         result
     }
 
+    /// The WebSocket gateway of a browser relay session, from `[Relay] GatewayUrl`;
+    /// set before `enable_relay`. Desktop relay traffic is direct UDP and has none.
+    pub fn set_relay_gateway(&mut self, origin: Option<String>) {
+        #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+        {
+            self.lock().relay_gateway = origin;
+        }
+        #[cfg(not(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown")))]
+        let _ = origin;
+    }
+
     pub fn relay_ready(&self) -> bool {
         self.lock().relay_ready()
     }
@@ -534,45 +618,175 @@ impl LanUdpTransport {
         Ok(())
     }
 
+    /// A federated match's lobby relay roster, carried in every admission of
+    /// this route. Set it before the pump answers the first challenge.
+    pub fn set_federation_roster(&mut self, roster: &[u8]) -> io::Result<()> {
+        let mut io = self.lock();
+        let route = io
+            .relay
+            .as_mut()
+            .filter(|route| route.retiring.is_none())
+            .ok_or_else(|| io::Error::other("no relay route"))?;
+        route.session.set_federation(roster).map_err(relay_io_error)
+    }
+
     pub fn ordering_certificate(&self) -> Option<Vec<u8>> {
         self.lock().relay.as_ref()?.ordering_certificate.clone()
     }
 
+    /// READY_REQUEST, resent by the caller until the start (spec §6.0).
     pub fn configure_ordering(&mut self, agreement: [u8; 32]) -> io::Result<()> {
-        self.send_ordering(|route| {
+        self.send_ordering(|route, now_ms| {
             let cert = route
                 .ordering_certificate
                 .as_ref()
                 .ok_or(RelayError::Unregistered)?;
             route
                 .session
-                .configure_ordering(cert, agreement, &mut route.encoded)
+                .configure_ordering_at(cert, agreement, now_ms, &mut route.encoded)
         })
     }
 
-    pub fn submit_ordering(&mut self, batch_id: u64, bytes: &[u8]) -> io::Result<()> {
-        self.send_ordering(|route| {
-            route
-                .session
-                .submit_ordering(batch_id, bytes, &mut route.encoded)
-        })
+    /// See `ClientSession::set_ordering_restore`.
+    pub(super) fn set_ordering_restore(&mut self, restoring: bool) {
+        if let Some(route) = self.lock().relay.as_mut() {
+            route.session.set_ordering_restore(restoring);
+        }
+    }
+
+    /// Runs `apply` on the current relay session, if any.
+    fn with_session<T>(&mut self, apply: impl FnOnce(&mut ClientSession) -> T) -> Option<T> {
+        self.lock()
+            .relay
+            .as_mut()
+            .filter(|route| route.retiring.is_none())
+            .map(|route| apply(&mut route.session))
+    }
+
+    /// See `ClientSession::seal_ordering_batch`.
+    pub fn seal_ordering_batch(&mut self, plaintext: &[u8]) -> io::Result<u64> {
+        self.with_session(|session| session.seal_ordering_batch(plaintext))
+            .ok_or_else(|| io::Error::other("no relay route"))?
+            .map_err(relay_io_error)
+    }
+
+    /// See `ClientSession::queue_ordering_checksums`.
+    pub fn queue_ordering_checksums(&mut self, samples: &[(u32, u32)]) -> io::Result<()> {
+        let mut io = self.lock();
+        let route = io
+            .relay
+            .as_mut()
+            .filter(|route| route.retiring.is_none())
+            .ok_or_else(|| io::Error::other("no relay route"))?;
+        let now_ms = route.now_ms();
+        route
+            .session
+            .queue_ordering_checksums(samples, now_ms)
+            .map_err(relay_io_error)
+    }
+
+    /// See `ClientSession::queue_ordering_pace`.
+    pub fn queue_ordering_pace(
+        &mut self,
+        pace: vera20k_relay_protocol::OrderPace,
+        frames_per_second: u16,
+        tick_micros: Option<u32>,
+    ) {
+        self.with_session(|session| {
+            session.queue_ordering_pace(pace, frames_per_second, tick_micros)
+        });
+    }
+
+    /// The sequencing layer's stream position for the uplink scheduler:
+    /// its watermark, gap state and turn length (spec §6.3, §6.7).
+    pub(super) fn report_ordering_position(
+        &mut self,
+        recv_next: u64,
+        gap: Option<vera20k_relay_protocol::OrderingGap>,
+        turn_ms: u32,
+    ) {
+        let mut io = self.lock();
+        let Some(route) = io.relay.as_mut().filter(|route| route.retiring.is_none()) else {
+            return;
+        };
+        let now_ms = route.now_ms();
+        route.session.set_ordering_received_next(recv_next);
+        route.session.set_ordering_gap(gap, now_ms);
+        route.session.set_ordering_turn_ms(turn_ms);
+    }
+
+    /// Sends the UPLINK the scheduler wants this service, if any (spec §6.3).
+    pub(super) fn poll_uplink(&mut self) -> io::Result<bool> {
+        let mut io = self.lock();
+        let io = &mut *io;
+        let Some(route) = io.relay.as_mut().filter(|route| route.retiring.is_none()) else {
+            return Ok(false);
+        };
+        let now_ms = route.now_ms();
+        if !route.session.poll_uplink(now_ms, &mut route.encoded) {
+            return Ok(false);
+        }
+        io.primary.send_to(&route.encoded, route.address)?;
+        Ok(true)
+    }
+
+    /// Sends the fallback PULL the session wants, if any (spec §7.7).
+    pub(super) fn poll_repair_pull(&mut self) -> io::Result<bool> {
+        let mut io = self.lock();
+        let io = &mut *io;
+        let Some(route) = io.relay.as_mut().filter(|route| route.retiring.is_none()) else {
+            return Ok(false);
+        };
+        let now_ms = route.now_ms();
+        if !route.session.poll_repair_pull(now_ms, &mut route.encoded) {
+            return Ok(false);
+        }
+        io.primary.send_to(&route.encoded, route.address)?;
+        Ok(true)
+    }
+
+    /// See `ClientSession::link_stats`.
+    pub fn relay_link_stats(&self) -> Option<vera20k_relay_protocol::ClientLinkStats> {
+        self.lock()
+            .relay
+            .as_ref()
+            .map(|route| route.session.link_stats())
     }
 
     pub fn pull_ordering(&mut self, next_sequence: u64) -> io::Result<()> {
-        self.send_ordering(|route| {
+        self.send_ordering(|route, now_ms| {
             route
                 .session
-                .pull_ordering(next_sequence, &mut route.encoded)
+                .pull_ordering_at(next_sequence, now_ms, &mut route.encoded)
+        })
+    }
+
+    pub fn control_ordering_pause(
+        &mut self,
+        request_id: u64,
+        expected_epoch: u64,
+        paused: bool,
+    ) -> io::Result<()> {
+        self.send_ordering(|route, now_ms| {
+            route.session.control_ordering_pause_at(
+                request_id,
+                expected_epoch,
+                paused,
+                now_ms,
+                &mut route.encoded,
+            )
         })
     }
 
     pub fn leave_ordering(&mut self) -> io::Result<()> {
-        self.send_ordering(|route| route.session.leave_ordering(&mut route.encoded))
+        self.send_ordering(|route, now_ms| {
+            route.session.leave_ordering_at(now_ms, &mut route.encoded)
+        })
     }
 
     fn send_ordering(
         &mut self,
-        encode: impl FnOnce(&mut RelayRoute) -> Result<(), RelayError>,
+        encode: impl FnOnce(&mut RelayRoute, u64) -> Result<(), RelayError>,
     ) -> io::Result<()> {
         let mut io = self.lock();
         let io = &mut *io;
@@ -581,13 +795,19 @@ impl LanUdpTransport {
             .as_mut()
             .filter(|route| route.retiring.is_none())
             .ok_or_else(|| io::Error::other("no relay route"))?;
-        encode(route).map_err(relay_io_error)?;
+        let now_ms = route.now_ms();
+        encode(route, now_ms).map_err(relay_io_error)?;
         io.primary
             .send_to(&route.encoded, route.address)
             .map(|_| ())
     }
 
     pub fn pop_ordering_received(&mut self) -> Option<vera20k_relay_protocol::OrderEvent> {
+        self.pop_ordering_received_with_time()
+            .map(|received| received.event)
+    }
+
+    pub(super) fn pop_ordering_received_with_time(&mut self) -> Option<ReceivedOrderEvent> {
         self.lock().relay.as_mut()?.ordering_inbox.pop_front()
     }
 
@@ -726,12 +946,49 @@ struct RelayRoute {
     ordering_certificate: Option<Vec<u8>>,
     // Dropped excess packets are recovered from the immutable stream cursor.
     // This bounds worker memory even while the UI/simulation thread is paused.
-    ordering_inbox: VecDeque<vera20k_relay_protocol::OrderEvent>,
+    ordering_inbox: VecDeque<ReceivedOrderEvent>,
+    // The relay session's monotonic millisecond clock (spec §6.5).
+    clock: RelayClock,
     retiring: Option<RelayRetirement>,
+}
+
+/// The relay session's millisecond clock. Precise: send times at encoding
+/// and receive times at the socket read, as spec §6.5 asks. Manual: the
+/// caller's wall bucket of the current `service`, so manual-clock consumers
+/// see the time they drive.
+#[derive(Debug, Clone, Copy)]
+enum RelayClock {
+    Precise(Instant),
+    Manual(u64),
+}
+
+// One relay datagram may pack a turn's or a whole repair page's entries.
+const ORDERING_INBOX_EVENTS: usize = 1024;
+
+impl RelayRoute {
+    /// `at` on the session's millisecond clock.
+    fn clock_ms(&self, at: Instant) -> u64 {
+        match self.clock {
+            RelayClock::Precise(epoch) => at.saturating_duration_since(epoch).as_millis() as u64,
+            RelayClock::Manual(now_ms) => now_ms,
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.clock_ms(Instant::now())
+    }
+
+    fn push_ordering(&mut self, event: vera20k_relay_protocol::OrderEvent, received_at: Instant) {
+        if self.ordering_inbox.len() < ORDERING_INBOX_EVENTS {
+            self.ordering_inbox
+                .push_back(ReceivedOrderEvent { event, received_at });
+        }
+    }
 }
 
 struct RelayRetirement {
     last_sent: Option<u32>,
+    attempts: u16,
 }
 
 struct PeerProbe {
@@ -751,19 +1008,49 @@ impl std::fmt::Debug for RelayRoute {
 }
 
 impl UdpIo {
+    fn use_precise_relay_clock(&mut self) {
+        self.precise_relay_clock = true;
+        if let Some(route) = self.relay.as_mut()
+            && let RelayClock::Manual(now_ms) = route.clock
+        {
+            let now = Instant::now();
+            let epoch = now
+                .checked_sub(Duration::from_millis(now_ms))
+                .unwrap_or(now);
+            route.clock = RelayClock::Precise(epoch);
+        }
+    }
+
     /// Explicit bind addresses allow independent clients/tests to select
     /// interfaces or ephemeral ports. A failure drops any socket already
     /// opened by this call; no partially open transport escapes.
-    #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+    #[cfg(all(
+        feature = "wasm",
+        not(feature = "wasm-net"),
+        target_arch = "wasm32",
+        target_os = "unknown"
+    ))]
     fn bind(_: UdpBindConfig, _: LanConnections) -> io::Result<Self> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "LAN play is unavailable in the single-player browser build"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "LAN play is unavailable in the single-player browser build",
+        ))
     }
 
-    #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(any(
+        not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")),
+        all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown")
+    ))]
     fn bind(config: UdpBindConfig, connections: LanConnections) -> io::Result<Self> {
+        #[cfg(not(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown")))]
         let primary = UdpSocket::bind(config.primary)?;
+        #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+        let primary = UdpSocket::bind(config.primary, "primary")?;
         primary.set_nonblocking(true)?;
+        #[cfg(not(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown")))]
         let alternate = UdpSocket::bind(config.alternate)?;
+        #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+        let alternate = UdpSocket::bind(config.alternate, "alternate")?;
         alternate.set_nonblocking(true)?;
         let global = GlobalChannel::new(
             GlobalConfig {
@@ -781,8 +1068,11 @@ impl UdpIo {
             global,
             broadcast_targets: Vec::new(),
             relay: None,
+            #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+            relay_gateway: None,
             lan_scope: None,
             pending_report: UdpServiceReport::default(),
+            precise_relay_clock: false,
         })
     }
 
@@ -878,6 +1168,12 @@ impl UdpIo {
         }
         let session =
             ClientSession::new(ticket, packet_key, payload_key).map_err(relay_io_error)?;
+        #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let gateway = self.relay_gateway.as_deref().unwrap_or(browser_proxy_url());
+            self.primary.set_relay(address, gateway)?;
+            self.alternate.set_relay(address, gateway)?;
+        }
         self.relay = Some(RelayRoute {
             address,
             session,
@@ -888,6 +1184,11 @@ impl UdpIo {
             peer_probes: None,
             ordering_certificate: None,
             ordering_inbox: VecDeque::new(),
+            clock: if self.precise_relay_clock {
+                RelayClock::Precise(Instant::now())
+            } else {
+                RelayClock::Manual(0)
+            },
             retiring: None,
         });
         self.global.require_authenticated_acknowledgments();
@@ -962,9 +1263,10 @@ impl UdpIo {
             route.renewing = None;
             route.peer_probes = None;
             route.ordering_inbox.clear();
-            route
-                .retiring
-                .get_or_insert(RelayRetirement { last_sent: None });
+            route.retiring.get_or_insert(RelayRetirement {
+                last_sent: None,
+                attempts: 0,
+            });
         } else {
             self.relay = None;
         }
@@ -1116,16 +1418,38 @@ impl UdpIo {
     /// owner alone decides retries, sequence order and peer failure identity.
     fn service(&mut self, now_ticks: u32, receive_budget: usize) -> UdpServiceReport {
         let mut report = UdpServiceReport::default();
+        if let Some(route) = self.relay.as_mut()
+            && let RelayClock::Manual(now_ms) = &mut route.clock
+        {
+            *now_ms = (*now_ms).max(u64::from(now_ticks) * 16);
+        }
+        #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+        if self.primary.take_route_change() {
+            // A replacement WS owns a new UDP source port. Reuse the existing
+            // challenge and retry owners; physical loss never means Leave.
+            if let Some(route) = self.relay.as_mut() {
+                route.session.forget_readiness();
+                if let Some(renewing) = route.renewing.as_mut() {
+                    renewing.forget_readiness();
+                }
+                route.last_probe = None;
+                route.last_response = None;
+            }
+        }
+        let mut leave_unacknowledged = false;
         if let Some(route) = self.relay.as_mut() {
             if let Some(retiring) = route.retiring.as_mut() {
-                if retiring
+                let due = retiring
                     .last_sent
-                    .is_none_or(|last| now_ticks.wrapping_sub(last) >= 16)
-                {
+                    .is_none_or(|last| now_ticks.wrapping_sub(last) >= 16);
+                leave_unacknowledged = due && retiring.attempts == RELAY_LEAVE_ATTEMPTS;
+                if due && !leave_unacknowledged {
                     retiring.last_sent = Some(now_ticks);
+                    retiring.attempts += 1;
+                    let now_ms = route.now_ms();
                     if let Err(error) = route
                         .session
-                        .leave_ordering(&mut route.encoded)
+                        .leave_ordering_at(now_ms, &mut route.encoded)
                         .map_err(relay_io_error)
                         .and_then(|()| {
                             self.primary
@@ -1161,10 +1485,11 @@ impl UdpIo {
                     .is_none_or(|last| now_ticks.wrapping_sub(last) >= interval)
                 {
                     route.last_probe = Some(now_ticks);
+                    let now_ms = route.now_ms();
                     for session in
                         std::iter::once(&mut route.session).chain(route.renewing.iter_mut())
                     {
-                        match session.probe(&mut route.encoded) {
+                        match session.probe_at(now_ms, &mut route.encoded) {
                             Ok(()) => {
                                 if let Err(error) =
                                     self.primary.send_to(&route.encoded, route.address)
@@ -1186,7 +1511,25 @@ impl UdpIo {
                         }
                     }
                 }
+                // The IO thread's UPLINK heartbeat while the game thread is
+                // held up (spec §6.6); the session knows when one is due.
+                let now_ms = route.now_ms();
+                if route.renewing.is_none()
+                    && route.session.heartbeat_uplink(now_ms, &mut route.encoded)
+                    && let Err(error) = self.primary.send_to(&route.encoded, route.address)
+                {
+                    record_io_error(
+                        &mut report,
+                        UdpChannel::Primary,
+                        UdpIoOperation::Send,
+                        error,
+                    );
+                }
             }
+        }
+        if leave_unacknowledged {
+            log::warn!("The relay did not acknowledge leaving the online match.");
+            self.relay = None;
         }
         //Portable polling replaces Windows FD_WRITE notification timing.
         //Give each retained FIFO one write opportunity per pass; each later
@@ -1334,19 +1677,20 @@ fn drain_socket(
                 break;
             }
         };
+        let received_at = Instant::now();
         report.received_datagrams += 1;
         let SocketAddr::V4(source) = source else {
             report.malformed_datagrams += 1;
             continue;
         };
-        let decrypted;
         let (datagram, source, received_scope) = if let Some(route) = relay.as_mut() {
             if source != route.address || length > vera20k_relay_protocol::MAX_DATAGRAM {
                 report.malformed_datagrams += 1;
                 continue;
             }
+            let received_ms = route.clock_ms(received_at);
             if route.retiring.is_some() {
-                match route.session.receive(&bytes[..length]) {
+                match route.session.receive_at(&bytes[..length], received_ms) {
                     Ok(ServerEvent::Ordering(vera20k_relay_protocol::OrderEvent::Left)) => {
                         *relay = None;
                     }
@@ -1358,7 +1702,7 @@ fn drain_socket(
             if let Some(event) = route
                 .renewing
                 .as_mut()
-                .and_then(|session| session.receive(&bytes[..length]).ok())
+                .and_then(|session| session.receive_at(&bytes[..length], received_ms).ok())
             {
                 match event {
                     ServerEvent::Ready => {
@@ -1369,6 +1713,12 @@ fn drain_socket(
                         }
                         route.session = next;
                         route.last_response = Some(now_ticks);
+                        // The renewed hop subscribes at once (spec §4.7).
+                        if route.session.poll_uplink(received_ms, &mut route.encoded)
+                            && let Err(error) = ack_socket.send_to(&route.encoded, route.address)
+                        {
+                            record_io_error(report, channel, UdpIoOperation::Send, error);
+                        }
                         continue;
                     }
                     ServerEvent::Challenge(cookie) => {
@@ -1376,7 +1726,7 @@ fn drain_socket(
                             .renewing
                             .as_mut()
                             .expect("candidate")
-                            .confirm(cookie, &mut route.encoded)
+                            .confirm_at(cookie, received_ms, &mut route.encoded)
                             .map_err(relay_io_error)
                             .and_then(|()| {
                                 ack_socket
@@ -1388,24 +1738,30 @@ fn drain_socket(
                         }
                         continue;
                     }
-                    ServerEvent::Payload { .. } | ServerEvent::Ordering(_) => {
+                    ServerEvent::Payload { .. }
+                    | ServerEvent::Ordering(_)
+                    | ServerEvent::OrderingPack(_) => {
                         unreachable!("candidate is promoted on READY")
                     }
                 }
             }
-            match route.session.receive(&bytes[..length]) {
+            match route.session.receive_at(&bytes[..length], received_ms) {
                 Ok(ServerEvent::Ordering(event)) => {
                     route.last_response = Some(now_ticks);
-                    if route.ordering_inbox.len() < 256 {
-                        route.ordering_inbox.push_back(event);
+                    route.push_ordering(event, received_at);
+                    continue;
+                }
+                Ok(ServerEvent::OrderingPack(events)) => {
+                    route.last_response = Some(now_ticks);
+                    for event in events {
+                        route.push_ordering(event, received_at);
                     }
                     continue;
                 }
                 Ok(ServerEvent::Payload { source, bytes }) => {
                     route.last_response = Some(now_ticks);
-                    decrypted = bytes;
                     (
-                        decrypted.as_bytes(),
+                        bytes,
                         relay_peer_endpoint(source).expect("authenticated source range"),
                         None,
                     )
@@ -1415,7 +1771,10 @@ fn drain_socket(
                     continue;
                 }
                 Ok(ServerEvent::Challenge(cookie)) => {
-                    match route.session.confirm(cookie, &mut route.encoded) {
+                    match route
+                        .session
+                        .confirm_at(cookie, received_ms, &mut route.encoded)
+                    {
                         Ok(()) => {
                             if let Err(error) = ack_socket.send_to(&route.encoded, route.address) {
                                 record_io_error(report, channel, UdpIoOperation::Send, error);
@@ -1630,9 +1989,10 @@ fn send_datagram(
                 )
             })?
         };
+        let now_ms = route.now_ms();
         route
             .session
-            .data(target, bytes, &mut route.encoded)
+            .data_at(target, bytes, now_ms, &mut route.encoded)
             .map_err(relay_io_error)?;
         socket.send_to(&route.encoded, route.address)
     } else {
@@ -1663,12 +2023,37 @@ fn record_io_error(
     operation: UdpIoOperation,
     error: io::Error,
 ) {
+    #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+    if error.kind() == io::ErrorKind::WouldBlock {
+        // An asynchronous WS connection/backpressure is not an admission
+        // failure. The original protocol owners retain and retry their work.
+        if operation == UdpIoOperation::Send {
+            report.send_would_block += 1;
+        }
+        return;
+    }
     if report.first_io_error.is_none() {
         report.first_io_error = Some(UdpIoFailure {
             channel,
             operation,
             error,
         });
+    }
+}
+
+#[cfg(test)]
+impl LanUdpTransport {
+    /// Delivers an authenticated ordering event as the relay route would.
+    pub(super) fn push_ordering_received_for_test(
+        &mut self,
+        event: vera20k_relay_protocol::OrderEvent,
+    ) {
+        if let Some(route) = self.lock().relay.as_mut() {
+            route.ordering_inbox.push_back(ReceivedOrderEvent {
+                event,
+                received_at: Instant::now(),
+            });
+        }
     }
 }
 

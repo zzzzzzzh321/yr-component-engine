@@ -257,6 +257,13 @@ pub struct SpawnManagerState {
 }
 
 impl SpawnManagerState {
+    /// Ares capture10045D76..10045D8B resumes the manager's +50 AI gate
+    /// only from its -1 start sentinel, preserving the retained duration.
+    #[cfg(feature = "ares")]
+    pub(crate) fn resume_update_timer(&mut self, frame: i32) {
+        self.update_timer.resume(frame);
+    }
+
     /// The interned `Spawns=` child type.
     pub fn spawn_type(&self) -> InternedId {
         self.spawn_type
@@ -1270,11 +1277,11 @@ impl SpawnHost for WorldSpawn<'_, '_> {
             self.owner_id,
             &target,
             terrain,
-            Some(sim.house_alliances.as_map()),
+            Some(&sim.house_alliances),
             &crate::sim::combat::line_of_fire::LineOfFireInputs {
                 overlay_grid: sim.overlay_grid.as_ref(),
                 overlay_registry: self.context.registry(),
-                alliances: Some(sim.house_alliances.as_map()),
+                alliances: Some(&sim.house_alliances),
             },
         )
     }

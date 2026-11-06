@@ -1,30 +1,28 @@
 //! Blocking HTTPS is confined to this worker. Session bearer tokens never
 //! enter Debug output, file storage, error strings, or the gameplay client state.
 
+use crate::util::time::{Duration, Instant};
 use base64::Engine;
+use std::collections::VecDeque;
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use std::io::Read;
 use std::path::PathBuf;
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
-use std::time::{Duration, Instant};
 
-#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use super::wire::EventBatch;
 use super::wire::{ChannelList, Envelope, Session};
 use serde_json::Value;
-#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use serde_json::json;
 
 pub(super) enum Request {
     /// One-use external launcher handoff; this worker remains the sole bearer owner.
-    AdoptSession {
+    AdoptRoomSession {
         session: Session,
         cursor: u64,
     },
@@ -70,10 +68,32 @@ pub(super) enum Request {
     OpenSession {
         attempt: u64,
         nickname: String,
+        credential: Credential,
+    },
+    /// An `/v1/accounts/` request, answered by [`Response::AccountAnswered`]
+    /// with the same `attempt`.
+    Account {
+        attempt: u64,
+        request: crate::ui::wol_account::AccountRequest,
+    },
+    /// `/v1/accounts/forget`: the lobby drops this computer's remembered
+    /// sign-in. Nothing answers.
+    ForgetSignIn {
+        name: String,
+        sign_in_token: String,
+    },
+    /// The shell gave up on an unanswering lobby outside a match: stop
+    /// polling and log this bearer out at the next sign-in.
+    Abandon,
+    /// An external launch's bearer for its match API (docs/spawn.md), in
+    /// place of `/v1/sessions`. Polling starts with the first event.
+    AdoptSession {
+        token: String,
+        /// A returning player's match and the end of its event history; the
+        /// `timing_confirmed` before it belongs to the process that left.
+        resume: Option<(String, u64)>,
     },
     Channels(u32),
-    /// `GET /v1/stats`; a failure is dropped and the next poll asks again.
-    Stats,
     Command {
         id: u64,
         operation: &'static str,
@@ -85,6 +105,106 @@ pub(super) enum Request {
         text: String,
         target: &'static str,
     },
+}
+
+/// How a sign-in proves its name (docs/lobby-protocol.md "Accounts"). It
+/// holds a password or a remembered sign-in, so it has no Debug.
+pub(super) enum Credential {
+    /// No password: a guest, or `name_claimed` for an account's name.
+    Guest,
+    /// The typed password; `remember` asks for a `sign_in_token`.
+    Password { password: String, remember: bool },
+    /// The `sign_in_token` this computer remembers for the name.
+    Remembered(String),
+}
+
+/// The `/v1/sessions` body: a password or a remembered sign-in, never both.
+fn session_body(nickname: &str, credential: &Credential) -> Value {
+    let mut body = json!({"nickname": nickname, "protocol": 4});
+    match credential {
+        Credential::Guest => {}
+        Credential::Password { password, remember } => {
+            body["password"] = json!(password);
+            body["remember"] = json!(remember);
+        }
+        Credential::Remembered(token) => body["sign_in_token"] = json!(token),
+    }
+    body
+}
+
+/// An account request's path and body.
+fn account_call(request: &crate::ui::wol_account::AccountRequest) -> (&'static str, Value) {
+    use crate::ui::wol_account::AccountRequest;
+    match request {
+        AccountRequest::Register {
+            name,
+            email,
+            password,
+        } => (
+            "/v1/accounts/register",
+            json!({"name": name, "email": email, "password": password}),
+        ),
+        AccountRequest::Verify { name, code } => {
+            ("/v1/accounts/verify", json!({"name": name, "code": code}))
+        }
+        AccountRequest::Forgot { name } => ("/v1/accounts/forgot", json!({"name": name})),
+        AccountRequest::Reset {
+            name,
+            code,
+            password,
+        } => (
+            "/v1/accounts/reset",
+            json!({"name": name, "code": code, "password": password}),
+        ),
+        AccountRequest::Delete { name, password } => (
+            "/v1/accounts/delete",
+            json!({"name": name, "password": password}),
+        ),
+    }
+}
+
+impl Request {
+    /// The periodic requests a waiting copy already covers: the host's 5 s
+    /// `ping` and the 10 s relay renewal retry.
+    fn repeats(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Command {
+                    operation, payload, ..
+                },
+                Self::Command {
+                    operation: other_operation,
+                    payload: other_payload,
+                    ..
+                },
+            ) => {
+                matches!(*operation, "ping" | "renew_relay")
+                    && operation == other_operation
+                    && payload == other_payload
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Queues what arrived during the last request behind `queued`, without a
+/// periodic request that `current` or a queued one repeats. A failing command
+/// takes about 24 s, so copies would otherwise pile up ahead of Ready, Start
+/// and chat for as long as the lobby is unreachable.
+fn queue_arrivals(
+    input: &Receiver<Request>,
+    current: Option<&Request>,
+    queued: &mut VecDeque<Request>,
+) {
+    while let Ok(request) = input.try_recv() {
+        if !current
+            .into_iter()
+            .chain(queued.iter())
+            .any(|waiting| waiting.repeats(&request))
+        {
+            queued.push_back(request);
+        }
+    }
 }
 
 pub(super) enum Response {
@@ -123,16 +243,27 @@ pub(super) enum Response {
         attempt: u64,
         player_id: String,
         nickname: String,
+        motd: Option<String>,
+        /// A password sign-in with `remember`: what signs this computer in
+        /// next time.
+        sign_in_token: Option<String>,
     },
     LoginFailed {
         attempt: u64,
         code: u32,
     },
+    /// HTTP 426 to a sign-in: the lobby no longer admits this version.
+    /// `message` is the lobby's own reason when it gave a plain one.
     UpgradeRequired {
         attempt: u64,
+        message: Option<String>,
+    },
+    /// HTTP 426 to a signed-in request: the lobby was upgraded during this
+    /// session. Only the refused request failed.
+    Outdated {
+        message: Option<String>,
     },
     Channels(ChannelList),
-    Stats(crate::ui::wol_shell::WolLobbyStats),
     Event(Envelope),
     CommandCompleted {
         id: u64,
@@ -145,8 +276,30 @@ pub(super) enum Response {
     },
     Failure(&'static str),
     Offline,
+    /// The first event poll of an outage failed; polling keeps retrying.
+    LobbyUnreachable,
+    /// An event poll succeeded again after `LobbyUnreachable`.
+    LobbyReachable,
+    /// About a minute of failed polls outside a match: polling stopped.
+    LobbyLost,
+    /// The lobby refused a sign-in for a reason of its own (maintenance,
+    /// full, busy, or the name's account): the text to show.
+    SignInRefused {
+        attempt: u64,
+        message: String,
+        /// 403 `wrong_password` or 404 `no_account`: the password or
+        /// remembered sign-in signs in to no account.
+        bad_credential: bool,
+    },
+    /// The answer to a [`Request::Account`], or the message to show.
+    AccountAnswered {
+        attempt: u64,
+        answer: Result<(), String>,
+    },
     StartRejected {
         id: u64,
+        /// 429, 5xx or no answer: the lobby, not the setup, refused it.
+        retryable: bool,
     },
     Translated {
         id: u64,
@@ -163,16 +316,76 @@ pub(super) enum TranslateFailure {
 }
 
 const MAX_BODY_BYTES: u64 = 1024 * 1024;
+const USER_AGENT: &str = concat!("VERA20k/", env!("CARGO_PKG_VERSION"), " multiplayer-client");
 // The server retains1024 events and returns at most256 at a time. Permit
 // concurrent arrivals too, but never release cleanup on a partial history.
 const MAX_CLEANUP_DRAIN_BATCHES: usize = 8;
+// After `timing_confirmed` a spawned match's only event is `relay_renewed`, in
+// the reply to its own `renew_relay`. This poll recovers a reply that was lost.
+const SPAWNED_MATCH_POLL: Duration = Duration::from_secs(60);
+// About three lines of the 0xD0 box body, which also holds the download link.
+const MAX_UPGRADE_MESSAGE_CHARS: usize = 160;
+// The failed polls, 2+4+8+16+30 s apart, after which a player outside a
+// match is told the lobby connection was lost: about a minute.
+const LOBBY_LOST_POLLS: u8 = 6;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestFailure {
     Status(u16),
     LostCursor,
-    ChannelRejected { status: u16, code: u32 },
+    ChannelRejected {
+        status: u16,
+        code: u32,
+    },
     AlreadyFinished,
+    /// 426 `upgrade_required` (docs/lobby-protocol.md), with the lobby's
+    /// message when it is one short line of plain text.
+    UpgradeRequired(Option<String>),
+    /// 503 `maintenance`: the operator closed sign-ins, with the same kind
+    /// of message.
+    Maintenance(Option<String>),
+    /// 503 `service_full` or `network_full`: the lobby has no room for this
+    /// sign-in, with the same kind of message.
+    Full(Option<String>),
+    /// A refusal about an account (docs/lobby-protocol.md "Accounts"): a
+    /// sign-in's `name_claimed`, `wrong_password`, `no_account` or
+    /// `account_locked`, or any refusal of an `/v1/accounts/` request, with
+    /// the message to show.
+    Account {
+        status: u16,
+        /// `wrong_password` or `no_account`: the credential signs in to no
+        /// account.
+        bad_credential: bool,
+        message: String,
+    },
+}
+
+/// What a lobby refusal of a sign-in tells the player: its own plain
+/// message when it gave one.
+fn sign_in_refusal(failure: RequestFailure) -> String {
+    match failure {
+        RequestFailure::Maintenance(message) => message.unwrap_or_else(|| {
+            "VERA20k Online is down for maintenance. Please try again later.".to_owned()
+        }),
+        RequestFailure::Full(message) => message.unwrap_or_else(|| {
+            "VERA20k Online is full right now. Please try again later.".to_owned()
+        }),
+        RequestFailure::Account { message, .. } => message,
+        _ => "VERA20k Online is busy right now. Please try again in a minute.".to_owned(),
+    }
+}
+
+/// The lobby's `error.message` when it is one short line of plain text.
+fn plain_message(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(|value| value["error"]["message"].as_str())
+        .map(str::trim)
+        .filter(|message| {
+            !message.is_empty()
+                && message.chars().count() <= MAX_UPGRADE_MESSAGE_CHARS
+                && !message.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,44 +416,127 @@ impl RequestFailure {
                 status,
                 code: 0x8004_0071,
             },
+            // The host kicked this player from the room within five minutes.
+            Some("room_kept_out") if status == 403 => Self::ChannelRejected {
+                status,
+                code: crate::app::shell_wol::lobby::KEPT_OUT_JOIN_ERROR,
+            },
             Some("room_full") if status == 409 => Self::ChannelRejected {
                 status,
                 code: 0x8004_006E,
+            },
+            Some("name_unavailable") if status == 409 => Self::ChannelRejected {
+                status,
+                code: crate::app::shell_wol::lobby::ROOM_NAME_TAKEN,
             },
             Some("room_unavailable") if status == 409 => Self::ChannelRejected {
                 status,
                 code: 0x8004_0070,
             },
             Some("unknown_match") if status == 409 => Self::AlreadyFinished,
+            Some("maintenance") if status == 503 => {
+                Self::Maintenance(plain_message(value.as_ref()))
+            }
+            Some("service_full" | "network_full") if status == 503 => {
+                Self::Full(plain_message(value.as_ref()))
+            }
+            Some(code @ ("name_claimed" | "wrong_password")) if status == 403 => {
+                Self::account(status, Some(code), value.as_ref())
+            }
+            Some(code @ "no_account") if status == 404 => {
+                Self::account(status, Some(code), value.as_ref())
+            }
+            Some(code @ "account_locked") if status == 429 => {
+                Self::account(status, Some(code), value.as_ref())
+            }
+            _ if status == 426 => Self::UpgradeRequired(plain_message(value.as_ref())),
             _ => Self::Status(status),
         }
     }
 
-    fn command_failure(self, operation: &str) -> CommandFailure {
+    /// An answer to `path`: an `/v1/accounts/` request's refusals all
+    /// carry their message, since `name_unavailable` there names an account,
+    /// and so do a sign-in's wrong passwords from one network and its
+    /// accounts being unavailable.
+    fn answer(path: &str, status: u16, bytes: &[u8]) -> Self {
+        let value = serde_json::from_slice::<Value>(bytes).ok();
+        let code = value
+            .as_ref()
+            .and_then(|value| value["error"]["code"].as_str());
+        let sign_in = path == "/v1/sessions"
+            && matches!(
+                (status, code),
+                (429, Some("rate_limited")) | (503, Some("accounts_unavailable"))
+            );
+        if !path.starts_with("/v1/accounts/") && !sign_in {
+            return Self::response(status, bytes);
+        }
+        Self::account(status, code, value.as_ref())
+    }
+
+    /// An account refusal with the lobby's plain message, or one for its code.
+    fn account(status: u16, code: Option<&str>, value: Option<&Value>) -> Self {
+        let message = plain_message(value).unwrap_or_else(|| {
+            match code {
+                Some("name_claimed") => {
+                    "That name has an account. Enter its password, or choose another username."
+                }
+                Some("wrong_password") => "Wrong password.",
+                Some("no_account") => "No account has that name.",
+                Some("account_locked") => {
+                    "Too many wrong passwords. Try again later, or use Forgot Password."
+                }
+                _ if status == 429 => "Too many tries. Please try again later.",
+                _ if status == 0 || status >= 500 => {
+                    "VERA20k Online is busy right now. Please try again in a minute."
+                }
+                _ => "VERA20k Online refused that. Check what you entered.",
+            }
+            .to_owned()
+        });
+        Self::Account {
+            status,
+            bad_credential: matches!(code, Some("wrong_password" | "no_account")),
+            message,
+        }
+    }
+
+    fn command_failure(&self, operation: &str) -> CommandFailure {
         match self {
             Self::AlreadyFinished if operation == "finish" => CommandFailure::AlreadyFinished,
-            Self::ChannelRejected { code, .. } => CommandFailure::Rejected(code),
+            Self::ChannelRejected { code, .. } => CommandFailure::Rejected(*code),
             _ if matches!(self.status(), 0 | 429 | 500..=599) => CommandFailure::Retryable,
             _ => CommandFailure::Rejected(0x8000_4005),
         }
     }
 
-    fn status(self) -> u16 {
+    fn status(&self) -> u16 {
         match self {
-            Self::Status(status) | Self::ChannelRejected { status, .. } => status,
+            Self::Status(status) | Self::ChannelRejected { status, .. } => *status,
             Self::LostCursor | Self::AlreadyFinished => 409,
+            Self::UpgradeRequired(_) => 426,
+            Self::Maintenance(_) | Self::Full(_) => 503,
+            Self::Account { status, .. } => *status,
         }
     }
 }
 
-#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 struct Client {
     stopping: Arc<AtomicBool>,
+    #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
     agent: ureq::Agent,
+    #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
     base: String,
+    #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+    browser: u32,
     token: Option<String>,
     cursor: u64,
     active_match: Option<String>,
+    /// The bearer came from an external launcher, not `/v1/sessions`.
+    spawned: bool,
+    /// The lobby stopped answering and the player was told the connection
+    /// was lost: no more polls; the next sign-in logs this bearer out first.
+    abandoned: bool,
 }
 
 fn decode_session(value: Value, requested_nickname: &str) -> Result<Session, RequestFailure> {
@@ -266,52 +562,13 @@ fn decode_session(value: Value, requested_nickname: &str) -> Result<Session, Req
     Ok(session)
 }
 
-#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 impl Client {
-    fn session_failed(&mut self, error: RequestFailure, output: &Sender<Response>) -> bool {
-        if error == RequestFailure::LostCursor
-            && let Some(match_id) = self.active_match.clone()
-        {
-            let recovered = self
-                .request(&format!("/v1/match/resume?match_id={match_id}"), None)
-                .and_then(|value| self.accept_match_resume(value, output));
-            // Shell event history is separate from the committed gameplay
-            // journal. Network failures keep the same bearer/identity/cursor
-            // until a matching active-match recovery succeeds.
-            if !matches!(
-                recovered,
-                Err(RequestFailure::Status(401) | RequestFailure::AlreadyFinished)
-            ) {
-                return true;
-            }
-            self.active_match = None;
-        }
-        if matches!(
-            error,
-            RequestFailure::Status(401) | RequestFailure::LostCursor
-        ) {
-            if error == RequestFailure::LostCursor && self.token.is_some() {
-                // The bearer still owns this guest name, even though its
-                // event history cannot be replayed. Ordinary logout accepts
-                // an expired cursor and retires only this session. If the
-                // request fails, normal stale-session reap remains the fallback.
-                let _ = self.request(
-                    "/v1/commands",
-                    Some(&json!({
-                        "request_id":"lost-cursor-logout","operation":"logout","payload":{}
-                    })),
-                );
-            }
-            // A missing history cannot be replayed safely. Retire this login so
-            // it stops refreshing the broken server session and use the WOL
-            // disconnect/re-login path. Repeated queued failures emit once.
-            if self.token.take().is_some() {
-                let _ = output.send(Response::Offline);
-            }
-            true
-        } else {
-            false
-        }
+    fn adopt_session(&mut self, token: String, resume: Option<(String, u64)>) {
+        self.token = Some(token);
+        let (active_match, cursor) = resume.map_or((None, 0), |(id, cursor)| (Some(id), cursor));
+        self.cursor = cursor;
+        self.active_match = active_match;
+        self.spawned = true;
     }
 
     fn accept_match_resume(
@@ -339,70 +596,6 @@ impl Client {
             .map_err(|_| RequestFailure::Status(0))?;
         self.cursor = cursor;
         Ok(())
-    }
-
-    fn poll_finished(
-        &mut self,
-        result: Result<(), RequestFailure>,
-        failed_polls: &mut u8,
-        output: &Sender<Response>,
-    ) -> Duration {
-        match result {
-            Ok(()) => {
-                *failed_polls = 0;
-                Duration::from_secs(1)
-            }
-            Err(error) if self.session_failed(error, output) => Duration::from_secs(30),
-            Err(_) => {
-                *failed_polls = failed_polls.saturating_add(1);
-                Duration::from_secs((1u64 << (*failed_polls).min(5)).min(30))
-            }
-        }
-    }
-
-    fn request(&self, path: &str, body: Option<&Value>) -> Result<Value, RequestFailure> {
-        if self.stopping.load(Ordering::Acquire) {
-            return Err(RequestFailure::Status(0));
-        }
-        let url = format!("{}{path}", self.base);
-        let response = if let Some(body) = body {
-            let mut request = self.agent.post(&url).header(
-                "User-Agent",
-                concat!("VERA20k/", env!("CARGO_PKG_VERSION"), " multiplayer-client"),
-            );
-            if let Some(token) = &self.token {
-                request = request.header("Authorization", format!("Bearer {token}"));
-            }
-            request.send_json(body)
-        } else {
-            let mut request = self.agent.get(&url).header(
-                "User-Agent",
-                concat!("VERA20k/", env!("CARGO_PKG_VERSION"), " multiplayer-client"),
-            );
-            if let Some(token) = &self.token {
-                request = request.header("Authorization", format!("Bearer {token}"));
-            }
-            request.call()
-        };
-        let mut response = response.map_err(|_| RequestFailure::Status(0))?;
-        let status = response.status().as_u16();
-        if status == 401 {
-            return Err(RequestFailure::Status(status));
-        }
-        let mut bytes = Vec::new();
-        response
-            .body_mut()
-            .as_reader()
-            .take(MAX_BODY_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| RequestFailure::Status(0))?;
-        if bytes.len() as u64 > MAX_BODY_BYTES {
-            return Err(RequestFailure::Status(0));
-        }
-        if !(200..300).contains(&status) {
-            return Err(RequestFailure::response(status, &bytes));
-        }
-        serde_json::from_slice(&bytes).map_err(|_| RequestFailure::Status(0))
     }
 
     fn batch(&mut self, value: Value, output: &Sender<Response>) -> Result<(), RequestFailure> {
@@ -434,22 +627,86 @@ impl Client {
         }
         Ok(())
     }
+}
 
-    fn drain_events(&mut self, output: &Sender<Response>) -> Result<(), RequestFailure> {
-        for _ in 0..MAX_CLEANUP_DRAIN_BATCHES {
-            let value = self.request(&format!("/v1/events?after={}", self.cursor), None)?;
-            let empty = value
-                .get("events")
-                .and_then(Value::as_array)
-                .is_some_and(Vec::is_empty);
-            self.batch(value, output)?;
-            if empty {
-                return Ok(());
-            }
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+impl Client {
+    /// The bearer a new stream opens with. A spawned match only needs events
+    /// during its start barrier, which polls cover, so it opens none.
+    fn stream_bearer(&self) -> Option<&str> {
+        self.token
+            .as_deref()
+            .filter(|_| !self.spawned && !self.abandoned)
+    }
+
+    /// A stream frame starts at the stream's own cursor, which command
+    /// replies and polls may have passed: a stale frame is dropped, and
+    /// `batch` drops the events this worker already delivered.
+    fn streamed(&mut self, frame: Value, output: &Sender<Response>) -> Result<(), RequestFailure> {
+        if frame["cursor"]
+            .as_u64()
+            .is_some_and(|cursor| cursor < self.cursor)
+        {
+            return Ok(());
         }
-        // Keep the same cleanup request ID and retry; a busy event stream is
-        // not proof that all old room callbacks have reached the UI owner.
-        Err(RequestFailure::Status(0))
+        self.batch(frame, output)
+    }
+
+    fn request(&self, path: &str, body: Option<&Value>) -> Result<Value, RequestFailure> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(RequestFailure::Status(0));
+        }
+        let url = format!("{}{path}", self.base);
+        let response = if let Some(body) = body {
+            let mut request = self.agent.post(&url).header("User-Agent", USER_AGENT);
+            if path == "/v1/sessions" {
+                // Its relay CONFIRM carries a federation roster, and it plays
+                // Quick Match; see docs/lobby-protocol.md.
+                request = request
+                    .header("Vera-Relay-Federation", "1")
+                    .header("Vera-Quick-Match", "1");
+            }
+            if let Some(token) = &self.token {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            request.send_json(body)
+        } else {
+            let mut request = self.agent.get(&url).header("User-Agent", USER_AGENT);
+            if let Some(token) = &self.token {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            request.call()
+        };
+        let mut response = response.map_err(|_| RequestFailure::Status(0))?;
+        let status = response.status().as_u16();
+        if status == 401 {
+            return Err(RequestFailure::Status(status));
+        }
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take(MAX_BODY_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| RequestFailure::Status(0))?;
+        if bytes.len() as u64 > MAX_BODY_BYTES {
+            return Err(RequestFailure::Status(0));
+        }
+        if !(200..300).contains(&status) {
+            return Err(RequestFailure::answer(path, status, &bytes));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| RequestFailure::Status(0))
+    }
+}
+
+fn translation_result(result: Result<Value, RequestFailure>) -> Result<String, TranslateFailure> {
+    match result {
+        Ok(value) => value["text"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or(TranslateFailure::Unavailable),
+        Err(RequestFailure::Status(400)) => Err(TranslateFailure::Unsupported),
+        Err(_) => Err(TranslateFailure::Unavailable),
     }
 }
 
@@ -468,6 +725,8 @@ fn spawn_translator(
         token: None,
         cursor: 0,
         active_match: None,
+        spawned: false,
+        abandoned: false,
     };
     let output = output.clone();
     std::thread::Builder::new()
@@ -476,14 +735,7 @@ fn spawn_translator(
             for (id, token, text, target) in input {
                 translator.token = Some(token);
                 let body = json!({"text":text,"target":target});
-                let outcome = match translator.request("/v1/translate", Some(&body)) {
-                    Ok(value) => value["text"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .ok_or(TranslateFailure::Unavailable),
-                    Err(RequestFailure::Status(400)) => Err(TranslateFailure::Unsupported),
-                    Err(_) => Err(TranslateFailure::Unavailable),
-                };
+                let outcome = translation_result(translator.request("/v1/translate", Some(&body)));
                 if output.send(Response::Translated { id, outcome }).is_err() {
                     break;
                 }
@@ -500,40 +752,208 @@ pub(super) fn run(
     output: Sender<Response>,
     stopping: Arc<AtomicBool>,
 ) {
+    // Only an external launch's validated loopback origin is plain HTTP.
     let config = ureq::Agent::config_builder()
         .https_only(base.starts_with("https://"))
         .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(12)))
         .build();
-    let mut client = Client {
+    let client = Client {
         stopping: Arc::clone(&stopping),
         agent: config.into(),
         base,
         token: None,
         cursor: 0,
         active_match: None,
+        spawned: false,
+        abandoned: false,
     };
     let translator = spawn_translator(&client, &output);
+    run_loop(client, input, output, translator);
+}
+
+// One source for the serial HTTP decisions. Native expands to ordinary blocking
+// functions; only the explicitly enabled browser target emits async functions.
+// No native executor or second copy of the protocol state is introduced.
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+macro_rules! platform_await {
+    ($operation:expr) => {
+        $operation
+    };
+}
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+macro_rules! platform_await {
+    ($operation:expr) => {
+        $operation.await
+    };
+}
+
+macro_rules! serial_driver {
+    ($($asynchronous:tt)?) => {
+        impl Client {
+    /// Log out a bearer this worker still holds (given up in an outage, or
+    /// whose logout the shell stopped retrying), which still holds its name.
+    /// The lobby refuses to log out a session in a match, so a match the
+    /// shell already left is finished first. False while the lobby is away.
+    $($asynchronous)? fn release_held_session(&mut self) -> bool {
+        if self.token.is_none() {
+            return true;
+        }
+        if let Some(match_id) = self.active_match.clone() {
+            let body = json!({"request_id":"held-finish","after":self.cursor,"operation":"finish","payload":{"match_id":match_id}});
+            let _ = platform_await!(self.request("/v1/commands", Some(&body)));
+            self.active_match = None;
+        }
+        let body = json!({"request_id":"held-logout","after":self.cursor,"operation":"logout","payload":{}});
+        match platform_await!(self.request("/v1/commands", Some(&body))) {
+            Ok(_) | Err(RequestFailure::Status(401)) => {
+                self.token = None;
+                self.abandoned = false;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    $($asynchronous)? fn session_failed(&mut self, error: RequestFailure, output: &Sender<Response>) -> bool {
+        if let RequestFailure::UpgradeRequired(message) = error {
+            // The lobby keeps serving an outdated session's events, finish,
+            // leave and logout (docs/lobby-protocol.md), so it stays.
+            let _ = output.send(Response::Outdated { message });
+            return false;
+        }
+        if error == RequestFailure::LostCursor
+            && let Some(match_id) = self.active_match.clone()
+        {
+            let recovered = platform_await!(self
+                .request(&format!("/v1/match/resume?match_id={match_id}"), None))
+                .and_then(|value| self.accept_match_resume(value, output));
+            // Shell event history is separate from the committed gameplay
+            // journal. Network failures keep the same bearer/identity/cursor
+            // until a matching active-match recovery succeeds.
+            if !matches!(
+                recovered,
+                Err(RequestFailure::Status(401) | RequestFailure::AlreadyFinished)
+            ) {
+                return true;
+            }
+            self.active_match = None;
+        }
+        if matches!(
+            error,
+            RequestFailure::Status(401) | RequestFailure::LostCursor
+        ) {
+            if error == RequestFailure::LostCursor && self.token.is_some() {
+                // The bearer still owns this guest name, even though its
+                // event history cannot be replayed. Ordinary logout accepts
+                // an expired cursor and retires only this session. If the
+                // request fails, normal stale-session reap remains the fallback.
+                let _ = platform_await!(self.request(
+                    "/v1/commands",
+                    Some(&json!({
+                        "request_id":"lost-cursor-logout","operation":"logout","payload":{}
+                    })),
+                ));
+            }
+            // A missing history cannot be replayed safely. Retire this login so
+            // it stops refreshing the broken server session and use the WOL
+            // disconnect/re-login path. Repeated queued failures emit once.
+            if self.token.take().is_some() {
+                let _ = output.send(Response::Offline);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    $($asynchronous)? fn poll_finished(
+        &mut self,
+        result: Result<(), RequestFailure>,
+        failed_polls: &mut u8,
+        output: &Sender<Response>,
+    ) -> Duration {
+        match result {
+            Ok(()) => {
+                if *failed_polls > 0 {
+                    let _ = output.send(Response::LobbyReachable);
+                }
+                *failed_polls = 0;
+                if self.spawned && self.active_match.is_some() {
+                    SPAWNED_MATCH_POLL
+                } else {
+                    Duration::from_secs(1)
+                }
+            }
+            Err(error) if platform_await!(self.session_failed(error.clone(), output)) => Duration::from_secs(30),
+            Err(_) => {
+                if *failed_polls == 0 {
+                    let _ = output.send(Response::LobbyUnreachable);
+                }
+                *failed_polls = failed_polls.saturating_add(1);
+                // From about a minute on, each failed poll asks the shell,
+                // which gives up (`Request::Abandon`) unless a match is on.
+                if *failed_polls >= LOBBY_LOST_POLLS && !self.spawned && !self.abandoned {
+                    let _ = output.send(Response::LobbyLost);
+                }
+                Duration::from_secs((1u64 << (*failed_polls).min(5)).min(30))
+            }
+        }
+    }
+
+    $($asynchronous)? fn drain_events(&mut self, output: &Sender<Response>) -> Result<(), RequestFailure> {
+        for _ in 0..MAX_CLEANUP_DRAIN_BATCHES {
+            let value = platform_await!(self.request(&format!("/v1/events?after={}", self.cursor), None))?;
+            let empty = value
+                .get("events")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty);
+            self.batch(value, output)?;
+            if empty {
+                return Ok(());
+            }
+        }
+        // Keep the same cleanup request ID and retry; a busy event stream is
+        // not proof that all old room callbacks have reached the UI owner.
+        Err(RequestFailure::Status(0))
+    }
+        }
+        $($asynchronous)? fn run_loop(
+            mut client: Client,
+            input: Receiver<Request>,
+            output: Sender<Response>,
+            translator: Option<Sender<(u64, String, String, &'static str)>>,
+        ) {
+    let stopping = Arc::clone(&client.stopping);
+    #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+    let mut streams = stream::Streams::new(&client.base);
     let mut failed_polls = 0_u8;
     let mut next_poll = Instant::now();
+    let mut queued = VecDeque::new();
     loop {
         if stopping.load(Ordering::Acquire) {
             break;
         }
-        let request = match input.recv_timeout(Duration::from_secs(1)) {
-            Ok(request) => Some(request),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => break,
+        let request = match queued.pop_front() {
+            Some(request) => Some(request),
+            None => match platform_await!(next_request(&input)) {
+                Ok(request) => request,
+                Err(()) => break,
+            },
         };
+        queue_arrivals(&input, request.as_ref(), &mut queued);
         if stopping.load(Ordering::Acquire) {
             break;
         }
         match request {
-            Some(Request::AdoptSession { session, cursor }) => {
+            Some(Request::AdoptRoomSession { session, cursor }) => {
                 if client.token.is_none() {
+                    client.adopt_session(session.token, None);
+                    // This is an already joined room, not an already formed
+                    // match. Its ordinary room/start lifecycle remains active.
+                    client.spawned = false;
                     client.cursor = cursor;
-                    client.token = Some(session.token);
                     failed_polls = 0;
                 }
             }
@@ -604,7 +1024,7 @@ pub(super) fn run(
                 offset,
             }) => {
                 let result = if crate::map::source::valid_source_sha256(&digest) {
-                    client.request(
+                    platform_await!(client.request(
                         &format!(
                             "/v1/maps/{seed_digest}?offset={offset}&resource={}",
                             if resource == crate::map::source::TransferResource::Preview {
@@ -614,12 +1034,12 @@ pub(super) fn run(
                             }
                         ),
                         None,
-                    )
+                    ))
                 } else {
                     Err(RequestFailure::Status(400))
                 };
                 if let Err(error) = result.as_ref() {
-                    client.session_failed(*error, &output);
+                    platform_await!(client.session_failed(error.clone(), &output));
                 }
                 let response = match result {
                     Ok(value) => {
@@ -675,11 +1095,11 @@ pub(super) fn run(
                 let body = json!({"request_id":id.to_string(),"after":client.cursor,"operation":"map_upload",
                     "payload":{"digest":digest,"byte_length":total,"offset":offset,"resource":if resource == crate::map::source::TransferResource::Preview { "preview" } else { "map" },
                     "data":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)}});
-                let result = client
-                    .request("/v1/commands", Some(&body))
+                let result = platform_await!(client
+                    .request("/v1/commands", Some(&body)))
                     .and_then(|value| client.batch(value, &output));
                 if let Err(error) = result.as_ref() {
-                    client.session_failed(*error, &output);
+                    platform_await!(client.session_failed(error.clone(), &output));
                 }
                 let response = match result {
                     Ok(()) => Response::MapUploaded {
@@ -696,23 +1116,21 @@ pub(super) fn run(
                 };
                 let _ = output.send(response);
             }
-            Some(Request::OpenSession { attempt, nickname }) => {
-                // A new username cannot prove ownership of an old bearer.
-                // The service's existing cleanup gate must retire it first.
-                if client.token.is_some() {
-                    let _ = output.send(Response::LoginFailed {
-                        attempt,
-                        code: 0x8004_0064,
-                    });
+            Some(Request::OpenSession {
+                attempt,
+                nickname,
+                credential,
+            }) => {
+                // A held bearer still holds its name: log it out first, and
+                // while the lobby is away, report that instead of the name.
+                if !platform_await!(client.release_held_session()) {
+                    let _ = output.send(Response::LoginFailed { attempt, code: 0 });
                     continue;
                 }
                 client.cursor = 0;
                 client.active_match = None;
-                let result = client
-                    .request(
-                        "/v1/sessions",
-                        Some(&json!({"nickname": nickname, "protocol": 4})),
-                    )
+                let result = platform_await!(client
+                    .request("/v1/sessions", Some(&session_body(&nickname, &credential))))
                     .and_then(|value| decode_session(value, &nickname));
                 match result {
                     Ok(session) => {
@@ -723,6 +1141,10 @@ pub(super) fn run(
                                 attempt,
                                 player_id: session.player_id,
                                 nickname: session.nickname,
+                                motd: session.motd,
+                                sign_in_token: session
+                                    .sign_in_token
+                                    .filter(|_| matches!(credential, Credential::Password { remember: true, .. })),
                             })
                             .is_err()
                         {
@@ -744,17 +1166,55 @@ pub(super) fn run(
                             code: 0x8004_0064,
                         });
                     }
-                    Err(RequestFailure::Status(426)) => {
-                        let _ = output.send(Response::UpgradeRequired { attempt });
+                    Err(RequestFailure::UpgradeRequired(message)) => {
+                        let _ = output.send(Response::UpgradeRequired { attempt, message });
+                    }
+                    Err(error @ (RequestFailure::Maintenance(_)
+                    | RequestFailure::Full(_)
+                    | RequestFailure::Account { .. }
+                    | RequestFailure::Status(429))) => {
+                        let bad_credential = matches!(
+                            error,
+                            RequestFailure::Account { bad_credential: true, .. }
+                        );
+                        let message = sign_in_refusal(error);
+                        let _ = output.send(Response::SignInRefused {
+                            attempt,
+                            message,
+                            bad_credential,
+                        });
                     }
                     Err(_) => {
                         let _ = output.send(Response::LoginFailed { attempt, code: 0 });
                     }
                 }
             }
+            Some(Request::Account { attempt, request }) => {
+                let (path, body) = account_call(&request);
+                let answer = platform_await!(client.request(path, Some(&body)))
+                    .map(|_| ())
+                    .map_err(sign_in_refusal);
+                let _ = output.send(Response::AccountAnswered { attempt, answer });
+            }
+            Some(Request::ForgetSignIn {
+                name,
+                sign_in_token,
+            }) => {
+                let body = json!({"name": name, "sign_in_token": sign_in_token});
+                if let Err(error) = platform_await!(client.request("/v1/accounts/forget", Some(&body))) {
+                    log::warn!("Could not forget the remembered sign-in: status={}", error.status());
+                }
+            }
+            Some(Request::Abandon) => client.abandoned = client.token.is_some(),
+            Some(Request::AdoptSession { token, resume }) => {
+                if client.token.is_none() {
+                    client.adopt_session(token, resume);
+                    failed_polls = 0;
+                }
+            }
             Some(Request::Channels(kind)) => {
-                match client
-                    .request(&format!("/v1/channels?kind={kind}"), None)
+                match platform_await!(client
+                    .request(&format!("/v1/channels?kind={kind}"), None))
                     .and_then(|value| {
                         serde_json::from_value(value).map_err(|_| RequestFailure::Status(0))
                     }) {
@@ -762,18 +1222,11 @@ pub(super) fn run(
                         let _ = output.send(Response::Channels(channels));
                     }
                     Err(error) => {
-                        if !client.session_failed(error, &output) {
+                        if !platform_await!(client.session_failed(error, &output)) {
                             let _ = output
                                 .send(Response::Failure("Could not refresh the online lobby."));
                         }
                     }
-                }
-            }
-            Some(Request::Stats) => {
-                if let Ok(stats) = client.request("/v1/stats", None).and_then(|value| {
-                    serde_json::from_value(value).map_err(|_| RequestFailure::Status(0))
-                }) {
-                    let _ = output.send(Response::Stats(stats));
                 }
             }
             Some(Request::Command {
@@ -784,21 +1237,16 @@ pub(super) fn run(
                 if operation == "logout" && client.token.is_none() {
                     // This serial worker has either already acknowledged
                     // logout or never obtained a bearer. No old authority is
-                    // left to clean up, including Back from the welcome page.
+                    // left to clean up, including Back from the sign-in page.
                     let _ = output.send(Response::CommandCompleted { id, operation });
                     continue;
                 }
                 let body = json!({"request_id":id.to_string(),"after":client.cursor,"operation":operation,"payload":payload});
-                let result = client
-                    .request("/v1/commands", Some(&body))
-                    .or_else(|error| {
-                        if error == RequestFailure::Status(0) {
-                            client.request("/v1/commands", Some(&body))
-                        } else {
-                            Err(error)
-                        }
-                    })
-                    .and_then(|value| {
+                let mut response = platform_await!(client.request("/v1/commands", Some(&body)));
+                if response == Err(RequestFailure::Status(0)) {
+                    response = platform_await!(client.request("/v1/commands", Some(&body)));
+                }
+                let result = response.and_then(|value| {
                         // Logout removes its event stream and returns cursor0.
                         // Its successful HTTP response is the completion receipt.
                         if operation == "logout" {
@@ -810,12 +1258,12 @@ pub(super) fn run(
                 let result = if result.is_ok() && matches!(operation, "finish" | "leave") {
                     // The server may return events pending before the mutation.
                     // Drain its committed tail before releasing the next room.
-                    client.drain_events(&output)
+                    platform_await!(client.drain_events(&output))
                 } else {
                     result
                 };
                 let completed = result.is_ok();
-                if let Err(error) = result {
+                if let Err(error) = &result {
                     // Static operation names and numeric status only: request
                     // bodies, headers and transport errors can carry secrets.
                     log::warn!(
@@ -831,10 +1279,14 @@ pub(super) fn run(
                         let _ = output.send(Response::CommandCompleted { id, operation });
                     }
                     Err(error)
-                        if !client.session_failed(error, &output) && operation != "renew_relay" =>
+                        if !platform_await!(client.session_failed(error.clone(), &output)) && operation != "renew_relay" =>
                     {
                         let _ = output.send(if operation == "start" {
-                            Response::StartRejected { id }
+                            Response::StartRejected {
+                                id,
+                                retryable: error.command_failure(operation)
+                                    == CommandFailure::Retryable,
+                            }
                         } else {
                             Response::CommandFailed {
                                 id,
@@ -847,6 +1299,7 @@ pub(super) fn run(
                 }
                 if operation == "logout" && completed {
                     client.token = None;
+                    client.abandoned = false;
                 }
             }
             Some(Request::Translate { id, text, target }) => {
@@ -863,14 +1316,66 @@ pub(super) fn run(
             }
             None => {}
         }
-        if client.token.is_some() && Instant::now() >= next_poll {
-            let result = client
-                .request(&format!("/v1/events?after={}", client.cursor), None)
+        #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+        let streaming = {
+            while let Some(frame) = streams.next(client.stream_bearer()) {
+                // A bad frame ends the stream; the next poll asks again.
+                if client.streamed(frame, &output).is_err() {
+                    streams.close();
+                }
+            }
+            streams.open(client.stream_bearer(), client.cursor, &stopping);
+            // A stream that is up is a lobby that answers.
+            if streams.live() && failed_polls > 0 {
+                client.poll_finished(Ok(()), &mut failed_polls, &output);
+            }
+            streams.live()
+        };
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        let streaming = false;
+        if client.token.is_some() && !client.abandoned && !streaming && Instant::now() >= next_poll {
+            let result = platform_await!(client
+                .request(&format!("/v1/events?after={}", client.cursor), None))
                 .and_then(|value| client.batch(value, &output));
-            next_poll = Instant::now() + client.poll_finished(result, &mut failed_polls, &output);
+            next_poll = Instant::now() + platform_await!(client.poll_finished(result, &mut failed_polls, &output));
+        }
+    }
+        }
+    };
+}
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+serial_driver!();
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+serial_driver!(async);
+
+// Stream frames arrive on their own channel, so the worker looks for them
+// every 50 ms, as the browser worker does for requests.
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+fn next_request(input: &Receiver<Request>) -> Result<Option<Request>, ()> {
+    match input.recv_timeout(Duration::from_millis(50)) {
+        Ok(request) => Ok(Some(request)),
+        Err(RecvTimeoutError::Timeout) => Ok(None),
+        Err(RecvTimeoutError::Disconnected) => Err(()),
+    }
+}
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+async fn next_request(input: &Receiver<Request>) -> Result<Option<Request>, ()> {
+    match input.try_recv() {
+        Ok(request) => Ok(Some(request)),
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(()),
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            browser::delay(50).await;
+            Ok(None)
         }
     }
 }
+
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+mod browser;
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+mod stream;
+#[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
+pub(super) use browser::{RequestOwner, start as start_browser};
 
 #[cfg(test)]
 mod tests {
@@ -902,6 +1407,23 @@ mod tests {
     }
 
     #[test]
+    fn authentication_response_carries_the_operators_welcome() {
+        let response = session_response();
+        let nickname = response["nickname"].as_str().unwrap().to_owned();
+        assert_eq!(
+            decode_session(response.clone(), &nickname).unwrap().motd,
+            None
+        );
+        let mut welcomed = response;
+        welcomed["motd"] = json!("Welcome to VERA20K Online!\nHave fun.");
+        let accepted = decode_session(welcomed, &nickname).unwrap();
+        assert_eq!(
+            accepted.motd.as_deref(),
+            Some("Welcome to VERA20K Online!\nHave fun.")
+        );
+    }
+
+    #[test]
     fn authentication_response_rejects_malformed_player_bearer_and_expiry() {
         let response = session_response();
         let nickname = response["nickname"].as_str().unwrap();
@@ -925,6 +1447,16 @@ mod tests {
         assert_eq!(
             wrong_key.command_failure("join"),
             CommandFailure::Rejected(0x8004_0071)
+        );
+        let kept_out = RequestFailure::response(403, br#"{"error":{"code":"room_kept_out"}}"#);
+        assert_eq!(
+            kept_out.command_failure("join"),
+            CommandFailure::Rejected(crate::app::shell_wol::lobby::KEPT_OUT_JOIN_ERROR)
+        );
+        let taken = RequestFailure::response(409, br#"{"error":{"code":"name_unavailable"}}"#);
+        assert_eq!(
+            taken.command_failure("create"),
+            CommandFailure::Rejected(crate::app::shell_wol::lobby::ROOM_NAME_TAKEN)
         );
         let full = RequestFailure::response(409, br#"{"error":{"code":"room_full"}}"#);
         assert_eq!(
@@ -951,6 +1483,82 @@ mod tests {
         );
     }
 
+    /// A bearer the shell stopped logging out (Back in an outage, or a
+    /// sign-in that answered after its wait) is logged out before the next
+    /// sign-in instead of reporting the name in use; while the lobby is
+    /// away it stays held.
+    #[test]
+    fn a_held_bearer_is_logged_out_before_signing_in_again() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let lobby = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (mut request, mut chunk) = (Vec::new(), [0; 1024]);
+            while !String::from_utf8_lossy(&request).contains("logout") {
+                let read = stream.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "the request ended without a logout");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .unwrap();
+        });
+        let mut client = Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: "http://127.0.0.1:1".to_owned(),
+            token: Some("synthetic-test-session".to_owned()),
+            cursor: 4,
+            active_match: None,
+            spawned: false,
+            abandoned: false,
+        };
+        assert!(!client.release_held_session());
+        assert!(client.token.is_some());
+        client.base = format!("http://{address}");
+        assert!(client.release_held_session());
+        assert!(client.token.is_none());
+        lobby.join().unwrap();
+    }
+
+    /// From about a minute of failed polls on, each failed poll asks the
+    /// shell to give up, until it does; then the bearer stays for the next
+    /// sign-in and no stream reopens.
+    #[test]
+    fn a_lobby_lost_for_a_minute_asks_the_shell_until_it_gives_up() {
+        let (output, input) = std::sync::mpsc::channel();
+        let mut client = Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: String::new(),
+            token: Some("synthetic-test-session".to_owned()),
+            cursor: 19,
+            active_match: None,
+            spawned: false,
+            abandoned: false,
+        };
+        let outage = |client: &mut Client, failures: &mut u8, polls| {
+            for _ in 0..polls {
+                client.poll_finished(Err(RequestFailure::Status(0)), failures, &output);
+            }
+            input
+                .try_iter()
+                .filter(|response| matches!(response, Response::LobbyLost))
+                .count()
+        };
+        let mut failures = 0;
+        assert_eq!(outage(&mut client, &mut failures, LOBBY_LOST_POLLS - 1), 0);
+        // A shell in a match ignores these, so they keep coming after it.
+        assert_eq!(outage(&mut client, &mut failures, 2), 2);
+        client.abandoned = true;
+        assert_eq!(outage(&mut client, &mut failures, 1), 0);
+        assert!(client.token.is_some() && client.stream_bearer().is_none());
+    }
+
     #[test]
     fn transient_poll_failure_preserves_session_and_cursor_until_definitive_unauthorized() {
         let (output, input) = std::sync::mpsc::channel();
@@ -961,12 +1569,16 @@ mod tests {
             token: Some("synthetic-test-session".to_owned()),
             cursor: 19,
             active_match: None,
+            spawned: false,
+            abandoned: false,
         };
         let mut failures = 0;
         assert_eq!(
             client.poll_finished(Err(RequestFailure::Status(0)), &mut failures, &output),
             Duration::from_secs(2)
         );
+        // One status line when the outage begins and one when it ends.
+        assert!(matches!(input.try_recv(), Ok(Response::LobbyUnreachable)));
         assert_eq!(
             client.poll_finished(Err(RequestFailure::Status(503)), &mut failures, &output),
             Duration::from_secs(4)
@@ -978,17 +1590,53 @@ mod tests {
         );
         assert!(client.token.is_some());
         assert_eq!(client.cursor, 19);
+        assert!(matches!(input.try_recv(), Ok(Response::LobbyLost)));
         assert!(input.try_recv().is_err());
         assert_eq!(
             client.poll_finished(Ok(()), &mut failures, &output),
             Duration::from_secs(1)
         );
         assert_eq!(failures, 0);
+        assert!(matches!(input.try_recv(), Ok(Response::LobbyReachable)));
+        client.poll_finished(Ok(()), &mut failures, &output);
+        assert!(input.try_recv().is_err());
         client.poll_finished(Err(RequestFailure::Status(401)), &mut failures, &output);
         assert!(client.token.is_none());
         assert!(matches!(input.try_recv(), Ok(Response::Offline)));
         assert!(client.session_failed(RequestFailure::Status(401), &output));
         assert!(input.try_recv().is_err());
+    }
+
+    #[test]
+    fn periodic_requests_do_not_pile_up_behind_a_timing_out_command() {
+        let (requests, input) = std::sync::mpsc::channel();
+        let command = |id, operation, payload| Request::Command {
+            id,
+            operation,
+            payload,
+        };
+        let renew = |id, match_id| command(id, "renew_relay", json!({"match_id":match_id}));
+        for request in [
+            command(2, "ready", json!({"ready":true})),
+            command(3, "ping", json!({})),
+            renew(4, "a"),
+            renew(5, "a"),
+            renew(6, "b"),
+            command(7, "chat", json!({"text":"gg"})),
+            command(8, "chat", json!({"text":"gg"})),
+        ] {
+            requests.send(request).unwrap();
+        }
+        let mut queued = VecDeque::new();
+        queue_arrivals(&input, Some(&command(1, "ping", json!({}))), &mut queued);
+        let ids: Vec<_> = queued
+            .iter()
+            .map(|request| match request {
+                Request::Command { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, [Some(2), Some(4), Some(6), Some(7), Some(8)]);
     }
 
     #[test]
@@ -1001,6 +1649,8 @@ mod tests {
             token: Some("synthetic-test-session".to_owned()),
             cursor: 19,
             active_match: None,
+            spawned: false,
+            abandoned: false,
         };
         let conflict = RequestFailure::response(
             409,
@@ -1012,7 +1662,7 @@ mod tests {
             409,
             br#"{"error":{"code":"history_expired","message":"Sign in again."}}"#,
         );
-        client.poll_finished(Err(expired), &mut 0, &output);
+        client.poll_finished(Err(expired.clone()), &mut 0, &output);
         assert!(client.token.is_none());
         assert_eq!(client.cursor, 19);
         assert!(matches!(input.try_recv(), Ok(Response::Offline)));
@@ -1025,6 +1675,156 @@ mod tests {
         );
     }
 
+    /// A full or busy lobby refuses a sign-in in its own words, not as a
+    /// connection failure.
+    #[test]
+    fn a_full_or_busy_lobby_refuses_a_sign_in_in_its_own_words() {
+        let reason = "Too many players from your network are online.";
+        let full = RequestFailure::response(
+            503,
+            json!({"error":{"code":"network_full","message":reason}})
+                .to_string()
+                .as_bytes(),
+        );
+        assert_eq!(full, RequestFailure::Full(Some(reason.into())));
+        assert_eq!(sign_in_refusal(full), reason);
+        assert!(sign_in_refusal(RequestFailure::Full(None)).contains("full"));
+        assert!(sign_in_refusal(RequestFailure::Status(429)).contains("busy"));
+    }
+
+    /// An account's refusals show the lobby's words; only `wrong_password`
+    /// and `no_account` say a remembered sign-in no longer works, and an
+    /// account request's `name_unavailable` is a message, not a room's join
+    /// code.
+    #[test]
+    fn account_refusals_carry_the_lobby_message() {
+        let refusal = |code: &str, message: &str| {
+            json!({"error":{"code":code,"message":message}}).to_string()
+        };
+        let wrong = RequestFailure::response(
+            403,
+            refusal("wrong_password", "Sign in again with your password.").as_bytes(),
+        );
+        assert_eq!(
+            wrong,
+            RequestFailure::Account {
+                status: 403,
+                bad_credential: true,
+                message: "Sign in again with your password.".into(),
+            }
+        );
+        let deleted = RequestFailure::response(404, br#"{"error":{"code":"no_account"}}"#);
+        assert!(matches!(
+            deleted,
+            RequestFailure::Account {
+                bad_credential: true,
+                ..
+            }
+        ));
+        let claimed = RequestFailure::response(403, br#"{"error":{"code":"name_claimed"}}"#);
+        assert!(!matches!(
+            claimed,
+            RequestFailure::Account {
+                bad_credential: true,
+                ..
+            }
+        ));
+        assert!(sign_in_refusal(claimed).contains("has an account"));
+        let taken = RequestFailure::answer(
+            "/v1/accounts/register",
+            409,
+            refusal("name_unavailable", "That name is taken.").as_bytes(),
+        );
+        assert_eq!(sign_in_refusal(taken), "That name is taken.");
+        let network = refusal(
+            "rate_limited",
+            "Too many wrong passwords from your network.",
+        );
+        assert_eq!(
+            sign_in_refusal(RequestFailure::answer(
+                "/v1/sessions",
+                429,
+                network.as_bytes()
+            )),
+            "Too many wrong passwords from your network."
+        );
+        assert_eq!(
+            RequestFailure::answer("/v1/maps", 429, network.as_bytes()),
+            RequestFailure::Status(429)
+        );
+    }
+
+    /// A sign-in sends the typed password or the remembered sign-in, never
+    /// both, and a guest sends neither.
+    #[test]
+    fn a_session_sends_a_password_or_a_remembered_sign_in() {
+        let token = "A".repeat(43);
+        let body = |credential| session_body("Tanya", &credential);
+        let guest = body(Credential::Guest);
+        assert_eq!(guest, json!({"nickname":"Tanya","protocol":4}));
+        let password = body(Credential::Password {
+            password: "s3cret-pw".into(),
+            remember: true,
+        });
+        assert_eq!(password["password"], "s3cret-pw");
+        assert_eq!(password["remember"], true);
+        assert!(password.get("sign_in_token").is_none());
+        let remembered = body(Credential::Remembered(token.clone()));
+        assert_eq!(remembered["sign_in_token"], token);
+        assert!(remembered.get("password").is_none() && remembered.get("remember").is_none());
+    }
+
+    #[test]
+    fn update_refusal_keeps_only_a_plain_lobby_reason_and_the_session() {
+        let reason = "Online play needs VERA20k 0.3.0 or newer.";
+        let refused = |message: &str| {
+            let body = json!({"error":{"code":"upgrade_required","message":message}});
+            RequestFailure::response(426, body.to_string().as_bytes())
+        };
+        let longest = "x".repeat(MAX_UPGRADE_MESSAGE_CHARS);
+        assert_eq!(
+            refused(&longest),
+            RequestFailure::UpgradeRequired(Some(longest.clone()))
+        );
+        let too_long = format!("{longest}x");
+        for unusable in [too_long.as_str(), "Update.\r\n[Ask]", "  "] {
+            assert_eq!(refused(unusable), RequestFailure::UpgradeRequired(None));
+        }
+        assert_eq!(
+            RequestFailure::response(426, b"not json"),
+            RequestFailure::UpgradeRequired(None)
+        );
+        assert_eq!(
+            RequestFailure::response(
+                503,
+                br#"{"error":{"code":"maintenance","message":"Back at 20:30 UTC."}}"#
+            ),
+            RequestFailure::Maintenance(Some("Back at 20:30 UTC.".into()))
+        );
+        assert_eq!(
+            RequestFailure::response(503, br#"{"error":{"code":"service_unavailable"}}"#),
+            RequestFailure::Status(503)
+        );
+
+        let (output, input) = std::sync::mpsc::channel();
+        let mut client = Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: String::new(),
+            token: Some("synthetic-test-session".to_owned()),
+            cursor: 19,
+            active_match: None,
+            spawned: false,
+            abandoned: false,
+        };
+        assert!(!client.session_failed(refused(reason), &output));
+        assert!(client.token.is_some());
+        assert!(matches!(
+            input.try_recv(),
+            Ok(Response::Outdated { message: Some(message) }) if message == reason
+        ));
+    }
+
     #[test]
     fn replayed_http_response_does_not_redeliver_lobby_events() {
         let (output, input) = std::sync::mpsc::channel();
@@ -1035,6 +1835,8 @@ mod tests {
             token: None,
             cursor: 0,
             active_match: None,
+            spawned: false,
+            abandoned: false,
         };
         let response = json!({"cursor":2,"events":[
             {"sequence":1,"kind":"created","payload":{}},
@@ -1063,6 +1865,96 @@ mod tests {
     }
 
     #[test]
+    fn stream_frames_behind_a_command_reply_deliver_only_newer_events() {
+        let (output, input) = std::sync::mpsc::channel();
+        let mut client = Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: String::new(),
+            token: None,
+            cursor: 5,
+            active_match: None,
+            spawned: false,
+            abandoned: false,
+        };
+        let event = |sequence| json!({"sequence":sequence,"kind":"chat","payload":{}});
+        client
+            .streamed(json!({"cursor":4,"events":[event(4)]}), &output)
+            .unwrap();
+        assert_eq!(client.cursor, 5);
+        client
+            .streamed(
+                json!({"cursor":6,"events":[event(4), event(5), event(6)]}),
+                &output,
+            )
+            .unwrap();
+        let delivered: Vec<_> = input
+            .try_iter()
+            .map(|response| match response {
+                Response::Event(event) => event.sequence,
+                _ => panic!("only events"),
+            })
+            .collect();
+        assert_eq!((delivered, client.cursor), (vec![6], 6));
+    }
+
+    #[test]
+    fn a_spawned_match_polls_slowly_and_never_streams_once_timing_is_confirmed() {
+        let (output, _input) = std::sync::mpsc::channel();
+        let timing = || {
+            json!({"cursor":1,"events":[{"sequence":1,"kind":"timing_confirmed",
+                "payload":{"match_id":"11111111-1111-1111-1111-111111111111"}}]})
+        };
+        let client = || Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: String::new(),
+            token: None,
+            cursor: 0,
+            active_match: None,
+            spawned: false,
+            abandoned: false,
+        };
+        let mut failures = 0;
+
+        let mut spawned = client();
+        // A returning engine's start is history: it polls at its match's pace at once.
+        let mut returning = client();
+        returning.adopt_session(
+            "synthetic-test-session".to_owned(),
+            Some(("11111111-1111-1111-1111-111111111111".to_owned(), 2)),
+        );
+        assert_eq!(returning.cursor, 2);
+        assert_eq!(
+            returning.poll_finished(Ok(()), &mut failures, &output),
+            Duration::from_secs(60)
+        );
+
+        spawned.adopt_session("synthetic-test-session".to_owned(), None);
+        assert_eq!(spawned.stream_bearer(), None);
+        // The start barrier waits on the other players' events.
+        assert_eq!(
+            spawned.poll_finished(Ok(()), &mut failures, &output),
+            Duration::from_secs(1)
+        );
+        spawned.batch(timing(), &output).unwrap();
+        assert_eq!(
+            spawned.poll_finished(Ok(()), &mut failures, &output),
+            Duration::from_secs(60)
+        );
+
+        // A lobby session's match keeps its stream and its pace.
+        let mut lobby = client();
+        lobby.token = Some("synthetic-test-session".to_owned());
+        assert_eq!(lobby.stream_bearer(), Some("synthetic-test-session"));
+        lobby.batch(timing(), &output).unwrap();
+        assert_eq!(
+            lobby.poll_finished(Ok(()), &mut failures, &output),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
     fn active_match_resume_preserves_identity_and_rejects_another_match_or_old_cursor() {
         let (output, input) = std::sync::mpsc::channel();
         let id = "11111111-1111-1111-1111-111111111111";
@@ -1073,6 +1965,8 @@ mod tests {
             token: Some("synthetic-test-session".to_owned()),
             cursor: 19,
             active_match: None,
+            spawned: false,
+            abandoned: false,
         };
         client
             .batch(

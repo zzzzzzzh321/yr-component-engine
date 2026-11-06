@@ -3,18 +3,30 @@
 //! Event priority and consumption order are player-visible contracts; this
 //! module keeps the original handler body intact.
 
+use super::frame::{FramePass, FrameRenderOutcome};
 use super::input::dispatch;
+use super::input::precedence::{InputLayer, ModalPage, ScreenPage};
 use super::{
     ActiveEventLoop, App, AppState, ApplicationHandler, ControlFlow, GameScreen, Instant, KeyCode,
     KeyEventExtModifierSupplement, MouseButton, MouseScrollDelta, PhysicalKey, PhysicalSize,
     ShellKey, WindowEvent, WindowId,
 };
+use crate::ui::pause_menu::InGameMenuState;
 
 /// Active YR's launcher parent ignores IDCANCEL. Taking only an immutable
 /// reference makes the no-close/no-replacement guarantee explicit at the
 /// keyboard routing seam.
 fn launcher_options_consumes_escape<T>(dialog: &Option<T>, is_escape: bool) -> bool {
     is_escape && dialog.is_some()
+}
+
+fn capture_render_continues(deadline: &mut Option<Instant>, outcome: FrameRenderOutcome) -> bool {
+    if outcome == FrameRenderOutcome::Deferred {
+        *deadline = None;
+        true
+    } else {
+        false
+    }
 }
 
 impl App {
@@ -94,7 +106,7 @@ impl App {
     pub(crate) fn release_in_game_pointer_state(state: &mut AppState) {
         state.match_state.input.tactical_mouse.reset_on_focus_loss();
         state.match_state.input.selection_state.cancel_drag();
-        state.match_state.input.minimap_dragging = false;
+        state.match_state.input.cancel_minimap_press();
         // A touch stream can end without an `Ended` when the window loses
         // focus with fingers down, and the live gesture owns the edge-scroll
         // inhibit, so it dies on the same edge as the rest of the pointer
@@ -123,9 +135,7 @@ impl App {
             .saved_game_browser
             .as_mut()
         {
-            browser.pressed_control = None;
-            browser.scroll_repeat_at = None;
-            browser.last_list_press = None;
+            browser.reset_interaction();
         }
     }
 
@@ -180,7 +190,8 @@ impl App {
         );
         let profile = &state.persistence.options_profile;
         let (percent, shape) = if state.platform.capture_client_size.is_some() {
-            (100, FrameShape::Window)
+            let zoom = state.platform.capture_presentation.zoom;
+            (zoom.percent(width, height), FrameShape::Window)
         } else if profile.original_shape {
             (profile.zoom.percent(width, height), FrameShape::Original)
         } else {
@@ -215,6 +226,47 @@ impl App {
         )));
     }
 
+    /// Note where the windowed window sits for the next launch, and whether it
+    /// is maximised. Full screen, maximised and minimised windows keep the last
+    /// ordinary placement, so leaving those states restores it. winit reports full screen until the
+    /// exit animation's last resize, so the animation's sizes are skipped too.
+    fn remember_window_placement(state: &mut AppState) {
+        let window = &state.platform.window;
+        if state.platform.capture_client_size.is_some()
+            || window.fullscreen().is_some()
+            || window.is_minimized().unwrap_or(false)
+        {
+            return;
+        }
+        let maximized = window.is_maximized();
+        if state.persistence.options_profile.window_maximized != maximized {
+            state.persistence.options_profile.window_maximized = maximized;
+            state.platform.window_placement_unsaved = true;
+        }
+        if maximized {
+            return;
+        }
+        let window = &state.platform.window;
+        let Ok(corner) = window.outer_position() else {
+            return;
+        };
+        let size = window.inner_size().to_logical::<u32>(window.scale_factor());
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let placement = crate::app::persistence::options_profile::WindowPlacement {
+            x: corner.x,
+            y: corner.y,
+            width: size.width,
+            height: size.height,
+        };
+        let profile = &mut state.persistence.options_profile;
+        if profile.window_placement != Some(placement) {
+            profile.window_placement = Some(placement);
+            state.platform.window_placement_unsaved = true;
+        }
+    }
+
     /// The window owns full screen while the game runs, and can change it by
     /// itself (its title-bar button, the system shortcut). Each event-loop pass
     /// copies its state into the profile and the Options box, so they and the
@@ -240,21 +292,24 @@ impl App {
             state.platform.recenter_windowed = false;
         } else {
             let leaving_full_screen = state.persistence.options_profile.full_screen;
-            let displays = crate::app::display_target::current_displays(&state.platform.window);
-            let on_choice = crate::app::display_target::window_is_on(
-                &state.platform.window,
-                &displays,
-                &state.persistence.options_profile.display,
-            );
-            let pending = leaving_full_screen || state.platform.recenter_windowed;
-            if pending && !on_choice {
-                crate::app::display_target::center_windowed(
+            // Only a placement still owed asks the system for its screens: the
+            // list costs a display-list query, too much for every pass.
+            if leaving_full_screen || state.platform.recenter_windowed {
+                let displays = crate::app::display_target::current_displays(&state.platform.window);
+                let on_choice = crate::app::display_target::window_is_on(
                     &state.platform.window,
                     &displays,
                     &state.persistence.options_profile.display,
                 );
+                if !on_choice {
+                    crate::app::display_target::center_windowed(
+                        &state.platform.window,
+                        &displays,
+                        &state.persistence.options_profile.display,
+                    );
+                }
+                state.platform.recenter_windowed = !on_choice;
             }
-            state.platform.recenter_windowed = pending && !on_choice;
         }
         state.persistence.options_profile.full_screen = full_screen;
         if let Some(dialog) = state.frontend.options_dialog.as_mut() {
@@ -342,7 +397,8 @@ impl App {
                 // Preserve the disposition before consuming either request;
                 // replay intentionally does not set frontend.external_launch.
                 let reveal_direct_window = state.platform.capture_client_size.is_none()
-                    && (self.pending_spawn.is_some() || self.replay_request.is_some());
+                    && (self.pending_spawn.is_some() || self.replay_request.is_some())
+                    && !(self.pending_spawn.is_some() && Self::spawn_hidden_window_requested());
                 // Resizes may have arrived while startup owned the renderer.
                 Self::follow_window_size(&mut state);
                 if let Some(request) = self.replay_request.take() {
@@ -351,6 +407,7 @@ impl App {
                             .replay
                             .standalone_startup()
                             .expect("validated replay request"),
+                        request.map_beside.as_deref(),
                     );
                     state.match_state.match_diagnostics.begin_playback(
                         request.replay,
@@ -359,6 +416,8 @@ impl App {
                     );
                     crate::app::loading::pump::begin_loading(&mut state, loading);
                 }
+                #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+                let mut browser_spawn_failure = None;
                 if let Some(pending) = self.pending_spawn.take()
                     && let Err(error) = Self::resolve_pending_spawn(pending, &state.process_assets)
                         .and_then(|request| match self.community_network.take() {
@@ -370,18 +429,32 @@ impl App {
                 {
                     let error = format!("CnCNet startup failed: {error:#}");
                     log::error!("{error}");
-                    self.startup_failure = Some(error);
-                    event_loop.exit();
-                    return;
+                    // docs/spawn.md: the page keeps its engine and may start
+                    // another launch; the report follows the Ready status.
+                    #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+                    {
+                        crate::web::status(&error);
+                        browser_spawn_failure = Some(error);
+                    }
+                    #[cfg(not(all(
+                        feature = "wasm",
+                        target_arch = "wasm32",
+                        target_os = "unknown"
+                    )))]
+                    {
+                        self.startup_failure = Some(error);
+                        event_loop.exit();
+                        return;
+                    }
                 }
                 if let Some(session) = self.shell_capture.as_mut() {
                     session.prepare_state(&mut state);
                 }
-                if let Some(session) = self.tactical_capture.as_mut()
+                if let Some(session) = self.hidden_run.as_mut()
                     && let Err(err) = session.prepare_state(&mut state)
                 {
-                    log::error!("Tactical capture preparation failed: {err:#}");
-                    session.fail(format!("tactical capture preparation failed: {err:#}"));
+                    log::error!("The {} could not start: {err:#}", session.name());
+                    session.fail(format!("{} preparation failed: {err:#}", session.name()));
                     event_loop.exit();
                     return;
                 }
@@ -417,20 +490,37 @@ impl App {
                         .and_then(|state| state.frontend.main_menu_shell_error.as_deref())
                         .unwrap_or("Ready"),
                 );
+                #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+                if let (Some(error), Some(state)) = (browser_spawn_failure, self.state.as_mut()) {
+                    Self::finish_browser_external_launch(state, Some(&error));
+                }
                 log::info!("Initialization complete");
             }
             Err(err) => {
                 #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
-                crate::web::status(&format!("Startup failed: {err:#}"));
+                {
+                    crate::web::request_exit(Some(&format!("Startup failed: {err:#}")));
+                    crate::web::status(&format!("Startup failed: {err:#}"));
+                }
                 log::error!("Failed to initialize: {:#}", err);
                 if self.pending_spawn.is_some() || self.replay_request.is_some() {
                     self.startup_failure = Some(format!("CnCNet initialization failed: {err:#}"));
+                } else if cfg!(not(all(target_arch = "wasm32", target_os = "unknown")))
+                    && self.shell_capture.is_none()
+                    && self.hidden_run.is_none()
+                {
+                    // A player's launch: say why before the process exits with
+                    // a failure status (`finish_capture`). The browser page
+                    // reports it above.
+                    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                    crate::app::system_dialog::report_startup_failure(&err);
+                    self.startup_failure = Some(format!("Startup failed: {err:#}"));
                 }
                 if let Some(session) = self.shell_capture.as_mut() {
                     session.fail(format!("shell capture initialization failed: {err:#}"));
                 }
-                if let Some(session) = self.tactical_capture.as_mut() {
-                    session.fail(format!("tactical capture initialization failed: {err:#}"));
+                if let Some(session) = self.hidden_run.as_mut() {
+                    session.fail(format!("{} initialization failed: {err:#}", session.name()));
                 }
                 event_loop.exit();
             }
@@ -458,13 +548,12 @@ impl ApplicationHandler for App {
             return;
         }
         log::info!("Application resumed — creating window and GPU context");
-        let capture_dimensions = match (self.shell_capture.as_ref(), self.tactical_capture.as_ref())
-        {
+        let capture_dimensions = match (self.shell_capture.as_ref(), self.hidden_run.as_ref()) {
             (Some(session), None) => Some((session.request().width(), session.request().height())),
-            (None, Some(session)) => Some((session.request().width(), session.request().height())),
+            (None, Some(session)) => Some(session.size()),
             (None, None) => None,
             (Some(_), Some(_)) => {
-                log::error!("Shell and tactical capture modes are mutually exclusive");
+                log::error!("Shell capture and hidden runs are mutually exclusive");
                 event_loop.exit();
                 return;
             }
@@ -477,6 +566,7 @@ impl ApplicationHandler for App {
             self.replay_request
                 .as_ref()
                 .map(|request| request.retail_dir.as_path()),
+            self.pending_spawn.is_some() && Self::spawn_hidden_window_requested(),
         );
         let result = if capture_dimensions.is_some() {
             result.and_then(super::initialize::InitializationStep::finish_synchronously)
@@ -508,8 +598,28 @@ impl ApplicationHandler for App {
             }
             return;
         }
+        // The hidden window only waits for its network goodbyes to finish.
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.frontend.network_goodbye_deadline.is_some())
+        {
+            return;
+        }
+        // Any event but a redraw may change the next picture.
+        if !matches!(event, WindowEvent::RedrawRequested)
+            && let Some(state) = self.state.as_mut()
+        {
+            state.platform.redraw_gate.note_input();
+        }
+        // Every screen remembers where the player puts the window.
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
+            && let Some(state) = self.state.as_mut()
+        {
+            Self::remember_window_placement(state);
+        }
         let shell_capture_active = self.shell_capture.is_some();
-        let tactical_capture_active = self.tactical_capture.is_some();
+        let hidden_run_active = self.hidden_run.is_some();
         // Set while this call re-dispatches a touch's mouse events: those carry
         // the parked touch cursor, not the hardware pointer.
         let from_touch = self.dispatching_touch;
@@ -521,12 +631,15 @@ impl ApplicationHandler for App {
         #[cfg(not(target_os = "linux"))]
         {
             if !shell_capture_active
-                && !tactical_capture_active
+                && !hidden_run_active
                 && let WindowEvent::Touch(touch) = &event
             {
                 let Some(state) = self.state.as_mut() else {
                     return;
                 };
+                if state.persistence.pending_load.is_some() {
+                    return;
+                }
                 let in_game = state.frontend.screen == GameScreen::InGame;
                 let scale = state.platform.window.scale_factor();
                 let output = state.match_state.input.touch_mapper.translate(
@@ -623,7 +736,7 @@ impl ApplicationHandler for App {
         // the guards below still own every keyboard/pointer/IME input event.
         // https://github.com/rust-windowing/winit/blob/v0.30.12/src/platform_impl/linux/x11/ime/mod.rs
         #[cfg(target_os = "linux")]
-        if (shell_capture_active || tactical_capture_active)
+        if (shell_capture_active || hidden_run_active)
             && state.platform.window.is_visible() == Some(false)
             && !state.platform.window.has_focus()
             && matches!(&event, WindowEvent::Ime(winit::event::Ime::Disabled))
@@ -631,34 +744,27 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // This checkpoint is driven entirely from `about_to_wait`. Focused
-        // input would contaminate its hidden, no-input production oracle.
-        if tactical_capture_active {
-            let session = self
-                .tactical_capture
-                .as_mut()
-                .expect("tactical capture session exists");
+        // A hidden run is driven entirely from `about_to_wait`. Input would
+        // contaminate a capture's no-input production oracle or move a map
+        // picture's camera, so none is ever dispatched.
+        if hidden_run_active {
+            let session = self.hidden_run.as_mut().expect("hidden run exists");
             match event {
                 WindowEvent::CloseRequested => {
-                    session.fail("tactical-capture window closed before bundle completion");
+                    session.close_requested();
                     event_loop.exit();
                 }
                 WindowEvent::Resized(size) => {
-                    let expected =
-                        PhysicalSize::new(session.request().width(), session.request().height());
-                    if size != expected {
-                        session.fail(format!(
-                            "tactical-capture surface resized to {}x{}, expected {}x{}",
-                            size.width, size.height, expected.width, expected.height
-                        ));
-                        event_loop.exit();
-                    } else {
+                    if session.accepts_size(size) {
                         Self::resize_surface_for_window_size(state, size);
+                    } else {
+                        event_loop.exit();
                     }
                 }
                 WindowEvent::Focused(true) => {
-                    session.record_focus_violation();
-                    event_loop.exit();
+                    if session.reject_focus() {
+                        event_loop.exit();
+                    }
                 }
                 WindowEvent::KeyboardInput { .. }
                 | WindowEvent::ModifiersChanged(_)
@@ -678,8 +784,9 @@ impl ApplicationHandler for App {
                 | WindowEvent::DroppedFile(_)
                 | WindowEvent::HoveredFile(_)
                 | WindowEvent::HoveredFileCancelled => {
-                    session.record_input_violation("window");
-                    event_loop.exit();
+                    if session.reject_input("window") {
+                        event_loop.exit();
+                    }
                 }
                 _ => {}
             }
@@ -756,12 +863,14 @@ impl ApplicationHandler for App {
 
         // Native does not expose menu/game input while its process-start splash
         // owns the display. Keep close/resize/redraw operational, but discard
-        // player input until the post-present deadline has elapsed.
-        if state
-            .frontend
-            .startup_splash
-            .as_ref()
-            .is_some_and(|splash| splash.is_active(Instant::now()))
+        // player input until the post-present deadline has elapsed. The startup
+        // logo plays before the splash and takes Play_Movie's own input.
+        if state.frontend.fullscreen_movie.is_none()
+            && state
+                .frontend
+                .startup_splash
+                .as_ref()
+                .is_some_and(|splash| splash.is_active(Instant::now()))
             && matches!(
                 &event,
                 WindowEvent::KeyboardInput { .. }
@@ -800,6 +909,22 @@ impl ApplicationHandler for App {
                 paused,
             );
         }
+        // Keep physical button/modifier releases above alive while the modal
+        // load owns input, so a key released here cannot stick after restore.
+        if state.persistence.pending_load.is_some() {
+            match &event {
+                WindowEvent::CloseRequested => state.persistence.pending_load = None,
+                WindowEvent::KeyboardInput { event, .. } if !event.state.is_pressed() => {}
+                WindowEvent::RedrawRequested
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+                | WindowEvent::Occluded(_)
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. } => {}
+                _ => return,
+            }
+        }
         if crate::app::frontend::status_screen::handle_event(state, &event, event_loop) {
             return;
         }
@@ -824,6 +949,10 @@ impl ApplicationHandler for App {
                     );
                     Self::teardown_skirmish_shell_for_start(state);
                     state.frontend.multiplayer_shell_runtime.persist_snapshot();
+                }
+                #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+                if Self::begin_network_goodbye(state) {
+                    return;
                 }
                 event_loop.exit();
             }
@@ -855,9 +984,13 @@ impl ApplicationHandler for App {
                 // The OS drops the cursor clip on alt-tab, so re-apply the
                 // player's confinement choice whenever the window returns.
                 if active {
+                    crate::app::input::cursor::refresh_pointer_in_client(state);
                     crate::app::input::cursor::apply_cursor_confinement(state);
                 }
                 if !active {
+                    // Give the arrow back at once: a backgrounded window may
+                    // draw no frame that would.
+                    crate::app::input::cursor::set_os_cursor_visible(state, true);
                     // `release_in_game_pointer_state` also drops a touch stream
                     // that ended without an `Ended`, so no phantom finger turns
                     // the next tap into a two-finger pan.
@@ -869,15 +1002,10 @@ impl ApplicationHandler for App {
                         .saved_seed_browser
                         .as_mut()
                     {
-                        browser.pressed_control = None;
-                        browser.scroll_repeat_at = None;
-                        browser.last_list_press = None;
+                        browser.reset_interaction();
                     }
                     if let Some(dialog) = state.frontend.keyboard_dialog.as_mut() {
                         dialog.reset_interaction();
-                    }
-                    if let Some(dialog) = state.frontend.network_options.as_mut() {
-                        dialog.cancel_pointer();
                     }
                     if let Some(lan) = state.frontend.lan.as_mut() {
                         lan.lobby.cancel_pointer();
@@ -917,8 +1045,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Occluded(occluded) => {
                 // Fully covered on the backends that report it. Windows does
-                // not; see the `Resized` arm above.
-                Self::set_window_hidden(state, occluded);
+                // not; see the `Resized` arm above. A spawn test run's
+                // deliberately invisible window keeps running as if shown.
+                let invisible_spawn = Self::invisible_spawn_window(state);
+                Self::set_window_hidden(state, occluded && !invisible_spawn);
             }
             WindowEvent::CursorEntered { .. } => {
                 state.match_state.input.reset_window_cursor_motion();
@@ -929,6 +1059,11 @@ impl ApplicationHandler for App {
                 state.platform.window.request_redraw();
             }
             WindowEvent::CursorLeft { .. } => {
+                // macOS's cursor lock: the pointer goes straight back in.
+                if crate::app::input::cursor::hold_pointer_in_window(state) {
+                    state.platform.window.request_redraw();
+                    return;
+                }
                 state.match_state.input.reset_window_cursor_motion();
                 // winit raises this from `WM_MOUSELEAVE`, which it arms on the
                 // matching enter and which fires when the pointer crosses onto the
@@ -950,17 +1085,21 @@ impl ApplicationHandler for App {
                 if event.state.is_pressed() && state.platform.ime.composing() {
                     return;
                 }
-                if Self::house_outcome_wait_pending(state) {
-                    if !event.state.is_pressed()
-                        && let PhysicalKey::Code(code) = event.physical_key
-                    {
-                        state.match_state.input.keys_held.remove(&code);
+                let layer = crate::app::input::precedence::input_layer(state);
+                match layer {
+                    InputLayer::HouseOutcomeWait => {
+                        if !event.state.is_pressed()
+                            && let PhysicalKey::Code(code) = event.physical_key
+                        {
+                            state.match_state.input.keys_held.remove(&code);
+                        }
+                        return;
                     }
-                    return;
-                }
-                if crate::app::match_runtime::network_failure::pending(state) {
-                    crate::app::match_runtime::network_failure::key(state, &event);
-                    return;
+                    InputLayer::Page(ModalPage::NetworkFailure) => {
+                        crate::app::match_runtime::network_failure::key(state, &event);
+                        return;
+                    }
+                    _ => {}
                 }
                 // Host delivery adaptation: dialogs may consume ordinary keys,
                 // but a release for an admitted planning gesture must still
@@ -980,15 +1119,44 @@ impl ApplicationHandler for App {
                     state.match_state.input.keys_held.remove(&code);
                     return;
                 }
-                // cursor lock toggle: flip the window cursor
-                // clip so the pointer cannot leave the game (and back). Works
-                // on every screen, like the rest of the lock feature.
-                if let PhysicalKey::Code(KeyCode::ScrollLock) = event.physical_key
-                    && event.state.is_pressed()
-                    && !event.repeat
-                {
-                    crate::app::input::cursor::toggle_cursor_confinement(state);
-                    state.platform.window.request_redraw();
+                // Cursor lock toggle: flip the window cursor clip so the
+                // pointer cannot leave the game (and back). Works on every
+                // screen, like the rest of the lock feature. Scroll Lock, or
+                // Ctrl+Alt+L for keyboards without one (every Mac's).
+                let modifiers = state.platform.live_modifiers;
+                let lock_key = match event.physical_key {
+                    PhysicalKey::Code(KeyCode::ScrollLock) => true,
+                    PhysicalKey::Code(KeyCode::KeyL) => {
+                        modifiers.control_key() && modifiers.alt_key()
+                    }
+                    _ => false,
+                };
+                if lock_key {
+                    if event.state.is_pressed() && !event.repeat {
+                        crate::app::input::cursor::toggle_cursor_confinement(state);
+                        state.platform.window.request_redraw();
+                    }
+                    return;
+                }
+                // Full screen toggle: Alt+Enter, and on macOS also the
+                // system's own Ctrl+Cmd+F. A capture keeps its fixed surface.
+                let full_screen_key = match event.physical_key {
+                    PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
+                        modifiers.alt_key() && !modifiers.control_key()
+                    }
+                    PhysicalKey::Code(KeyCode::KeyF) => {
+                        cfg!(target_os = "macos")
+                            && modifiers.control_key()
+                            && modifiers.super_key()
+                            && !modifiers.alt_key()
+                    }
+                    _ => false,
+                };
+                if full_screen_key && state.platform.capture_client_size.is_none() {
+                    if event.state.is_pressed() && !event.repeat {
+                        let full_screen = state.platform.window.fullscreen().is_none();
+                        Self::set_full_screen(state, full_screen);
+                    }
                     return;
                 }
                 // VERA's FPS readout toggle. Like the cursor lock it works on
@@ -1007,37 +1175,50 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                // The wait loop pumps 0xEA without IsDialogMessage and polls
-                // no game keys while it is open (0x006497EC).
-                if state.match_state.network_wait.dialog_open() {
-                    if !event.state.is_pressed()
-                        && let PhysicalKey::Code(code) = event.physical_key
-                    {
-                        state.match_state.input.keys_held.remove(&code);
+                // The keys above work under every layer; the rest follow it.
+                let screen = match layer {
+                    InputLayer::Screen(screen) => screen,
+                    // The wait loop pumps 0xEA without IsDialogMessage and
+                    // polls no game keys while it is open (0x006497EC).
+                    InputLayer::Page(ModalPage::NetworkWait) => {
+                        if !event.state.is_pressed()
+                            && let PhysicalKey::Code(code) = event.physical_key
+                        {
+                            state.match_state.input.keys_held.remove(&code);
+                        }
+                        return;
                     }
+                    InputLayer::Page(ModalPage::Keyboard) => {
+                        crate::app::input::keyboard::key(state, &event);
+                        return;
+                    }
+                    // The status card took the shell error's keys.
+                    InputLayer::ShellTransition
+                    | InputLayer::HouseOutcomeWait
+                    | InputLayer::Page(ModalPage::NetworkFailure | ModalPage::ShellError) => {
+                        return;
+                    }
+                };
+                if matches!(screen, ScreenPage::NetworkSetup | ScreenPage::Skirmish)
+                    && crate::app::frontend::preview_zoom::key(state, &event)
+                {
                     return;
                 }
-                if state.frontend.keyboard_dialog.is_some() {
-                    crate::app::input::keyboard::key(state, &event);
-                    return;
-                }
-                if crate::app::input::coop_score::active(state) {
+                if screen == ScreenPage::CoopScore {
                     crate::app::input::coop_score::key(state, &event);
                     return;
                 }
-                if state.frontend.network_options.is_some() {
-                    crate::app::input::network_options::key(state, &event);
-                    return;
-                }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.shell_route.lan_lobby()
-                {
+                if screen == ScreenPage::LanLobby {
                     crate::app::shell_lan::key(state, &event);
                     return;
                 }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.shell_route.network_setup()
+                // VERA: typing in Choose Map fills its search line.
+                if matches!(screen, ScreenPage::NetworkSetup | ScreenPage::Skirmish)
+                    && Self::choose_map_search_key(state, &event)
                 {
+                    return;
+                }
+                if screen == ScreenPage::NetworkSetup {
                     if state
                         .frontend
                         .skirmish_shell_state
@@ -1058,22 +1239,20 @@ impl ApplicationHandler for App {
                                 code,
                                 KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter
                             ) {
-                                Self::cancel_choose_map_eject_prompt(state);
+                                Self::answer_choose_map_prompt_key(state, code != KeyCode::Escape);
                             }
                         }
                     }
                     return;
                 }
-                if Self::native_skirmish_shell_active(state)
+                if screen == ScreenPage::Skirmish
                     && state
                         .frontend
                         .skirmish_shell_state
                         .saved_seed_browser
                         .is_some()
                 {
-                    if !crate::app::frontend::shell_transition::blocks_shell_input(state)
-                        && event.state.is_pressed()
-                    {
+                    if event.state.is_pressed() {
                         let code = match event.physical_key {
                             PhysicalKey::Code(code) => Some(code),
                             _ => None,
@@ -1090,20 +1269,30 @@ impl ApplicationHandler for App {
                         code == KeyCode::Escape && event.state.is_pressed() && !event.repeat;
                     let in_game: bool = state.frontend.screen == GameScreen::InGame;
                     let paused_at_event = in_game && state.match_state.paused();
+                    let locally_paused_at_event = in_game && state.match_state.local_paused();
 
-                    if crate::app::frontend::shell_transition::blocks_shell_input(state) {
+                    // A shared pause must be resumable without a simulation
+                    // tick, including while the local Options dialog is open.
+                    let modifiers = state.platform.live_modifiers;
+                    if in_game
+                        && code == KeyCode::Pause
+                        && !(modifiers.shift_key()
+                            || modifiers.control_key()
+                            || modifiers.alt_key()
+                            || modifiers.super_key())
+                        && crate::app::input::pause_menu::multiplayer_control(state).is_some()
+                    {
+                        if event.state.is_pressed() && !event.repeat {
+                            crate::app::input::pause_menu::toggle_multiplayer_pause(state);
+                        }
                         return;
                     }
 
-                    if state.frontend.screen == GameScreen::MainMenu
-                        && state.frontend.fullscreen_movie.is_some()
-                    {
+                    if screen == ScreenPage::FullscreenMovie {
                         Self::fullscreen_movie_key(state, code, event.state.is_pressed());
                         return;
                     }
-                    if state.frontend.screen == GameScreen::MainMenu
-                        && state.frontend.credits_roll.is_some()
-                    {
+                    if screen == ScreenPage::CreditsRoll {
                         let modifiers = state.platform.live_modifiers;
                         let bare = !(modifiers.shift_key()
                             || modifiers.control_key()
@@ -1131,7 +1320,7 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    if Self::native_skirmish_shell_active(state)
+                    if screen == ScreenPage::Skirmish
                         && event.state.is_pressed()
                         && !event.repeat
                         && Self::shell_key_for_code(code)
@@ -1140,18 +1329,18 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    if Self::native_skirmish_shell_active(state)
+                    if screen == ScreenPage::Skirmish
                         && event.state.is_pressed()
                         && !event.repeat
                         && matches!(
                             code,
                             KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter
                         )
-                        && Self::cancel_choose_map_eject_prompt(state)
+                        && Self::answer_choose_map_prompt_key(state, code != KeyCode::Escape)
                     {
                         return;
                     }
-                    if Self::native_skirmish_shell_active(state) && is_escape {
+                    if screen == ScreenPage::Skirmish && is_escape {
                         if state
                             .frontend
                             .skirmish_shell_state
@@ -1171,7 +1360,7 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    if Self::wol_active(state) {
+                    if screen == ScreenPage::Wol {
                         Self::handle_wol_key(
                             state,
                             Some(code),
@@ -1182,7 +1371,7 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    if Self::load_saved_game_active(state) {
+                    if screen == ScreenPage::LoadSavedGame {
                         // The message box takes Enter/Escape; the page
                         // ignores IDOK/IDCANCEL (0x00558A30).
                         if event.state.is_pressed() {
@@ -1192,10 +1381,13 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    if (Self::menu_page_active(state)
-                        || Self::movie_list_active(state)
-                        || Self::campaign_active(state))
-                        && is_escape
+                    if matches!(
+                        screen,
+                        ScreenPage::SinglePlayer
+                            | ScreenPage::MoviesAndCredits
+                            | ScreenPage::MovieList
+                            | ScreenPage::Campaign
+                    ) && is_escape
                     {
                         // IsDialogMessageA turns Escape into IDCANCEL (id 2),
                         // which the 0x100/0x101/0x129/0x94 procs and the common
@@ -1203,12 +1395,10 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    if in_game
-                        && matches!(
-                            state.match_state.match_presentation.in_game_menu,
-                            crate::ui::pause_menu::InGameMenuState::SavedGame(_)
-                        )
-                    {
+                    if matches!(
+                        screen,
+                        ScreenPage::InGameShell(InGameMenuState::SavedGame(_))
+                    ) {
                         if event.state.is_pressed() {
                             Self::saved_game_key(state, Some(code), event.text.as_deref());
                         }
@@ -1217,7 +1407,7 @@ impl ApplicationHandler for App {
                     }
                     if in_game
                         && state.match_state.match_presentation.in_game_menu
-                            == crate::ui::pause_menu::InGameMenuState::Surrender
+                            == InGameMenuState::Surrender
                     {
                         // 0x005D36A0: IDOK and IDCANCEL both answer result 1.
                         if event.state.is_pressed()
@@ -1234,7 +1424,7 @@ impl ApplicationHandler for App {
                     }
                     if in_game
                         && state.match_state.match_presentation.in_game_menu
-                            == crate::ui::pause_menu::InGameMenuState::Page
+                            == InGameMenuState::Page
                     {
                         // 0xCF's loop takes every key; Escape names nothing.
                         // A release still drops its held key: the loop's
@@ -1251,24 +1441,21 @@ impl ApplicationHandler for App {
                         state.platform.window.request_redraw();
                         return;
                     }
-                    if in_game
-                        && matches!(
-                            state.match_state.match_presentation.in_game_menu,
-                            crate::ui::pause_menu::InGameMenuState::Sound
-                                | crate::ui::pause_menu::InGameMenuState::Diplomacy
-                                | crate::ui::pause_menu::InGameMenuState::MissionBriefing
+                    if matches!(
+                        screen,
+                        ScreenPage::InGameShell(
+                            InGameMenuState::Sound
+                                | InGameMenuState::Diplomacy
+                                | InGameMenuState::MissionBriefing
                         )
-                    {
+                    ) {
                         // B8 has no IDOK/IDCANCEL close command. Neither has
                         // 0x73: its proc keys commands by GetDlgCtrlID(lParam)
                         // (0x006581A7), and Return 0x423 is owner-drawn, so
                         // Enter and Escape name no child it handles.
                         return;
                     }
-                    if in_game
-                        && state.match_state.match_presentation.in_game_menu
-                            == crate::ui::pause_menu::InGameMenuState::AbortConfirm
-                    {
+                    if screen == ScreenPage::InGameShell(InGameMenuState::AbortConfirm) {
                         // B6 accepts default IDOK1 as Resume (4F1A59..4F1A65).
                         // Owner buttons reject focus through610CA0:6118BF..DE;
                         // their resource has no WS_TABSTOP. Do not invent a
@@ -1286,13 +1473,15 @@ impl ApplicationHandler for App {
                         return;
                     }
                     if !crate::app::input::hotkeys::input_admitted_while_paused(
-                        paused_at_event,
+                        // Shared pause still admits chat. The keyboard owner
+                        // consumes chat first, then blocks gameplay hotkeys.
+                        locally_paused_at_event,
                         &event.logical_key,
                     ) {
                         return;
                     }
 
-                    if Self::native_skirmish_shell_active(state)
+                    if screen == ScreenPage::Skirmish
                         && event.state.is_pressed()
                         && !is_escape
                         && Self::handle_skirmish_shell_key_input(state, code, event.text.as_deref())
@@ -1335,97 +1524,90 @@ impl ApplicationHandler for App {
                     state.match_state.input.cursor_from_touch = false;
                 }
                 state.set_cursor_from_window(position.x as f32, position.y as f32);
-                if Self::house_outcome_wait_pending(state) {
-                    return;
+                let layer = crate::app::input::precedence::input_layer(state);
+                match layer {
+                    InputLayer::HouseOutcomeWait => return,
+                    InputLayer::Page(ModalPage::NetworkFailure) => {
+                        crate::app::match_runtime::network_failure::cursor_moved(state);
+                        return;
+                    }
+                    _ => {}
                 }
-                if crate::app::match_runtime::network_failure::pending(state) {
-                    crate::app::match_runtime::network_failure::cursor_moved(state);
+                // Nothing under VERA's enlarged map preview follows the
+                // pointer; only the cursor over it moves.
+                if matches!(
+                    layer,
+                    InputLayer::Screen(ScreenPage::NetworkSetup | ScreenPage::Skirmish)
+                ) && crate::app::frontend::preview_zoom::is_open(state)
+                {
+                    state.platform.window.request_redraw();
                     return;
                 }
                 // Shared tooltip service: every move restarts the show delay
                 // and hides a visible tip (study S1).
                 crate::app::input::tooltips::on_mouse_move(state);
-                if crate::app::frontend::shell_transition::blocks_shell_input(state) {
-                    return;
-                }
-                if state.frontend.keyboard_dialog.is_some() {
-                    crate::app::input::keyboard::cursor_moved(state);
-                    return;
-                }
-                if state.frontend.network_options.is_some() {
-                    crate::app::input::network_options::cursor_moved(state);
-                    return;
-                }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.shell_route.lan_lobby()
-                {
-                    crate::app::shell_lan::cursor_moved(state);
-                    return;
-                }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.shell_route.network_setup()
-                {
-                    if state
-                        .frontend
-                        .skirmish_shell_state
-                        .choose_map_modal
-                        .is_some()
-                    {
-                        Self::handle_skirmish_shell_mouse_move(state);
-                    } else {
-                        crate::app::input::multiplayer_setup::cursor_moved(state);
+                let screen = match layer {
+                    InputLayer::Screen(screen) => screen,
+                    InputLayer::Page(ModalPage::NetworkWait) => {
+                        crate::app::input::connection::cursor_moved(state);
+                        return;
                     }
-                    return;
-                }
-                if Self::native_launcher_options_active(state) {
-                    Self::handle_launcher_options_mouse(state, None);
-                    return;
-                }
-                if state.frontend.screen == GameScreen::InGame {
-                    dispatch::handle_cursor_moved_in_game(state);
-                }
-                if Self::native_skirmish_shell_active(state) {
-                    Self::handle_skirmish_shell_mouse_move(state);
-                }
-                if Self::menu_page_active(state) {
-                    Self::handle_menu_page_mouse_move(state);
-                }
-                if Self::movie_list_active(state) {
-                    Self::handle_movie_list_mouse_move(state);
-                }
-                if Self::campaign_active(state) {
-                    Self::handle_campaign_mouse_move(state);
-                }
-                if Self::load_saved_game_active(state) {
-                    Self::handle_load_saved_game_mouse_move(state);
-                }
-                if Self::wol_active(state) {
-                    Self::handle_wol_mouse_move(state);
-                }
-                if crate::app::input::coop_score::active(state) {
-                    crate::app::input::coop_score::cursor_moved(state);
-                }
-                if Self::score_shell_active(state) {
-                    Self::handle_score_shell_mouse_move(state);
-                }
-                if Self::campaign_score_shell_active(state) {
-                    Self::handle_campaign_score_mouse_move(state);
-                }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.main_menu_shell_error.is_none()
-                    && !Self::menu_page_active(state)
-                    && !Self::movie_list_active(state)
-                    && !Self::campaign_active(state)
-                    && !Self::load_saved_game_active(state)
-                    && !Self::wol_active(state)
-                    && state.frontend.fullscreen_movie.is_none()
-                    && state.frontend.credits_roll.is_none()
-                    && !Self::native_skirmish_shell_active(state)
+                    InputLayer::Page(ModalPage::Keyboard) => {
+                        crate::app::input::keyboard::cursor_moved(state);
+                        return;
+                    }
+                    // The status card took the shell error's moves.
+                    InputLayer::ShellTransition
+                    | InputLayer::HouseOutcomeWait
+                    | InputLayer::Page(ModalPage::NetworkFailure | ModalPage::ShellError) => {
+                        return;
+                    }
+                };
+                match screen {
+                    ScreenPage::LanLobby => crate::app::shell_lan::cursor_moved(state),
+                    ScreenPage::NetworkSetup => {
+                        if state
+                            .frontend
+                            .skirmish_shell_state
+                            .choose_map_modal
+                            .is_some()
+                        {
+                            Self::handle_skirmish_shell_mouse_move(state);
+                        } else {
+                            crate::app::input::multiplayer_setup::cursor_moved(state);
+                        }
+                    }
+                    ScreenPage::LauncherOptions => Self::handle_launcher_options_mouse(state, None),
+                    ScreenPage::InGameShell(_) | ScreenPage::Battlefield => {
+                        dispatch::handle_cursor_moved_in_game(state);
+                    }
+                    ScreenPage::Skirmish => Self::handle_skirmish_shell_mouse_move(state),
+                    ScreenPage::SinglePlayer | ScreenPage::MoviesAndCredits => {
+                        Self::handle_menu_page_mouse_move(state);
+                    }
+                    ScreenPage::MovieList => Self::handle_movie_list_mouse_move(state),
+                    ScreenPage::Campaign => Self::handle_campaign_mouse_move(state),
+                    ScreenPage::LoadSavedGame => Self::handle_load_saved_game_mouse_move(state),
+                    ScreenPage::Wol => Self::handle_wol_mouse_move(state),
+                    ScreenPage::CoopScore => crate::app::input::coop_score::cursor_moved(state),
+                    ScreenPage::Score => Self::handle_score_shell_mouse_move(state),
+                    ScreenPage::CampaignScore => Self::handle_campaign_score_mouse_move(state),
                     // While the SHP quit-confirm modal owns the controller, the menu
                     // move handler must not re-activate 0xE2 and reset the gesture.
-                    && state.frontend.shell_message_box.is_none()
-                {
-                    Self::handle_main_menu_shell_mouse_move(state);
+                    ScreenPage::MainMenu if state.frontend.shell_message_box.is_none() => {
+                        Self::handle_main_menu_shell_mouse_move(state);
+                    }
+                    // The open message box takes the move; the update offer's
+                    // change list follows it.
+                    ScreenPage::MainMenu => {
+                        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                        crate::app::updater::notes::cursor_moved(state);
+                    }
+                    ScreenPage::FullscreenMovie
+                    | ScreenPage::CreditsRoll
+                    | ScreenPage::Loading
+                    | ScreenPage::InGameCard
+                    | ScreenPage::ResultCard => {}
                 }
             }
             WindowEvent::MouseInput {
@@ -1433,225 +1615,212 @@ impl ApplicationHandler for App {
                 button,
                 ..
             } => {
-                if Self::house_outcome_wait_pending(state) {
-                    if !btn_state.is_pressed() {
-                        Self::release_in_game_pointer_state(state);
-                    }
-                    return;
+                // A click in the game locks the cursor again after Ctrl+Alt+L
+                // freed it, when the Options box keeps it locked. The click
+                // still reaches the game.
+                if btn_state.is_pressed() {
+                    crate::app::input::cursor::relock_cursor_on_click(state);
                 }
-                if crate::app::match_runtime::network_failure::pending(state) {
-                    crate::app::match_runtime::network_failure::mouse(
-                        state,
-                        button,
-                        btn_state.is_pressed(),
-                    );
-                    return;
-                }
-                // Any button press/release kills a visible tooltip + pending
-                // timer (all buttons incl. middle — study S1).
-                crate::app::input::tooltips::on_button_event(state);
-                if crate::app::frontend::shell_transition::blocks_shell_input(state) {
-                    return;
-                }
-                if state.frontend.screen == GameScreen::MainMenu {
-                    // Play_Movie reads and ignores mouse buttons; Show_Credits
-                    // queues them as ordinary Keyboard entries.
-                    if state.frontend.fullscreen_movie.is_some() {
-                        return;
-                    }
-                    if state.frontend.credits_roll.is_some() {
-                        Self::credits_roll_input(
-                            state,
-                            crate::app::frontend::credits_roll::CreditsInput::Other,
-                        );
-                        return;
-                    }
-                    if Self::movie_list_active(state) {
-                        if button == MouseButton::Left {
-                            if btn_state.is_pressed() {
-                                Self::handle_movie_list_mouse_down(state);
-                            } else {
-                                Self::handle_movie_list_mouse_up(state);
-                            }
+                let layer = crate::app::input::precedence::input_layer(state);
+                match layer {
+                    InputLayer::HouseOutcomeWait => {
+                        if !btn_state.is_pressed() {
+                            Self::release_in_game_pointer_state(state);
                         }
                         return;
                     }
-                    if Self::campaign_active(state) {
-                        if button == MouseButton::Left {
-                            if btn_state.is_pressed() {
-                                Self::handle_campaign_mouse_down(state);
-                            } else {
-                                Self::handle_campaign_mouse_up(state);
-                            }
-                        }
-                        return;
-                    }
-                    if Self::load_saved_game_active(state) {
-                        if button == MouseButton::Left {
-                            Self::handle_load_saved_game_mouse(state, btn_state.is_pressed());
-                            state.platform.window.request_redraw();
-                        }
-                        return;
-                    }
-                    if Self::wol_active(state) {
-                        if button == MouseButton::Left {
-                            if btn_state.is_pressed() {
-                                Self::handle_wol_mouse_down(state);
-                            } else {
-                                Self::handle_wol_mouse_up(state);
-                            }
-                            state.platform.window.request_redraw();
-                        }
-                        return;
-                    }
-                }
-                // While a main-menu modal dialog is open, route the click to the
-                // SHP quit-confirm modal's OK/Cancel hit-test on the normal shell
-                // path; native child dialogs own their input routes below.
-                if state.frontend.keyboard_dialog.is_some() {
-                    crate::app::input::keyboard::mouse(state, button, btn_state.is_pressed());
-                    return;
-                }
-                if state.frontend.network_options.is_some() {
-                    crate::app::input::network_options::mouse(
-                        state,
-                        button,
-                        btn_state.is_pressed(),
-                    );
-                    return;
-                }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.shell_route.lan_lobby()
-                {
-                    crate::app::shell_lan::mouse(state, button, btn_state.is_pressed());
-                    return;
-                }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.shell_route.network_setup()
-                {
-                    if state
-                        .frontend
-                        .skirmish_shell_state
-                        .choose_map_modal
-                        .is_some()
-                    {
-                        if button == MouseButton::Left {
-                            if btn_state.is_pressed() {
-                                Self::handle_skirmish_shell_mouse_down(state);
-                            } else {
-                                Self::handle_skirmish_shell_mouse_up(state);
-                            }
-                        }
-                    } else {
-                        crate::app::input::multiplayer_setup::mouse(
+                    InputLayer::Page(ModalPage::NetworkFailure) => {
+                        crate::app::match_runtime::network_failure::mouse(
                             state,
                             button,
                             btn_state.is_pressed(),
                         );
-                    }
-                    return;
-                }
-                if Self::main_menu_dialog_open(state) {
-                    if Self::native_launcher_options_active(state) && button == MouseButton::Left {
-                        Self::handle_launcher_options_mouse(state, Some(btn_state.is_pressed()));
                         return;
                     }
-                    if state.frontend.shell_message_box.is_some()
-                        && state.frontend.screen == GameScreen::MainMenu
-                        && state.frontend.main_menu_shell_error.is_none()
-                        && button == MouseButton::Left
-                    {
-                        if btn_state.is_pressed() {
-                            Self::handle_shell_message_box_mouse_down(state);
-                        } else {
-                            Self::handle_shell_message_box_mouse_up(state);
-                        }
+                    _ => {}
+                }
+                // Any button press/release kills a visible tooltip + pending
+                // timer (all buttons incl. middle — study S1).
+                crate::app::input::tooltips::on_button_event(state);
+                let screen = match layer {
+                    InputLayer::Screen(screen) => screen,
+                    // 0xEA's route belongs to the in-game dispatch.
+                    InputLayer::Page(ModalPage::NetworkWait) => {
+                        dispatch::handle_mouse_input(state, button, btn_state);
+                        return;
                     }
+                    InputLayer::Page(ModalPage::Keyboard) => {
+                        crate::app::input::keyboard::mouse(state, button, btn_state.is_pressed());
+                        return;
+                    }
+                    // The status card took the shell error's buttons.
+                    InputLayer::ShellTransition
+                    | InputLayer::HouseOutcomeWait
+                    | InputLayer::Page(ModalPage::NetworkFailure | ModalPage::ShellError) => {
+                        return;
+                    }
+                };
+                let left = button == MouseButton::Left;
+                let pressed = btn_state.is_pressed();
+                if matches!(screen, ScreenPage::NetworkSetup | ScreenPage::Skirmish)
+                    && crate::app::frontend::preview_zoom::mouse(state, pressed)
+                {
                     return;
                 }
-                if crate::app::input::coop_score::active(state) {
-                    crate::app::input::coop_score::mouse(state, button, btn_state.is_pressed());
-                } else if Self::campaign_score_shell_active(state) {
-                    if button == MouseButton::Left {
-                        if btn_state.is_pressed() {
+                match screen {
+                    // Play_Movie reads and ignores mouse buttons; Show_Credits
+                    // queues them as ordinary Keyboard entries.
+                    ScreenPage::FullscreenMovie => {}
+                    ScreenPage::CreditsRoll => Self::credits_roll_input(
+                        state,
+                        crate::app::frontend::credits_roll::CreditsInput::Other,
+                    ),
+                    ScreenPage::MovieList if left => {
+                        if pressed {
+                            Self::handle_movie_list_mouse_down(state);
+                        } else {
+                            Self::handle_movie_list_mouse_up(state);
+                        }
+                    }
+                    ScreenPage::Campaign if left => {
+                        if pressed {
+                            Self::handle_campaign_mouse_down(state);
+                        } else {
+                            Self::handle_campaign_mouse_up(state);
+                        }
+                    }
+                    ScreenPage::LoadSavedGame if left => {
+                        Self::handle_load_saved_game_mouse(state, pressed);
+                        state.platform.window.request_redraw();
+                    }
+                    ScreenPage::Wol if left => {
+                        if pressed {
+                            Self::handle_wol_mouse_down(state);
+                        } else {
+                            Self::handle_wol_mouse_up(state);
+                        }
+                        state.platform.window.request_redraw();
+                    }
+                    ScreenPage::LanLobby => crate::app::shell_lan::mouse(state, button, pressed),
+                    ScreenPage::NetworkSetup => {
+                        if state
+                            .frontend
+                            .skirmish_shell_state
+                            .choose_map_modal
+                            .is_none()
+                        {
+                            crate::app::input::multiplayer_setup::mouse(state, button, pressed);
+                        } else if left && pressed {
+                            Self::handle_skirmish_shell_mouse_down(state);
+                        } else if left {
+                            Self::handle_skirmish_shell_mouse_up(state);
+                        }
+                    }
+                    ScreenPage::LauncherOptions if left => {
+                        Self::handle_launcher_options_mouse(state, Some(pressed));
+                    }
+                    // A retained main-menu dialog takes the click: the SHP
+                    // quit-confirm modal hit-tests its OK/Cancel here.
+                    _ if Self::main_menu_dialog_open(state) => {
+                        if screen == ScreenPage::MainMenu
+                            && state.frontend.shell_message_box.is_some()
+                            && left
+                        {
+                            if pressed {
+                                Self::handle_shell_message_box_mouse_down(state);
+                            } else {
+                                Self::handle_shell_message_box_mouse_up(state);
+                            }
+                        }
+                    }
+                    ScreenPage::CoopScore => {
+                        crate::app::input::coop_score::mouse(state, button, pressed)
+                    }
+                    ScreenPage::CampaignScore if left => {
+                        if pressed {
                             Self::handle_campaign_score_mouse_down(state);
                         } else {
                             Self::handle_campaign_score_mouse_up(state);
                         }
                     }
-                } else if Self::score_shell_active(state) {
-                    if button == MouseButton::Left {
-                        if btn_state.is_pressed() {
+                    ScreenPage::Score if left => {
+                        if pressed {
                             Self::handle_score_shell_mouse_down(state);
                         } else {
                             Self::handle_score_shell_mouse_up(state);
                         }
                     }
-                } else if Self::native_skirmish_shell_active(state) {
-                    if button == MouseButton::Left {
-                        if btn_state.is_pressed() {
+                    ScreenPage::Skirmish if left => {
+                        if pressed {
                             Self::handle_skirmish_shell_mouse_down(state);
                         } else {
                             Self::handle_skirmish_shell_mouse_up(state);
                         }
                     }
-                } else if Self::menu_page_active(state) {
-                    if button == MouseButton::Left {
-                        if btn_state.is_pressed() {
+                    ScreenPage::SinglePlayer | ScreenPage::MoviesAndCredits if left => {
+                        if pressed {
                             Self::handle_menu_page_mouse_down(state);
                         } else {
                             Self::handle_menu_page_mouse_up(state);
                         }
                     }
-                } else if state.frontend.screen == GameScreen::MainMenu
-                    && state.frontend.main_menu_shell_error.is_none()
-                {
-                    if button == MouseButton::Left {
-                        if btn_state.is_pressed() {
+                    ScreenPage::MainMenu if left => {
+                        if pressed {
                             Self::handle_main_menu_shell_mouse_down(state);
                         } else {
                             Self::handle_main_menu_shell_mouse_up(state);
                         }
                     }
-                } else if state.frontend.screen == GameScreen::InGame {
-                    dispatch::handle_mouse_input(state, button, btn_state);
+                    ScreenPage::InGameShell(_) | ScreenPage::Battlefield => {
+                        dispatch::handle_mouse_input(state, button, btn_state);
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if Self::house_outcome_wait_pending(state) {
-                    return;
-                }
-                if crate::app::match_runtime::network_failure::pending(state) {
-                    return;
-                }
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(pos) => (pos.y as f32 / 30.0).clamp(-3.0, 3.0),
                 };
-                if crate::app::frontend::shell_transition::blocks_shell_input(state) {
+                let screen = match crate::app::input::precedence::input_layer(state) {
+                    InputLayer::Screen(screen) => screen,
+                    InputLayer::Page(ModalPage::Keyboard) => {
+                        crate::app::input::keyboard::wheel(state, lines);
+                        state.platform.window.request_redraw();
+                        return;
+                    }
+                    // ComboDropWin consumes no mouse-wheel selection/scroll;
+                    // the other pages have no wheel route.
+                    InputLayer::HouseOutcomeWait
+                    | InputLayer::ShellTransition
+                    | InputLayer::Page(
+                        ModalPage::ShellError | ModalPage::NetworkFailure | ModalPage::NetworkWait,
+                    ) => return,
+                };
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                if screen == ScreenPage::MainMenu && crate::app::updater::notes::wheel(state, lines)
+                {
                     return;
                 }
-                if state.frontend.keyboard_dialog.is_some() {
-                    crate::app::input::keyboard::wheel(state, lines);
-                    state.platform.window.request_redraw();
+                if matches!(screen, ScreenPage::NetworkSetup | ScreenPage::Skirmish)
+                    && crate::app::frontend::preview_zoom::is_open(state)
+                {
                     return;
                 }
-                if state.frontend.network_options.is_some() {
-                    // ComboDropWin consumes no mouse-wheel selection/scroll.
-                    return;
-                }
-                if state.frontend.screen == GameScreen::MainMenu
-                    && Self::native_skirmish_shell_active(state)
+                if screen == ScreenPage::Skirmish
                     && Self::handle_skirmish_shell_mouse_wheel(state, lines)
                 {
                     state.platform.window.request_redraw();
                     return;
                 }
-                if state.frontend.screen == GameScreen::InGame
+                if matches!(screen, ScreenPage::InGameShell(_) | ScreenPage::Battlefield)
                     && !state.match_state.paused()
-                    && !state.match_state.network_wait.dialog_open()
                     && !crate::app::input::campaign_input::is_locked(state)
                 {
+                    if crate::app::presentation::super_timers::wheel(state, lines) {
+                        state.platform.window.request_redraw();
+                        return;
+                    }
                     // Optional player setting: over the battlefield the wheel changes the view
                     // distance tier, anchored on the tactical centre. Over the
                     // sidebar and the bottom strip it keeps gamemd's native
@@ -1666,21 +1835,30 @@ impl ApplicationHandler for App {
                     // Every wheel notch scrolls the active build strip by one
                     // row. gamemd routes the wheel message straight to the
                     // SidebarUp / SidebarDown commands and has no world zoom.
-                    dispatch::sidebar_wheel_scroll(state, lines);
+                    if let Some(action) = dispatch::wheel_notch(lines) {
+                        dispatch::sidebar_scroll_command(state, action);
+                    }
                 }
             }
             WindowEvent::Ime(ime) => crate::app::input::ime::event(state, ime),
             WindowEvent::RedrawRequested => {
-                if let Err(err) = Self::render_frame(state, event_loop, None, None) {
-                    log::error!("Render: {:#}", err);
-                    if state
-                        .match_state
-                        .match_diagnostics
-                        .playback_capture_requested()
-                    {
-                        state.frontend.external_launch_error =
-                            Some(format!("Replay capture failed: {err:#}"));
-                        event_loop.exit();
+                match Self::render_frame(state, event_loop, None, None, FramePass::Draw) {
+                    Ok(FrameRenderOutcome::Deferred) => {
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                        state.platform.window.request_redraw();
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        log::error!("Render: {:#}", err);
+                        if state
+                            .match_state
+                            .match_diagnostics
+                            .playback_capture_requested()
+                        {
+                            state.frontend.external_launch_error =
+                                Some(format!("Replay capture failed: {err:#}"));
+                            event_loop.exit();
+                        }
                     }
                 }
             }
@@ -1707,20 +1885,27 @@ impl ApplicationHandler for App {
             return;
         }
         let shell_scroll_wake = if let Some(state) = self.state.as_mut() {
+            #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+            if Self::poll_browser_exit(state, event_loop) {
+                return;
+            }
+            #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+            if Self::poll_network_goodbye(state, event_loop) {
+                return;
+            }
             Self::follow_window_full_screen(state);
             // cursor lock: the OS drops the clip on focus loss /
             // Windows key, so re-assert the player's choice every frame while
             // the window is focused. Presentation-only, never part of the sim.
             crate::app::input::cursor::reassert_cursor_confinement(state);
             // Captures keep their sealed input; they never ask for an IME.
-            if self.shell_capture.is_none() && self.tactical_capture.is_none() {
+            if self.shell_capture.is_none() && self.hidden_run.is_none() {
                 crate::app::input::ime::sync(state);
             }
             Self::update_saved_seed_browser_scroll(state, false);
             Self::update_load_saved_game_scroll(state, false);
             [
                 crate::app::input::keyboard::poll_scroll_repeat(state),
-                crate::app::input::network_options::poll_scroll_repeat(state),
                 crate::app::shell_lan::poll(state),
                 crate::app::shell_wol::poll(state),
                 crate::app::shell_network_setup::poll(state),
@@ -1731,8 +1916,25 @@ impl ApplicationHandler for App {
                 crate::app::input::sound::poll_scroll_repeat(state),
                 Self::poll_movie_list_scroll(state),
                 Self::poll_choose_map_scroll(state),
+                Self::poll_skirmish_opponent_scroll(state),
+                // Captures replay sealed input; they never read the library.
+                (self.shell_capture.is_none() && self.hidden_run.is_none())
+                    .then(|| crate::app::map_library::poll(state))
+                    .flatten(),
+                // Nor the login page's counts and news.
+                (self.shell_capture.is_none() && self.hidden_run.is_none())
+                    .then(|| crate::app::shell_wol::login_info::poll(state))
+                    .flatten(),
+                (self.shell_capture.is_none() && self.hidden_run.is_none())
+                    .then(|| crate::app::map_picture::poll(state))
+                    .flatten(),
                 Self::poll_campaign(state),
                 Self::campaign_score_animation_deadline(state),
+                // Captures replay sealed input; they never check or ask.
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                (self.shell_capture.is_none() && self.hidden_run.is_none())
+                    .then(|| crate::app::updater::poll(state))
+                    .flatten(),
             ]
             .into_iter()
             .flatten()
@@ -1740,7 +1942,7 @@ impl ApplicationHandler for App {
         } else {
             None
         };
-        if self.shell_capture.is_some() || self.tactical_capture.is_some() {
+        if self.shell_capture.is_some() || self.hidden_run.is_some() {
             // A callback already queued by the platform can arrive after the
             // completed one-shot capture requested exit. Never render it again.
             if self
@@ -1748,7 +1950,7 @@ impl ApplicationHandler for App {
                 .as_ref()
                 .is_some_and(|session| session.is_finished())
                 || self
-                    .tactical_capture
+                    .hidden_run
                     .as_ref()
                     .is_some_and(|session| session.is_finished())
             {
@@ -1762,12 +1964,24 @@ impl ApplicationHandler for App {
                 return;
             }
         }
-        if let (Some(state), Some(session)) = (self.state.as_mut(), self.tactical_capture.as_mut())
-        {
-            if let Err(err) = Self::render_frame(state, event_loop, None, Some(&mut *session)) {
-                log::error!("Tactical capture render: {err:#}");
-                session.fail(format!("tactical capture render failed: {err:#}"));
-                event_loop.exit();
+        if let (Some(state), Some(session)) = (self.state.as_mut(), self.hidden_run.as_mut()) {
+            let outcome = match Self::render_frame(
+                state,
+                event_loop,
+                None,
+                Some(&mut *session),
+                FramePass::Draw,
+            ) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    log::error!("The {} could not render: {err:#}", session.name());
+                    session.fail(format!("{} render failed: {err:#}", session.name()));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            if capture_render_continues(&mut self.capture_render_not_before, outcome) {
+                event_loop.set_control_flow(ControlFlow::Poll);
                 return;
             }
             if !session.is_finished() {
@@ -1780,10 +1994,23 @@ impl ApplicationHandler for App {
         } else if let (Some(state), Some(session)) =
             (self.state.as_mut(), self.shell_capture.as_mut())
         {
-            if let Err(err) = Self::render_frame(state, event_loop, Some(&mut *session), None) {
-                log::error!("Shell capture render: {err:#}");
-                session.fail(format!("shell capture render failed: {err:#}"));
-                event_loop.exit();
+            let outcome = match Self::render_frame(
+                state,
+                event_loop,
+                Some(&mut *session),
+                None,
+                FramePass::Draw,
+            ) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    log::error!("Shell capture render: {err:#}");
+                    session.fail(format!("shell capture render failed: {err:#}"));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            if capture_render_continues(&mut self.capture_render_not_before, outcome) {
+                event_loop.set_control_flow(ControlFlow::Poll);
                 return;
             }
             if !session.is_finished() {
@@ -1800,10 +2027,38 @@ impl ApplicationHandler for App {
                 if let Some(service) = shell_scroll_wake {
                     deadline = deadline.min(service);
                 }
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                event_loop.set_control_flow(if deadline <= Instant::now() {
+                    ControlFlow::Poll
+                } else {
+                    ControlFlow::WaitUntil(deadline)
+                });
             }
         } else if let Some(state) = self.state.as_mut() {
-            if crate::app::frontend::shell_transition::main_menu_presented_is_poisoned(state) {
+            if Self::next_online_render_frame(state).is_none() {
+                state.platform.frame_pacer.clear_render_continuation();
+            }
+            if Self::invisible_spawn_window(state) {
+                // An invisible window receives no RedrawRequested; drive the
+                // same frame directly, as the hidden capture drivers do. It
+                // stands for a visible window, so a still picture is probed.
+                let pass = match state.platform.redraw_gate.next_pass() {
+                    crate::app::match_runtime::redraw_gate::NextPass::Probe => FramePass::Probe,
+                    crate::app::match_runtime::redraw_gate::NextPass::Draw => FramePass::Draw,
+                };
+                let deferred = matches!(
+                    Self::render_frame(state, event_loop, None, None, pass),
+                    Ok(FrameRenderOutcome::Deferred)
+                );
+                event_loop.set_control_flow(if deferred {
+                    ControlFlow::Poll
+                } else {
+                    ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(8))
+                });
+            } else if state.platform.frame_pacer.render_deferred() {
+                event_loop.set_control_flow(ControlFlow::Poll);
+                state.platform.window.request_redraw();
+            } else if crate::app::frontend::shell_transition::main_menu_presented_is_poisoned(state)
+            {
                 event_loop.set_control_flow(ControlFlow::Wait);
             } else if let Some(deadline) =
                 crate::app::frontend::shell_transition::main_menu_presented_wake_deadline(state)
@@ -1824,23 +2079,61 @@ impl ApplicationHandler for App {
                     // edge reaches first. macOS stops presenting to an occluded
                     // layer, so this loop cannot ride on redraws; it wakes at
                     // half the pacer bucket to hold the cadence.
-                    if Self::service_match_runtime(state, event_loop, true).quit_requested {
+                    if Self::service_match_runtime(state, event_loop, true, true).quit_requested {
                         return;
                     }
                     event_loop.set_control_flow(ControlFlow::WaitUntil(
-                        Instant::now()
-                            + crate::app::match_runtime::frame_pacer::HIDDEN_SERVICE_WAKE,
+                        Instant::now() + crate::app::match_runtime::frame_pacer::SERVICE_WAKE,
                     ));
                 } else {
-                    // Nothing on screen to keep fresh. Park the redraw loop
-                    // until a window event (including the un-occlude edge)
-                    // wakes it, rather than rendering frames no one can see.
-                    event_loop.set_control_flow(ControlFlow::Wait);
+                    // Nothing on screen to keep fresh: draw no frames until a
+                    // window event (including the un-occlude edge). The shell's
+                    // services still wake it, so a lobby, a LAN room or a Quick
+                    // Match search keeps answering while the player is in
+                    // another window.
+                    event_loop.set_control_flow(
+                        shell_scroll_wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+                    );
+                }
+            } else if state.platform.redraw_gate.next_pass()
+                == crate::app::match_runtime::redraw_gate::NextPass::Probe
+            {
+                // The presented picture still stands. Service the match as the
+                // hidden loop does; the pass draws only once the picture
+                // changed. Window events and explicit redraw requests still
+                // draw at once, and a picture that starts moving goes back to
+                // a redraw per refresh from the next refresh.
+                match Self::render_frame(state, event_loop, None, None, FramePass::Probe) {
+                    Ok(FrameRenderOutcome::Deferred) => {
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                        state.platform.window.request_redraw();
+                    }
+                    outcome => {
+                        if let Err(err) = outcome {
+                            log::error!("Render: {err:#}");
+                        }
+                        if state.platform.redraw_gate.next_pass()
+                            == crate::app::match_runtime::redraw_gate::NextPass::Draw
+                        {
+                            event_loop.set_control_flow(
+                                shell_scroll_wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+                            );
+                            state.platform.window.request_redraw();
+                        } else {
+                            let wake = Instant::now()
+                                + crate::app::match_runtime::frame_pacer::SERVICE_WAKE;
+                            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                                shell_scroll_wake.map_or(wake, |service| service.min(wake)),
+                            ));
+                        }
+                    }
                 }
             } else {
-                if let Some(deadline) = shell_scroll_wake {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-                }
+                // A probe's wake must not outlive it: a past deadline would
+                // spin this loop between refreshes.
+                event_loop.set_control_flow(
+                    shell_scroll_wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+                );
                 state.platform.window.request_redraw();
             }
         }
@@ -1849,14 +2142,44 @@ impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = self.state.as_mut() {
             crate::app::match_runtime::sim_tick::flush_replay_log(state);
+            crate::app::map_picture::stop_for_exit(&mut state.frontend.map_pictures);
+            // However the game ends (Exit, the close button, Cmd-Q), the
+            // next launch opens the window where the player left it.
+            if std::mem::take(&mut state.platform.window_placement_unsaved) {
+                crate::app::persistence::options::persist_options_profile(state);
+            }
         }
         log::logger().flush();
+        // A confirmed quit (its cascade's Theme Stop(0), 0x0052E7EC, has run)
+        // or a page unload tears down a running game.
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        self.browser_exiting();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_capture_clears_render_delay_for_the_next_event_loop_pass() {
+        let deadline = Instant::now() + std::time::Duration::from_millis(8);
+        let mut not_before = Some(deadline);
+        assert!(!capture_render_continues(
+            &mut not_before,
+            FrameRenderOutcome::Unavailable
+        ));
+        assert_eq!(not_before, Some(deadline));
+        assert!(capture_render_continues(
+            &mut not_before,
+            FrameRenderOutcome::Deferred
+        ));
+        assert_eq!(not_before, None);
+        assert!(!capture_render_continues(
+            &mut not_before,
+            FrameRenderOutcome::Presented
+        ));
+    }
 
     #[test]
     fn capture_render_deadline_survives_early_service_wakes_and_admits_when_due() {

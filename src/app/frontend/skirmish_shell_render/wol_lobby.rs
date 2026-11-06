@@ -34,6 +34,9 @@ pub(super) const POPUP_DEPTHS: ModalDepths = ModalDepths {
 /// `0x808080`: a full game's row (`0x00781480`).
 const GREYED_RGB: [f32; 3] = [128.0 / 255.0; 3];
 
+/// VERA: the modern game list's gap between a room's name and its tag.
+const GAME_TAG_GAP: i32 = 8;
+
 /// Sprites on the skirmish atlas, sprites on the lobby art and texts.
 #[derive(Default)]
 pub(crate) struct WolLobbyPaint {
@@ -145,6 +148,14 @@ pub(crate) fn paint_wol_lobby_children(
             SHELL_LABEL_TEXT_RGB,
         ));
     }
+    if let Some(rect) = layout.observer_caption {
+        paint.texts.push(text(
+            &label(state, "GUI:Observe"),
+            rect,
+            ShellAlign::H_RIGHT,
+            SHELL_LABEL_TEXT_RGB,
+        ));
+    }
 
     // The image buttons' faces and the text sort buttons' captions.
     for (id, rect) in layout
@@ -201,7 +212,7 @@ pub(crate) fn paint_wol_lobby_children(
         },
         scale,
     );
-    if let Some(entry) = atlas.lan_observer_toggle(ui.observer) {
+    if !modern && let Some(entry) = atlas.lan_observer_toggle(ui.observer) {
         push_flag_entry_clipped_centered(
             &mut paint.controls,
             entry,
@@ -239,14 +250,16 @@ pub(crate) fn paint_wol_lobby_children(
         .chat
         .list
         .geometry(layout.chat_log, ui.chat.lines.len(), scale);
-    list_controls(
-        &mut paint.controls,
-        atlas,
-        lobbies,
-        &ui.lobby_list,
-        true,
-        scale,
-    );
+    if !modern {
+        list_controls(
+            &mut paint.controls,
+            atlas,
+            lobbies,
+            &ui.lobby_list,
+            true,
+            scale,
+        );
+    }
     list_controls(
         &mut paint.controls,
         atlas,
@@ -300,6 +313,7 @@ pub(crate) fn paint_wol_lobby_children(
             SHELL_LABEL_TEXT_RGB,
         ));
     }
+    let ping_header = layout.control_rect(SORT_PING);
     for (visible, row) in ui
         .game_rows
         .iter()
@@ -313,29 +327,72 @@ pub(crate) fn paint_wol_lobby_children(
         } else {
             SHELL_LABEL_TEXT_RGB
         };
+        // The modern list keeps one retail icon, a password game's lock, in
+        // the first icon column; that row's name starts at the next one. A
+        // tag ends the name cell against the Ping column, and the name stops
+        // a gap before it.
+        let name_x = if row.keyed {
+            GAME_PASSWORD_X
+        } else {
+            GAME_TYPE_X
+        };
+        let name_end = GAME_PING_X - 2;
+        let tag = row.tag.as_deref().filter(|_| modern);
+        let tag_w = tag.map_or(0, |tag| {
+            (font.text_width(tag) as i32).min(name_end - name_x)
+        });
+        let name_w = match tag {
+            Some(_) => name_end - name_x - tag_w - GAME_TAG_GAP,
+            None => name_end - name_x,
+        };
         paint.texts.push(text(
             &row.text,
             if modern {
-                cell(rect, 2, GAME_PING_X - 4)
+                cell(rect, name_x, name_w.max(1))
             } else {
                 cell(rect, GAME_NAME_X, GAME_NAME_W)
             },
             ShellAlign::V_CENTER,
             rgb,
         ));
-        // A -1 ping is the text "???"; any other is an integer cell.
+        if let Some(tag) = tag {
+            paint.texts.push(text(
+                tag,
+                cell(rect, name_end - tag_w, tag_w.max(1)),
+                ShellAlign::H_RIGHT | ShellAlign::V_CENTER,
+                rgb,
+            ));
+        }
+        // A -1 ping is the text "???"; any other is an integer cell. The
+        // modern list centres it under its Ping header instead of starting
+        // it at the retail column, left of the header's caption.
         let ping = if row.ping == -1 {
             "???".to_owned()
         } else {
             row.ping.to_string()
         };
-        paint.texts.push(text(
-            &ping,
-            cell(rect, GAME_PING_X, 0),
-            ShellAlign::V_CENTER,
-            rgb,
-        ));
-        if !modern && let Some(art) = art {
+        let (ping_rect, ping_align) = match ping_header.filter(|_| modern) {
+            Some(header) => (
+                RectPx::new(header.x, rect.y, header.w, rect.h),
+                ShellAlign::H_CENTER | ShellAlign::V_CENTER,
+            ),
+            None => (cell(rect, GAME_PING_X, 0), ShellAlign::V_CENTER),
+        };
+        paint.texts.push(text(&ping, ping_rect, ping_align, rgb));
+        if modern {
+            if row.keyed
+                && let Some(art) = art
+            {
+                push_icon(
+                    &mut paint.icons,
+                    art,
+                    "wolpriv.pcx",
+                    rect,
+                    GAME_TYPE_X,
+                    scale,
+                );
+            }
+        } else if let Some(art) = art {
             push_icon(
                 &mut paint.icons,
                 art,
@@ -367,19 +424,29 @@ pub(crate) fn paint_wol_lobby_children(
         .enumerate()
     {
         let rect = players.row(visible);
+        // VERA: the modern list shows only the badge of a row's high-score
+        // cells, at its left, and every name as far right of it as the retail
+        // list's, so names line up whether or not a row has a badge.
+        if modern {
+            paint.texts.push(text(
+                &row.name,
+                cell(rect, 2 + PLAYER_NAME_X - PLAYER_BADGE_X, 0),
+                ShellAlign::V_CENTER,
+                SHELL_LABEL_TEXT_RGB,
+            ));
+            if let Some(art) = art
+                && let Some((file, _)) = row.score_icons.iter().find(|(_, x)| *x == PLAYER_BADGE_X)
+            {
+                push_icon(&mut paint.icons, art, file, rect, 2, scale);
+            }
+            continue;
+        }
         paint.texts.push(text(
             &row.name,
-            if modern {
-                cell(rect, 2, 0)
-            } else {
-                cell(rect, PLAYER_NAME_X, PLAYER_NAME_W)
-            },
+            cell(rect, PLAYER_NAME_X, PLAYER_NAME_W),
             ShellAlign::V_CENTER,
             SHELL_LABEL_TEXT_RGB,
         ));
-        if modern {
-            continue;
-        }
         if let Some((tag, _)) = &row.clan {
             paint.texts.push(text(
                 tag,
@@ -423,13 +490,81 @@ pub(crate) fn paint_wol_lobby_children(
     paint
 }
 
+/// VERA's Players trackbar and Allow spectators box in a Create Game box,
+/// painted after the box as its other checkboxes are.
+pub(super) fn paint_room_limits(
+    state: &AppState,
+    atlas: &crate::render::skirmish_shell_chrome::SkirmishShellChromeAtlas,
+    controls: &mut Vec<SpriteInstance>,
+    labels: &mut Vec<PaintLabel<'_>>,
+    picker: &crate::ui::room_limits::RoomLimitsPicker,
+    layout: &crate::ui::room_limits::RoomLimitsLayout,
+    scale: ShellScale,
+) {
+    let chrome = atlas.control_chrome();
+    let players = i32::from(picker.limits.players);
+    paint_control(
+        controls,
+        &chrome,
+        ControlPaint::Trackbar {
+            rect: layout.players,
+            thumb_left: crate::ui::room_limits::PLAYERS.thumb_left_in(
+                players,
+                layout.players,
+                scale,
+            ),
+            plaque: true,
+            disabled: false,
+        },
+        scale,
+    );
+    paint_control(
+        controls,
+        &chrome,
+        ControlPaint::Checkbox {
+            rect: layout.spectators,
+            checked: picker.limits.spectators,
+        },
+        scale,
+    );
+    let caption = |text: String, rect: RectPx, align: ShellAlign| PaintLabel {
+        text: text.into(),
+        rect,
+        align,
+        rgb: SHELL_LABEL_TEXT_RGB,
+        path_a_reveal: None,
+    };
+    labels.extend([
+        caption(
+            "Max players".to_owned(),
+            layout.players_label,
+            ShellAlign::H_RIGHT | ShellAlign::V_CENTER,
+        ),
+        caption(
+            players.to_string(),
+            crate::ui::shell::trackbar::value_text_rect(layout.players, scale),
+            ShellAlign::H_CENTER | ShellAlign::V_CENTER,
+        ),
+        caption(
+            "Allow spectators".to_owned(),
+            crate::ui::skirmish_shell::checkbox_text_rect(layout.spectators, scale),
+            ShellAlign::V_CENTER,
+        ),
+    ]);
+}
+
 /// `0xC3` or `0xE1` over the covered dialog; `status` is `0xC3`'s own
-/// status line text.
+/// status line text. The `modern` lobby draws them on Red Alert 2's box art,
+/// as VERA's updater boxes do; the native lobby keeps gamemd's mode-2 art.
+/// `scale` is the lobby page's, so the box grows with the page.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_wol_lobby_popup(
     state: &AppState,
     popup: &WolLobbyPopup,
+    modern: bool,
     width: i32,
     height: i32,
+    scale: ShellScale,
     status: &str,
     caret_visible: bool,
 ) -> WolLobbyPaint {
@@ -437,7 +572,6 @@ pub(crate) fn paint_wol_lobby_popup(
     let Some(atlas) = state.frontend.skirmish_shell_chrome.as_ref() else {
         return paint;
     };
-    let scale = ShellScale::RETAIL;
     let button_align = ShellAlign(ShellAlign::H_CENTER.0 | ShellAlign::V_CENTER.0);
     let caption = |key: &str, rect: RectPx, align: ShellAlign, enabled: bool| PaintLabel {
         text: label(state, key).into(),
@@ -467,61 +601,102 @@ pub(crate) fn paint_wol_lobby_popup(
             popup.buttons.is_pressed(POPUP_CANCEL),
         )
     };
+    let mut room_name = None;
     let (dialog, buttons, mut labels, password) = match &popup.kind {
         WolPopupKind::Create(create) => {
-            let layout = crate::ui::shell::modal::wol_create_game_layout(width, height);
-            for (rect, checked) in [
-                (layout.clan, create.clan),
-                (layout.limit, create.limit),
-                (layout.observe, create.observe),
+            let layout =
+                crate::ui::shell::modal::wol_create_game_layout_on(width, height, modern, scale);
+            let check_text = |rect| crate::ui::skirmish_shell::checkbox_text_rect(rect, scale);
+            // Style SS_RIGHT.
+            let mut labels = vec![caption(
+                "GUI:Password",
+                layout.password_label,
+                ShellAlign::H_RIGHT,
+                true,
+            )];
+            // The online layout has no clan or observer box.
+            for (rect, checked, key, enabled) in [
+                (
+                    layout.clan,
+                    create.clan,
+                    "GUI:BattleClanTournament",
+                    create.clan_enabled,
+                ),
+                (
+                    Some(layout.limit),
+                    create.limit,
+                    "WOL:LimitScreenResolution",
+                    create.limit_enabled,
+                ),
+                (layout.observe, create.observe, "GUI:Observe", true),
             ] {
+                let Some(rect) = rect else {
+                    continue;
+                };
                 paint_control(
                     &mut paint.controls,
                     &atlas.control_chrome(),
                     ControlPaint::Checkbox { rect, checked },
                     scale,
                 );
+                labels.push(caption(
+                    key,
+                    check_text(rect),
+                    ShellAlign::V_CENTER,
+                    enabled,
+                ));
             }
-            let check_text = |rect| crate::ui::skirmish_shell::checkbox_text_rect(rect, scale);
-            let mut labels = vec![
-                // Style SS_RIGHT.
-                caption(
-                    "GUI:Password",
-                    layout.password_label,
-                    ShellAlign::H_RIGHT,
-                    true,
-                ),
-                caption(
-                    "GUI:BattleClanTournament",
-                    check_text(layout.clan),
-                    ShellAlign::V_CENTER,
-                    create.clan_enabled,
-                ),
-                caption(
-                    "WOL:LimitScreenResolution",
-                    check_text(layout.limit),
-                    ShellAlign::V_CENTER,
-                    create.limit_enabled,
-                ),
-                caption(
-                    "GUI:Observe",
-                    check_text(layout.observe),
-                    ShellAlign::V_CENTER,
-                    true,
-                ),
-                caption(
-                    "GUI:OK",
-                    ok_label(layout.ok),
-                    button_align,
-                    popup.ok_enabled(),
-                ),
-                caption(
-                    "GUI:Cancel",
-                    cancel_label(layout.cancel),
-                    button_align,
-                    true,
-                ),
-            ];
+            if let (Some(picker), Some(room)) = (&create.room, &layout.room) {
+                paint_room_limits(
+                    state,
+                    atlas,
+                    &mut paint.controls,
+                    &mut labels,
+                    picker,
+                    room,
+                    scale,
+                );
+            }
+            if let (Some(ranked), Some(rect)) = (create.ranked, layout.ranked) {
+                paint_control(
+                    &mut paint.controls,
+                    &atlas.control_chrome(),
+                    ControlPaint::Checkbox {
+                        rect,
+                        checked: ranked,
+                    },
+                    scale,
+                );
+                labels.push(PaintLabel {
+                    text: "Ranked game".to_owned().into(),
+                    rect: crate::ui::skirmish_shell::checkbox_text_rect(rect, scale),
+                    align: ShellAlign::V_CENTER,
+                    rgb: SHELL_LABEL_TEXT_RGB,
+                    path_a_reveal: None,
+                });
+            }
+            if let (Some(edit), Some((label, rect))) = (&create.name, layout.name) {
+                labels.push(PaintLabel {
+                    text: "Room name".to_owned().into(),
+                    rect: label,
+                    align: ShellAlign::H_RIGHT,
+                    rgb: SHELL_LABEL_TEXT_RGB,
+                    path_a_reveal: None,
+                });
+                room_name = Some((edit, rect));
+            }
+            labels.push(caption(
+                "GUI:OK",
+                ok_label(layout.ok),
+                button_align,
+                popup.ok_enabled(),
+            ));
+            labels.push(caption(
+                "GUI:Cancel",
+                cancel_label(layout.cancel),
+                button_align,
+                true,
+            ));
             labels.push(PaintLabel {
                 text: status.to_owned().into(),
                 rect: layout.status,
@@ -540,7 +715,8 @@ pub(crate) fn paint_wol_lobby_popup(
             )
         }
         WolPopupKind::Password(_) => {
-            let layout = crate::ui::shell::modal::wol_channel_password_layout(width, height);
+            let layout =
+                crate::ui::shell::modal::wol_channel_password_layout_on(width, height, scale);
             (
                 layout.dialog,
                 vec![
@@ -572,9 +748,13 @@ pub(crate) fn paint_wol_lobby_popup(
             )
         }
     };
+    let background = atlas
+        .ra2_dialog_background
+        .filter(|_| modern)
+        .or_else(|| atlas.mode_two_dialog_background(None));
     let draw = shell_paint::paint_modal_shp(
         &state.renderer.bit_font,
-        atlas.mode_two_dialog_background(None),
+        background,
         super::type3_button_frames(atlas),
         dialog,
         &buttons,
@@ -596,5 +776,114 @@ pub(crate) fn paint_wol_lobby_popup(
         scale,
         POPUP_DEPTHS.text,
     );
+    if let Some((edit, rect)) = room_name {
+        push_edit(
+            &mut paint,
+            state,
+            edit,
+            rect,
+            caret_visible,
+            scale,
+            POPUP_DEPTHS.text,
+        );
+    }
+    paint
+}
+
+/// VERA's player card over the modern lobby, on the online Create Game box:
+/// a caption and value per row, the player list's badge beside the name, the
+/// four buttons and the status line.
+pub(crate) fn paint_wol_player_card(
+    state: &AppState,
+    view: &crate::app::shell_wol::player_card::PlayerCardView,
+    art: Option<&WolPageArt>,
+    scale: ShellScale,
+) -> WolLobbyPaint {
+    let mut paint = WolLobbyPaint::default();
+    let Some(atlas) = state.frontend.skirmish_shell_chrome.as_ref() else {
+        return paint;
+    };
+    let plain = |text: &str, rect: RectPx, align: ShellAlign, rgb: [f32; 3]| PaintLabel {
+        text: text.to_owned().into(),
+        rect,
+        align,
+        rgb,
+        path_a_reveal: None,
+    };
+    let layout = &view.layout;
+    let mut labels = Vec::new();
+    for (row, ((caption, value), &(caption_rect, value_rect))) in
+        view.rows.iter().zip(&layout.rows).enumerate()
+    {
+        labels.push(plain(
+            caption,
+            caption_rect,
+            ShellAlign(ShellAlign::H_RIGHT.0 | ShellAlign::V_CENTER.0),
+            SHELL_LABEL_TEXT_RGB,
+        ));
+        // The name sits after its badge as in the modern player list.
+        let value_rect = match (row, view.badge, art) {
+            (0, Some(file), Some(art)) => {
+                push_icon(&mut paint.icons, art, file, value_rect, 2, scale);
+                scale.derive_rect(value_rect, |rect| {
+                    let x = 2 + PLAYER_NAME_X - PLAYER_BADGE_X;
+                    RectPx::new(rect.x + x, rect.y, rect.w - x, rect.h)
+                })
+            }
+            _ => value_rect,
+        };
+        labels.push(plain(
+            value,
+            value_rect,
+            ShellAlign::V_CENTER,
+            SHELL_LABEL_TEXT_RGB,
+        ));
+    }
+    let button_align = ShellAlign(ShellAlign::H_CENTER.0 | ShellAlign::V_CENTER.0);
+    for button in &view.buttons {
+        labels.push(plain(
+            &button.caption,
+            crate::app::frontend::shell_pass::owner_draw_button_label_rect(
+                button.rect,
+                button.pressed,
+            ),
+            button_align,
+            if button.enabled {
+                SHELL_LABEL_TEXT_RGB
+            } else {
+                shell_paint::SHELL_TEXT_RGB_DISABLED
+            },
+        ));
+    }
+    labels.push(plain(
+        &view.status,
+        layout.status,
+        ShellAlign::NONE,
+        SHELL_LABEL_TEXT_RGB,
+    ));
+    let buttons: Vec<ModalButton> = view
+        .buttons
+        .iter()
+        .map(|button| ModalButton {
+            rect: button.rect,
+            pressed: button.pressed,
+            enabled: button.enabled,
+        })
+        .collect();
+    let background = atlas
+        .ra2_dialog_background
+        .or_else(|| atlas.mode_two_dialog_background(None));
+    let draw = shell_paint::paint_modal_shp(
+        &state.renderer.bit_font,
+        background,
+        super::type3_button_frames(atlas),
+        layout.dialog,
+        &buttons,
+        &labels,
+        scale,
+        POPUP_DEPTHS,
+    );
+    paint.controls = draw.sprites;
+    paint.texts = draw.text;
     paint
 }

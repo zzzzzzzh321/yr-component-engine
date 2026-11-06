@@ -194,14 +194,13 @@ fn raw_pair(projection: &MinimapPlayfieldProjection, cell: (u16, u16)) -> [[u8; 
 fn apply_incremental(
     projection: &mut MinimapPlayfieldProjection,
     runtime: &SimRuntime,
-    cell: (u16, u16),
+    cells: &[(u16, u16)],
     colors: &HashMap<(u8, u8), [u8; 3]>,
 ) {
     apply_radar_terrain_dirty_cells(
         RadarTerrainUpdateLayers {
             base_rgba: &mut projection.base_rgba,
             terrain_pixels: &projection.terrain_pixels,
-            surface_pixels: &mut projection.surface_pixels,
             overlay_pixels: &mut projection.overlay_pixels,
             native_surface: projection.native_radar_surface,
             native_terrain: &mut projection.native_radar_terrain,
@@ -209,7 +208,7 @@ fn apply_incremental(
         CurrentRadarCellAuthority::from_runtime(runtime),
         BRIDGE_COLOR,
         colors,
-        &[cell],
+        cells,
     );
 }
 
@@ -313,7 +312,7 @@ fn gsi_04_01_structural_high_bridge_wins_in_full_and_incremental_paths() {
 
     let mut incremental = projection(&grid, &stale_destroyed, &[], expanded_bounds(), &colors);
     assert_eq!(raw_pair(&incremental, cell), [BRIDGE_END_COLOR; 2]);
-    apply_incremental(&mut incremental, &current_high, cell, &colors);
+    apply_incremental(&mut incremental, &current_high, &[cell], &colors);
     assert_eq!(raw_pair(&incremental, cell), [BRIDGE_COLOR; 2]);
 }
 
@@ -389,7 +388,7 @@ fn gsi_04_01_intact_low_overlay_stays_overlay_in_full_and_incremental_paths() {
 
         let mut incremental = projection(&grid, &absent, &[], expanded_bounds(), &colors);
         assert_eq!(raw_pair(&incremental, cell), [BASE_COLOR; 2]);
-        apply_incremental(&mut incremental, &intact_low, cell, &colors);
+        apply_incremental(&mut incremental, &intact_low, &[cell], &colors);
         assert_eq!(raw_pair(&incremental, cell), [expected; 2]);
     }
 }
@@ -414,7 +413,7 @@ fn gsi_04_01_extra_dir6_family_without_deck_flags_keeps_live_overlay() {
 
     let mut incremental = projection(&grid, &absent, &[], expanded_bounds(), &colors);
     assert_eq!(raw_pair(&incremental, cell), [BASE_COLOR; 2]);
-    apply_incremental(&mut incremental, &live_overlay, cell, &colors);
+    apply_incremental(&mut incremental, &live_overlay, &[cell], &colors);
     assert_eq!(raw_pair(&incremental, cell), [OVERLAY_COLOR; 2]);
 }
 
@@ -452,9 +451,9 @@ fn gsi_04_01_high_collapse_uses_cellclass_overlay_then_repairs_in_full_and_incre
 
         let mut incremental = projection(&grid, &repaired, &[], expanded_bounds(), &colors);
         assert_eq!(raw_pair(&incremental, cell), [BRIDGE_COLOR; 2]);
-        apply_incremental(&mut incremental, &destroyed, cell, &colors);
+        apply_incremental(&mut incremental, &destroyed, &[cell], &colors);
         assert_eq!(raw_pair(&incremental, cell), [expected; 2]);
-        apply_incremental(&mut incremental, &repaired, cell, &colors);
+        apply_incremental(&mut incremental, &repaired, &[cell], &colors);
         assert_eq!(raw_pair(&incremental, cell), [BRIDGE_COLOR; 2]);
     }
 }
@@ -513,7 +512,7 @@ fn gsi_04_01_snapshot_high_collapse_uses_cellclass_overlay_after_structural_flag
         );
 
         let mut incremental = projection(&grid, &repaired, &[], expanded_bounds(), &colors);
-        apply_incremental(&mut incremental, &restored, cell, &colors);
+        apply_incremental(&mut incremental, &restored, &[cell], &colors);
         assert_eq!(
             raw_pair(&incremental, cell),
             [expected; 2],
@@ -535,7 +534,7 @@ fn gsi_04_01_bridge_end_overlays_retain_black_in_full_and_incremental_paths() {
 
         let mut incremental = projection(&grid, &intact_low, &[], expanded_bounds(), &colors);
         assert_eq!(raw_pair(&incremental, cell), [LOW_BRIDGE_COLOR; 2]);
-        apply_incremental(&mut incremental, &destroyed, cell, &colors);
+        apply_incremental(&mut incremental, &destroyed, &[cell], &colors);
         assert_eq!(raw_pair(&incremental, cell), [BRIDGE_END_COLOR; 2], "{id}");
     }
 }
@@ -576,7 +575,7 @@ fn retail_bridge_end_headers_reach_full_and_dirty_radar_sources() {
     let absent = runtime_with_overlay(resolved, cell, None);
     let mut dirty = projection(&grid, &absent, &[], expanded_bounds(), &colors);
     assert_eq!(raw_pair(&dirty, cell), [BASE_COLOR; 2]);
-    apply_incremental(&mut dirty, &runtime, cell, &colors);
+    apply_incremental(&mut dirty, &runtime, &[cell], &colors);
     assert_eq!(raw_pair(&dirty, cell), [BRIDGE_END_COLOR; 2]);
 }
 
@@ -745,6 +744,82 @@ fn gsi_04_01_full_and_incremental_paths_share_current_cell_source_precedence() {
             cell,
         ),
         [[200, 200, 160]; 2],
+    );
+}
+
+#[test]
+fn native_dirty_cell_without_cellclass_change_keeps_generated_surface() {
+    let (grid, resolved) = fixture(None);
+    let cell = central_cell(&grid, expanded_bounds());
+    let colors = colors();
+    let runtime = live_runtime(resolved, OverlayGrid::new(SIDE, SIDE));
+    let mut native = projection(&grid, &runtime, &[], expanded_bounds(), &colors);
+    let surface = |native: &MinimapPlayfieldProjection| {
+        let terrain = native
+            .native_radar_terrain
+            .as_ref()
+            .expect("generated surface");
+        (terrain.generated_rgb565().to_vec(), terrain.revision())
+    };
+    let generated = surface(&native);
+    apply_incremental(&mut native, &runtime, &[cell], &colors);
+    assert_eq!(
+        surface(&native),
+        generated,
+        "an unchanged CellClass source must not regenerate the surface"
+    );
+    assert!(
+        native.base_rgba.is_empty(),
+        "nor stamp the mapless per-cell color beside it"
+    );
+}
+
+#[test]
+fn mapless_dirty_batch_updates_removes_and_appends_overlay_pixels_in_order() {
+    let (grid, resolved) = fixture(None);
+    let a = central_cell(&grid, expanded_bounds());
+    let (b, c) = ((a.0 + 1, a.1), (a.0 + 2, a.1));
+    let changed = [70, 71, 72];
+    let mut colors = colors();
+    colors.insert((10, 5), changed);
+    let mut before = OverlayGrid::new(SIDE, SIDE);
+    before.place_overlay(a.0, a.1, 10, 4);
+    before.place_overlay(c.0, c.1, 10, 4);
+    let mut after = OverlayGrid::new(SIDE, SIDE);
+    after.place_overlay(b.0, b.1, 10, 4);
+    after.place_overlay(c.0, c.1, 10, 5);
+    let before = live_runtime(resolved.clone(), before);
+    let after = live_runtime(resolved, after);
+    // Without resolved terrain no generated surface exists: the fallback
+    // stamps these retained pixels in list order.
+    let mut fallback = MinimapPlayfieldProjection::derive(
+        &grid,
+        None,
+        &[],
+        &colors,
+        "TEMPERATE",
+        Some(expanded_bounds()),
+        Some(CurrentRadarCellAuthority::from_runtime(&before)),
+    );
+    assert!(fallback.native_radar_terrain.is_none());
+    let rgba = |[r, g, b]: [u8; 3]| [r, g, b, 255];
+    let listed = |projection: &MinimapPlayfieldProjection| {
+        projection
+            .overlay_pixels
+            .iter()
+            .map(|pixel| ((pixel.rx, pixel.ry), pixel.color))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        listed(&fallback),
+        [(a, rgba(OVERLAY_COLOR)), (c, rgba(OVERLAY_COLOR))]
+    );
+
+    apply_incremental(&mut fallback, &after, &[a, b, c, b], &colors);
+    assert_eq!(
+        listed(&fallback),
+        [(c, rgba(changed)), (b, rgba(OVERLAY_COLOR))],
+        "removed cells leave, changed cells keep their slot, new cells append",
     );
 }
 

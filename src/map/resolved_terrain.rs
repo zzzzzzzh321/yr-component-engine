@@ -117,7 +117,7 @@ pub(crate) fn recalc_zone_type(
     outside: bool,
     overlay_zone_type: Option<u8>,
     land_type: u8,
-    wheel_speed: Option<u8>,
+    wheel_speed: Option<crate::util::native_x87::NativeF32Bits>,
     terrain_object_occupation: Option<i32>,
 ) -> u8 {
     if outside {
@@ -541,11 +541,12 @@ impl DynamicTerrainCellState {
         }
     }
 
+    /// Every field but `level`, which the grid writes through its one level
+    /// writer (`ResolvedTerrainGrid::set_cell_level`).
     fn apply(&self, cell: &mut ResolvedTerrainCell) {
         cell.final_tile_index = self.final_tile_index;
         cell.final_sub_tile = self.final_sub_tile;
         cell.is_wood_bridge_repair_tile = self.is_wood_bridge_repair_tile;
-        cell.level = self.level;
         cell.filled_clear = self.filled_clear;
         cell.tileset_index = self.tileset_index;
         cell.land_type = self.land_type;
@@ -615,6 +616,29 @@ impl DynamicTerrainCells {
         self.0.get(cell)
     }
 
+    /// Fold the records into the simulation state hash without what the
+    /// tile variant alone decides (the variant, its radar colours and draw
+    /// offsets). The variant comes from the process-lifetime selector table
+    /// ([`crate::map::tile_variant_selector`]), which each process builds
+    /// from its own first map's presentation draws, and no simulation code
+    /// reads it.
+    pub(crate) fn hash_simulation(&self, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.0.len().hash(hasher);
+        for (cell, state) in &self.0 {
+            cell.hash(hasher);
+            DynamicTerrainCellState {
+                variant: 0,
+                render_offset_x: 0,
+                render_offset_y: 0,
+                radar_left: [0; 3],
+                radar_right: [0; 3],
+                ..state.clone()
+            }
+            .hash(hasher);
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&(u16, u16), &DynamicTerrainCellState)> {
         self.0.iter()
     }
@@ -640,6 +664,41 @@ impl PristineTmpHeader {
     }
 }
 
+/// An inclusive range of signed cell levels (`level as i8`, the height
+/// `terrain::iso_to_screen` projects). See [`ResolvedTerrainGrid::level_span`].
+/// The default holds level 0 alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LevelSpan {
+    pub min: i8,
+    pub max: i8,
+}
+
+impl LevelSpan {
+    /// Every signed level.
+    pub const FULL: Self = Self {
+        min: i8::MIN,
+        max: i8::MAX,
+    };
+
+    /// The span of `levels` and 0.
+    fn of(levels: impl IntoIterator<Item = u8>) -> Self {
+        let mut span = Self::default();
+        for level in levels {
+            span.widen(level);
+        }
+        span
+    }
+
+    fn widen(&mut self, level: u8) {
+        self.min = self.min.min(level as i8);
+        self.max = self.max.max(level as i8);
+    }
+
+    pub fn contains(&self, level: u8) -> bool {
+        (self.min..=self.max).contains(&(level as i8))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedTerrainGrid {
     width: u16,
@@ -661,6 +720,15 @@ pub struct ResolvedTerrainGrid {
     /// never serialized or included in simulation hashes.
     native_tmp_draw_heights: HashMap<u16, PristineTmpHeader>,
     cells: Vec<ResolvedTerrainCell>,
+    /// Derived bound on the signed levels in `cells`, always holding 0 (the
+    /// level presentation assumes for a cell the grid lacks). Every
+    /// constructor computes it from `cells`; [`Self::set_cell_level`], the one
+    /// level writer, widens it and nothing narrows it. The raw test accessors
+    /// widen it to [`LevelSpan::FULL`]. A restored cell (the rollback in
+    /// [`Self::apply_dynamic_cell_state`]) brings back a level it already held.
+    /// Presentation and tactical picking bound a cell's projected height with it;
+    /// [`Self::level_span`] checks it in debug builds.
+    level_span: LevelSpan,
     /// One live identity handle, normally bound to the process owner before
     /// scenario construction. Synthetic constructors own a fresh detached
     /// handle; derived clones share it.
@@ -730,9 +798,10 @@ pub struct ResolvedTerrainGrid {
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_flat_ground_grid(size: u16) -> ResolvedTerrainGrid {
     let costs = SpeedCostProfile {
-        foot: Some(100),
-        track: Some(100),
-        wheel: Some(100),
+        foot: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        track: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
         ..Default::default()
     };
     test_grid(size, size, |rx, ry| ResolvedTerrainCell {
@@ -750,15 +819,16 @@ pub(crate) const TEST_RETAIL_CLEAR_INI: &str = "[Clear]\nFoot=100%\nTrack=100%\n
 
 /// The row the production land reader makes of retail `[Clear]`.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const TEST_RETAIL_CLEAR_SPEED_COSTS: SpeedCostProfile = SpeedCostProfile {
-    foot: Some(100),
-    track: Some(100),
-    wheel: Some(100),
-    float: Some(0),
-    amphibious: Some(80),
-    float_beach: Some(0),
-    hover: Some(50),
-};
+pub(crate) fn test_retail_clear_speed_costs() -> SpeedCostProfile {
+    static ROW: std::sync::OnceLock<SpeedCostProfile> = std::sync::OnceLock::new();
+    *ROW.get_or_init(|| {
+        TerrainRules::from_ini(&crate::rules::ini_parser::IniFile::from_str(
+            TEST_RETAIL_CLEAR_INI,
+        ))
+        .row(LandType::Clear)
+        .speed_costs
+    })
+}
 
 /// Retail `[Clear]` read by the production land reader, for binding a test
 /// grid's land rows as a scenario load binds its rules.
@@ -773,8 +843,8 @@ pub fn test_retail_clear_rules() -> TerrainRules {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_retail_clear_cell(rx: u16, ry: u16) -> ResolvedTerrainCell {
     ResolvedTerrainCell {
-        speed_costs: TEST_RETAIL_CLEAR_SPEED_COSTS,
-        base_speed_costs: TEST_RETAIL_CLEAR_SPEED_COSTS,
+        speed_costs: test_retail_clear_speed_costs(),
+        base_speed_costs: test_retail_clear_speed_costs(),
         ..test_clear_cell(rx, ry)
     }
 }
@@ -808,13 +878,14 @@ pub fn test_grid(
 /// Every SpeedType at 100%.
 #[cfg(any(test, feature = "test-support"))]
 pub const TEST_OPEN_SPEED_COSTS: SpeedCostProfile = SpeedCostProfile {
-    foot: Some(100),
-    track: Some(100),
-    wheel: Some(100),
-    float: Some(100),
-    amphibious: Some(100),
-    float_beach: Some(100),
-    hover: Some(100),
+    foot: Some(crate::util::native_x87::NativeF32Bits::ONE),
+    track: Some(crate::util::native_x87::NativeF32Bits::ONE),
+    wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+    float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+    amphibious: Some(crate::util::native_x87::NativeF32Bits::ONE),
+    float_beach: Some(crate::util::native_x87::NativeF32Bits::ONE),
+    hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+    winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
 };
 
 /// [`test_flat_cell`], named for the Clear land it carries.
@@ -987,6 +1058,7 @@ impl ResolvedTerrainGrid {
         Self {
             width,
             height,
+            level_span: LevelSpan::of(cells.iter().map(|cell| cell.level)),
             cells,
             land_speed_costs: land_speed_cost_profiles(None),
             overlay_passability: Vec::new(),
@@ -1277,17 +1349,39 @@ impl ResolvedTerrainGrid {
         self.cells.get_mut(idx)
     }
 
-    /// [`Self::cell_mut`] for fixtures outside this module.
+    /// [`Self::cell_mut`] for fixtures outside this module. A fixture may
+    /// write any level through it, so the level span becomes
+    /// [`LevelSpan::FULL`].
     #[cfg(any(test, feature = "test-support"))]
     pub fn cell_mut_for_test(&mut self, rx: u16, ry: u16) -> Option<&mut ResolvedTerrainCell> {
+        self.level_span = LevelSpan::FULL;
         self.cell_mut(rx, ry)
     }
 
     /// The cell storage, for fixtures that reshape a grid. Does not move
-    /// `mutation_epoch`.
+    /// `mutation_epoch`; widens the level span to [`LevelSpan::FULL`].
     #[cfg(any(test, feature = "test-support"))]
     pub fn cells_mut_for_test(&mut self) -> &mut Vec<ResolvedTerrainCell> {
+        self.level_span = LevelSpan::FULL;
         &mut self.cells
+    }
+
+    /// The one writer of a stored cell's level; keeps [`Self::level_span`].
+    fn set_cell_level(&mut self, index: usize, level: u8) {
+        self.cells[index].level = level;
+        self.level_span.widen(level);
+    }
+
+    /// A signed range holding every stored cell's level and 0. It only widens
+    /// while the grid lives, so it can be wider than the current levels.
+    pub fn level_span(&self) -> LevelSpan {
+        debug_assert!(
+            self.cells
+                .iter()
+                .all(|cell| self.level_span.contains(cell.level)),
+            "a cell level was written past set_cell_level"
+        );
+        self.level_span
     }
 
     /// Epoch of mutable cell access; see the field note.
@@ -1314,9 +1408,11 @@ impl ResolvedTerrainGrid {
         let before = (!same_entry && self.bridge_recalc_catalog.is_some())
             .then(|| self.cells[index].clone());
         state.apply(&mut self.cells[index]);
+        self.set_cell_level(index, state.level);
         if !same_entry {
             if let Some(before) = before {
                 if let Err(error) = self.refresh_saved_cell_presentation(index) {
+                    // The restored level was in the span, which never narrows.
                     self.cells[index] = before;
                     log::error!("terrain snapshot presentation unavailable at {rx},{ry}: {error}");
                     return false;
@@ -1370,6 +1466,10 @@ impl ResolvedTerrainGrid {
 }
 
 impl crate::map::terrain::TacticalCellLookup for ResolvedTerrainGrid {
+    fn max_cell_level(&self) -> i8 {
+        self.level_span().max
+    }
+
     fn cell_level(&self, rx: u16, ry: u16) -> Option<u8> {
         // Original6D6753 reads the current candidate, not a load-time level.
         self.cell(rx, ry).map(|cell| cell.level)
@@ -1395,7 +1495,8 @@ impl ResolvedTerrainCell {
     /// overlay fields are the knobs a test turns.
     pub fn clear_for_test(rx: u16, ry: u16) -> Self {
         let speed_costs = SpeedCostProfile {
-            wheel: Some(100),
+            wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+            winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
             ..Default::default()
         };
         Self {
@@ -1435,5 +1536,27 @@ mod mutation_epoch_tests {
         let stable = grid.mutation_epoch();
         grid.set_terrain_object_occupation((5, 5), Some(1));
         assert_eq!(grid.mutation_epoch(), stable);
+    }
+}
+
+#[cfg(test)]
+mod level_span_tests {
+    use super::*;
+
+    /// Presentation windows project with the span, so a raw native level
+    /// store above every built level (Cell+11B, 568E40) must widen it, and a
+    /// signed-negative byte must reach its minimum.
+    #[test]
+    fn native_level_write_beyond_the_built_levels_widens_the_span() {
+        let mut grid = test_grid(2, 1, |rx, ry| ResolvedTerrainCell {
+            level: 2,
+            ..test_flat_cell(rx, ry)
+        });
+        assert_eq!(grid.level_span(), LevelSpan { min: 0, max: 2 });
+        let cell = grid.native_cell_identity((1, 0));
+        grid.write_native_cell_level(cell, 9);
+        assert_eq!(grid.level_span(), LevelSpan { min: 0, max: 9 });
+        grid.write_native_cell_level(cell, 0xF8);
+        assert_eq!(grid.level_span(), LevelSpan { min: -8, max: 9 });
     }
 }

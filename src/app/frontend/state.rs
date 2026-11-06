@@ -18,6 +18,20 @@ pub(crate) struct FrontendState {
     /// External client launch: returning from the session closes the process for its client.
     pub(crate) external_launch: bool,
     pub(crate) external_launch_error: Option<String>,
+    /// The external launch's or online lobby match's local result, first
+    /// decided wins (docs/spawn.md); see `App::record_match_result`.
+    pub(crate) match_result: Option<crate::app::cncnet::ExternalMatchResult>,
+    /// The decided network match's winners still in it, for the online
+    /// lobby's `finish` (docs/lobby-protocol.md).
+    pub(crate) match_winners: Option<Vec<String>>,
+    /// Frames, duration and opponent departure for the launch report.
+    pub(crate) external_progress: crate::app::cncnet::ExternalLaunchProgress,
+    /// The game is closing and waits until this for its network goodbyes
+    /// (`App::poll_network_goodbye`).
+    pub(crate) network_goodbye_deadline: Option<crate::util::time::Instant>,
+    /// Browser launch is closing its network owners before engine exit.
+    #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+    pub(crate) browser_exit_pending: bool,
     /// The Skirmish setup dialog's state.
     pub(crate) skirmish_shell_state: crate::ui::skirmish_shell::SkirmishShellState,
     /// Choose Map's last clicked game-type row `[0x008316FC]`: starts at -1,
@@ -30,6 +44,10 @@ pub(crate) struct FrontendState {
         crate::app::frontend::skirmish_session::MultiplayerShellRuntime,
     pub(crate) skirmish_shell_chrome:
         Option<crate::render::skirmish_shell_chrome::SkirmishShellChromeAtlas>,
+    /// The `DialogBackground.Image/.Palette` pair the shell chrome atlas was
+    /// built with. A game load that resolves a different pair drops the atlas
+    /// so it rebuilds with the side's three dialog slots.
+    pub(crate) shell_dialog_background: Option<(String, String)>,
     pub(crate) main_menu_shell_state: crate::ui::main_menu_shell::MainMenuShellState,
     pub(crate) single_player_shell_state: crate::ui::single_player_shell::SinglePlayerShellState,
     /// Shared descriptor-driven input authority for the front-end shell dialogs
@@ -45,12 +63,11 @@ pub(crate) struct FrontendState {
     pub(crate) main_menu_movie_last_step: Instant,
     /// Terminal menu failure; retained for the error screen and input gate.
     pub(crate) main_menu_shell_error: Option<String>,
+    /// The config and settings files the error screen names (`initialize`).
+    pub(crate) startup_files: crate::app::initialize::StartupFiles,
     /// Set by each status-screen draw and taken by the frame's cursor owner:
     /// the card has no retail art, so the window's own cursor shows over it.
     pub(crate) status_screen_drawn: bool,
-    /// Numeric internal-version string used by the bottom-right main-menu line.
-    /// Resolution follows the retail 16-byte/CR-only cached contract.
-    pub(crate) version_txt: String,
     /// Active shell first-paint controls-reveal slide (presentation only). gamemd
     /// plays this on the first paint of every shell dialog (menu / single-player /
     /// skirmish); the wave swaps each owner-draw button's SDBTNANM frame index.
@@ -85,12 +102,18 @@ pub(crate) struct FrontendState {
     pub(crate) quit_cascade: Option<crate::app::frontend::quit_cascade::QuitCascade>,
     /// Retail process-start splash, held until its post-present deadline.
     pub(crate) startup_splash: Option<startup_splash::StartupSplashPresentation>,
+    /// WinMain's `[Intro] Play=` bit (`[0xA8E960] & 4`), consumed at launch:
+    /// the first-run intro starts once the splash hold ends (`0x0052CA65`).
+    pub(crate) startup_intro_pending: bool,
     /// The two-button shell message box `0x120` over the empty backdrop:
     /// main-menu Exit Game (the app only exits on its OK, never on the first
     /// Exit click) or campaign defeat's retry prompt.
     pub(crate) shell_message_box: Option<ShellMessageBox>,
     /// Retained active-YR launcher Options `0xD5` parent snapshot.
     pub(crate) options_dialog: Option<crate::ui::main_menu_dialogs::OptionsDialogState>,
+    /// The page the launcher Options dialog reopens on after its key-mapping
+    /// child `0xA3` closes, so the page the player came from comes back.
+    pub(crate) options_reopen_at: Option<crate::ui::main_menu_dialogs::options::Category>,
     /// Shared A3 child, reached from launcher Options or paused Game Controls.
     pub(crate) keyboard_dialog: Option<crate::ui::shell::keyboard::KeyboardState>,
     /// Movie list `0x129` instance while `ShellRoute::MovieList` is shown.
@@ -118,14 +141,26 @@ pub(crate) struct FrontendState {
     /// The offline WOL test service's credential store, standing in for the
     /// WOLAPI one for the process.
     pub(crate) wol_test_credentials: Vec<crate::ui::wol_login::WolCredential>,
+    /// Explicit native diagnostics only: WOL visits keep the retail welcome
+    /// `0x10E` and full controls instead of opening at the online sign-in,
+    /// and a LAN guest's BD keeps Accept (`SetupDialog::modern`).
+    pub(crate) native_shell_ui: bool,
     /// LAN lobby interaction/discovery; admitted participants belong to MatchSession.
     pub(crate) lan: Option<crate::app::shell_lan::LanShellRuntime>,
     pub(crate) network_setup_protocol:
         Option<crate::app::shell_network_setup::NetworkSetupProtocol>,
     /// BC/BD control interaction; values are projected from MatchSession.
     pub(crate) multiplayer_setup: Option<crate::ui::multiplayer_setup::MultiplayerSetupState>,
-    /// Options' Network child D7, retained until its teardown completes.
-    pub(crate) network_options: Option<crate::ui::network_options::NetworkOptionsState>,
+    /// The host's last Create Game choices, which its next VERA room takes.
+    pub(crate) room_limits: crate::ui::room_limits::RoomLimits,
+    /// The host's last Room name in VERA's online lobby, which its next
+    /// Create Game shows; `None` until one is typed.
+    pub(crate) wol_room_name: Option<String>,
+    /// The host unticked Ranked game at its last Create Game in VERA's
+    /// online lobby, which its next Create Game shows.
+    pub(crate) wol_room_unranked: bool,
+    /// VERA: how this player returns to its LAN room after the match.
+    pub(crate) lan_rematch: Option<crate::app::shell_lan::LanRematch>,
     /// `0x10E`'s background and icon art (`0x0072C7E0`).
     pub(crate) wol_welcome_art: Option<crate::render::main_menu_shell_chrome::WolPageArt>,
     /// `0x10F`'s background art (`0x0072C600`), freed with the dialog
@@ -212,6 +247,8 @@ pub(crate) struct FrontendState {
     pub(crate) random_map_retention: RandomMapGenerationRetention,
     pub(crate) skirmish_preview_texture:
         Option<crate::app::frontend::skirmish_shell_render::SkirmishPreviewTexture>,
+    /// VERA's enlarged map preview, while it shows.
+    pub(crate) preview_zoom: Option<crate::app::frontend::preview_zoom::PreviewZoom>,
     /// Minimap renderer — created at map load time.
     pub(crate) loading_screen_atlas:
         Option<crate::render::loading_screen_chrome::LoadingScreenAtlas>,
@@ -225,6 +262,15 @@ pub(crate) struct FrontendState {
     /// persistence of the old app field. Match paths read the runtime-bound
     /// copy via `overlay_registry()`.
     pub(crate) shell_preview_overlay_registry: Option<OverlayTypeRegistry>,
+    /// The online map library's catalog and Choose Map's map download.
+    pub(crate) map_library: crate::app::map_library::MapLibrary,
+    /// The online login page's lobby counts and news.
+    pub(crate) login_info: crate::app::shell_wol::login_info::LoginInfo,
+    /// VERA's own map pictures for the setup screens' previews.
+    pub(crate) map_pictures: crate::app::map_picture::MapPictures,
+    /// The release check, its main-menu offer and the download (desktop only).
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub(crate) updater: crate::app::updater::Updater,
 }
 
 /// One open shell message box `0x120` and the caller its result returns to.
@@ -243,4 +289,18 @@ pub(crate) enum ShellMessageBoxPurpose {
     CampaignReplay(Option<Box<crate::app::match_bootstrap::PreparedCampaignStartup>>),
     /// MapSelect's failed Init message returns to the victory continuation.
     CampaignVictory(Box<crate::app::campaign_victory::CampaignVictory>),
+    /// The updater's offer (`0x121`): Update, Skip Version or Later, over
+    /// the release's change list.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateOffer(crate::app::updater::notes::ReleaseNotes),
+    /// The updater's download progress (`0xCE`); its button cancels.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateProgress,
+    /// Vera Options' Check for Updates waiting for its check (`0xCE`); its
+    /// button stops waiting.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateCheck,
+    /// The updater's notice (`0xCE`): a failure, or what a check found.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateNotice,
 }

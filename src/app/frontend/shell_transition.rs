@@ -63,8 +63,6 @@ pub(crate) enum ShellSlideKind {
     LoadSavedGame,
     /// Dialog 0xD5 — launcher Options.
     Options,
-    /// VERA's own page of `0xD5`: VERA's controls, with Back in the column.
-    VeraOptions,
     /// Dialog 0x10E — Westwood Online welcome.
     WolWelcome,
     /// Dialog 0x10F — Westwood Online login.
@@ -89,8 +87,6 @@ pub(crate) enum ShellSlideKind {
     WolAddBuddyQuery,
     /// Dialog 0xA3 — Options' Keyboard page (front-end parent only).
     Keyboard,
-    /// Dialog D7, Options' Network child.
-    NetworkOptions,
     LanLobby,
     /// BC/BD (LAN) or C2/C9 (WOL) network setup.
     NetworkSetup(crate::ui::multiplayer_setup::SetupDialog),
@@ -129,7 +125,7 @@ impl ShellSlideKind {
             ShellSlideKind::Skirmish => 0x0102,
             ShellSlideKind::Campaign => 0x0094,
             ShellSlideKind::LoadSavedGame => 0x00B7,
-            ShellSlideKind::Options | ShellSlideKind::VeraOptions => 0x00D5,
+            ShellSlideKind::Options => 0x00D5,
             ShellSlideKind::WolWelcome => 0x010E,
             ShellSlideKind::WolLogin => 0x010F,
             ShellSlideKind::WolLobby => 0x0113,
@@ -142,7 +138,6 @@ impl ShellSlideKind {
             ShellSlideKind::WolQuickMatch => 0x0117,
             ShellSlideKind::WolAddBuddyQuery => 0x0122,
             ShellSlideKind::Keyboard => 0x00A3,
-            ShellSlideKind::NetworkOptions => 0x00D7,
             ShellSlideKind::LanLobby => 0xBB,
             ShellSlideKind::NetworkSetup(dialog) => dialog.page().dialog.0,
             ShellSlideKind::ChooseMap => 0x006B,
@@ -155,36 +150,32 @@ impl ShellSlideKind {
 
     /// The dialog's slide column with the panel's `rows` tile rows. Every
     /// rendered shell has a `slide` table entry, so a miss is a programming
-    /// error. Options' two pages adjust `0xD5`'s retail column to VERA's
-    /// buttons: the main page slides Vera Options under Network too, and
-    /// VERA's page has only Back, as on the Keyboard page `0xA3`.
+    /// error. Options slides VERA's page buttons under retail's Keyboard.
+    /// Skirmish slides VERA's Save Setup and Load Setup under Choose Map.
     pub(crate) fn column(self, rows: u32, page: Option<&MenuPageSpec>) -> SlideColumn {
         let spec = crate::ui::shell::slide::slide_spec_for(self.dialog_id())
             .expect("rendered shell dialog must have a slide column");
+        let page = page.filter(|page| page.dialog == self.dialog_id());
         // WOL's simplified pages must slide only their visible buttons too.
-        let top_buttons = page
-            .filter(|page| page.dialog == self.dialog_id())
-            .map_or_else(
-                || match self {
-                    ShellSlideKind::Options => spec.top_buttons + 1,
-                    ShellSlideKind::VeraOptions => 0,
-                    _ => spec.top_buttons,
-                },
-                |page| page.stacked.len() as u32,
-            );
+        let top_buttons = page.map_or_else(
+            || match self {
+                ShellSlideKind::Options => {
+                    crate::ui::main_menu_dialogs::options::shell::OPTIONS_PAGE
+                        .stacked
+                        .len() as u32
+                }
+                ShellSlideKind::Skirmish => spec.top_buttons + 2,
+                _ => spec.top_buttons,
+            },
+            |page| page.stacked.len() as u32,
+        );
         crate::ui::shell::slide::SlideDialogSpec {
             top_buttons,
+            // The online lobby keeps the warning monitor for its top panel.
+            top_panel: spec.top_panel && page.is_none_or(crate::ui::wol_lobby::keeps_top_panel),
             ..spec
         }
         .column(rows)
-    }
-
-    /// The kind of the Options page that shows.
-    pub(crate) fn options_page(page: crate::ui::main_menu_dialogs::options::OptionsPage) -> Self {
-        match page {
-            crate::ui::main_menu_dialogs::options::OptionsPage::Main => ShellSlideKind::Options,
-            crate::ui::main_menu_dialogs::options::OptionsPage::Vera => ShellSlideKind::VeraOptions,
-        }
     }
 }
 
@@ -194,29 +185,35 @@ fn column_page_spec(
 ) -> Option<&'static MenuPageSpec> {
     let visit = visit?;
     match kind? {
-        ShellSlideKind::WolWelcome => Some(visit.welcome_page_spec()),
+        ShellSlideKind::WolWelcome => Some(&crate::ui::wol_shell::WOL_WELCOME_PAGE),
         ShellSlideKind::WolLogin => Some(visit.login()?.policy.page_spec()),
         ShellSlideKind::WolLobby => Some(visit.lobby()?.ui.page_spec()),
         _ => None,
     }
 }
 
-/// Right-panel tile rows at the current surface size (`[0x00B0FA20]`).
-fn panel_rows(state: &AppState) -> u32 {
+/// Right-panel tile rows a new wave of `kind` slides on, at the current
+/// surface size (`[0x00B0FA20]`).
+fn panel_rows(state: &AppState, kind: Option<ShellSlideKind>) -> u32 {
     // A fitted shell paints the scaled 800x600 column, so its slide must use
     // the authored 9 tile rows even when the live window is too short for
     // `right_panel_rects(window)` to reach the same count. Retail 640/800
-    // keep the live window's own rows.
-    if crate::app::frontend::shell_layout::fills_window(state) {
-        return crate::ui::shell::geom::right_panel_rects(
+    // keep the live window's own rows, but for Options where they are too
+    // few for its column: that page is fitted there too.
+    let config = &state.renderer.gpu.config;
+    let (width, height) = (config.width as i32, config.height as i32);
+    let fitted = crate::app::frontend::shell_layout::fills_window(state)
+        || (kind == Some(ShellSlideKind::Options)
+            && !crate::ui::main_menu_dialogs::options::shell::retail_column_fits(width, height));
+    let (width, height) = if fitted {
+        (
             crate::ui::shell::geom::SHELL_BASE_W,
             crate::ui::shell::geom::SHELL_BASE_H,
         )
-        .tile_count
-        .max(1) as u32;
-    }
-    let config = &state.renderer.gpu.config;
-    crate::ui::shell::geom::right_panel_rects(config.width as i32, config.height as i32)
+    } else {
+        (width, height)
+    };
+    crate::ui::shell::geom::right_panel_rects(width, height)
         .tile_count
         .max(1) as u32
 }
@@ -226,6 +223,14 @@ fn panel_rows(state: &AppState) -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ShellExitThen {
     MainMenu(crate::ui::main_menu_shell::MainMenuShellAction),
+    /// The updater's offer: `0xE2` slides out as for Exit Game, then the
+    /// message box asks over the empty shell backdrop.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateOffer,
+    /// Options' Check for Updates: `0xD5` slides out, then the updater's
+    /// boxes show over the empty shell backdrop.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateCheck,
     SinglePlayer(crate::ui::single_player_shell::SinglePlayerShellAction),
     MoviesCredits(crate::ui::movies_credits_shell::MoviesCreditsAction),
     /// Movie list Play Movie with a selected row.
@@ -247,13 +252,9 @@ pub(crate) enum ShellExitThen {
     /// commits and writes (Main Menu `0x5CB`; state 0x12 recreates `0xE2`) or
     /// commits and runs the Keyboard page (`0x5CE`).
     Options(crate::ui::main_menu_dialogs::options::LauncherParentResult),
-    /// VERA's page switch: the other Options page slides out, then this page
-    /// shows and slides in. Nothing is applied or saved.
-    OptionsPage(crate::ui::main_menu_dialogs::options::OptionsPage),
     /// Keyboard `0xA3` Back or Cancel: `0x005FBEF0` tears it down with its
     /// slide, then the bindings save or reload and a new `0xD5` is built.
     KeyboardClose(crate::app::input::keyboard::KeyboardExit),
-    NetworkOptionsClose,
     LanBack,
     LanCreate {
         observe: bool,
@@ -301,9 +302,9 @@ pub(crate) enum ShellExitThen {
     WolLoginClose(u16),
     /// `0x113` Back (`0x686`): the runner leaves its channel and returns 0.
     WolLobbyBack,
-    /// `0x113` Buddy List (`0x689`): the runner ends as for Back, with mode
-    /// 5 and return mode 4.
-    WolLobbyBuddy,
+    /// `0x113` Buddy List (`0x689`), or the online page's Quick Match: the
+    /// runner ends as for Back, with mode 5 or 1 and return mode 4.
+    WolLobbyRunner(crate::ui::wol_shell::WolMode),
     /// A game join was requested (`0x0078C281`): `0x113` slides out and hides.
     WolLobbyHide,
     /// The create succeeded: `0x113` slides out and hides, then C2 opens.
@@ -338,6 +339,10 @@ impl ShellExitThen {
     pub(crate) fn dialog(&self) -> ShellSlideKind {
         match self {
             Self::MainMenu(_) => ShellSlideKind::MainMenu,
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            Self::UpdateOffer => ShellSlideKind::MainMenu,
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            Self::UpdateCheck => ShellSlideKind::Options,
             Self::SinglePlayer(_) => ShellSlideKind::SinglePlayer,
             Self::MoviesCredits(_) => ShellSlideKind::MoviesAndCredits,
             Self::PlayMovie | Self::MovieListBack => ShellSlideKind::MovieList,
@@ -345,15 +350,7 @@ impl ShellExitThen {
             Self::CampaignBack | Self::CampaignStart(_) => ShellSlideKind::Campaign,
             Self::LoadSavedGameBack => ShellSlideKind::LoadSavedGame,
             Self::Options(_) => ShellSlideKind::Options,
-            // The page that slides out is the other one.
-            Self::OptionsPage(crate::ui::main_menu_dialogs::options::OptionsPage::Vera) => {
-                ShellSlideKind::Options
-            }
-            Self::OptionsPage(crate::ui::main_menu_dialogs::options::OptionsPage::Main) => {
-                ShellSlideKind::VeraOptions
-            }
             Self::KeyboardClose(_) => ShellSlideKind::Keyboard,
-            Self::NetworkOptionsClose => ShellSlideKind::NetworkOptions,
             Self::LanBack | Self::LanCreate { .. } | Self::LanJoinAccepted(_) => {
                 ShellSlideKind::LanLobby
             }
@@ -368,7 +365,7 @@ impl ShellExitThen {
             Self::WolBack | Self::WolAction(_) => ShellSlideKind::WolWelcome,
             Self::WolLoginClose(_) => ShellSlideKind::WolLogin,
             Self::WolLobbyBack
-            | Self::WolLobbyBuddy
+            | Self::WolLobbyRunner(_)
             | Self::WolLobbyHide
             | Self::WolCreateAccepted { .. }
             | Self::WolOptionsOpen => ShellSlideKind::WolLobby,
@@ -451,7 +448,7 @@ pub(crate) fn begin_shell_exit(state: &mut AppState, then: ShellExitThen) -> She
     ) {
         ExitStartRule::Slide => {
             let column = kind.column(
-                panel_rows(state),
+                panel_rows(state, Some(kind)),
                 column_page_spec(state.frontend.wol.as_ref(), Some(kind)),
             );
             state.frontend.shell_exit = Some(ShellExit {
@@ -575,12 +572,10 @@ struct ShellLifecycleReducer<'a> {
 
 impl<'a> ShellLifecycleReducer<'a> {
     fn from_state(state: &'a mut AppState) -> Self {
+        let target = current_shell_slide_target(state);
         Self {
-            panel_rows: panel_rows(state),
-            page_spec: column_page_spec(
-                state.frontend.wol.as_ref(),
-                current_shell_slide_target(state),
-            ),
+            panel_rows: panel_rows(state, target),
+            page_spec: column_page_spec(state.frontend.wol.as_ref(), target),
             active_shell: &mut state.frontend.shell_slide_active_shell,
             first_paint_slide: &mut state.frontend.shell_first_paint_slide,
             slide_generation: &mut state.frontend.shell_slide_generation,
@@ -661,7 +656,6 @@ impl<'a> ShellLifecycleReducer<'a> {
             | ShellSlideKind::Campaign
             | ShellSlideKind::LoadSavedGame
             | ShellSlideKind::Options
-            | ShellSlideKind::VeraOptions
             | ShellSlideKind::WolWelcome
             | ShellSlideKind::WolLogin
             | ShellSlideKind::WolLobby
@@ -674,7 +668,6 @@ impl<'a> ShellLifecycleReducer<'a> {
             | ShellSlideKind::WolQuickMatch
             | ShellSlideKind::WolAddBuddyQuery
             | ShellSlideKind::Keyboard
-            | ShellSlideKind::NetworkOptions
             | ShellSlideKind::LanLobby => ShellWaveCompletion::MenuPage,
             ShellSlideKind::NetworkSetup(_) => ShellWaveCompletion::MultiplayerSetup,
             ShellSlideKind::Skirmish => ShellWaveCompletion::Skirmish,
@@ -726,16 +719,13 @@ impl<'a> ShellLifecycleReducer<'a> {
 pub(crate) fn invalidate_main_menu_dialog_instance(state: &mut AppState) {
     ShellLifecycleReducer::from_state(state).invalidate_main_menu_dialog_instance();
     // A new 0xE2 starts with no press or hover: its status line stays empty
-    // until a hover message arrives from the real cursor position.
-    let menu = &mut state.frontend.main_menu_shell_state;
-    menu.pressed_owner_draw_button = None;
-    menu.hovered_owner_draw_button = None;
-    if state.frontend.shell_controller.top_id() == Some(DialogId(0x00E2)) {
-        state
-            .frontend
-            .shell_controller
-            .reset_to(DialogId(0x00E2), false);
-    }
+    // until a hover message arrives from the real cursor position. The
+    // controller's 0xE2 instance is cleared wherever it sits, under a message
+    // box included.
+    state
+        .frontend
+        .shell_controller
+        .restart_instance(crate::ui::main_menu_shell::MAIN_MENU_DIALOG);
 }
 
 /// Deliver the kind-1 timer only while the bare 0xE2 dialog owns steady paint.
@@ -791,9 +781,37 @@ pub(crate) fn blocks_shell_input(state: &AppState) -> bool {
     // The graceful quit cascade also freezes shell input (the original processes
     // no input during its blocking teardown), so a stray click can't re-enter the
     // menu mid-fade.
+    #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+    if state.frontend.browser_exit_pending {
+        return true;
+    }
     state.frontend.quit_cascade.is_some()
         || state.frontend.shell_exit.is_some()
         || transition_blocks_shell_input(state.frontend.shell_first_paint_slide.as_ref())
+        || external_menu_wait(state).is_some()
+}
+
+/// Why an external network launch (docs/spawn.md) is at the main menu. It
+/// shows the empty menu backdrop there and takes no shell input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalMenuWait {
+    /// Admission, before the match first reaches the screen.
+    Joining,
+    /// The match ran; the launch is reporting it.
+    Reporting,
+}
+
+pub(crate) fn external_menu_wait(state: &AppState) -> Option<ExternalMenuWait> {
+    let external = state.frontend.screen == crate::ui::game_screen::GameScreen::MainMenu
+        && (crate::app::shell_wol::spawned_visit(state)
+            || crate::app::shell_network_setup::external(state));
+    external.then(|| {
+        if state.frontend.external_progress.match_started.is_none() {
+            ExternalMenuWait::Joining
+        } else {
+            ExternalMenuWait::Reporting
+        }
+    })
 }
 
 pub(crate) fn transition_blocks_shell_input(transition: Option<&ShellFrameWave>) -> bool {
@@ -854,9 +872,6 @@ pub(crate) fn current_shell_slide_target(state: &AppState) -> Option<ShellSlideK
     // Keyboard page `0xA3` runs after `0xD5` is destroyed (`0x0055FD06`) and
     // slides like it. The Exit confirmation (state 6) and the quit after it
     // (state 7) run without a family dialog.
-    if state.frontend.network_options.is_some() {
-        return Some(ShellSlideKind::NetworkOptions);
-    }
     if let Some(dialog) = state.frontend.keyboard_dialog.as_ref() {
         return (dialog.parent == crate::ui::shell::keyboard::KeyboardParent::Launcher)
             .then_some(ShellSlideKind::Keyboard)
@@ -866,10 +881,10 @@ pub(crate) fn current_shell_slide_target(state: &AppState) -> Option<ShellSlideK
         return None;
     }
     // Only the native page slides; the assetless fallback does not.
-    if let Some(dialog) = state.frontend.options_dialog.as_ref() {
+    if state.frontend.options_dialog.is_some() {
         return (crate::app::App::native_launcher_options_active(state)
             && crate::ui::shell::slide::is_slide_eligible(ShellSlideKind::Options.dialog_id()))
-        .then_some(ShellSlideKind::options_page(dialog.page()));
+        .then_some(ShellSlideKind::Options);
     }
     let candidate = if state.frontend.shell_route.skirmish() {
         skirmish_slide_target(&state.frontend.skirmish_shell_state)?
@@ -1132,7 +1147,7 @@ pub(crate) fn render_shell_first_paint_slide(
         | ShellSlideKind::WolAddBuddyQuery => {
             crate::app::frontend::wol_welcome_render::render_wol_page(state, encoder, destination)?
         }
-        ShellSlideKind::Options | ShellSlideKind::VeraOptions => {
+        ShellSlideKind::Options => {
             crate::app::App::native_launcher_options_active(state) && {
                 crate::app::frontend::skirmish_shell_render::render_launcher_options(
                     state,
@@ -1160,14 +1175,6 @@ pub(crate) fn render_shell_first_paint_slide(
         }
         ShellSlideKind::NetworkSetup(_) => {
             crate::app::frontend::skirmish_shell_render::render_multiplayer_setup(
-                state,
-                encoder,
-                destination,
-            )?;
-            true
-        }
-        ShellSlideKind::NetworkOptions => {
-            crate::app::frontend::skirmish_shell_render::render_network_options(
                 state,
                 encoder,
                 destination,
@@ -1354,7 +1361,7 @@ mod tests {
     #[test]
     fn the_skirmish_stack_slides_only_the_dialog_that_shows() {
         use crate::ui::skirmish_shell::{
-            ChooseMapModalState, ChooseMapSelection, EjectPrompt, RandomMapSetupModalState,
+            ChooseMapModalState, ChooseMapPrompt, ChooseMapSelection, RandomMapSetupModalState,
             SavedSeedBrowserState, SavedSeedMode, SkirmishShellState,
             compute_choose_map_modal_layout,
         };
@@ -1408,12 +1415,13 @@ mod tests {
         // and OK closes the chooser at once.
         shell.random_map_setup_modal = None;
         let chooser = shell.choose_map_modal.as_mut().unwrap();
-        chooser.eject_prompt = Some(EjectPrompt {
+        chooser.message_box = Some(ChooseMapPrompt {
             selection: ChooseMapSelection {
                 mode_id: 1,
                 record_index: Some(0),
             },
             pressed: None,
+            kind: crate::ui::skirmish_shell::ChooseMapPromptKind::EjectAi,
         });
         assert_eq!(skirmish_slide_target(&shell), None);
         assert_eq!(
@@ -1422,7 +1430,7 @@ mod tests {
         );
         // Cancel shows the chooser again; its first paint slides it in
         // (`0x005E6B47`, `0x005E6B51`).
-        assert!(shell.choose_map_modal.as_mut().unwrap().decline_eject());
+        assert!(shell.choose_map_modal.as_mut().unwrap().close_prompt());
         assert_eq!(
             skirmish_slide_target(&shell),
             Some(ShellSlideKind::ChooseMap)
@@ -1445,6 +1453,7 @@ mod tests {
             ShellExitThen::MovieListBack.dialog(),
             ShellSlideKind::MovieList
         );
+        assert_eq!(ShellExitThen::UpdateCheck.dialog(), ShellSlideKind::Options);
     }
 
     /// Last presented tick of a `0xE2` entry at 800x600 (9 tile rows).
@@ -1496,32 +1505,31 @@ mod tests {
             (3, true, false)
         );
         assert_eq!(top_and_bottom(ShellSlideKind::MovieList), (1, true, false));
-        assert_eq!(top_and_bottom(ShellSlideKind::Skirmish), (2, true, true));
-        // Retail `0xD5` slides Keyboard and Network; VERA's main page adds
-        // Vera Options under them, and VERA's page slides only Back.
+        // Retail `0x102` slides Start Game and Choose Map; VERA's Save Setup
+        // and Load Setup slide under them.
+        assert_eq!(top_and_bottom(ShellSlideKind::Skirmish), (4, true, true));
+        // Retail `0xD5` slides Keyboard and Network; VERA leaves Network out
+        // and slides its six page buttons under Keyboard.
         assert_eq!(
             crate::ui::shell::slide::slide_spec_for(DialogId(0x00D5))
                 .unwrap()
                 .top_buttons,
             2
         );
-        assert_eq!(top_and_bottom(ShellSlideKind::Options), (3, true, false));
-        assert_eq!(
-            top_and_bottom(ShellSlideKind::VeraOptions),
-            (0, true, false)
-        );
+        assert_eq!(top_and_bottom(ShellSlideKind::Options), (7, true, false));
     }
 
     #[test]
     fn modern_wol_slides_only_animate_the_visible_button_faces() {
-        let welcome = ShellSlideKind::WolWelcome
-            .column(9, Some(&crate::ui::wol_shell::WOL_ONLINE_WELCOME_PAGE));
-        assert_eq!((welcome.top_buttons, welcome.bottom_button), (1, true));
         let lobby = crate::ui::wol_lobby::WolLobbyState::new(false, true);
         let column = ShellSlideKind::WolLobby.column(9, Some(lobby.page_spec()));
-        assert_eq!((column.top_buttons, column.bottom_button), (3, true));
+        assert_eq!(
+            (column.top_buttons, column.bottom_button, column.top_panel),
+            (4, true, false)
+        );
         assert_eq!(ShellSlideKind::WolWelcome.column(9, None).top_buttons, 6);
-        assert_eq!(ShellSlideKind::WolLobby.column(9, None).top_buttons, 8);
+        let retail = ShellSlideKind::WolLobby.column(9, None);
+        assert_eq!((retail.top_buttons, retail.top_panel), (8, true));
     }
 
     #[test]

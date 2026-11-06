@@ -22,6 +22,10 @@ pub struct LaserBirth {
     /// Laser+21: the supported Prism main beam's doubled first color.
     pub supported: bool,
     pub color: LaserColor,
+    /// Laser+54, copied by54FE60: the intensity a fading laser starts at.
+    /// Every caller passes 1.0 except the Railgun system's (`0x0062F8A4`),
+    /// which passes 0.5.
+    pub fade_start: NativeF32Bits,
     /// Laser+58, copied by54FE60. Ordinary lasers fade1→0; the delayed
     /// ring caller4A778E/4A785F retains0.5 as its other endpoint.
     pub fade_end: NativeF32Bits,
@@ -123,8 +127,21 @@ pub(crate) fn create<'w>(
     from: Option<ProjectileCoord>,
 ) -> Option<&'w mut LaserBirth> {
     let source = world.substrate.entities.get(source_id)?;
+    #[cfg(feature = "phobos")]
+    let single_color = weapon.phobos_laser_is_single_color;
+    #[cfg(not(feature = "phobos"))]
+    let single_color = false;
     let color = if weapon.is_house_color {
         LaserColor::House(source.owner())
+    } else if single_color {
+        // Phobos `TechnoClass_LaserZap_IsSingleColor` (`0x6FD446`) flips
+        // `IsHouseColor` after the constructor; the special draw keeps the
+        // stored inner colour and drops the outer pair.
+        LaserColor::Explicit {
+            inner: weapon.laser_inner_color,
+            outer: [0; 3],
+            spread: [0; 3],
+        }
     } else {
         LaserColor::Explicit {
             inner: weapon.laser_inner_color,
@@ -170,6 +187,55 @@ pub(crate) fn create<'w>(
     ))
 }
 
+/// Phobos `BulletExt::SimulatedFiringLaser`: the same copied birth from
+/// explicit endpoints and the child's firing House, so a shot whose Techno
+/// already expired still draws. `IsSingleColor`/`LaserThickness` replace the
+/// stock color pair and width; `IsHouseColor` takes the House laser color.
+#[cfg(feature = "phobos")]
+pub(crate) fn create_effect(
+    world: &mut Simulation,
+    house: Option<InternedId>,
+    from: ProjectileCoord,
+    to: ProjectileCoord,
+    weapon: &WeaponType,
+) {
+    let (color, width, supported) = if weapon.is_house_color || weapon.phobos_laser_is_single_color
+    {
+        let color = match (weapon.is_house_color, house) {
+            (true, Some(house)) => LaserColor::House(house),
+            _ => LaserColor::Explicit {
+                inner: weapon.laser_inner_color,
+                outer: [0; 3],
+                spread: [0; 3],
+            },
+        };
+        let width = weapon.phobos_laser_thickness;
+        (color, width, width > 3)
+    } else {
+        (
+            LaserColor::Explicit {
+                inner: weapon.laser_inner_color,
+                outer: weapon.laser_outer_color,
+                spread: weapon.laser_outer_spread,
+            },
+            3,
+            false,
+        )
+    };
+    let birth = construct(
+        &world.session,
+        &mut world.lifecycle_outputs,
+        from,
+        to,
+        0,
+        weapon.laser_duration,
+        color,
+        NativeF32Bits::POSITIVE_ZERO,
+    );
+    birth.width = width;
+    birth.supported = supported;
+}
+
 /// LaserDraw54FE60 initializes every caller's width1/unsupported object;
 /// caller-specific postprocessing mutates that one returned birth.
 pub(crate) fn construct<'a>(
@@ -191,6 +257,7 @@ pub(crate) fn construct<'a>(
         width: 1,
         supported: false,
         color,
+        fade_start: NativeF32Bits::ONE,
         fade_end,
     }));
     let LifecycleOutput::LaserCreated(laser) = birth else {

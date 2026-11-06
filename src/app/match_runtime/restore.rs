@@ -10,7 +10,7 @@ pub(crate) fn commit_prepared_load(
     path: &std::path::Path,
     prepared: crate::app::persistence::PreparedSavedGame,
     from_menu: bool,
-) {
+) -> Result<(), crate::rules::error::RulesError> {
     let wall_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
     crate::app::radar_movie::retire(state, wall_ms);
     crate::app::chrono_screen::retire(state, wall_ms);
@@ -66,9 +66,6 @@ pub(crate) fn commit_prepared_load(
         crate::app::loading::pump::present_game_mode_blank(state);
     }
 
-    // Saved native identity is session.current_house. Never borrow an outgoing
-    // sandbox preference or another match's human display handle.
-    state.match_state.local_owner_override = None;
     // Load_Game 0x0067E4E8 restores GameMode from the save header; VERA's
     // persisted classification rides on the restored ScenarioSession.
     let game_mode = state
@@ -131,7 +128,13 @@ pub(crate) fn commit_prepared_load(
         state,
         map,
         committed.presentation,
-    );
+    )?;
+    state
+        .match_state
+        .match_presentation
+        .voxel_images
+        .borrow_mut()
+        .load_game();
 
     // MouseLoad5BE092 restores incoming Power; SidebarNoInit6A4F89/94
     // rearms only slide. Sample after world adoption so diagnostic time uses
@@ -222,7 +225,11 @@ pub(crate) fn commit_prepared_load(
     crate::app::input::camera::restore_tactical_view(state, committed.details.tactical_view);
 
     // Reset pacing, not saved simulation input delay or elapsed score time.
-    state.platform.frame_pacer.reset_for_immediate_frame();
+    state.platform.frame_pacer.reset_for_new_world();
+    state
+        .match_state
+        .network_quality
+        .reset(state.platform.frame_pacer.total_render_deferrals());
     crate::app::presentation::sidebar_render::refresh_sidebar_projection(state);
     // The incoming chrome owns the footer allowance; refresh its layout
     // before initializing derived geometry, including on a cold/different-side
@@ -241,4 +248,5 @@ pub(crate) fn commit_prepared_load(
     // by the saved targeting/cursor projection.
     super::sim_tick::apply_trigger_effects(state, &pause_effects);
     log::info!("Load: restored simulation from {}", path.display());
+    Ok(())
 }

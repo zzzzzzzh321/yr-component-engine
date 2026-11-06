@@ -6,7 +6,7 @@ use super::*;
 fn native_discharge_art_reader_matches_original_signed_independent_keys() {
     // Original InfantryType ART reads 5246BE..52473A call ReadInt5276D0
     // independently over E40/E44/E48/E4C. Replay every cached-input row
-    // through the production read owner, then fresh file/registry inputs.
+    // through the production read owner, then fresh physical file inputs.
     let corpus: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
         "tools/spatial_oracle/infantry_discharge_rules.json",
     ))
@@ -48,14 +48,10 @@ fn native_discharge_art_reader_matches_original_signed_independent_keys() {
                 text.push_str(&format!("{key}={raw}\n"));
             }
         }
-        let registry = ArtRegistry::from_ini(&IniFile::from_str(&text));
-        let entry = registry.get(section).unwrap();
-        let actual = [
-            entry.fire_up,
-            entry.fire_prone,
-            entry.secondary_fire,
-            entry.secondary_prone,
-        ];
+        let ini = IniFile::from_str(&text);
+        // A fresh type starts from constructor5236D7..5236F9's four zeros.
+        let mut actual = [0; 4];
+        read_infantry_discharge_frames(ini.section(section).unwrap(), &mut actual);
         let expected: [i32; 4] = serde_json::from_value(row["after"].clone()).unwrap();
         assert_eq!(actual, expected, "original row {}", row["case"]);
         compared += 1;
@@ -183,6 +179,16 @@ fn test_object_shp_candidates_dedupe_when_substitution_matches_original() {
         candidates,
         vec!["GAPOWR.SHP", "GAPOWR.SNO", "GGPOWR.SHP", "GGPOWR.SNO",]
     );
+}
+
+/// `0x00460285..0x00460382` reads every MuzzleFlash index; a missing one is
+/// (0, 0) and does not end the list.
+#[test]
+fn muzzle_flash_reads_past_a_missing_index() {
+    let ini = IniFile::from_str("[GAOBS]\nMuzzleFlash0=1,2\nMuzzleFlash2=5,6\n");
+    let reg = ArtRegistry::from_ini(&ini);
+    let ports = &reg.get("GAOBS").unwrap().muzzle_flash_positions;
+    assert_eq!(ports[..3], [(1, 2), (0, 0), (5, 6)]);
 }
 
 #[test]
@@ -793,9 +799,9 @@ fn gsi_04_05_hidden_object_id_gate_is_distinct_from_image_metadata() {
 }
 
 #[test]
-fn parse_partial_offsets_collects_what_exists() {
-    // art has only DockingOffset0 and DockingOffset2 (gap at 1).
-    // Parser collects what's present. The art→rules merge handles sizing to NumberOfDocks.
+fn parse_partial_offsets_keeps_each_pad_at_its_index() {
+    // art has only DockingOffset0 and DockingOffset2 (gap at 1). Native reads
+    // each slot by index (0x004649AF..0x00464A41); slot 1 keeps its zero.
     let ini: IniFile = IniFile::from_str(
         "[ODD]\n\
          DockingOffset0=64,0,0\n\
@@ -803,9 +809,10 @@ fn parse_partial_offsets_collects_what_exists() {
     );
     let reg: ArtRegistry = ArtRegistry::from_ini(&ini);
     let entry: &ArtEntry = reg.get("ODD").expect("ODD entry");
-    assert_eq!(entry.pads.len(), 2, "filter_map skips missing index 1");
+    assert_eq!(entry.pads.len(), 3);
     assert_eq!(entry.pads[0].lepton_offset, (64, 0, 0));
-    assert_eq!(entry.pads[1].lepton_offset, (192, 0, 0));
+    assert_eq!(entry.pads[1].lepton_offset, (0, 0, 0));
+    assert_eq!(entry.pads[2].lepton_offset, (192, 0, 0));
 }
 
 #[test]
@@ -1002,6 +1009,7 @@ fn scenario_anim_theater_replaces_only_the_shape_and_retries_the_stored_id() {
                 skip_root_color_add_and_mode: false,
             },
             &Default::default(),
+            &crate::rules::sound_ini::SoundRegistry::default(),
         )
         .unwrap();
     let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
@@ -1315,19 +1323,35 @@ fn use_buffer_reads_the_type_id_section() {
     assert!(!reg.use_buffer("MISSING"));
 }
 
+/// Retail `UseBuffer=` marks the four helicopters; `DisableVoxelCache=` and
+/// `DisableShadowCache=` the Night Hawk, the paradrop plane and the spy plane.
 #[test]
 fn retail_use_buffer_types_are_the_four_helicopters() {
     let Some((_, art_ini)) = crate::rules::retail_ini_fixture::retail_rules_and_art() else {
         return;
     };
     let reg = ArtRegistry::from_ini(&art_ini);
-    let mut flagged: Vec<&str> = art_ini
-        .section_names()
-        .into_iter()
-        .filter(|name| reg.use_buffer(name))
-        .collect();
-    flagged.sort_unstable();
-    assert_eq!(flagged, ["HIND", "SCHD", "SCHP", "SHAD"]);
+    let flagged = |flag: fn(&ArtRegistry, &str) -> bool| {
+        let mut names: Vec<&str> = art_ini
+            .section_names()
+            .into_iter()
+            .filter(|name| flag(&reg, name))
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    assert_eq!(
+        flagged(ArtRegistry::use_buffer),
+        ["HIND", "SCHD", "SCHP", "SHAD"]
+    );
+    assert_eq!(
+        flagged(ArtRegistry::disable_voxel_cache),
+        ["PDPLANE", "SHAD", "SPYP"]
+    );
+    assert_eq!(
+        flagged(ArtRegistry::disable_shadow_cache),
+        ["PDPLANE", "SHAD", "SPYP"]
+    );
 }
 
 /// ReadINI reads `CanBeHidden=` from the type ID's ART section with ReadBool

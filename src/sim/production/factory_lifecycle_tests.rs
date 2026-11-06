@@ -1795,11 +1795,11 @@ fn prerequisite_loss_events_preserve_player_copies_cleanup_and_snapshot_replay()
     assert_eq!(restored.state_hash(), sim.state_hash(), "saved loss state");
 
     let header = ReplayHeader {
-        version: 1,
+        version: crate::sim::replay::REPLAY_VERSION,
         tick_hz: 15,
         seed: sim.session.seed(),
         pixel_conversion_bounds: sim.session.pixel_conversion_bounds(),
-        map_name: "factory-loss".into(),
+        map_name: sim.session.map_name().to_owned(),
         rules_hash: rules.simulation_config_hash(),
     };
     let mut resources = SimResources::empty();
@@ -2737,6 +2737,77 @@ fn building_queue_switch_keeps_a_suspended_held_building() {
     assert_eq!(sim.interner.resolve(factory.queue[0].type_id), "YAREFN");
 }
 
+/// The same cancel through the production entry: Phobos'
+/// `HouseClass_AbandonProduction_RewriteForBuilding @ 0x004FAAD8` makes one
+/// right-click on a queued structure remove that queued copy, so the building
+/// under construction stays and nothing refunds (a queued copy is unpaid until
+/// it starts). Without the rewrite this call abandons the held product instead.
+#[cfg(feature = "phobos")]
+#[test]
+fn cancel_one_queued_structure_keeps_the_building_under_construction() {
+    use crate::sim::production::ProductionCancellation;
+    use crate::sim::world::FrameEffects;
+
+    let (mut sim, rules, owner) = world_with_building_queue(0xb001_0003);
+    assert!(enqueue_by_type(
+        &mut sim,
+        &rules,
+        "Americans",
+        "GAPOWR",
+        FrameEffects::default(),
+        false,
+    ));
+    let held = held_id(&sim, owner, ProductionCategory::Building);
+    assert!(enqueue_by_type(
+        &mut sim,
+        &rules,
+        "Americans",
+        "GAPOWR",
+        FrameEffects::default(),
+        false,
+    ));
+    let credits = sim.houses[&owner].economy().credits();
+    assert_eq!(
+        sim.production
+            .factories()
+            .view(owner, ProductionCategory::Building)
+            .unwrap()
+            .queue
+            .len(),
+        1,
+        "the second GAPOWR waits in the queue"
+    );
+
+    assert!(cancel_production_for_owner(
+        &mut sim,
+        &rules,
+        "Americans",
+        ProductionCancellation::Type {
+            type_id: "GAPOWR",
+            naval: false,
+        },
+        false,
+        FrameEffects::default(),
+    ));
+
+    let factory = sim
+        .production
+        .factories()
+        .view(owner, ProductionCategory::Building)
+        .unwrap();
+    assert!(factory.queue.is_empty(), "the queued copy is gone");
+    assert_eq!(
+        held_id(&sim, owner, ProductionCategory::Building),
+        held,
+        "the building under construction is retained"
+    );
+    assert_eq!(
+        sim.houses[&owner].economy().credits(),
+        credits,
+        "an unpaid queued copy refunds nothing"
+    );
+}
+
 /// Begin_Production drops a building's PRODUCE while the building factory
 /// runs (`0x004FA520..0x004FA550`: rate set, +0x70 clear, RTTI
 /// BuildingType), ahead of its same-type branch and without a scold: a second
@@ -3639,15 +3710,25 @@ fn secret_lab_fallback_capture_paid_queue_snapshot_and_loss_share_the_existing_o
     // Native Begin_Production takes already-admitted events and checks the
     // build limit, so the pre-capture gate belongs to the sidebar/Select owner.
     assert!(
-        !super::production_tech::build_option_for_owner(&sim, &rules, "Americans", "E1")
-            .unwrap()
-            .enabled
+        !super::production_tech::build_option_for_owner(
+            &sim,
+            &rules,
+            sim.interner.get("Americans"),
+            "E1"
+        )
+        .unwrap()
+        .enabled
     );
     sim.change_owner_with_rules(lab, owner, &rules, None, FrameEffects::default());
     assert!(
-        super::production_tech::build_option_for_owner(&sim, &rules, "Americans", "E1")
-            .unwrap()
-            .enabled
+        super::production_tech::build_option_for_owner(
+            &sim,
+            &rules,
+            sim.interner.get("Americans"),
+            "E1"
+        )
+        .unwrap()
+        .enabled
     );
     assert_eq!(sim.houses[&owner].base_projection().secret_labs(), [lab]);
     assert!(
@@ -3711,9 +3792,14 @@ fn secret_lab_fallback_capture_paid_queue_snapshot_and_loss_share_the_existing_o
         product
     );
     assert!(
-        super::production_tech::build_option_for_owner(&restored, &rules, "Americans", "E1")
-            .unwrap()
-            .enabled
+        super::production_tech::build_option_for_owner(
+            &restored,
+            &rules,
+            restored.interner.get("Americans"),
+            "E1"
+        )
+        .unwrap()
+        .enabled
     );
     let credits = restored.houses[&owner].economy().credits();
     let spent = restored.houses[&owner].economy().spent_credits();
@@ -3738,9 +3824,14 @@ fn secret_lab_fallback_capture_paid_queue_snapshot_and_loss_share_the_existing_o
         Some(fallback)
     );
     assert!(
-        !super::production_tech::build_option_for_owner(&restored, &rules, "Americans", "E1")
-            .unwrap()
-            .enabled
+        !super::production_tech::build_option_for_owner(
+            &restored,
+            &rules,
+            restored.interner.get("Americans"),
+            "E1"
+        )
+        .unwrap()
+        .enabled
     );
     // The loss recheck reaches ordinary strip cancellation. Both duplicate
     // requests are removed and the held identity is destroyed, not delivered.

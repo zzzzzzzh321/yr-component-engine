@@ -7,17 +7,18 @@
 //! It answers the visit's and the WOL setup's requests once no shell
 //! transition runs: like a real service, a reply arrives after the page that
 //! asked has slid out. Any login is accepted. The lobbies, games and users
-//! are fixed stand-ins; Boris's game is a tournament room, Vladimir's has
-//! other rules (its exInfo hash differs from the user's), and the user is
-//! in a stand-in squad, so clan games can be created. Two of the users say
-//! one line each when a chat lobby is joined, and a locate finds them. A
-//! created game is joined by one stand-in guest, in no squad, who picks,
-//! has the map and accepts; the joined game's host answers the guest's
-//! first choices with its options. A start with that guest gets OnGameStart
-//! and the connection verify, then the scenario negotiation fails
-//! ("Scenarios don't match"): nobody can play a match here. The buddy list
-//! starts with four stand-ins whose locates answer a chat lobby, a game,
-//! offline and find-disabled; Add and Remove change it for the process.
+//! are fixed stand-ins; Boris's game is a tournament room, Vladimir's a
+//! co-op room with other rules (its exInfo hash differs from the user's),
+//! and the user is in a stand-in squad, so clan games can be created. Two
+//! of the users say one line each when a chat lobby is joined, and a
+//! locate finds them. A created game is joined by one stand-in guest, in no
+//! squad, who picks, has the map and accepts; the joined game's host
+//! answers the guest's first choices with its options. A start with that
+//! guest gets OnGameStart and the connection verify, then the scenario
+//! negotiation fails ("Scenarios don't match"): nobody can play a match
+//! here. The buddy list starts with four stand-ins whose locates answer a
+//! chat lobby, a game, offline and find-disabled; Add and Remove change it
+//! for the process.
 //! Quick Match finds a `Lob_40_0` lobby whose stand-in matchbot answers a
 //! request with `Working`, the pool size and a `Start` that makes the user
 //! the host and Natasha the opponent; she joins the created game, accepts,
@@ -201,7 +202,7 @@ fn guest_answer(state: &mut AppState, request: &NetworkSetupRequest) {
                 }
             }
         }
-        (WolTestGuest::Joined, NetworkSetupRequest::Kick { name }) if name == GUEST => {
+        (WolTestGuest::Joined, NetworkSetupRequest::Kick { name, .. }) if name == GUEST => {
             state.frontend.wol_test_guest = WolTestGuest::Kicked;
             let Some(channel) = super::lobby::current_channel(state) else {
                 return;
@@ -363,6 +364,7 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
             store_credential(&mut state.frontend.wol_test_credentials, nickname, password);
             return;
         }
+        WolServiceRequest::ForgetSignIn => return,
         WolServiceRequest::ForgetCredential { slot } => {
             state
                 .frontend
@@ -374,9 +376,10 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
             service_event(state, WolServiceEvent::NetStatus(SERVER_STATUS_READY));
             WolServiceEvent::ServerList(Ok(servers()))
         }
-        WolServiceRequest::Connect { .. } => {
-            WolServiceEvent::Login(Ok(WolLoginAccepted { motd: MOTD.into() }))
-        }
+        // VERA's own message of the day, then this service's.
+        WolServiceRequest::Connect { .. } => WolServiceEvent::Login(Ok(WolLoginAccepted {
+            motd: format!("{}\n{MOTD}", super::service::vera_motd(state)),
+        })),
         WolServiceRequest::ListChannels { kind, .. } => WolServiceEvent::Channels {
             kind,
             channels: if kind == GAME_CHANNEL {
@@ -525,6 +528,8 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         }
         // Every WOL:Locale00..37 the retail CSF holds.
         WolServiceRequest::LocaleCount => WolServiceEvent::LocaleCount(38),
+        // VERA online's account requests: the stand-in lobby accepts each.
+        WolServiceRequest::Account(_) => WolServiceEvent::Account(Ok(())),
         // Nothing to cancel or deliver: nobody is online.
         WolServiceRequest::SetLocale(_)
         | WolServiceRequest::LeaveChannel
@@ -552,6 +557,7 @@ fn lobby_greeting(state: &mut AppState) {
         action: false,
         ansi: false,
         options: None,
+        sent_at: None,
     };
     for event in [
         WolServiceEvent::Ladder(vec![tanya_ladder()]),
@@ -597,7 +603,7 @@ fn ladder_record(name: &str) -> Option<WolLadderRecord> {
     }
 }
 
-/// The high scores: Tanya's 1520 points (a three-star general's badge) at
+/// The high scores: Tanya's 1520 points (a five-star general's badge) at
 /// rank 7; Boris's 90 points (lieutenant) at rank 123 with every co-op
 /// campaign finished.
 fn high_score(name: &str) -> Option<WolHighScoreRecord> {
@@ -751,6 +757,7 @@ fn match_requested(state: &mut AppState) {
         action: false,
         ansi: true,
         options,
+        sent_at: None,
     };
     let players = format!("{local},0,0,0,0,0,0,0,{GUEST},1,0,0,0,0,0,0");
     for event in [
@@ -763,85 +770,33 @@ fn match_requested(state: &mut AppState) {
 }
 
 /// The options a stand-in matchbot's `Start` carries for `host` and
-/// `guest`, as the host receives them (`local_player_index` 0).
+/// `guest`, as the host receives them (`local_player_index` 0): its fixed
+/// picks through the Quick Match owner's builder.
 pub(crate) fn matchbot_options(
     state: &AppState,
     host: &str,
     guest: &str,
 ) -> anyhow::Result<crate::app::shell_network_setup::HostOptions> {
-    use crate::skirmish_launch::{
-        LaunchCountry, LaunchStartPosition, LaunchTeam, SkirmishHumanSlot, SkirmishLocalSlot,
-    };
-    let quick_coop = super::quick_match::quick_coop(state);
-    let mode = if quick_coop {
-        state
-            .frontend
-            .skirmish_modes
-            .iter()
-            .find(|mode| mode.class == crate::skirmish_modes::MpModeClass::Cooperative)
+    use super::quick_match::{MatchMap, MatchPlayer, MatchStart};
+    // In Quick Co-op the host's +0x20 replaces the map with the first
+    // Allied one, whose stage admits only Americans (index 0); a peer
+    // country outside it turns Random, which the shell never resolves.
+    let ((host_country, guest_country), map) = if super::quick_match::quick_coop(state) {
+        ((0, 0), MatchMap::Named(QUICK_COOP_MAP))
     } else {
-        state.frontend.skirmish_modes.first()
-    }
-    .ok_or_else(|| anyhow::anyhow!("no mode"))?;
-    let file = state
-        .frontend
-        .scenario_catalog
-        .records()
-        .iter()
-        .find(|record| {
-            if quick_coop {
-                record.file_name.eq_ignore_ascii_case(QUICK_COOP_MAP)
-            } else {
-                crate::map::skirmish_scenarios::record_matches_mode(record, mode)
-                    && record.player_capacity >= 2
-            }
-        })
-        .map(|record| record.file_name.clone())
-        .ok_or_else(|| anyhow::anyhow!("no map for the matchbot"))?;
-    let human = |row: u8, name: &str, country: u32, color_index| SkirmishHumanSlot {
-        raw_slot_index: Some(row),
+        ((5, 4), MatchMap::First)
+    };
+    let player = |name: &str, country, color| MatchPlayer {
         name: name.into(),
-        slot: SkirmishLocalSlot {
-            country: LaunchCountry::from_country_index(country),
-            country_random: false,
-            color_index,
-            color_random: false,
-            start_position: LaunchStartPosition::Auto,
-            team: LaunchTeam::None,
-        },
-        role: Default::default(),
+        country,
+        color,
     };
-    let mut launch = crate::skirmish_launch::SkirmishLaunchSession {
-        mode: crate::skirmish_launch::SkirmishLaunchMode::from_game_mode(mode),
-        selected_map_file: Some(file.clone()),
-        // In Quick Co-op the host's +0x20 replaces the map with the first
-        // Allied one, whose stage admits only Americans (index 0); a peer
-        // country outside it turns Random, which the shell never resolves.
-        humans: if quick_coop {
-            vec![human(0, host, 0, 1), human(1, guest, 0, 3)]
-        } else {
-            vec![human(0, host, 5, 1), human(1, guest, 4, 3)]
-        },
-        local_player_index: 0,
-        opponents: Vec::new(),
-        ai_player_count: 0,
-        pre_fill_house_roster: crate::skirmish_launch::PreFillHouseRoster::from_compact_skirmish(0),
-        options: state
-            .frontend
-            .skirmish_shell_state
-            .launch_options_base
-            .clone(),
+    let pairing = MatchStart {
+        seed: HOST_SEED,
+        host: player(host, host_country, 1),
+        guest: player(guest, guest_country, 3),
     };
-    launch.rebuild_house_roster();
-    Ok(crate::app::shell_network_setup::HostOptions {
-        launch,
-        map_metadata: crate::app::shell_network_setup::local_map_metadata(state, &file)?,
-        vacancies: [crate::app::match_runtime::session::NetworkVacancy::Open;
-            crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
-        observer_row: None,
-        cooperative_difficulty: 0,
-        seed: Some(HOST_SEED),
-    })
+    super::quick_match::host_options(state, &pairing, map)
 }
 
 fn lobby_members() -> Vec<WolMember> {
@@ -858,7 +813,7 @@ fn stand_in_hash(state: &AppState) -> i32 {
     super::lobby::local_ini_hash(state).unwrap_or(0)
 }
 
-/// The first scenario record, which Tanya's and Vladimir's games name.
+/// The first scenario record, which Tanya's game names.
 fn stand_in_map(state: &AppState) -> String {
     state
         .frontend
@@ -871,8 +826,9 @@ fn stand_in_map(state: &AppState) -> String {
 
 /// Open games of other stand-in hosts, one that is full and one whose
 /// rules differ (`hash + 1`). Each keeps an observer slot, which the shown
-/// capacity leaves out. Their scenarios name `map`, the random map and a
-/// name the 40-byte exInfo cuts.
+/// capacity leaves out. Their scenarios name `map`, the random map, a
+/// name the 40-byte exInfo cuts and Quick Co-op's campaign map, so the
+/// modern list tags the room with other rules as a co-op room.
 fn games(hash: i32, map: &str) -> Vec<WolChannel> {
     let game = |host: &str, users, max_users, ping, hash: i32, scenario: &str| WolChannel {
         kind: GAME_CHANNEL,
@@ -905,7 +861,8 @@ fn games(hash: i32, map: &str) -> Vec<WolChannel> {
             hash,
             "Transylvania_but_much_longer_still.yro",
         ),
-        game("Vladimir", 2, 7, 90, hash.wrapping_add(1), map),
+        // A co-op room with one of its two seats taken.
+        game("Vladimir", 1, 3, 90, hash.wrapping_add(1), QUICK_COOP_MAP),
     ]
 }
 
@@ -962,6 +919,7 @@ mod tests {
             quick_match: false,
             clan_id: 0,
             local_hash: Some(7),
+            vera_rooms: false,
         };
         let games = games(7, "Transylv.yro");
         assert_eq!(admit(&games[0], false, context), Ok(()));

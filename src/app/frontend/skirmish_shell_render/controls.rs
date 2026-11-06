@@ -20,8 +20,8 @@ use crate::ui::skirmish_shell::{
     combo_dropdown_needs_scrollbar, combo_dropdown_rect, combo_dropdown_row_rect,
     combo_dropdown_scroll_thumb_rect, combo_dropdown_scrollbar_rect,
     combo_dropdown_visible_row_count, combo_enabled, combo_face_rect, combo_items,
-    combo_swatch_rect, player_name_edit_text_rect, player_row_visible, selected_combo_item_index,
-    trackbar_visual_value,
+    combo_swatch_rect, opponent_scroll_geometry, player_name_edit_text_rect, player_row_visible,
+    selected_combo_item_index, trackbar_visual_value,
 };
 
 use super::chrome::{
@@ -75,37 +75,49 @@ pub(super) fn frame_segments(
     out
 }
 
-/// Original61E700's group window split: the frame starts half the drawn
-/// font cell below the window top, and the caption sits 10px in on that top
-/// line, one authored cell tall. Returns (frame, caption) for
-/// [`push_group_or_plain_frame`] and the caption text.
+/// Original61E700's group window split: the frame starts half a font cell
+/// below the window top, and the caption sits 10px in, one cell tall.
+/// Derive both rectangles in authored pixels before mapping them to the window,
+/// so the caption's clip and the frame grow together. `cell_height` is unscaled.
 pub(super) fn group_box_geometry(
     group: RectPx,
-    drawn_cell_height: i32,
     cell_height: i32,
+    scale: ShellScale,
 ) -> (RectPx, RectPx) {
-    let top = drawn_cell_height / 2;
+    let top = cell_height / 2;
     (
-        RectPx::new(group.x, group.y + top, group.w, group.h - top),
-        RectPx::new(group.x + 10, group.y, group.w - 10, cell_height),
+        scale.derive_rect(group, |group| {
+            RectPx::new(group.x, group.y + top, group.w, group.h - top)
+        }),
+        scale.derive_rect(group, |group| {
+            RectPx::new(group.x + 10, group.y, group.w - 10, cell_height)
+        }),
     )
 }
 
+/// Paint the shared61E700/6208F0 bevel from a window-space frame. Caption
+/// width is in authored pixels; map each ring and its gap to the window once.
 pub(super) fn push_group_or_plain_frame(
     out: &mut Vec<SpriteInstance>,
-    atlas: &SkirmishShellChromeAtlas,
+    white_pixel: Option<SkirmishShellChromeEntry>,
     rect: RectPx,
     caption_width: Option<i32>,
     outer_light: bool,
+    scale: ShellScale,
 ) {
+    let rect = if scale.is_retail() {
+        rect
+    } else {
+        scale.base_rect(rect)
+    };
     for (index, (rect, rgb)) in frame_segments(rect, caption_width, outer_light)
         .into_iter()
         .enumerate()
     {
-        push_solid_rect(
+        push_solid_rect_px(
             out,
-            atlas,
-            rect,
+            white_pixel,
+            scale.scale_rect(rect),
             rgb.map(|c| f32::from(c) / 255.0),
             SHELL_CONTROL_DEPTH - index as f32 * 0.0000001,
         );
@@ -542,10 +554,12 @@ pub(super) enum ControlPaint {
     /// A trackbar window with its thumb's window-relative left edge
     /// ([`crate::ui::shell::trackbar::thumb_left`]). `plaque` is off where
     /// the owner sends `0x4AC` with 0 (Options Detail/Difficulty/Scroll, BBB).
+    /// `disabled` is the window's `WS_DISABLED` style (`0x0061E0B0`).
     Trackbar {
         rect: RectPx,
         thumb_left: i32,
         plaque: bool,
+        disabled: bool,
     },
     Combo {
         rect: RectPx,
@@ -589,6 +603,7 @@ pub(super) fn paint_control(
             rect,
             thumb_left,
             plaque,
+            disabled,
         } => {
             // The paint blits the plaque and the thumb, then draws two
             // adjacent border-2 frames; the frame entry includes their
@@ -611,6 +626,12 @@ pub(super) fn paint_control(
                     scale.factor(),
                     SHELL_CONTROL_DEPTH - 0.00002,
                 );
+                // A disabled window darkens the thumb rect with the overlay
+                // alpha (`0x0061E0B0..0x0061E0D4`). RESIDUAL: native also
+                // darkens the backdrop under TRAKGRIP's transparent texels.
+                if disabled && let Some(sprite) = out.last_mut() {
+                    sprite.tint = [DISABLED_OVERLAY_KEEP; 3];
+                }
             }
             let base = scale.base_rect(rect);
             if let Some(frame) = chrome.trackbar_frame(plaque, base.w, base.h) {
@@ -777,6 +798,7 @@ pub(super) fn push_trackbar_instances(
                 rect,
                 thumb_left,
                 plaque: true,
+                disabled: false,
             },
             layout.scale,
         );
@@ -855,11 +877,7 @@ pub(super) fn push_combo_instances(
         layout.scale,
     );
 
-    for (idx, opponent) in shell.opponents.iter().enumerate() {
-        if idx >= layout.rows.ai_type_combos.len() {
-            break;
-        }
-        let row = idx + 1;
+    for (slot, row, opponent) in shell.paged_opponents() {
         if !player_row_visible(shell, maps, row) {
             continue;
         }
@@ -867,9 +885,9 @@ pub(super) fn push_combo_instances(
             out,
             &chrome,
             ControlPaint::Combo {
-                rect: layout.rows.ai_type_combos[idx],
+                rect: layout.rows.ai_type_combos[slot - 1],
                 swatch: None,
-                open: open == Some(SkirmishComboId::AiType(idx)),
+                open: open == Some(SkirmishComboId::AiType(row - 1)),
                 disabled: false,
             },
             layout.scale,
@@ -879,7 +897,7 @@ pub(super) fn push_combo_instances(
             out,
             &chrome,
             ControlPaint::Combo {
-                rect: layout.rows.side_combos[row],
+                rect: layout.rows.side_combos[slot],
                 swatch: None,
                 open: open == Some(SkirmishComboId::Side(row)),
                 disabled: sibling_disabled,
@@ -890,7 +908,7 @@ pub(super) fn push_combo_instances(
             out,
             &chrome,
             ControlPaint::Combo {
-                rect: layout.color_combos[row],
+                rect: layout.color_combos[slot],
                 swatch: swatch_for(
                     (!sibling_disabled && opponent.color_claimed).then_some(opponent.color_index),
                 ),
@@ -903,7 +921,7 @@ pub(super) fn push_combo_instances(
             out,
             &chrome,
             ControlPaint::Combo {
-                rect: layout.rows.start_combos[row],
+                rect: layout.rows.start_combos[slot],
                 swatch: None,
                 open: open == Some(SkirmishComboId::Start(row)),
                 disabled: sibling_disabled,
@@ -914,7 +932,7 @@ pub(super) fn push_combo_instances(
             out,
             &chrome,
             ControlPaint::Combo {
-                rect: layout.rows.team_combos[row],
+                rect: layout.rows.team_combos[slot],
                 swatch: None,
                 open: open == Some(SkirmishComboId::Team(row)),
                 // Team is the one sibling whose enable state is row-active AND
@@ -922,6 +940,29 @@ pub(super) fn push_combo_instances(
                 // `sibling_disabled`.
                 disabled: !combo_enabled(shell, maps, SkirmishComboId::Team(row)),
             },
+            layout.scale,
+        );
+    }
+}
+
+/// VERA's scrollbar beside the computer rows of a map with more than eight
+/// starts: the shared list's frame and scrollbar.
+pub(super) fn push_opponent_scrollbar_instances(
+    out: &mut Vec<SpriteInstance>,
+    atlas: &SkirmishShellChromeAtlas,
+    layout: &SkirmishShellLayout,
+    shell: &SkirmishShellState,
+    maps: &[MapMenuEntry],
+) {
+    if let Some(geometry) = opponent_scroll_geometry(layout, shell, maps) {
+        super::list::paint_list(
+            out,
+            atlas,
+            geometry,
+            shell.first_opponent,
+            None,
+            shell.opponent_scroll.pressed_part(),
+            false,
             layout.scale,
         );
     }
@@ -1049,7 +1090,8 @@ mod tests {
                 shell.refresh_country_catalog(&rules);
                 let maps = [];
                 let selected = selected_combo_item(&shell, id);
-                let arrow = combo_arrow_hit_rect(combo_rect(&layout, id).unwrap(), layout.scale);
+                let arrow =
+                    combo_arrow_hit_rect(combo_rect(&layout, &shell, id).unwrap(), layout.scale);
                 handle_option_mouse_down(&mut shell, &layout, &maps, arrow.x, arrow.y);
                 assert_eq!(shell.open_combo_dropdown.unwrap().id, id);
                 let content = combo_dropdown_content_rect(&shell, &layout, &maps, id).unwrap();
@@ -1203,6 +1245,7 @@ mod tests {
                     rect,
                     thumb_left,
                     plaque: true,
+                    disabled: false,
                 },
                 ShellScale::RETAIL,
             );
@@ -1237,6 +1280,7 @@ mod tests {
                 rect: RectPx::new(236, 98, 263, 21),
                 thumb_left: 1,
                 plaque: false,
+                disabled: false,
             },
             ShellScale::RETAIL,
         );
@@ -1252,10 +1296,38 @@ mod tests {
                 rect,
                 thumb_left: 1,
                 plaque: true,
+                disabled: false,
             },
             ShellScale::RETAIL,
         );
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn a_disabled_trackbar_darkens_only_its_thumb() {
+        let chrome = ControlChrome {
+            trackbar_plaque_mid_trofm: Some(entry(0.1, 114.0, 24.0)),
+            trackbar_thumb_trakgrip: Some(entry(0.4, 12.0, 22.0)),
+            ..Default::default()
+        };
+        let paint = |disabled| {
+            let mut out = Vec::new();
+            paint_control(
+                &mut out,
+                &chrome,
+                ControlPaint::Trackbar {
+                    rect: RectPx::new(404, 314, 129, 22),
+                    thumb_left: 34,
+                    plaque: true,
+                    disabled,
+                },
+                ShellScale::RETAIL,
+            );
+            out.iter().map(|sprite| sprite.tint).collect::<Vec<_>>()
+        };
+        assert_eq!(paint(false), [[1.0; 3]; 2]);
+        // 0x60 overlay: (255 - 0x60) / 256 of each channel.
+        assert_eq!(paint(true), [[1.0; 3], [159.0 / 256.0; 3]]);
     }
 
     #[test]
@@ -1277,6 +1349,7 @@ mod tests {
                     rect: RectPx::new(236, 98, width, height),
                     thumb_left: 1,
                     plaque: reserve > 0,
+                    disabled: false,
                 },
                 ShellScale::RETAIL,
             );
@@ -1303,27 +1376,46 @@ mod tests {
                 (true, skirmish.unit_count),
                 (true, players),
             ];
-            windows.extend(
-                LauncherOptionsLayout::new(
-                    width as i32,
-                    height as i32,
-                    crate::ui::main_menu_dialogs::options::OptionsPage::Main,
-                )
-                .trackbars
-                .into_iter()
-                .map(|(id, rect)| (id.plaque_reserve() > 0, rect)),
-            );
+            // 640x480 fits Options to the window, so its rects map back first.
+            for category in crate::ui::main_menu_dialogs::options::Category::ALL {
+                let layout = LauncherOptionsLayout::new(width as i32, height as i32, category);
+                windows.extend(
+                    layout
+                        .trackbars
+                        .iter()
+                        .map(|&(id, rect)| (id.plaque_reserve() > 0, layout.scale.base_rect(rect))),
+                );
+            }
             windows.extend(
                 crate::ui::shell::sound::ShellSoundLayout::new(width as i32, height as i32)
                     .sliders
                     .map(|rect| (true, rect)),
             );
+            // The online pause menu's Internet Game Controls.
+            let shell =
+                crate::ui::shell::in_game_shell::allied_fixture_layout(width as i32, height as i32);
+            let internet = crate::ui::shell::pause_menu::pause_menu_layout(
+                width as i32,
+                height as i32,
+                shell,
+                [125, 25],
+                crate::ui::shell::pause_menu::PauseMenuTemplate::Internet,
+            )
+            .internet
+            .expect("FF has its sliders");
+            windows.extend(internet.sliders.map(|rect| (true, rect)));
             use crate::ui::multiplayer_setup::{
                 DIFFICULTY, MultiplayerSetupLayout, SetupDialog, SetupFlavor,
             };
             for dialog in [SetupFlavor::Lan, SetupFlavor::Wol]
                 .into_iter()
-                .flat_map(|flavor| [false, true].map(|host| SetupDialog { host, flavor }))
+                .flat_map(|flavor| {
+                    [false, true].map(|host| SetupDialog {
+                        host,
+                        flavor,
+                        modern: false,
+                    })
+                })
             {
                 let layout =
                     MultiplayerSetupLayout::new(dialog, width as i32, height as i32, false);
@@ -1361,7 +1453,13 @@ mod tests {
         use crate::ui::multiplayer_setup::{SetupDialog, SetupFlavor};
         for dialog in [SetupFlavor::Lan, SetupFlavor::Wol]
             .into_iter()
-            .flat_map(|flavor| [false, true].map(|host| SetupDialog { host, flavor }))
+            .flat_map(|flavor| {
+                [false, true].map(|host| SetupDialog {
+                    host,
+                    flavor,
+                    modern: false,
+                })
+            })
         {
             for (width, height, responsive) in [
                 (640, 480, false),
@@ -1797,11 +1895,15 @@ mod tests {
     }
 }
 
+/// A disabled owner-draw control's `AlphaBlendRect` colour 0 at the overlay
+/// alpha `[0xAC4898]` = 0x60 (`0x0060FAB9`) keeps `(255 - 0x60) / 256` of each
+/// channel. As a tint it skips the RGB565 truncation (at most one unit per
+/// channel).
+const DISABLED_OVERLAY_KEEP: f32 = (255 - 0x60) as f32 / 256.0;
+
 /// Owner-draw checkbox 0x006163A0's WM_PAINT: the face PCX for its check
 /// and dual-state flags at the control's origin, then for a disabled window
-/// `AlphaBlendRect` colour 0 at the overlay alpha 0x60 (`0x0060FAB9`), which
-/// keeps `(255 - 0x60) / 256` of each channel. The tint applies that factor
-/// to the face without the RGB565 truncation (at most one unit per channel).
+/// the overlay ([`DISABLED_OVERLAY_KEEP`]).
 fn paint_checkbox_face(
     out: &mut Vec<SpriteInstance>,
     chrome: &ControlChrome,
@@ -1822,8 +1924,13 @@ fn paint_checkbox_face(
     };
     let icon = checkbox_icon_rect(rect, scale);
     if disabled {
-        const DISABLED_KEEP: f32 = (255 - 0x60) as f32 / 256.0;
-        push_tinted_entry(out, entry, icon, [DISABLED_KEEP; 3], SHELL_CONTROL_DEPTH);
+        push_tinted_entry(
+            out,
+            entry,
+            icon,
+            [DISABLED_OVERLAY_KEEP; 3],
+            SHELL_CONTROL_DEPTH,
+        );
     } else {
         push_entry(out, entry, icon, SHELL_CONTROL_DEPTH);
     }

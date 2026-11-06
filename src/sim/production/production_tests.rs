@@ -282,9 +282,6 @@ fn naval_rules_with_infantry(infantry: &str, sections: &str) -> RuleSet {
         .expect("naval production rules and ART should parse");
     if !infantry.is_empty() {
         rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
-        rules.bind_animation_sequences(
-            &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-        );
     }
     rules
 }
@@ -296,15 +293,17 @@ pub(super) fn water_terrain(width: u16, height: u16) -> ResolvedTerrainGrid {
             cells.push(ResolvedTerrainCell {
                 land_type: 2,
                 speed_costs: crate::rules::terrain_rules::SpeedCostProfile {
-                    float: Some(100),
-                    hover: Some(100),
+                    float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+                    hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+                    winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
                     ..crate::rules::terrain_rules::SpeedCostProfile::default()
                 },
                 zone_type: crate::map::resolved_terrain::zone_class::WATER,
                 base_land_type: 2,
                 base_speed_costs: crate::rules::terrain_rules::SpeedCostProfile {
-                    float: Some(100),
-                    hover: Some(100),
+                    float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+                    hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+                    winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
                     ..crate::rules::terrain_rules::SpeedCostProfile::default()
                 },
                 ..crate::map::resolved_terrain::test_flat_cell(x, y)
@@ -322,8 +321,8 @@ fn water_terrain_with_yard_exit(width: u16, height: u16) -> ResolvedTerrainGrid 
     for (x, y) in (20..=24).flat_map(|n| [(24, n), (n, 24)]) {
         let cell = terrain.cell_mut_for_test(x, y).unwrap();
         let cost = if (x, y) == (22, 24) { 100 } else { 0 };
-        cell.speed_costs.float = Some(cost);
-        cell.base_speed_costs.float = Some(cost);
+        cell.speed_costs.float = Some(crate::rules::terrain_rules::test_speed_percent(cost));
+        cell.base_speed_costs.float = Some(crate::rules::terrain_rules::test_speed_percent(cost));
     }
     terrain
 }
@@ -968,20 +967,8 @@ fn mixed_land_and_naval_factories_bind_independent_vehicle_and_ship_slots() {
         "native typed Naval Unit FindFactory binds GAYARD"
     );
 
-    assert_eq!(
-        sim.production
-            .primary_factory_ids(americans, ProductionCategory::Vehicle)
-            .next()
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        sim.production
-            .primary_factory_ids(americans, ProductionCategory::Ship)
-            .next()
-            .unwrap(),
-        2
-    );
+    assert!(sim.production.is_primary_factory(1));
+    assert!(sim.production.is_primary_factory(2));
 
     arm_build_via(
         &mut sim,
@@ -1037,12 +1024,8 @@ fn mixed_land_and_naval_factories_bind_independent_vehicle_and_ship_slots() {
         .expect("GAYARD delivered DEST through naval FNPC/Unlimbo");
     assert_eq!((destroyer.position.rx(), destroyer.position.ry()), (22, 24));
     assert!(destroyer.lifecycle.cell_marked() && !destroyer.lifecycle.in_limbo());
-    assert_eq!(
-        sim.production
-            .primary_factory_ids(americans, ProductionCategory::Ship)
-            .next()
-            .unwrap(),
-        2,
+    assert!(
+        sim.production.is_primary_factory(2),
         "the older GAWEAP cannot receive the Ship completion"
     );
     assert!(
@@ -1068,13 +1051,13 @@ fn naval_delivery_nonzero_canenter_refunds_without_trying_second_producer() {
     let mut sim = Simulation::new();
     let mut terrain = water_terrain(40, 40);
     for cell in terrain.cells_mut_for_test() {
-        cell.speed_costs.float = Some(0);
-        cell.base_speed_costs.float = Some(0);
+        cell.speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
+        cell.base_speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
     }
     for candidate in [(12, 14), (22, 24)] {
         let cell = terrain.cell_mut_for_test(candidate.0, candidate.1).unwrap();
-        cell.speed_costs.float = Some(100);
-        cell.base_speed_costs.float = Some(100);
+        cell.speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::ONE);
+        cell.base_speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::ONE);
     }
     let grid = PathGrid::from_resolved_terrain(&terrain);
     sim.install_fixture_path_grid(Some(&grid));
@@ -1173,11 +1156,8 @@ fn naval_delivery_nonzero_canenter_refunds_without_trying_second_producer() {
             .is_none_or(|factory| factory.object.is_none())
     );
     assert_eq!(credits_for_owner(&sim, "Americans"), credits + 1000);
-    assert_eq!(
-        sim.production
-            .primary_factory_ids(americans, ProductionCategory::Ship)
-            .next(),
-        Some(1),
+    assert!(
+        sim.production.is_primary_factory(1),
         "HousePlace does not try the second eligible producer after Exit0"
     );
     assert!(
@@ -1207,8 +1187,8 @@ fn naval_empty_fnpc_refunds_then_a_fresh_successor_records_delivery_once() {
     let mut sim = Simulation::new();
     let mut terrain = water_terrain(40, 40);
     for cell in terrain.cells_mut_for_test() {
-        cell.speed_costs.float = Some(0);
-        cell.base_speed_costs.float = Some(0);
+        cell.speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
+        cell.base_speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO);
     }
     let allocated = (0..40)
         .flat_map(|ry| (0..40).map(move |rx| (rx, ry)))
@@ -1324,16 +1304,11 @@ fn naval_empty_fnpc_refunds_then_a_fresh_successor_records_delivery_once() {
         successor
     );
     assert_eq!(sim.scenario_rng.logical_state(), expected.logical_state());
-    assert_eq!(
-        sim.production
-            .primary_factory_ids(americans, ProductionCategory::Ship)
-            .next(),
-        Some(1)
-    );
+    assert!(sim.production.is_primary_factory(1));
     assert_eq!(sim.houses[&americans].stats().built(), 0);
     for cell in sim.resolved_terrain.as_mut().unwrap().cells_mut_for_test() {
-        cell.speed_costs.float = Some(100);
-        cell.base_speed_costs.float = Some(100);
+        cell.speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::ONE);
+        cell.base_speed_costs.float = Some(crate::util::native_x87::NativeF32Bits::ONE);
     }
     let grid = PathGrid::from_resolved_terrain(sim.resolved_terrain.as_ref().unwrap());
     sim.path_grid = Some(std::sync::Arc::new(grid));

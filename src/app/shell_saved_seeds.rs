@@ -13,14 +13,6 @@ use crate::util::native_file_name::{self, NativeFileName};
 use crate::ui::shell::saved_file_input::{self, BrowserInputResult};
 
 impl App {
-    pub(super) fn saved_seed_dir(state: &AppState) -> Option<std::path::PathBuf> {
-        state
-            .platform
-            .game_config
-            .as_ref()
-            .map(|config| config.paths.ra2_dir.clone())
-    }
-
     fn skirmish_saved_seed_layout(
         state: &AppState,
         mode: SavedSeedMode,
@@ -29,7 +21,7 @@ impl App {
     }
 
     pub(super) fn open_saved_seed_browser(state: &mut AppState, mode: SavedSeedMode) {
-        let entries = Self::saved_seed_dir(state)
+        let entries = Self::random_map_dir(state)
             .map(|dir| saved_seeds::list_saved_seeds(&dir))
             .unwrap_or_default();
         let current = state
@@ -58,7 +50,7 @@ impl App {
         state.frontend.skirmish_shell_state.saved_seed_browser = None;
         // Re-entry sees physical disk state, including failed native-style deletes.
         let available =
-            Self::saved_seed_dir(state).is_some_and(|dir| saved_seeds::saved_seeds_available(&dir));
+            Self::random_map_dir(state).is_some_and(|dir| saved_seeds::saved_seeds_available(&dir));
         if let Some(modal) = state
             .frontend
             .skirmish_shell_state
@@ -71,33 +63,41 @@ impl App {
         }
     }
 
-    fn show_saved_seed_prompt(
-        state: &mut AppState,
-        purpose: SavedSeedPromptPurpose,
+    /// The saved-file browsers' message box: Yes/No to confirm, else OK.
+    pub(super) fn saved_browser_prompt<I>(
+        state: &AppState,
+        purpose: SavedSeedPromptPurpose<I>,
         body: String,
         confirm: bool,
-    ) {
+    ) -> SavedSeedPrompt<I> {
         let affirmative = if confirm {
             Self::csf_label(state, "TXT_YES", "Yes")
         } else {
             Self::csf_label(state, "TXT_OK", "OK")
         };
         let negative = confirm.then(|| Self::csf_label(state, "TXT_NO", "No"));
+        SavedSeedPrompt {
+            purpose,
+            body,
+            affirmative,
+            negative,
+        }
+    }
+
+    fn show_saved_seed_prompt(
+        state: &mut AppState,
+        purpose: SavedSeedPromptPurpose,
+        body: String,
+        confirm: bool,
+    ) {
+        let prompt = Self::saved_browser_prompt(state, purpose, body, confirm);
         if let Some(browser) = state
             .frontend
             .skirmish_shell_state
             .saved_seed_browser
             .as_mut()
         {
-            browser.description_edit.focused = false;
-            browser.pressed_control = None;
-            browser.scroll_repeat_at = None;
-            browser.prompt = Some(SavedSeedPrompt {
-                purpose,
-                body,
-                affirmative,
-                negative,
-            });
+            browser.show_prompt(prompt);
         }
     }
 
@@ -106,7 +106,7 @@ impl App {
         file_name: NativeFileName,
         description: SeedDescription,
     ) {
-        let Some(dir) = Self::saved_seed_dir(state) else {
+        let Some(dir) = Self::random_map_dir(state) else {
             return;
         };
         let Some(modal) = state
@@ -120,7 +120,9 @@ impl App {
         // MapSeed Save 0x00597804 updates the working description before file I/O.
         // Its nonnull-filename path returns success even if the file could not open.
         modal.options.description = description;
-        if let Err(error) = saved_seeds::write_browser_seed(&dir, &file_name, &modal.options) {
+        if let Err(error) = crate::util::file_system::create_dir_all(&dir)
+            .and_then(|()| saved_seeds::write_browser_seed(&dir, &file_name, &modal.options))
+        {
             log::warn!(
                 "saved seed: native-style save acknowledgment despite I/O failure for {file_name}: {error}"
             );
@@ -162,7 +164,7 @@ impl App {
                 Self::finish_saved_seed_write(state, file_name, description);
             }
             SavedSeedPromptPurpose::Delete { file_name } if affirmative => {
-                if let Some(dir) = Self::saved_seed_dir(state)
+                if let Some(dir) = Self::random_map_dir(state)
                     && let Err(error) = native_file_name::delete(&dir, &file_name)
                 {
                     log::warn!("saved seed: could not delete {file_name}: {error}");
@@ -190,7 +192,7 @@ impl App {
     }
 
     fn apply_saved_seed_outcome(state: &mut AppState, outcome: SavedSeedOutcome) {
-        let Some(dir) = Self::saved_seed_dir(state) else {
+        let Some(dir) = Self::random_map_dir(state) else {
             return;
         };
         match outcome {

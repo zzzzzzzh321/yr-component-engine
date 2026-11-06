@@ -25,6 +25,20 @@ impl GameEntity {
         self.building_online.online
     }
 
+    /// Phobos `TechnoExt::IsActive` (`src/Ext/Techno/Body.cpp`) plus the power
+    /// plant enhancer loops' `HasPower` (Building+660) gate. Temporal
+    /// targeting and warping are both covered by `is_warped_out`.
+    #[cfg(feature = "phobos")]
+    pub fn is_power_plant_enhancer_active(&self) -> bool {
+        self.is_active()
+            && self.health.current() > 0
+            && !self.lifecycle.in_limbo()
+            && !self.is_warped_out()
+            && !self.deactivated.is_offline()
+            && self.emp_remaining() <= 0
+            && self.building_online()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_building_online_for_test(&mut self, online: bool) {
         self.building_online.online = online;
@@ -78,9 +92,9 @@ impl Simulation {
         true
     }
 
-    /// GoOnline452260, also inlined by ReadINI44FC27..44FD1F. The native
-    /// EMP+504 gate remains at its constructor zero: the engine has no EMP
-    /// producer yet (the same bound as OperationalFacts' existing adapter).
+    /// GoOnline452260, also inlined by ReadINI44FC27..44FD1F. A building
+    /// held by an EMP (`+0x504` nonzero, `0x00452271`) stays off; only Ares
+    /// writes that counter.
     pub(crate) fn go_building_online(
         &mut self,
         id: u64,
@@ -90,7 +104,10 @@ impl Simulation {
         let Some(entity) = self.substrate.entities.get(id) else {
             return false;
         };
-        if entity.category() != EntityCategory::Structure || entity.building_online() {
+        if entity.category() != EntityCategory::Structure
+            || entity.building_online()
+            || entity.emp_remaining() != 0
+        {
             return false;
         }
         let owner = entity.owner();

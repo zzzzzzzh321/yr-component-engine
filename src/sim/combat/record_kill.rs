@@ -92,8 +92,8 @@ fn award_kill_experience(
 }
 
 /// The caller decides whether this callback leaves the victim alive. Native
-/// RecordKill always books immediately; this controls only VERA's fallback for
-/// teardown sites whose native callback is still unrepresented.
+/// RecordKill always books immediately; this controls only whether the
+/// callback closes VERA's [`KillRecord`] guard.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KillCallback {
     Terminal,
@@ -135,8 +135,8 @@ impl KillSource {
 /// calls it with no attacker before the owner store: that call immediately
 /// books the old House's loss while the object remains alive. Each actual
 /// native callback books independently; there is no first-credit guard in
-/// 702D40. The UnInit fallback guard prevents an additional deferred record,
-/// rather than suppressing this callback. Spawner missiles
+/// 702D40, and UnInit books nothing (`Simulation::close_kill_record`).
+/// Spawner missiles
 /// credit their launcher's house; if the launcher dies during the missile's
 /// flight, the kill goes uncredited.
 ///
@@ -151,7 +151,7 @@ fn record_the_kill(
     entities: &mut EntityStore,
     houses: &mut crate::sim::houses::Houses,
     interner: &StringInterner,
-    alliances: &HouseAllianceMap,
+    alliances: &HouseAlliances,
     victim_id: u64,
     source: KillSource,
     victim_cost: i32,
@@ -170,6 +170,21 @@ fn record_the_kill(
     if matches!(source, KillSource::Techno(_)) && victim.tracking_facts.dont_score() {
         return;
     }
+    #[cfg(feature = "ares")]
+    if let KillSource::Techno(Some(attacker)) = source {
+        // Ares RegisterDestruction_Bounty702E64 ->1004B100 precedes the
+        // original alliance/XP work, after Tags and DontScore. No E4 payout.
+        crate::sim::bounty::award(
+            entities, houses, interner, alliances, rules, victim_id, attacker,
+        );
+    }
+    // Bounty changes the existing wallet and may queue a presentation sum on
+    // an actor. Reborrow the victim after that visit rather than retaining a
+    // mutable-store alias across the native hook.
+    #[cfg(feature = "ares")]
+    let Some(victim) = entities.get(victim_id) else {
+        return;
+    };
     let killer_id = match source {
         KillSource::Techno(source) => source,
         KillSource::House(_) => None,
@@ -195,13 +210,7 @@ fn record_the_kill(
         .and_then(|id| entities.get(id))
         .map(|killer| killer.owner())
         .or(killer_owner);
-    let allied = asker.is_some_and(|asker| {
-        crate::map::houses::is_allied_with(
-            alliances,
-            interner.resolve(asker),
-            interner.resolve(victim_owner),
-        )
-    });
+    let allied = asker.is_some_and(|asker| alliances.is_allied(interner, asker, victim_owner));
     let points =
         super::veterancy::kill_award_points(victim_cost, victim.veterancy.rank_kind(), allied);
     if let Some(killer_id) = killer_id {
@@ -257,12 +266,26 @@ impl crate::sim::world::Simulation {
             // even for NULL. Each call re-reads Object+34, without Alive/HP
             // gates. This precedes the base CostOf and its6/4 callbacks.
             // Source: original bodies/vtable via tools.native_inspect.
-            // RESIDUAL: hijacked Units (+338 !=-1) with a transferable Tag
-            // skip this prefix; hijacking state/crew transfer is not ported.
+            //74472F..74473F: a retained captor and transferable Tag skip
+            //this prefix;738374 later copies that Tag to the escaped captor.
             // No own RNG/timer/detach; synchronous Tag actions own those.
-            for kind in [7, 48, 29] {
-                if kind != 7 || source.is_present() {
-                    self.dispatch_object_tag_event(victim_id, kind, Some(victim_id), None, context);
+            let captor_has_tag = self
+                .substrate
+                .entities
+                .get(victim_id)
+                .is_some_and(|victim| victim.capture_infantry_type_index.get() != -1)
+                && self.trigger_runtime.object_tag_is_transferable(victim_id);
+            if !captor_has_tag {
+                for kind in [7, 48, 29] {
+                    if kind != 7 || source.is_present() {
+                        self.dispatch_object_tag_event(
+                            victim_id,
+                            kind,
+                            Some(victim_id),
+                            None,
+                            context,
+                        );
+                    }
                 }
             }
         }
@@ -284,7 +307,7 @@ impl crate::sim::world::Simulation {
             &mut self.substrate.entities,
             &mut self.houses,
             &self.interner,
-            self.house_alliances.as_map(),
+            &self.house_alliances,
             victim_id,
             source,
             victim_cost,
@@ -354,15 +377,17 @@ impl crate::sim::world::Simulation {
 ///   vector through a death animation, so this keeps the callback's
 ///   attribution. It does not defer or suppress the native score callback,
 ///   and saves do not keep it.
-/// - a VERA guard that keeps UnInit's uncredited-loss fallback
-///   (`Simulation::record_destruction_once`) from booking a loss a routed
-///   RecordTheKill callback already booked. Native callbacks themselves may
-///   record again; it does not stand in for native-alive or dying.
+/// - a VERA guard that says the object's destruction is closed: a terminal
+///   RecordTheKill callback credited it, or UnInit removed it. No booking
+///   reads it (native callbacks may record again, and UnInit books nothing);
+///   the dead-object check in `Simulation`'s frame validation, the hash and
+///   test counts do. It does not stand in for native-alive or dying.
 ///
-/// The credit step sets both. The fallback sets the guard
-/// ([`Self::mark_fallback_recorded`]); the receiver's next exact-zero callback
-/// and a PostMortem restore clear both ([`Self::clear`]); the construction
-/// boundary clears the guard ([`Self::reset_constructed`]).
+/// The credit step sets both. UnInit and ReceiveDamage's Destroy set the
+/// guard (`Simulation::close_kill_record`, [`Self::close`]); the receiver's
+/// next exact-zero callback and a PostMortem restore clear both
+/// ([`Self::clear`]); the construction boundary clears the guard
+/// ([`Self::reset_constructed`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct KillRecord {
     #[serde(skip)]
@@ -377,13 +402,13 @@ impl KillRecord {
         self.killed_by
     }
 
-    /// The object's loss is booked.
+    /// The object's destruction is closed: credited or removed.
     pub(crate) const fn is_recorded(self) -> bool {
         self.destruction_recorded
     }
 
-    /// UnInit's fallback booked the loss.
-    pub(crate) fn mark_fallback_recorded(&mut self) {
+    /// UnInit or Destroy closed the record, booking nothing.
+    pub(crate) fn close(&mut self) {
         self.destruction_recorded = true;
     }
 
@@ -416,11 +441,10 @@ impl KillRecord {
 /// The immediate House-accounting half of RecordKill70300F..7031DC.
 /// MatchStatistics owns all mutations; retained fatal attribution is an
 /// observation, never a second deferred score authority. A Temporal erase
-/// calls this at full health (71AAC4), so its later UnInit must also skip the
-/// fallback. FootCrash4DEC51 calls at full health before4DEC72 zeroes it, so
-/// health/attacker alone cannot identify a terminal callback. An attacker-free
-/// live ChangeOwner callback leaves the existing death guard untouched, since
-/// the object remains alive afterwards.
+/// calls this at full health (71AAC4) and FootCrash4DEC51 before4DEC72
+/// zeroes it, so health/attacker alone cannot identify a terminal callback.
+/// An attacker-free live ChangeOwner callback leaves the existing death guard
+/// untouched, since the object remains alive afterwards.
 ///
 /// Building+53C=-1 suppresses only BuildingsLost703054, including when a
 /// sale's NULL callback synchronously changes owner or removes the receiver.

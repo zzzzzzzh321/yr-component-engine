@@ -6,33 +6,35 @@ use super::*;
 
 /// Navigate with the normal buttons before resolving a resource control. Its
 /// visible slot is never the participant's absolute row on an extended roster.
+/// `row`'s control on the roster pages, paged to through normal input. A
+/// VERA room lists only who is in it, so a row's place there is not its
+/// index; the search starts from the first page.
 fn setup_control_at_row(
     state: &mut AppState,
     column: SetupColumn,
     row: usize,
 ) -> Result<Option<u16>> {
     use crate::ui::multiplayer_setup::{NEXT_ROWS, PREVIOUS_ROWS, VISIBLE_SETUP_ROWS};
-    for _ in 0..=crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT / VISIBLE_SETUP_ROWS {
+    let pages = crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT / VISIBLE_SETUP_ROWS + 1;
+    for _ in 0..pages {
+        if setup::view(state).context("setup view")?.first_row == 0 {
+            break;
+        }
+        setup_button(state, PREVIOUS_ROWS)?;
+    }
+    for _ in 0..pages {
         let view = setup::view(state).context("setup view")?;
-        if row >= view.row_count {
+        if let Some(combo) = view.combos.iter().find(|combo| {
+            combo.row as usize == row
+                && combo.visible
+                && SetupColumn::decode(combo.id).is_some_and(|(candidate, _)| candidate == column)
+        }) {
+            return Ok(Some(combo.id));
+        }
+        if view.first_row + view.dialog.rows_per_page() >= view.row_count {
             return Ok(None);
         }
-        if row < view.first_row {
-            setup_button(state, PREVIOUS_ROWS)?;
-        } else if row >= view.first_row + VISIBLE_SETUP_ROWS {
-            setup_button(state, NEXT_ROWS)?;
-        } else {
-            return Ok(view
-                .combos
-                .iter()
-                .find(|combo| {
-                    combo.row as usize == row
-                        && combo.visible
-                        && SetupColumn::decode(combo.id)
-                            .is_some_and(|(candidate, _)| candidate == column)
-                })
-                .map(|combo| combo.id));
-        }
+        setup_button(state, NEXT_ROWS)?;
     }
     anyhow::bail!("setup page navigation did not reach the participant")
 }
@@ -44,6 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod battle;
 mod cooperative;
 mod failure;
+mod latency;
 mod mass;
 mod online;
 mod profile;
@@ -54,6 +57,119 @@ const GUEST_NAME: &str = "LiveGuest";
 const REQUIRED_FRAMES: u32 = 300;
 const SOLO_AI_INPUT_BOUND_FRAMES: u32 = 1;
 
+/// Diagnostic evidence only: a fixed local frame cannot prove that Stop has
+/// arrived from the relay. Retain the full Position after actual execution,
+/// cleared navigation and the same ten-frame quiet window as the mass capture.
+#[derive(Default)]
+struct StopObservation {
+    quiet: Option<(u32, Value)>,
+    settled: Option<(u32, Value)>,
+}
+
+impl StopObservation {
+    fn observe(&mut self, frame: u32, applied: bool, position: Value, navigation_clear: bool) {
+        if self.settled.is_some() {
+            return;
+        }
+        if !applied || !navigation_clear {
+            self.quiet = None;
+            return;
+        }
+        match self.quiet.as_ref() {
+            Some((since, previous)) if previous == &position => {
+                if frame.saturating_sub(*since) >= 10 {
+                    self.settled = Some((frame, position));
+                }
+            }
+            _ => self.quiet = Some((frame, position)),
+        }
+    }
+
+    fn position(&self) -> Option<&Value> {
+        self.settled.as_ref().map(|(_, position)| position)
+    }
+}
+
+#[cfg(test)]
+mod stop_observation_tests {
+    use super::{AiActivity, LanTarget, LiveLanCapture, StopObservation};
+    use crate::app::match_diagnostics::CommandExecutionObservation;
+    use crate::sim::command::{CommandRecord, IDLE_OPCODE, StopRecord};
+    use serde_json::json;
+
+    #[test]
+    fn waits_for_applied_stop_and_quiet_position_beyond_old_frame_160() {
+        let before = json!({"rx":10,"ry":10,"sub_x":128,"sub_y":128});
+        let stopped = json!({"rx":12,"ry":10,"sub_x":128,"sub_y":128});
+        let mut observation = StopObservation::default();
+        observation.observe(160, false, before.clone(), true);
+        assert_eq!(observation.position(), None);
+        observation.observe(220, true, before.clone(), false);
+        assert_eq!(observation.position(), None);
+        observation.observe(221, true, before.clone(), true);
+        observation.observe(225, true, stopped.clone(), true);
+        observation.observe(234, true, stopped.clone(), true);
+        assert_eq!(observation.position(), None);
+        observation.observe(235, true, stopped.clone(), true);
+        assert_eq!(observation.position(), Some(&stopped));
+        observation.observe(600, true, before.clone(), true);
+        assert_eq!(
+            observation.position(),
+            Some(&stopped),
+            "retain the settled baseline so later movement is detected"
+        );
+    }
+
+    #[test]
+    fn delayed_online_execution_is_recorded_without_relaxing_solo_ai_deadline() {
+        fn capture() -> LiveLanCapture {
+            let mut capture = LiveLanCapture::new_config(LanTarget::OnlineHost, None, None);
+            capture.actor = Some(7);
+            capture
+                .actions
+                .push(json!({"input":"Stop","native_frame":80,"actor":7}));
+            capture
+        }
+        fn execution(frame: u32) -> CommandExecutionObservation {
+            let mut record = CommandRecord::encode(IDLE_OPCODE, 0, frame as i32, &[]).unwrap();
+            StopRecord {
+                house_id: 0,
+                frame: frame as i32,
+                entity_id: 7,
+            }
+            .write_into(&mut record);
+            CommandExecutionObservation {
+                observed_at: crate::app::match_diagnostics::ObservationTime::now(),
+                frame,
+                record,
+                applied: true,
+                actor: Some(7),
+                motion: None,
+                timing: None,
+                destination: None,
+                cell: Some((12, 10)),
+                mission: Some((0, 0)),
+            }
+        }
+        let mut online = capture();
+        online
+            .observe_simple_input_application(221, execution(220))
+            .unwrap();
+        assert_eq!(online.actions[0]["application_frame"], 220);
+        assert_eq!(online.actions[0]["delay_frames"], 140);
+
+        let mut solo = capture();
+        solo.ai = Some(AiActivity::default());
+        assert!(
+            solo.observe_simple_input_application(221, execution(220))
+                .is_err()
+        );
+        solo.observe_simple_input_application(82, execution(81))
+            .unwrap();
+        assert_eq!(solo.actions[0]["application_frame"], 81);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Main,
@@ -61,7 +177,6 @@ enum Phase {
     Discover,
     HostSetup,
     HostReady,
-    HostKick,
     GuestSetup,
     Loading,
     Running,
@@ -137,7 +252,7 @@ impl AiActivity {
             .filter(|slot| !slot.is_human && !slot.observer)
             .collect::<Vec<_>>();
         ensure!(
-            ai.len() == 1 && ai[0].source_human_index.is_none(),
+            ai.len() == 1 && ai[0].source_human_index().is_none(),
             "AI acquired a human source"
         );
         let sim = &state
@@ -253,15 +368,18 @@ pub(super) struct LiveLanCapture {
     actor_last_seen: Option<Value>,
     origin: Option<(u16, u16)>,
     observed_movement: bool,
-    stopped_position: Option<Value>,
+    stop_observation: StopObservation,
     stopped: bool,
     last_wait: Option<String>,
-    kick_observed: bool,
-    entered_setup: bool,
+    /// The guest watched from a spectator row (`switch_sides`).
+    guest_watched: bool,
+    /// The guest's Side list steps: Observer asked, a side asked, playing.
+    sides: u8,
     cooperative: Option<cooperative::CooperativeRun>,
     country_selected: bool,
     battle: Option<battle::BattleOpening>,
     mass: Option<mass::MassInput>,
+    latency: Option<latency::LatencyCapture>,
     ai: Option<AiActivity>,
     failure: Option<failure::FailureCapture>,
     setup_crash: Option<setup_crash::SetupCrashCapture>,
@@ -292,6 +410,7 @@ impl LiveLanCapture {
         let players = config.players;
         let simple = config.simple_input;
         let mass = config.mass_input;
+        let latency = config.latency;
         let ai = config.ai.is_some();
         let mut capture = Self::new_config(target, None, Some(online::LiveRoundFlow::new(config)));
         if let Some(failure) = startup_failure {
@@ -302,6 +421,9 @@ impl LiveLanCapture {
         capture.ai = ai.then(AiActivity::default);
         if simple {
             capture.battle = None;
+        }
+        if latency {
+            capture.latency = Some(latency::LatencyCapture::default());
         }
         if mass {
             capture.mass = Some(mass::MassInput::default());
@@ -336,12 +458,11 @@ impl LiveLanCapture {
             actor_last_seen: None,
             origin: None,
             observed_movement: false,
-            stopped_position: None,
+            stop_observation: StopObservation::default(),
             stopped: false,
             last_wait: None,
-            // Co-op skips the kick/rejoin pass: its rows follow the campaign.
-            kick_observed: target.live_cooperative(),
-            entered_setup: false,
+            guest_watched: false,
+            sides: 0,
             cooperative: target.live_cooperative().then(|| {
                 cooperative::CooperativeRun::new(
                     matches!(
@@ -355,8 +476,12 @@ impl LiveLanCapture {
                         LanTarget::LiveCoopFinalGuest => cooperative::CoopEnding::CampaignEnd {
                             continue_to_shell: true,
                         },
+                        LanTarget::OnlineCoopHost | LanTarget::OnlineCoopGuest => {
+                            cooperative::CoopEnding::Advance
+                        }
                         _ => cooperative::CoopEnding::Retry,
                     },
+                    target.online(),
                 )
             }),
             country_selected: false,
@@ -369,6 +494,7 @@ impl LiveLanCapture {
             )
             .then(|| battle::BattleOpening::new(!target.online())),
             mass: None,
+            latency: None,
             ai: None,
             failure: match target {
                 LanTarget::LiveTimeoutHost | LanTarget::OnlineTimeoutHost => {
@@ -391,6 +517,7 @@ impl LiveLanCapture {
             LanTarget::OnlineHost
                 | LanTarget::OnlineTimeoutHost
                 | LanTarget::OnlineQuitHost
+                | LanTarget::OnlineCoopHost
                 | LanTarget::LiveHost
                 | LanTarget::LiveTimeoutHost
                 | LanTarget::LiveQuitHost
@@ -477,6 +604,87 @@ impl LiveLanCapture {
         })
     }
 
+    /// The host paired with `lan-live-guest` starts only once it watched
+    /// and plays again.
+    fn waits_for_spectator(&self) -> bool {
+        self.target == LanTarget::LiveHost
+    }
+
+    /// In setup the guest picks Observer in its Side list: VERA's room
+    /// moves it to the open spectator row. Then it picks a side, and the
+    /// room seats it again.
+    fn switch_sides(&mut self, state: &mut AppState, frame: u32) -> Result<()> {
+        if self.target != LanTarget::LiveGuest {
+            return Ok(());
+        }
+        let Some(local) = state
+            .match_state
+            .session
+            .network_setup()
+            .map(|launch| launch.local_player().clone())
+        else {
+            return Ok(());
+        };
+        let Some(row) = local.raw_slot_index else {
+            return Ok(());
+        };
+        match (self.sides, local.is_observer()) {
+            (0, false) | (1, true) => {}
+            (2, false) => {
+                self.sides = 3;
+                self.event(frame, &format!("guest plays again from row {row}"));
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+        let control = setup_control_at_row(state, SetupColumn::Country, usize::from(row))?
+            .context("visible local Side list")?;
+        let view = setup::view(state).context("Side list view")?;
+        let value = view
+            .combo(control)
+            .context("local Side list")?
+            .choices
+            .iter()
+            .map(|item| item.value)
+            .find(|value| (*value == -3) != local.is_observer())
+            .filter(|_| view.enabled(control));
+        let Some(value) = value else {
+            return Ok(());
+        };
+        setup::apply_action(state, SetupAction::Select { control, value });
+        self.sides += 1;
+        self.event(
+            frame,
+            &if local.is_observer() {
+                format!("guest watches from row {row}; picks side {value}")
+            } else {
+                format!("guest picks Observer from row {row}")
+            },
+        );
+        Ok(())
+    }
+
+    /// A guest's game accepts by itself, so readiness no longer says the guest
+    /// has made its choices. The host's Start also waits for the choices this
+    /// run makes: battle runs pick Americans for every player, and a run that
+    /// fixes starts gives every process its own `--online-start`.
+    fn choices_made(&self, state: &AppState, fixed_starts: bool) -> bool {
+        state
+            .match_state
+            .session
+            .network_setup()
+            .is_some_and(|launch| {
+                launch.humans.iter().all(|human| {
+                    (self.battle.is_none() || !human.slot.country_random)
+                        && (!fixed_starts
+                            || matches!(
+                                human.slot.start_position,
+                                crate::skirmish_launch::LaunchStartPosition::Position(_)
+                            ))
+                })
+            })
+    }
+
     /// Select an authored waypoint through the local human's visible Start
     /// combo. The configured waypoint is never used as a source/raw-row index.
     /// Read the real choice each time: later map selection can reset it to Auto.
@@ -539,6 +747,19 @@ impl LiveLanCapture {
             .map_or(self.phase == Phase::Finished, online::LiveRoundFlow::ready)
     }
 
+    /// The battle observer checks each command at its execution boundary and
+    /// repair on consecutive frames. Ordinary pacing runs every due frame in
+    /// one pass, for example the next frame right after a network wait ends,
+    /// so the battle asks for one frame per render. A co-op win holds both
+    /// processes at one frame, which a pass of several frames would overshoot.
+    pub(super) fn observes_every_frame(&self) -> bool {
+        self.battle.is_some()
+            || self
+                .cooperative
+                .as_ref()
+                .is_some_and(cooperative::CooperativeRun::flags_win)
+    }
+
     pub(super) fn owns_simulation_steps(&self, state: &AppState) -> bool {
         // Keep the final observed frame stable during GPU readback. Ordinary
         // App frame pacing and NetworkCommandBoundary own every earlier step,
@@ -556,6 +777,9 @@ impl LiveLanCapture {
         rendered: PresentedShell,
         frame: u32,
     ) -> Result<()> {
+        if let Some(latency) = self.latency.as_mut() {
+            latency.observe_setup(state);
+        }
         ensure!(
             state.frontend.main_menu_shell_error.is_none(),
             "live LAN capture reached shell fallback"
@@ -614,25 +838,20 @@ impl LiveLanCapture {
                 return Ok(());
             }
         }
-        self.entered_setup |= state.match_state.session.network_setup().is_some();
-        if !self.host()
-            && self.entered_setup
-            && !self.kick_observed
-            && matches!(self.phase, Phase::GuestSetup | Phase::Loading)
-            && rendered == PresentedShell::LanLobby
-            && lobby_settled(state)
+        if !self.guest_watched
+            && state
+                .match_state
+                .session
+                .network_setup()
+                .is_some_and(|launch| {
+                    launch
+                        .humans
+                        .iter()
+                        .any(|human| human.name == GUEST_NAME && human.is_observer())
+                })
         {
-            ensure!(
-                state.match_state.session.network_setup().is_none(),
-                "kicked guest retained admitted setup"
-            );
-            self.kick_observed = true;
-            self.country_selected = false;
-            self.phase = Phase::Discover;
-            self.event(
-                frame,
-                "host kick returned guest to BB; rediscover and rejoin",
-            );
+            self.guest_watched = true;
+            self.event(frame, "the guest watches from a spectator row");
         }
         if frame % 120 == 0 {
             log::debug!(
@@ -672,9 +891,10 @@ impl LiveLanCapture {
         match self.phase {
             Phase::Main
                 if rendered == PresentedShell::MainMenu
-                    && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(
-                        state,
-                    ))? =>
+                    && steady_main_menu_capture_ready_for(
+                        MainMenuCaptureSnapshot::from_state(state),
+                        self.latency.is_some(),
+                    )? =>
             {
                 // Hidden-window transcript captures suppress physical LAN.
                 // Live captures install the real owner before normal Network
@@ -727,7 +947,7 @@ impl LiveLanCapture {
                 }
                 self.event(frame, "BB name entered through normal input");
                 if self.host() {
-                    lobby_button(state, crate::ui::lan_shell::CREATE)?;
+                    create_lan_game(state)?;
                     self.phase = Phase::HostSetup;
                 } else {
                     self.phase = Phase::Discover;
@@ -800,26 +1020,6 @@ impl LiveLanCapture {
                 if rendered == PresentedShell::NetworkSetup && setup_settled(state, true) =>
             {
                 let session = &state.match_state.session;
-                if !self.kick_observed
-                    && let Some(row) = session.network_setup().and_then(|launch| {
-                        launch
-                            .humans
-                            .iter()
-                            .find(|human| human.name == GUEST_NAME)
-                            .and_then(|human| human.raw_slot_index)
-                    })
-                {
-                    let control =
-                        setup_control_at_row(state, SetupColumn::Player, usize::from(row))?
-                            .context("visible guest row")?;
-                    setup::apply_action(state, SetupAction::Select { control, value: 2 });
-                    self.event(
-                        frame,
-                        "replace guest row through normal UI; real Type8 kick",
-                    );
-                    self.phase = Phase::HostKick;
-                    return Ok(());
-                }
                 if let Some(launch) = session.network_setup()
                     && launch.humans.len() == 2
                     && launch
@@ -830,58 +1030,26 @@ impl LiveLanCapture {
                         session.network_player_ready(index)
                             && session.network_map_status(index) == Some(1)
                     })
+                    && self.choices_made(state, false)
+                    && (!self.waits_for_spectator()
+                        || self.guest_watched
+                            && launch.humans.iter().all(|human| !human.is_observer()))
                 {
                     setup_button(state, crate::ui::multiplayer_setup::START)?;
                     self.event(frame, "all real acknowledgements present; Start clicked");
                     self.phase = Phase::Loading;
                 }
             }
-            Phase::HostKick
-                if rendered == PresentedShell::NetworkSetup && setup_settled(state, true) =>
-            {
-                if state
-                    .match_state
-                    .session
-                    .network_setup()
-                    .is_some_and(|launch| launch.humans.len() == 1)
-                {
-                    self.kick_observed = true;
-                    self.event(
-                        frame,
-                        "real guest departure removed host membership and endpoint",
-                    );
-                    self.phase = Phase::HostReady;
-                }
-            }
             Phase::GuestSetup
                 if rendered == PresentedShell::NetworkSetup && setup_settled(state, false) =>
             {
+                // The guest's game accepts the received options and map by
+                // itself, and again after each host change, so the run stays
+                // in editable setup until the host starts.
                 self.select_country(state)?;
-                let session = &state.match_state.session;
-                if session.network_setup().is_some_and(|launch| {
-                    launch.humans.len() == 2
-                        && launch
-                            .humans
-                            .iter()
-                            .all(|human| human.raw_slot_index.is_some())
-                }) && session.network_start_seed().is_some()
-                    && session.network_setup().is_some_and(|launch| {
-                        !session.network_player_ready(launch.local_player_index)
-                    })
-                    && setup::view(state).is_some_and(|view| view.accept_enabled)
-                {
-                    setup_button(state, crate::ui::multiplayer_setup::ACCEPT)?;
-                    self.event(frame, "received real options/map status; Accept clicked");
-                    // A host may still commit a generated/custom map. Remain
-                    // in editable setup so its ordinary Ready invalidation can
-                    // be acknowledged again before actual loading begins.
-                }
+                self.switch_sides(state, frame)?;
             }
             Phase::Loading | Phase::GuestSetup if state.frontend.screen == GameScreen::InGame => {
-                ensure!(
-                    self.kick_observed,
-                    "live diagnostic skipped kick/rejoin validation"
-                );
                 ensure!(
                     state.match_state.live_network.is_some(),
                     "loaded LAN match has no real command transport"
@@ -1018,9 +1186,8 @@ impl LiveLanCapture {
     ) -> Result<()> {
         // Use the existing action admission, including current control
         // availability. The isolated profile must allow one open peer.
-        let row_count = setup::view(state).context("host setup view")?.row_count;
         let mut retained_ai = false;
-        for row in 1..row_count {
+        for row in 1..crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT {
             if state
                 .match_state
                 .session
@@ -1088,6 +1255,20 @@ impl LiveLanCapture {
             state.frontend.screen == GameScreen::InGame,
             "live LAN match left gameplay before completion"
         );
+        if self.battle.is_none() && self.mass.is_none() && self.latency.is_none() {
+            let simulation = &state
+                .match_state
+                .sim_runtime
+                .as_ref()
+                .context("live simulation")?
+                .simulation;
+            // A pending native frame may already have applied commands, but
+            // its post-logic position is not committed for observation yet.
+            if simulation.pending_network_wait() {
+                return Ok(());
+            }
+            self.observe_simple_input_applications(state, simulation.session().binary_frame())?;
+        }
         let simulation = &state
             .match_state
             .sim_runtime
@@ -1120,9 +1301,14 @@ impl LiveLanCapture {
             self.observed_movement |= self
                 .origin
                 .is_some_and(|origin| origin != (entity.position.rx(), entity.position.ry()));
-            if committed >= 160 && self.stopped_position.is_none() {
-                self.stopped_position = Some(serde_json::to_value(entity.position)?);
-            }
+            self.stop_observation.observe(
+                committed,
+                self.actions.iter().any(|action| {
+                    action["input"] == "Stop" && action.get("application_frame").is_some()
+                }),
+                serde_json::to_value(entity.position)?,
+                entity.navigation.nav_com().is_none() && entity.navigation.nav_queue().is_empty(),
+            );
         }
         ensure!(
             committed >= self.checksums.len() as u32,
@@ -1167,6 +1353,13 @@ impl LiveLanCapture {
                 .push(json!({"render_frame":frame,"native_frame":committed,"wait":wait}));
             self.last_wait = Some(wait);
         }
+        if let Some(latency) = self.latency.as_mut() {
+            if latency.step(state, required_frames)? {
+                MoviesCapture::restore_neutral_pointer(state);
+                self.phase = Phase::Finished;
+            }
+            return Ok(());
+        }
         if let Some(mass) = self.mass.as_mut() {
             let complete = mass.step(state, committed)?;
             if committed >= required_frames {
@@ -1206,10 +1399,12 @@ impl LiveLanCapture {
             let battle = self.battle.as_mut().expect("battle target");
             battle.step(state, committed, host, &mut self.actions)?;
             if committed >= required_frames {
+                let missing = battle.missing(state)?;
                 ensure!(
-                    battle.finished(state)?,
-                    "Battle opening incomplete: {}",
-                    battle.phase()
+                    missing.is_empty(),
+                    "Battle opening incomplete: {}; missing {}",
+                    battle.phase(),
+                    missing.join(", ")
                 );
                 let live = state
                     .match_state
@@ -1229,9 +1424,6 @@ impl LiveLanCapture {
             }
             return Ok(());
         }
-        if self.ai.is_some() {
-            self.observe_simple_input_applications(state, committed)?;
-        }
         if committed >= 10 && self.actor.is_none() {
             self.issue_move(state, committed)?;
         }
@@ -1249,6 +1441,8 @@ impl LiveLanCapture {
             .context("live transport")?;
         if self.checksums.len() >= self.required_frames() as usize
             && self.stopped
+            && self.simple_inputs_applied()
+            && self.stop_observation.position().is_some()
             // The survivor must arm from its own committed prefix: the
             // finishing guest may exit at300 before sending frame300's
             // advertisement. The pair receipt compares both300-frame rings.
@@ -1263,14 +1457,6 @@ impl LiveLanCapture {
                     .all(|peer| peer.frame() >= self.required_frames() as i32))
         {
             if let Some(ai) = &self.ai {
-                ensure!(
-                    self.actions.len() == 2
-                        && self
-                            .actions
-                            .iter()
-                            .all(|action| action.get("application_frame").is_some()),
-                    "solo AI Move/Stop did not both reach their actual receivers"
-                );
                 ensure!(
                     ai.activity.is_some(),
                     "AI House had no observed factory progress or new live entity; snapshot={}",
@@ -1291,7 +1477,9 @@ impl LiveLanCapture {
                 .get(self.actor.context("actor")?)
                 .context("actor")?;
             ensure!(
-                self.stopped_position.as_ref() == Some(&serde_json::to_value(entity.position)?),
+                self.stop_observation.position() == Some(&serde_json::to_value(entity.position)?)
+                    && entity.navigation.nav_com().is_none()
+                    && entity.navigation.nav_queue().is_empty(),
                 "Stop did not retain a stable position through the final frames"
             );
             MoviesCapture::restore_neutral_pointer(state);
@@ -1313,12 +1501,10 @@ impl LiveLanCapture {
     }
 
     fn issue_move(&mut self, state: &mut AppState, frame: u32) -> Result<()> {
-        if self.ai.is_some() {
-            state
-                .match_state
-                .match_diagnostics
-                .begin_command_observation();
-        }
+        state
+            .match_state
+            .match_diagnostics
+            .begin_command_observation();
         let (actor, from, to) = battle::mobile_move_with_mouse(state)?;
         self.actor = Some(actor);
         self.origin = Some(from);
@@ -1326,120 +1512,40 @@ impl LiveLanCapture {
         Ok(())
     }
 
+    fn simple_inputs_applied(&self) -> bool {
+        self.actions.len() == 2
+            && self
+                .actions
+                .iter()
+                .all(|action| action.get("application_frame").is_some())
+    }
+
     fn observe_simple_input_applications(
         &mut self,
         state: &mut AppState,
         frame: u32,
     ) -> Result<()> {
-        use crate::sim::command::{MegaMissionOrder, MegaMissionRecord, StopRecord};
-        use crate::sim::components::NavTargetRef;
-        use crate::sim::mission::{MissionId, MissionType};
-        let Some(actor) = self.actor else {
-            return Ok(());
-        };
         for execution in state
             .match_state
             .match_diagnostics
             .take_command_observations()?
         {
-            if execution.actor != Some(actor) {
-                continue;
-            }
-            let (input, target) =
-                if let Some(command) = MegaMissionRecord::decode(&execution.record) {
-                    let MegaMissionOrder::Move { target_x, target_y } = command.order else {
-                        continue;
-                    };
-                    (
-                        "tactical Move",
-                        Some((u16::try_from(target_x)?, u16::try_from(target_y)?)),
-                    )
-                } else if StopRecord::decode(&execution.record).is_some() {
-                    ("Stop", None)
-                } else {
-                    continue;
-                };
-            let Some(action) = self
-                .actions
-                .iter_mut()
-                .find(|action| action["input"] == input)
-            else {
-                continue;
-            };
-            let issued = u32::try_from(
-                action["native_frame"]
+            self.observe_simple_input_application(frame, execution)?;
+        }
+        if self.ai.is_some() {
+            for action in &self.actions {
+                let issued = action["native_frame"]
                     .as_u64()
-                    .context("input issue frame")?,
-            )?;
-            ensure!(
-                execution.applied,
-                "solo AI {input} receiver rejected actor {actor}"
-            );
-            ensure!(
-                action.get("application_frame").is_none(),
-                "duplicate solo AI {input} application"
-            );
-            // The callback records the frame before its commit; the next
-            // presented frame is normally one higher. No render-frame or
-            // movement observation stands in for this actual dispatch.
-            let delay = execution
-                .frame
-                .checked_sub(issued)
-                .context("input applied before its click")?;
-            ensure!(
-                delay <= SOLO_AI_INPUT_BOUND_FRAMES,
-                "solo AI {input} applied {delay} native frames after click at {issued}; scheduled={}, applied={}",
-                execution.record.frame_stamp(),
-                execution.frame
-            );
-            if let Some((x, y)) = target {
+                    .context("input issue frame")?;
                 ensure!(
-                    action["target"] == json!([x, y]),
-                    "Move receiver target differs from tactical click"
-                );
-                let moving = MissionId::from_known(MissionType::Move).raw();
-                ensure!(
-                    (execution.destination == Some(NavTargetRef::cell(x, y))
-                        && execution
-                            .mission
-                            .is_some_and(|(current, queued)| current == moving || queued == moving))
-                        || (execution.cell == Some((x, y)) && execution.destination.is_none()),
-                    "solo AI Move receiver did not install or reach the clicked destination"
-                );
-            } else {
-                ensure!(
-                    execution.mission.is_some() && execution.destination.is_none(),
-                    "solo AI Stop receiver retained a destination"
+                    action.get("application_frame").is_some()
+                        || u64::from(frame) <= issued + u64::from(SOLO_AI_INPUT_BOUND_FRAMES),
+                    "solo AI {} has no receiver application within {SOLO_AI_INPUT_BOUND_FRAMES} native frame of click at {issued}; observed frame {frame}",
+                    action["input"]
                 );
             }
-            action["application_frame"] = json!(execution.frame);
-            action["application_observed_at_frame"] = json!(frame);
-            action["scheduled_frame"] = json!(execution.record.frame_stamp());
-            action["delay_frames"] = json!(delay);
-            action["applied"] = json!(execution.applied);
-            action["receiver"] = json!({"destination":execution.destination,
-                "cell":execution.cell,"mission":execution.mission});
-            action["timing"] = json!(execution.timing.as_ref().map(|timing| json!({
-                "fps":timing.fps,"frame_send_rate":timing.frame_send_rate,"max_ahead":timing.max_ahead})));
         }
-        for action in &self.actions {
-            let issued = action["native_frame"]
-                .as_u64()
-                .context("input issue frame")?;
-            ensure!(
-                action.get("application_frame").is_some()
-                    || u64::from(frame) <= issued + u64::from(SOLO_AI_INPUT_BOUND_FRAMES),
-                "solo AI {} has no receiver application within {SOLO_AI_INPUT_BOUND_FRAMES} native frame of click at {issued}; observed frame {frame}",
-                action["input"]
-            );
-        }
-        if self.stopped
-            && self.actions.len() == 2
-            && self
-                .actions
-                .iter()
-                .all(|action| action.get("application_frame").is_some())
-        {
+        if self.stopped && self.simple_inputs_applied() {
             state
                 .match_state
                 .match_diagnostics
@@ -1448,19 +1554,133 @@ impl LiveLanCapture {
         Ok(())
     }
 
+    fn observe_simple_input_application(
+        &mut self,
+        frame: u32,
+        execution: crate::app::match_diagnostics::CommandExecutionObservation,
+    ) -> Result<()> {
+        use crate::sim::command::{MegaMissionOrder, MegaMissionRecord, StopRecord};
+        use crate::sim::components::NavTargetRef;
+        use crate::sim::mission::{MissionId, MissionType};
+        let Some(actor) = self.actor else {
+            return Ok(());
+        };
+        if execution.actor != Some(actor) {
+            return Ok(());
+        }
+        let (input, target) = if let Some(command) = MegaMissionRecord::decode(&execution.record) {
+            let MegaMissionOrder::Move { target_x, target_y } = command.order else {
+                return Ok(());
+            };
+            (
+                "tactical Move",
+                Some((u16::try_from(target_x)?, u16::try_from(target_y)?)),
+            )
+        } else if StopRecord::decode(&execution.record).is_some() {
+            ("Stop", None)
+        } else {
+            return Ok(());
+        };
+        let Some(action) = self
+            .actions
+            .iter_mut()
+            .find(|action| action["input"] == input)
+        else {
+            return Ok(());
+        };
+        let issued = u32::try_from(
+            action["native_frame"]
+                .as_u64()
+                .context("input issue frame")?,
+        )?;
+        ensure!(
+            execution.applied,
+            "simple {input} receiver rejected actor {actor}"
+        );
+        ensure!(
+            action.get("application_frame").is_none(),
+            "duplicate simple {input} application"
+        );
+        // The production callback records the dispatch frame, before commit.
+        // Online input is scheduled against the relay clock, so neither the
+        // local click frame nor MaxAhead bounds when a catching-up client sees it.
+        let delay = execution
+            .frame
+            .checked_sub(issued)
+            .context("input applied before its click")?;
+        if self.ai.is_some() {
+            ensure!(
+                delay <= SOLO_AI_INPUT_BOUND_FRAMES,
+                "solo AI {input} applied {delay} native frames after click at {issued}; scheduled={}, applied={}",
+                execution.record.frame_stamp(),
+                execution.frame
+            );
+        }
+        if let Some((x, y)) = target {
+            ensure!(
+                action["target"] == json!([x, y]),
+                "Move receiver target differs from tactical click"
+            );
+            let moving = MissionId::from_known(MissionType::Move).raw();
+            ensure!(
+                (execution.destination == Some(NavTargetRef::cell(x, y))
+                    && execution
+                        .mission
+                        .is_some_and(|(current, queued)| current == moving || queued == moving))
+                    || (execution.cell == Some((x, y)) && execution.destination.is_none()),
+                "Move receiver did not install or reach the clicked destination"
+            );
+        } else {
+            ensure!(
+                execution.mission.is_some() && execution.destination.is_none(),
+                "Stop receiver retained a destination"
+            );
+        }
+        action["application_frame"] = json!(execution.frame);
+        action["application_observed_at_frame"] = json!(frame);
+        action["scheduled_frame"] = json!(execution.record.frame_stamp());
+        action["delay_frames"] = json!(delay);
+        action["applied"] = json!(execution.applied);
+        action["receiver"] = json!({"destination":execution.destination,"cell":execution.cell,"mission":execution.mission});
+        action["timing"] = json!(execution.timing.as_ref().map(|timing| json!({
+            "fps":timing.fps,"frame_send_rate":timing.frame_send_rate,"max_ahead":timing.max_ahead})));
+        log::info!(
+            "Simple capture {input}: issued={issued}, scheduled={}, applied={}, observed={frame}",
+            execution.record.frame_stamp(),
+            execution.frame
+        );
+        Ok(())
+    }
+
+    /// An incomplete opt-in latency round. Its partial receipt is still
+    /// written before the capture outcome fails.
+    pub(super) fn measurement_failure(&self) -> Option<String> {
+        self.rounds
+            .as_ref()?
+            .latency_failure()
+            .map(|failure| format!("online latency measurement incomplete in {failure}"))
+    }
+
     pub(super) fn receipt(&self, state: &AppState) -> Result<Value> {
         if let Some(crash) = &self.setup_crash {
             return crash.receipt();
         }
-        if let Some(online) = &self.rounds {
-            return online.receipt(state);
-        }
         if let Some(run) = &self.cooperative {
+            if let Some(online) = &self.rounds {
+                return Ok(json!({"target":format!("{:?}",self.target),
+                    "service_boundary":"two independent App processes; normal WOL UI, deployed HTTPS lobby, authenticated UDP relay; ordinary frame boundary",
+                    "scope":"online Cooperative: C0 campaign in the room's options, the first stage won on both, BC6 Continue, the kept room on the next stage and its loading over the relay; bounded runtime validation, not native parity",
+                    "process_id":std::process::id(),"startup":self.startup,
+                    "online":online.cooperative_receipt(),"cooperative":run.receipt(state)?}));
+            }
             return Ok(json!({"target":format!("{:?}",self.target),
                 "service_boundary":"two independent App processes; real UDP/global/private queues; ordinary frame boundary",
                 "scope":"LAN Cooperative: C0 campaign, B6 Observe by both, BC6 records and the retried mission's loading over real UDP; bounded runtime validation, not native parity",
                 "process_id":std::process::id(),"startup":self.startup,"route":self.route,
                 "cooperative":run.receipt(state)?}));
+        }
+        if let Some(online) = &self.rounds {
+            return online.receipt(state);
         }
         self.round_receipt(state)
     }
@@ -1506,9 +1726,8 @@ impl LiveLanCapture {
                     .is_some_and(|failure| failure.returned()),
             "finished live capture lost its transport"
         );
-        Ok(
-            json!({"target":format!("{:?}",self.target),"service_boundary":if self.ai.is_some() {"one App process; real HTTPS/UDP relay; ordinary frame boundary"} else if self.target.online() {"independent App processes; real HTTPS/UDP relay; ordinary frame boundary"} else {"two independent App processes; real UDP/global/private queues; ordinary frame boundary"},
-            "scope":if self.target.desync_failure() { "real300-frame CRC and strong-hash prefix followed by external scoped FRAMEINFO corruption, actual checksum CE Stop and ordinary LAN lobby cleanup" } else if self.failure.is_some() { "shared 300-frame prefix followed by real peer disappearance and ordinary wait recovery or Quit; bounded runtime validation, not whole-match/native parity" } else if self.target.online() {"observed production match before real outcome; tactical commands and simulation checksums"} else if self.battle.is_some() { "kick/rejoin, Battle opening, paid GI rally/combat, paid GAPILE repair and sale with an unfinished Infantry queue, natural crew, refunds and cleanup, then former-foundation Move; bounded runtime validation, not whole-match/native parity" } else { "kick/rejoin, 300 native frames and local Move/Stop; bounded runtime validation, not whole-match/native parity" },
+        let mut receipt = json!({"target":format!("{:?}",self.target),"service_boundary":if self.ai.is_some() {"one App process; real HTTPS/UDP relay; ordinary frame boundary"} else if self.target.online() {"independent App processes; real HTTPS/UDP relay; ordinary frame boundary"} else {"two independent App processes; real UDP/global/private queues; ordinary frame boundary"},
+            "scope":if self.target.desync_failure() { "real300-frame CRC and strong-hash prefix followed by external scoped FRAMEINFO corruption, actual checksum CE Stop and ordinary LAN lobby cleanup" } else if self.failure.is_some() { "shared 300-frame prefix followed by real peer disappearance and ordinary wait recovery or Quit; bounded runtime validation, not whole-match/native parity" } else if self.target.online() {"observed production match before real outcome; tactical commands and simulation checksums"} else if self.battle.is_some() { "Battle opening, paid GI rally/combat, paid GAPILE repair and sale with an unfinished Infantry queue, natural crew, refunds and cleanup, then former-foundation Move; bounded runtime validation, not whole-match/native parity" } else { "300 native frames and local Move/Stop; bounded runtime validation, not whole-match/native parity" },
             "process_id":std::process::id(),
             "loading_progress":crate::app::diagnostics::shell_capture::loading_runtime::progress_receipt(state)?,
             "participant_count":self.startup.as_ref().and_then(|startup|startup["sources"].as_array()).map_or(self.expected_players,Vec::len),
@@ -1518,16 +1737,16 @@ impl LiveLanCapture {
             "failure":self.failure.as_ref().map(|failure| failure.receipt()),"mass_input":self.mass.as_ref().map(mass::MassInput::receipt),
             "ai_activity":self.ai.as_ref().map(AiActivity::receipt).transpose()?,
             "solo_ai_input_bound_native_frames":self.ai.as_ref().map(|_| SOLO_AI_INPUT_BOUND_FRAMES),
-            "kick_observed":self.kick_observed,
             "production_broadcast":self.config.as_ref().map(|config|matches!(config.transport,LiveLanTransport::ProductionBroadcast)),
             "bind":self.config.as_ref().and_then(|config|config.transport.explicit_endpoints()).map(|(bind,_)|bind.to_string()),"peer":self.config.as_ref().and_then(|config|config.transport.explicit_endpoints()).map(|(_,peer)|peer.to_string()),"startup":self.startup,"map_admission":self.map_admission,
             "native_checksums":checksums,"simulation_hashes":hashes,
             "simulation_hash_interval":crate::sim::replay::PLAY_HASH_INTERVAL.get(),
-            "actions":self.actions,"actor_last_seen":self.actor_last_seen,"observed_movement":self.observed_movement,"stopped_position":self.stopped_position,"route":self.route,
+            "actions":self.actions,"actor_last_seen":self.actor_last_seen,"observed_movement":self.observed_movement,"stopped_position":self.stop_observation.position(),"stop_settled_at_frame":self.stop_observation.settled.as_ref().map(|(frame,_)|frame),"route":self.route,
             "final_native_frame":sim.session().binary_frame(),"checksum_failure":format!("{:?}",sim.pending_network_failure()),
             "sent_commands":live.map(|live| live.sent_commands()),"peers":live.map(|live| live.peers().iter().map(|peer| json!({"house":peer.house_id(),"frame":peer.frame(),"advertised_commands":peer.advertised_commands(),"received_commands":peer.received_commands()})).collect::<Vec<_>>()),
-            "mobile_objects":sim.entities().values_sorted().filter(|entity| matches!(entity.category(), crate::map::entities::EntityCategory::Infantry | crate::map::entities::EntityCategory::Unit)).map(|entity| json!({"id":entity.stable_id(),"owner":sim.interner().resolve(entity.owner()),"position":entity.position,"alive":entity.is_alive()})).collect::<Vec<_>>() }),
-        )
+            "mobile_objects":sim.entities().values_sorted().filter(|entity| matches!(entity.category(), crate::map::entities::EntityCategory::Infantry | crate::map::entities::EntityCategory::Unit)).map(|entity| json!({"id":entity.stable_id(),"owner":sim.interner().resolve(entity.owner()),"position":entity.position,"alive":entity.is_alive()})).collect::<Vec<_>>() });
+        receipt["latency"] = json!(self.latency.as_ref().map(latency::LatencyCapture::receipt));
+        Ok(receipt)
     }
 }
 
@@ -1606,7 +1825,7 @@ fn local_owner(state: &AppState) -> Result<String> {
         .context("network setup")?;
     crate::sim::scenario_bootstrap::normalized_launch_slots(launch)
         .into_iter()
-        .find(|slot| slot.source_human_index == Some(launch.local_player_index))
+        .find(|slot| slot.is_controlled_by(launch.local_player_index))
         .map(|slot| slot.owner_name)
         .context("local normalized House")
 }

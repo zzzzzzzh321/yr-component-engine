@@ -10,9 +10,11 @@
 //! [`LanListState`]).
 
 mod channels;
+mod player_card;
 mod popups;
 
 pub(crate) use channels::*;
+pub(crate) use player_card::*;
 pub(crate) use popups::*;
 
 use crate::ui::lan_shell::{
@@ -36,6 +38,8 @@ pub(crate) const TOURNAMENT: u16 = 0x7A3;
 pub(crate) const NEWS: u16 = 0x7A6;
 pub(crate) const OPTIONS: u16 = 0x61F;
 pub(crate) const PAGE_BUTTON: u16 = 0x5C2;
+/// The online page's Quick Match: the welcome's control.
+pub(crate) const QUICK_MATCH: u16 = crate::ui::wol_shell::QUICK_MATCH;
 pub(crate) const BACK: u16 = 0x686;
 pub(crate) const REFRESH: u16 = 0x55D;
 pub(crate) const EMOTE: u16 = 0x3ED;
@@ -55,14 +59,16 @@ pub(crate) const PLAYER_SORT_ALPHA: u16 = 0x76A;
 pub(crate) const PLAYER_SORT_RANK: u16 = 0x76B;
 pub(crate) const PLAYER_SORT_CLAN: u16 = 0x76C;
 
-/// The modern lobby lists names and ping; legacy service-only columns stay
+/// The modern lobby lists names and ping, and with its one chat lobby it
+/// shows no lobby list; legacy service-only columns and the list stay
 /// available to native diagnostics through the same layout and state owners.
-const LEGACY_SORT_CONTROLS: [u16; 5] = [
+const LEGACY_CONTROLS: [u16; 6] = [
     SORT_GAMETYPE,
     SORT_PASSWORD,
     SORT_RESLOCK,
     PLAYER_SORT_CLAN,
     PLAYER_SORT_RANK,
+    LOBBIES,
 ];
 
 const fn button(
@@ -98,16 +104,31 @@ pub(crate) const PAGE: MenuPageSpec = MenuPageSpec {
     back: button(BACK, 332, "GUI:Back", "STT:WOLLobbyBack"),
 };
 
-/// The normal VERA lobby keeps core play and Options, with Options in the third
-/// row. The retail page above remains the owner for legacy service diagnostics.
+/// The normal VERA lobby keeps core play and Options. It has no welcome
+/// `0x10E`, so its third row is that page's Quick Match (`0x6E0`, its caption
+/// and tooltip) and Options moves to the fourth. The retail page above remains
+/// the owner for legacy service diagnostics.
 const ONLINE_PAGE: MenuPageSpec = MenuPageSpec {
     stacked: &[
         button(CREATE, 111, "GUI:CreateGame", "STT:LobbyButtonNew"),
         button(JOIN, 138, "GUI:JoinGame", "STT:LobbyButtonJoin"),
-        button(OPTIONS, 166, "GUI:WOLOptions", "STT:WOLLobbyOptions"),
+        button(
+            QUICK_MATCH,
+            166,
+            "GUI:QuickMatch",
+            "STT:WOLWelcomeQuickMatch",
+        ),
+        button(OPTIONS, 193, "GUI:WOLOptions", "STT:WOLLobbyOptions"),
     ],
     ..PAGE
 };
+
+/// Record `+0xD5`: the retail page's top panel holds the lobby list. The
+/// online page shows no list, so it keeps the family's warning monitor
+/// there, as the other online pages do.
+pub(crate) fn keeps_top_panel(page: &MenuPageSpec) -> bool {
+    *page != ONLINE_PAGE
+}
 
 /// The game list's header buttons and the player list's, with captions.
 pub(crate) const SORT_BUTTONS: [(u16, &str); 8] = [
@@ -247,6 +268,9 @@ pub(crate) struct WolLobbyLayout {
     pub(crate) sort_buttons: Vec<(u16, RectPx)>,
     pub(crate) observer_image: RectPx,
     pub(crate) observer_toggle: RectPx,
+    /// The modern lobby's right-aligned `GUI:Observe` before the checkbox;
+    /// the retail dialog has no caption there.
+    pub(crate) observer_caption: Option<RectPx>,
     pub(crate) labels: [(&'static str, RectPx); 2],
 }
 
@@ -310,6 +334,7 @@ impl WolLobbyLayout {
             .into(),
             observer_image: px(594, 10, 28, 21),
             observer_toggle: px(576, 13, 16, 17),
+            observer_caption: None,
             labels: [
                 ("GUI:OpenGames", px(50, 10, 201, 17)),
                 ("GUI:Players", px(324, 10, 157, 17)),
@@ -341,6 +366,7 @@ impl WolLobbyLayout {
         .map(|(id, _)| id)
     }
 
+    /// The child's window; a child the page hides has none.
     pub(crate) fn control_rect(&self, id: u16) -> Option<RectPx> {
         if let Some(rect) = self.page.button_rect(id) {
             return Some(rect);
@@ -360,6 +386,7 @@ impl WolLobbyLayout {
             CHAT => self.chat,
             _ => return None,
         })
+        .filter(|rect| rect.w > 0)
     }
 }
 
@@ -491,6 +518,8 @@ pub(crate) enum WolLobbyAction {
     Options,
     /// `0x5C2`: the page dialog `0xCF` (`0x0078BA3E`).
     Page,
+    /// The online page's Quick Match: the Quick Match runner `0x0079FC40`.
+    QuickMatch,
     /// Buddy List, Clan, Tournament and News run dialogs or web pages that
     /// are later chains.
     Unported(u16),
@@ -520,6 +549,8 @@ pub(crate) struct WolLobbyState {
     /// `[0x84A23C]`: the row index of the last Join (initially -1).
     pub(crate) join_row: Option<usize>,
     pub(crate) popup: Option<WolLobbyPopup>,
+    /// VERA's player card over the modern lobby.
+    pub(crate) card: Option<WolPlayerCard>,
     focus_started_at: crate::util::time::Instant,
 }
 
@@ -547,13 +578,14 @@ impl WolLobbyState {
             admitted_name: None,
             join_row: None,
             popup: None,
+            card: None,
             focus_started_at: crate::util::time::Instant::now(),
         }
     }
 
     pub(crate) fn enabled(&self, control: u16) -> bool {
         !self.disabled.contains(&control)
-            && (!self.modern || !LEGACY_SORT_CONTROLS.contains(&control))
+            && (!self.modern || !LEGACY_CONTROLS.contains(&control))
             && (PAGE.button(control).is_none() || self.page_spec().button(control).is_some())
     }
 
@@ -574,7 +606,7 @@ impl WolLobbyState {
         if self.modern {
             layout
                 .sort_buttons
-                .retain(|(id, _)| !LEGACY_SORT_CONTROLS.contains(id));
+                .retain(|(id, _)| !LEGACY_CONTROLS.contains(id));
             let scale = layout.page.scale;
             for (id, rect) in &mut layout.sort_buttons {
                 match *id {
@@ -583,6 +615,18 @@ impl WolLobbyState {
                     _ => {}
                 }
             }
+            // The retail checkbox and eye image sit on two centre lines below
+            // the Players heading, with no caption. Here the checkbox trails
+            // that heading: its 18x18 plate is the control (the plate alone
+            // toggles, as on every shell checkbox), flush with the list's
+            // right edge and centred on the heading's capitals (rows 14..22),
+            // and a caption on the heading's baseline names it. It shows the
+            // state, so the eye image is gone.
+            layout.observer_toggle = scale.scale_rect(RectPx::new(604, 10, 18, 18));
+            layout.observer_caption = Some(scale.scale_rect(RectPx::new(484, 10, 114, 17)));
+            layout.observer_image = RectPx::new(0, 0, 0, 0);
+            // One chat lobby, so no lobby list.
+            layout.lobbies = RectPx::new(0, 0, 0, 0);
         }
         layout
     }
@@ -658,6 +702,9 @@ impl WolLobbyState {
         if let Some(popup) = self.popup.as_mut() {
             popup.cancel_pointer();
         }
+        if let Some(card) = self.card.as_mut() {
+            card.buttons = ShellButtonInteraction::default();
+        }
     }
 
     pub(crate) fn selected_game(&self) -> Option<&WolGameRow> {
@@ -726,6 +773,14 @@ impl WolLobbyState {
             })
             .collect();
         self.player_list.hot_row = None;
+        // A player card closes once its player has left the list.
+        if self
+            .card
+            .as_ref()
+            .is_some_and(|card| !self.player_rows.iter().any(|row| row.name == card.name))
+        {
+            self.card = None;
+        }
     }
 
     /// The selected players' names (`LB_GETSELITEMS`, at most 32).
@@ -739,7 +794,20 @@ impl WolLobbyState {
             .collect()
     }
 
-    pub(crate) fn toggle_player(&mut self, row: usize) {
+    /// A press on a player row: the classic page toggles its selection
+    /// (`LBS_MULTIPLESEL`); VERA's lobby opens the player's card instead and
+    /// returns the name.
+    pub(crate) fn press_player(&mut self, row: usize) -> Option<String> {
+        if !self.modern {
+            self.toggle_player(row);
+            return None;
+        }
+        let name = self.player_rows.get(row)?.name.clone();
+        self.card = Some(WolPlayerCard::new(name.clone()));
+        Some(name)
+    }
+
+    fn toggle_player(&mut self, row: usize) {
         if row >= self.player_rows.len() {
             return;
         }
@@ -797,6 +865,7 @@ impl WolLobbyState {
             }
             OPTIONS => WolLobbyAction::Options,
             PAGE_BUTTON => WolLobbyAction::Page,
+            QUICK_MATCH if self.modern => WolLobbyAction::QuickMatch,
             BUDDY | CLAN | TOURNAMENT | NEWS => WolLobbyAction::Unported(control),
             _ => return None,
         })
@@ -896,9 +965,17 @@ mod tests {
         let mut lobby = WolLobbyState::new(false, true);
         let layout = WolLobbyLayout::new(800, 600, lobby.page_spec());
         let controls: Vec<_> = layout.page.buttons.iter().map(|button| button.id).collect();
-        assert_eq!(controls, [CREATE, JOIN, OPTIONS, BACK]);
+        assert_eq!(controls, [CREATE, JOIN, QUICK_MATCH, OPTIONS, BACK]);
         let retail = WolLobbyLayout::new(800, 600, &PAGE);
-        assert_eq!(layout.control_rect(OPTIONS), retail.control_rect(BUDDY));
+        assert_eq!(layout.control_rect(QUICK_MATCH), retail.control_rect(BUDDY));
+        assert_eq!(layout.control_rect(OPTIONS), retail.control_rect(CLAN));
+        assert_eq!(
+            tooltip_key(QUICK_MATCH, lobby.page_spec()),
+            Some("STT:WOLWelcomeQuickMatch")
+        );
+        // Only the online page offers it; the retail page has its welcome.
+        assert_eq!(WolLobbyState::new(false, false).activate(QUICK_MATCH), None);
+        assert_eq!(retail.control_rect(QUICK_MATCH), None);
         lobby.disable_commands();
         lobby.enable_commands(true);
         lobby.begin_lobby_switch();
@@ -910,17 +987,28 @@ mod tests {
             assert_eq!(tooltip_key(control, lobby.page_spec()), None);
         }
         assert_eq!(lobby.activate(OPTIONS), Some(WolLobbyAction::Options));
+        assert_eq!(
+            lobby.activate(QUICK_MATCH),
+            Some(WolLobbyAction::QuickMatch)
+        );
     }
 
     #[test]
-    fn modern_body_keeps_useful_controls_and_cannot_activate_legacy_headers() {
+    fn modern_body_keeps_useful_controls_and_hides_legacy_ones() {
         let mut lobby = WolLobbyState::new(false, true);
         let layout = lobby.layout(800, 600, false);
         let legacy = WolLobbyState::new(false, false).layout(800, 600, false);
         let headers: Vec<_> = layout.sort_buttons.iter().map(|(id, _)| *id).collect();
         assert_eq!(headers, [SORT_ALPHA, SORT_PING, PLAYER_SORT_ALPHA]);
-        for id in LEGACY_SORT_CONTROLS {
-            let old = legacy.control_rect(id).expect("legacy header");
+        for id in [
+            SORT_GAMETYPE,
+            SORT_PASSWORD,
+            SORT_RESLOCK,
+            PLAYER_SORT_CLAN,
+            PLAYER_SORT_RANK,
+            LOBBIES,
+        ] {
+            let old = legacy.control_rect(id).expect("legacy control");
             assert_eq!(layout.control_rect(id), None);
             assert_ne!(
                 layout.control_at(old.x + old.w / 2, old.y + old.h / 2),
@@ -938,10 +1026,8 @@ mod tests {
             EMOTE,
             GAMES,
             PLAYERS,
-            LOBBIES,
             CHAT_LOG,
             CHAT,
-            OBSERVER_IMAGE,
             OBSERVER_TOGGLE,
         ] {
             let rect = layout.control_rect(id).expect("useful control");
@@ -950,6 +1036,29 @@ mod tests {
                 Some(id)
             );
         }
+    }
+
+    /// The modern Observe checkbox trails the Players heading on its row,
+    /// flush with the player list, with its caption between the two; the
+    /// retail eye image's place left of it takes no clicks.
+    #[test]
+    fn modern_observe_checkbox_trails_the_players_heading() {
+        let layout = WolLobbyState::new(false, true).layout(800, 600, false);
+        let legacy = WolLobbyState::new(false, false).layout(800, 600, false);
+        let (_, heading) = layout.labels[1];
+        let plate = crate::ui::skirmish_shell::checkbox_icon_rect(
+            layout.observer_toggle,
+            layout.page.scale,
+        );
+        assert_eq!(plate, layout.observer_toggle);
+        assert_eq!(plate.y, heading.y);
+        assert_eq!(plate.x + plate.w, layout.players.x + layout.players.w);
+        let caption = layout.observer_caption.expect("caption");
+        assert_eq!(caption.y, heading.y);
+        assert!(heading.x + heading.w <= caption.x && caption.x + caption.w < plate.x);
+        let eye = legacy.observer_image;
+        assert_eq!(layout.control_at(eye.x + 2, eye.y + eye.h / 2), None);
+        assert_eq!(legacy.observer_caption, None);
     }
 
     #[test]
@@ -963,6 +1072,7 @@ mod tests {
             keyed: false,
             limit_icon: None,
             ping: -1,
+            tag: None,
         };
         let mut lobby = WolLobbyState::new(false, false);
         lobby.replace_games(vec![row("a"), row("b")]);
@@ -980,8 +1090,8 @@ mod tests {
             score_icons: Vec::new(),
         };
         lobby.replace_players(vec![player("x"), player("y"), player("z")]);
-        lobby.toggle_player(2);
-        lobby.toggle_player(0);
+        assert_eq!(lobby.press_player(2), None);
+        assert_eq!(lobby.press_player(0), None);
         assert_eq!(lobby.private_targets(), ["x", "z"]);
         lobby.replace_players(vec![
             player("z"),
@@ -999,6 +1109,30 @@ mod tests {
 
         lobby.replace_players(vec![player("y")]);
         assert!(lobby.private_targets().is_empty());
+    }
+
+    /// VERA's lobby opens a player's card where the classic page selects the
+    /// name for private chat; the card closes once its player has left.
+    #[test]
+    fn a_modern_press_opens_the_players_card_until_they_leave() {
+        let player = |name: &str| WolPlayerRow {
+            name: name.into(),
+            icon: None,
+            clan: None,
+            rank: None,
+            score_icons: Vec::new(),
+        };
+        let mut lobby = WolLobbyState::new(false, true);
+        lobby.replace_players(vec![player("Tanya"), player("Boris")]);
+        assert_eq!(lobby.press_player(1).as_deref(), Some("Boris"));
+        assert!(lobby.private_targets().is_empty());
+        lobby.replace_players(vec![player("Boris"), player("Natasha")]);
+        assert_eq!(
+            lobby.card.as_ref().map(|card| card.name.as_str()),
+            Some("Boris")
+        );
+        lobby.replace_players(vec![player("Natasha")]);
+        assert!(lobby.card.is_none());
     }
 
     #[test]

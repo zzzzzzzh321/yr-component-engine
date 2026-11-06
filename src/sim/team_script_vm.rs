@@ -474,8 +474,16 @@ impl TeamAiInstallDiagnostic {
         }
     }
 
+    /// A fixed-AIMD resolution loss refuses the install, except an AITrigger
+    /// naming an absent TeamType. AITriggerTypeClass::Read_INI (`0x0041F580`)
+    /// looks the name up with TeamTypeClass::Find (`0x006F0FC0`, call at
+    /// `0x0041F665`), which returns null without allocating, and keeps the
+    /// trigger; Is_Eligible (`0x0041E720`) then rejects a null primary team at
+    /// `0x0041E754`. Mental Omega 3.3.6's AIMO ships one such trigger
+    /// (`FOETR176LB-G` -> `FOETT176LB-G`).
     pub(crate) fn is_fixed_source_refusal(&self) -> bool {
         self.source() == TeamAiDefinitionSource::FixedAimd
+            && !matches!(self, Self::MissingAiTriggerTeamType { .. })
     }
 }
 
@@ -547,6 +555,12 @@ impl From<crate::sim::combat::TargetKind> for TeamTarget {
 pub struct TeamScriptState {
     id: u64,
     owner: InternedId,
+    /// Team+30, Script_Scout6EE800's selected House. Constructor6E8AB0
+    /// clears it; Load6EC51E..527 fixes its pointer. It persists across
+    /// action visits. Houses never retire during a Rust scenario; a new
+    /// scenario replaces both registries, so entity-u64 expiry cannot alias it.
+    #[serde(default)]
+    scout_house: Option<InternedId>,
     team_type_id: Option<InternedId>,
     task_force_id: Option<InternedId>,
     script_id: InternedId,
@@ -748,8 +762,6 @@ pub struct TeamScriptVm {
     task_force_order: Vec<InternedId>,
     team_types: BTreeMap<InternedId, TeamTypeDefinition>,
     #[serde(default)]
-    team_type_order: Vec<InternedId>,
-    #[serde(default)]
     team_type_ini: BTreeMap<InternedId, TeamTypeIniMetadata>,
     #[serde(default)]
     ai_triggers: BTreeMap<InternedId, TeamAiTriggerDefinition>,
@@ -797,9 +809,6 @@ impl TeamScriptVm {
     }
 
     pub fn register_team_type(&mut self, definition: TeamTypeDefinition) {
-        if !self.team_types.contains_key(&definition.id) {
-            self.team_type_order.push(definition.id);
-        }
         self.team_type_ini.entry(definition.id).or_default();
         self.team_types.insert(definition.id, definition);
     }
@@ -1072,10 +1081,10 @@ impl TeamScriptVm {
         self.rejoin_team.retain(|_, team| *team != team_id);
     }
 
-    /// `entity_id`'s team (Foot `+0x5D4`), if any, is leaving the map
-    /// (`TeamClass+0x82`): Fly's playfield latch writes it for a retreating
-    /// aircraft and its passengers leaving the map (`0x004CD59F`,
-    /// `0x004CD5CC`).
+    /// Latch TeamClass+0x82 for `entity_id`'s current team (Foot+0x5D4),
+    /// consumed by the empty-team event23 predicate. InfantryAI51BE3E..51BE52
+    /// writes it from retained playfield membership; Fly's latch also writes
+    /// it for retreating aircraft/passengers (`0x004CD59F`, `0x004CD5CC`).
     pub(crate) fn mark_member_team_leaving_map(&mut self, entity_id: u64) {
         if let Some(team) = self
             .member_team
@@ -1267,6 +1276,7 @@ impl TeamScriptState {
         Self {
             id,
             owner,
+            scout_house: None,
             team_type_id,
             task_force_id,
             script_id,
@@ -1366,6 +1376,10 @@ impl TeamScriptVm {
             team.task_force_id.hash(hasher);
             team.script_id.hash(hasher);
             team.owner.hash(hasher);
+            if let Some(house) = team.scout_house {
+                b"team-scout-house-v1".hash(hasher);
+                house.hash(hasher);
+            }
             team.cursor.hash(hasher);
             team.advance_pending.hash(hasher);
             // The retired test-only wait counter, always 0.
@@ -1616,10 +1630,6 @@ pub(crate) fn join_team_for_test(
 }
 
 #[cfg(test)]
-mod type_conversion_tests;
-#[cfg(test)]
-mod sdk_type_conversion_tests;
-#[cfg(test)]
 mod firesale_retail_tests;
 #[cfg(test)]
 mod group_recruitment_tests;
@@ -1633,6 +1643,10 @@ mod path_threat_input_tests;
 mod recruit_oracle_tests;
 #[cfg(test)]
 pub(crate) mod reinforcements_tests;
+#[cfg(test)]
+mod sdk_type_conversion_tests;
+#[cfg(test)]
+mod type_conversion_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1908,9 +1922,8 @@ mod tests {
         assert!(diagnostics.is_empty());
         assert_eq!(vm.registry_counts(), (1, 1, 2, 1));
         assert_eq!(
-            vm.team_type_order()
-                .iter()
-                .map(|id| interner.resolve(*id))
+            crate::sim::trigger_runtime::RuntimeDefinitions::read_teams(&registry)
+                .team_type_ids()
                 .collect::<Vec<_>>(),
             ["TT1", "TT2"]
         );
@@ -2003,7 +2016,6 @@ mod tests {
         let encoded = serde_json::to_string(&vm).unwrap();
         let restored: TeamScriptVm = serde_json::from_str(&encoded).unwrap();
         assert_eq!(restored.registry_counts(), vm.registry_counts());
-        assert_eq!(restored.team_type_order(), vm.team_type_order());
         assert_eq!(restored.ai_trigger_order(), vm.ai_trigger_order());
         assert_eq!(
             restored.ai_trigger(interner.get("AT").unwrap()),
@@ -2502,7 +2514,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires extracted retail rulesmd.ini and aimd.ini"]
+    #[ignore = "requires VERA20K_RETAIL_AIMD and VERA20K_RETAIL_RULESMD naming extracted retail INIs"]
     fn gsi_04_05_retail_aimd_installs_all_resolved_definitions_without_teams() {
         use crate::rules::ini_parser::IniFile;
 
@@ -2544,8 +2556,8 @@ mod tests {
             12
         );
         let zone_rows = vm
-            .team_type_order()
-            .iter()
+            .team_types
+            .keys()
             .map(|id| {
                 let team_type = vm.team_type(*id).expect("ordered TeamType");
                 format!(

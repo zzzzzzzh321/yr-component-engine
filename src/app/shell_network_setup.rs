@@ -5,25 +5,31 @@
 //! `wol`; every shared helper branches on GameMode like the native ones.
 
 mod actions;
+pub(crate) mod bans;
 pub(crate) mod agreement;
 mod cooperative;
-pub(crate) use cooperative::chooser_rows as cooperative_chooser_rows;
+pub(crate) use cooperative::{
+    CooperativeResume, chooser_rows as cooperative_chooser_rows, resume as resume_cooperative,
+};
 pub(crate) mod maps;
 mod service;
 pub(crate) use service::{
     HostOptions, NetworkSetupEvent, accept_network_map_source, accept_network_random_map_preview,
-    fail_go_handoff, invalidate_network_agreement, poll, prepare_lan_guest_handoff, service_event,
-    set_network_map_progress,
+    fail_go_handoff, invalidate_network_agreement, poll, prepare_lan_guest_handoff,
+    refuse_local_acceptance, service_event, set_network_map_progress,
 };
 pub(crate) mod view;
 mod wol;
-pub(crate) use actions::{apply_action, commit_map_selection, commit_start, open_choose_map, request_external_start};
+pub(crate) use actions::{
+    apply_action, begin_external_lan_go, commit_map_selection, commit_start, open_choose_map,
+    request_external_start,
+};
 pub(crate) use view::view;
 pub(crate) use wol::{
-    WolStartUser, guest_users_listed, kicked_key, local_left, map_status, play_player_left,
-    player_choices, player_ready, preview_request, resident_seed, send_first_choices, user_joined,
-    user_kicked, user_left, verify, verify_cursor_moved, verify_layout, verify_mouse,
-    verify_poll_scroll,
+    WolStartUser, balance_teams, guest_users_listed, kicked_key, local_left, map_status,
+    play_player_left, player_choices, player_ready, preview_request, resident_seed,
+    send_first_choices, user_joined, user_kicked, user_left, verify, verify_cursor_moved,
+    verify_layout, verify_mouse, verify_poll_scroll,
 };
 
 use super::{App, AppState};
@@ -78,6 +84,9 @@ pub(crate) enum NetworkSetupRequest {
     RequestAcceptance,
     Kick {
         name: String,
+        /// VERA's rooms: the host's own kick, which keeps the player out of
+        /// the room for five minutes. Joins the host turns away do not.
+        keep_out: bool,
     },
     Leave,
     Chat(Vec<u16>),
@@ -125,6 +134,11 @@ pub(crate) struct NetworkSetupProtocol {
     /// run without C2/C9 (`0x007A6208..0x007A6229`, `0x0078A36C..0x0078A386`)
     /// under the runner's `0x117`.
     quick_match: bool,
+    /// An external launch (docs/spawn.md): a launcher formed the room, so
+    /// like Quick Match no setup dialog exists. The relay start handshake
+    /// runs unchanged and Negotiated(0) starts loading directly; a direct
+    /// (LAN) launch runs the LAN GO and its completion starts loading.
+    external: bool,
     /// WOL `00B77DEC`/`00B77E28` after the host's StartGame request, until
     /// the server's OnGameStart rejects it; a matching OnGameStart holds it
     /// (`[0xB77E28] = 2`) until the abort or the match.
@@ -171,6 +185,11 @@ pub(crate) struct NetworkSetupProtocol {
     /// Derived from the same admitted source as the received image.
     received_preview_bounds: Option<crate::map::preview::PreviewSourceBounds>,
     received_preview_count: u32,
+    /// VERA: a kept WOL room came back after BC6's Continue
+    /// (`cooperative::resume`) in place of `+0xAC`'s rematch (`0x005C46E0`),
+    /// which seats both players without a join. The next join is the
+    /// partner coming back to that seat.
+    cooperative_rematch_seat: bool,
     requests: Vec<NetworkSetupRequest>,
 }
 
@@ -334,6 +353,7 @@ impl NetworkSetupProtocol {
         Self {
             locked: false,
             quick_match,
+            external: false,
             wol_start_pending: false,
             online_start_preparing: false,
             ping_deadline: wol_host.then(|| Instant::now() + wol::PING_PERIOD),
@@ -356,6 +376,7 @@ impl NetworkSetupProtocol {
             received_preview: None,
             received_preview_bounds: None,
             received_preview_count: 0,
+            cooperative_rematch_seat: false,
             requests: if wol_host {
                 // C2 0x497: advertisement 78F000, then one ping per user.
                 vec![
@@ -381,6 +402,17 @@ impl NetworkSetupProtocol {
 
     pub(crate) fn start_in_progress(&self) -> bool {
         self.wol_start_pending || self.online_start_preparing
+    }
+
+    /// VERA: the next join is the kept room's partner coming back.
+    pub(crate) fn await_cooperative_rematch_seat(&mut self) {
+        self.cooperative_rematch_seat = true;
+    }
+
+    /// Whether this join is the kept room's partner coming back: only the
+    /// first join after [`Self::await_cooperative_rematch_seat`].
+    pub(crate) fn take_cooperative_rematch_seat(&mut self) -> bool {
+        std::mem::take(&mut self.cooperative_rematch_seat)
     }
 
     pub(crate) fn lan_go_send_pending(&self) -> bool {
@@ -501,6 +533,80 @@ pub(crate) fn quick_match(state: &AppState) -> bool {
         .is_some_and(|protocol| protocol.quick_match)
 }
 
+/// The admitted setup belongs to an external launch, with no dialog.
+pub(crate) fn external(state: &AppState) -> bool {
+    state
+        .frontend
+        .network_setup_protocol
+        .as_ref()
+        .is_some_and(|protocol| protocol.external)
+}
+
+/// The network visit an external launch enters: GameMode 4 (relay) or 3
+/// (direct LAN) with the launcher's canonical session admitted as this
+/// client's setup. Source 0 is the room owner, as in the lobby's
+/// `game_started` users, and the direct host.
+pub(crate) fn accept_external_session(
+    session: &mut crate::app::match_runtime::session::MatchSession,
+    launch: SkirmishLaunchSession,
+    context: crate::app::match_runtime::session::NetworkReturnContext,
+) -> anyhow::Result<()> {
+    let host = launch.local_player_index == 0;
+    session.enter_network(context);
+    session.accept_network_setup(launch, host, None, false)
+}
+
+/// Install an external launch's setup without a dialog, its online start
+/// requests or pings: the launcher already agreed the room.
+pub(crate) fn install_external_setup(
+    state: &mut AppState,
+    launch: SkirmishLaunchSession,
+    context: crate::app::match_runtime::session::NetworkReturnContext,
+) -> anyhow::Result<()> {
+    // The parser resolved the launcher's map beside spawn.ini to a local
+    // path. Participants keep it in different directories, and the world
+    // hashes the map name, so load that file as this client's physical
+    // source under its shared logical name, as a LAN guest's download.
+    let mut launch = launch;
+    let path = launch
+        .selected_map_file
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("external launch has no map"))?;
+    let logical = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("external map has no file name"))?
+        .to_owned();
+    crate::map::source::validate_network_map_name(&logical)?;
+    let loaded = {
+        let root = &state
+            .platform
+            .game_config
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no asset directory"))?
+            .paths
+            .ra2_dir;
+        let assets = state
+            .process_assets
+            .manager()
+            .ok_or_else(|| anyhow::anyhow!("retail assets are unavailable"))?;
+        crate::map::source::load_network_map_ini(root, &path, assets)?
+    };
+    let effective = crate::map::source::effective_network_map_digest(&loaded.ini, false);
+    launch.selected_map_file = Some(logical);
+    accept_external_session(&mut state.match_state.session, launch, context)?;
+    state
+        .match_state
+        .session
+        .accept_external_network_map_source(loaded.source, effective)?;
+    let mut protocol = NetworkSetupProtocol::new(dialog(state), false);
+    protocol.external = true;
+    protocol.ping_deadline = None;
+    protocol.requests.clear();
+    state.frontend.network_setup_protocol = Some(protocol);
+    Ok(())
+}
+
 /// The setup dialog the admitted session shows: GameMode4 is WOL C2/C9.
 /// A white (0xFFFFFFFF) CSF line in the setup chat log: Start refusals and
 /// WOL chat notices.
@@ -516,14 +622,29 @@ fn chat_notice(state: &mut AppState, key: &str, args: &[crate::assets::csf_file:
 }
 
 pub(crate) fn dialog(state: &AppState) -> SetupDialog {
-    let session = &state.match_state.session;
+    let flavor = if state.match_state.session_mode() == SessionMode::Wol {
+        SetupFlavor::Wol
+    } else {
+        SetupFlavor::Lan
+    };
+    setup_dialog(state, state.match_state.session.host(), flavor)
+}
+
+/// The setup dialog this process presents. Only native diagnostics keep the
+/// guest's Accept and the WOL Page buttons (`SetupDialog::modern`).
+pub(crate) fn setup_dialog(state: &AppState, host: bool, flavor: SetupFlavor) -> SetupDialog {
+    let modern = match flavor {
+        SetupFlavor::Wol => state
+            .frontend
+            .wol
+            .as_ref()
+            .is_some_and(|visit| visit.modern_ui()),
+        SetupFlavor::Lan => !state.frontend.native_shell_ui,
+    };
     SetupDialog {
-        host: session.host(),
-        flavor: if state.match_state.session_mode() == SessionMode::Wol {
-            SetupFlavor::Wol
-        } else {
-            SetupFlavor::Lan
-        },
+        host,
+        flavor,
+        modern,
     }
 }
 
@@ -545,13 +666,24 @@ fn open_service_lobby(state: &mut AppState, dialog: SetupDialog) {
     }
 }
 
+fn abandon_host_setup(state: &mut AppState, dialog: SetupDialog) {
+    if dialog.wol() {
+        crate::app::shell_wol::lobby::host_setup_left(state);
+    }
+    open_service_lobby(state, dialog);
+}
+
 impl App {
     /// BC/C2 creation: restore the service's own setup profile. LAN BC then
     /// consumes Main -> CRT seed initialization at005DEC3B..5C; C2 draws no
     /// RNG (no 65C7E0/7CB49D/7CB4AA callee in 0078F7F0). Assignment still
     /// uses the retained Scenario cursor; gameplay reseeds both streams later
     /// at0052E619.
-    pub(crate) fn open_host_setup(state: &mut AppState, observe: bool) {
+    ///
+    /// Returns whether the setup opened. VERA: map archives are optional, so a
+    /// catalog can have no eligible map; a WOL host then leaves the channel it
+    /// just created.
+    pub(crate) fn open_host_setup(state: &mut AppState, observe: bool) -> bool {
         let dialog = SetupDialog {
             host: true,
             ..dialog(state)
@@ -587,8 +719,8 @@ impl App {
             Ok(value) => value,
             Err(error) => {
                 log::error!("Could not restore network setup: {error:#}");
-                open_service_lobby(state, dialog);
-                return;
+                abandon_host_setup(state, dialog);
+                return false;
             }
         };
         if let Err(error) = install_setup(
@@ -599,8 +731,8 @@ impl App {
             Some(if observe { 0 } else { 7 }),
         ) {
             log::error!("Could not admit local network setup: {error:#}");
-            open_service_lobby(state, dialog);
-            return;
+            abandon_host_setup(state, dialog);
+            return false;
         }
         // The WOL C2's own +20/+18 calls (0x791293, 0x7912A3) belong to a
         // later chain; LAN BC runs them here.
@@ -628,6 +760,7 @@ impl App {
             .session
             .set_network_player_ready(0, true)
             .expect("BC owns the local host node");
+        true
     }
 
     /// Packet7 closes BB before full host options arrive. Retained options
@@ -656,13 +789,11 @@ impl App {
         launch.rebuild_house_roster();
         // The packet7 peer's identity belongs to the service envelope until
         // the original type3 roster admission; it is not a fabricated node.
+        let dialog = setup_dialog(state, false, SetupFlavor::Lan);
         if let Err(error) = install_setup(
             state,
             launch,
-            SetupDialog {
-                host: false,
-                flavor: SetupFlavor::Lan,
-            },
+            dialog,
             [NetworkVacancy::Open; crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
             acceptance.observer_row,
         ) {
@@ -701,7 +832,7 @@ pub(crate) fn install_setup(
     state
         .match_state
         .session
-        .accept_network_setup(launch, host, observer_row)?;
+        .accept_network_setup(launch, host, observer_row, dialog.modern)?;
     let quick_match = dialog.wol() && crate::app::shell_wol::quick_match::mode_active(state);
     if dialog.wol() {
         let room = crate::app::shell_wol::lobby::room(state);
@@ -781,6 +912,15 @@ pub(crate) fn install_setup(
                     .set_network_vacancy(row as u8, vacancy)?;
             }
         }
+        // A VERA room holds the people its host allowed at Create Game and
+        // opens its spectator row if spectators may join, but for Quick
+        // Match's matchbot game.
+        if dialog.modern && !quick_match {
+            let limits = state.frontend.room_limits;
+            let session = &mut state.match_state.session;
+            session.set_network_people_limit(limits.players)?;
+            session.set_network_spectators(limits.spectators)?;
+        }
         if let Some(file) = state
             .match_state
             .session
@@ -796,13 +936,15 @@ pub(crate) fn install_setup(
     }
     state.frontend.lan = None;
     let mut setup_ui = MultiplayerSetupState::default();
-    if let Some(row) = state
-        .match_state
-        .session
-        .network_setup()
-        .and_then(|launch| launch.local_player().raw_slot_index)
+    // VERA's rooms list their players first, from the first page.
+    if !dialog.modern
+        && let Some(row) = state
+            .match_state
+            .session
+            .network_setup()
+            .and_then(|launch| launch.local_player().raw_slot_index)
     {
-        setup_ui.show_row(usize::from(row));
+        setup_ui.show_row(usize::from(row), dialog.rows_per_page());
     }
     state.frontend.multiplayer_setup = Some(setup_ui);
     state.frontend.network_setup_protocol = Some(NetworkSetupProtocol::new(dialog, quick_match));
@@ -873,7 +1015,7 @@ pub(crate) fn remember_setup(state: &mut AppState) {
     if session.host()
         && let Some(launch) = session.network_setup()
     {
-        let vacancies = std::array::from_fn(|row| session.network_vacancy(row as u8));
+        let vacancies = session.network_remembered_vacancies();
         let choices = std::array::from_fn(|row| session.network_row_choices(row as u8));
         state
             .frontend
@@ -964,7 +1106,7 @@ pub(crate) fn return_after_match(state: &mut AppState) {
         crate::app::shell_wol::reenter_after_match(state);
     } else {
         crate::app::lan_service::restart_lobby_visit(state);
-        App::open_lan_lobby(state);
+        App::reopen_lan_room(state);
     }
 }
 
@@ -1015,6 +1157,42 @@ fn leave_setup(state: &mut AppState) -> SetupDialog {
     dialog
 }
 
+/// VERA asks first: a guest's online room offers its map before the
+/// transfer downloads it (`shell_wol::live_service::maps`).
+pub(crate) fn offer_missing_map(state: &mut AppState, name: String, message: String) {
+    if let Some(ui) = state.frontend.multiplayer_setup.as_mut() {
+        ui.map_offer = Some(crate::ui::multiplayer_setup::MapOffer {
+            name,
+            message,
+            downloading: false,
+            opened: Instant::now(),
+        });
+        // The offer takes the pointer from a row's open list too.
+        ui.cancel_pointer();
+        ui.popup.close();
+    }
+    state.platform.window.request_redraw();
+}
+
+/// The offer's map arrived, changed, or its transfer ended.
+pub(crate) fn close_missing_map_offer(state: &mut AppState) {
+    if let Some(ui) = state.frontend.multiplayer_setup.as_mut()
+        && ui.map_offer.take().is_some()
+    {
+        state.platform.window.request_redraw();
+    }
+}
+
+/// Whether the player pressed Download; the offer then shows the download.
+pub(crate) fn missing_map_download_agreed(state: &AppState) -> bool {
+    state
+        .frontend
+        .multiplayer_setup
+        .as_ref()
+        .and_then(|ui| ui.map_offer.as_ref())
+        .is_some_and(|offer| offer.downloading)
+}
+
 /// The shared CE owner admitted its OK/default key.
 pub(crate) fn acknowledge_notice(state: &mut AppState) {
     if let Some(ui) = state.frontend.multiplayer_setup.as_mut() {
@@ -1045,6 +1223,7 @@ mod tests {
             SetupDialog {
                 host: true,
                 flavor: SetupFlavor::Wol,
+                modern: false,
             },
             false,
         );
@@ -1066,6 +1245,7 @@ mod tests {
             SetupDialog {
                 host: false,
                 flavor: SetupFlavor::Wol,
+                modern: false,
             },
             false,
         );

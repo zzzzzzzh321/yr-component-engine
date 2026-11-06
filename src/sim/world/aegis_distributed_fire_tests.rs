@@ -23,12 +23,12 @@ fn eligible_air_target(sim: &Simulation, rules: &RuleSet, aegis: u64) -> Option<
         LineOfFireInputs {
             overlay_grid: sim.overlay_grid.as_ref(),
             overlay_registry: None,
-            alliances: Some(sim.house_alliances.as_map()),
+            alliances: Some(&sim.house_alliances),
         },
         Some(sim),
         None,
     )
-    .target()
+    .object()
 }
 
 struct GuardScene {
@@ -68,6 +68,9 @@ impl GuardScene {
             let id = sim
                 .spawn_object_at_height("ZEP", "Russians", x, y, 0, 6, &rules)
                 .expect("retail Kirov high Unlimbo");
+            // The player has seen the Kirov, a VehicleType: the campaign scan
+            // gate needs +0x41B.
+            crate::sim::arena_fixture::discover(&mut sim, id);
             let actor = sim.substrate.entities.get(id).unwrap();
             assert!(!actor.lifecycle.in_limbo());
             assert!(actor.lifecycle.cell_marked());
@@ -504,13 +507,10 @@ fn distributed_scan_preserves_retained_bucket_order_across_reentry_and_movement(
         return;
     };
     let scan = |scene: &mut GuardScene| {
-        scene.sim.greatest_threat_represented(
-            &scene.rules,
-            None,
-            scene.aegis,
-            ScanMission::Guard,
-            None,
-        );
+        scene
+            .sim
+            .greatest_threat_represented(&scene.rules, None, scene.aegis, ScanMission::Guard, None)
+            .and_then(crate::sim::combat::TargetKind::object_id);
         scene
             .sim
             .substrate
@@ -743,7 +743,8 @@ fn distributed_collection_flat_entry_clears_but_class_early_return_preserves() {
     source.remember_distributed_fire_target(target);
     scene
         .sim
-        .greatest_threat_represented(&scene.rules, None, scene.aegis, ScanMission::Hunt, None);
+        .greatest_threat_represented(&scene.rules, None, scene.aegis, ScanMission::Hunt, None)
+        .and_then(crate::sim::combat::TargetKind::object_id);
     let source = scene.sim.substrate.entities.get(scene.aegis).unwrap();
     assert!(
         source.distributed_fire_candidates().is_empty(),
@@ -768,7 +769,7 @@ fn distributed_collection_flat_entry_clears_but_class_early_return_preserves() {
         target: Some(TargetKind::Entity(victim)),
         score: 7,
     };
-    let actor = sim.substrate.entities.get_mut(cow).unwrap();
+    let actor = sim.substrate.entities.get(cow).unwrap();
     // Retail ENGINEER is armed by Primary=DefuseKit (and has secondary
     // VirtualScanner), so it correctly reaches the base scan. COW supplies
     // the actual51E288..51E2C4 early return without altering weapon tuning.
@@ -781,8 +782,15 @@ fn distributed_collection_flat_entry_clears_but_class_early_return_preserves() {
         actor.category(),
         crate::map::entities::EntityCategory::Infantry
     );
-    assert!(!crate::sim::combat::combat_weapon::is_armed(actor, kind));
+    assert!(!crate::sim::combat::combat_weapon::is_armed(
+        actor,
+        kind,
+        &sim.substrate.entities,
+        &rules,
+        &sim.interner
+    ));
     assert!(!kind.infiltrate && !kind.vehicle_thief);
+    let actor = sim.substrate.entities.get_mut(cow).unwrap();
     actor.replace_distributed_fire_candidates(vec![retained]);
     actor.remember_distributed_fire_target(TargetKind::Entity(victim));
     let outcome = crate::sim::combat::combat_targeting::greatest_threat_for_entity(
@@ -805,7 +813,8 @@ fn distributed_collection_flat_entry_clears_but_class_early_return_preserves() {
         "native unarmed Infantry class override returns before base"
     );
     assert_eq!(
-        sim.greatest_threat_represented(&rules, None, cow, ScanMission::Guard, None),
+        sim.greatest_threat_represented(&rules, None, cow, ScanMission::Guard, None)
+            .and_then(crate::sim::combat::TargetKind::object_id),
         None
     );
     let actor = sim.substrate.entities.get(cow).unwrap();

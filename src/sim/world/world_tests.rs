@@ -50,7 +50,8 @@ fn make_test_entity(type_id: &str, category: EntityCategory) -> MapEntity {
         recruitable_a: true,
         recruitable_b: true,
         group: -1,
-        structure_upgrades: [None, None, None],
+        follows: None,
+        structure_columns: Default::default(),
         structure_ai_sellable: false,
         structure_ai_repairable: false,
         structure_online: true,
@@ -173,12 +174,20 @@ fn game_speed_transition_applies_at_ingress_before_triggers_and_hash() {
     assert_eq!(control.session.game_options().game_speed, 1);
     assert_ne!(result.state_hash, control_result.state_hash);
     assert_eq!(result.state_hash, Some(sim.state_hash()));
-    assert!(sim.take_master_frame_test_trace().starts_with(&[
-        MasterFrameTestRung::SessionCommands,
-        MasterFrameTestRung::Triggers,
-        MasterFrameTestRung::TeamScript,
-        MasterFrameTestRung::LogicVector,
-    ]));
+    let order = [
+        FrameStep::SessionCommands,
+        FrameStep::Triggers,
+        FrameStep::TeamScript,
+        FrameStep::DiskLasers,
+        FrameStep::LightningStorm,
+        FrameStep::LogicVector,
+    ];
+    let trace = sim.take_frame_step_trace();
+    let visited: Vec<_> = trace
+        .into_iter()
+        .filter(|step| order.contains(step))
+        .collect();
+    assert!(visited.starts_with(&order));
 }
 
 #[test]
@@ -478,6 +487,34 @@ fn game_speed_ingress_uses_house_order_and_survives_same_frame_exit() {
     assert_eq!(result.state_hash, Some(sim.state_hash()));
 }
 
+/// A WOL tournament player's EXIT runs DestroyConnection(house, 0) on every
+/// remaining peer (`0x0064C9B1`), whose tail kills the leaver's House
+/// (`0x005DA8F7..0x005DA90F`). A replay runs only the shared EXIT.
+#[test]
+fn a_tournament_players_exit_flags_their_house_on_the_remaining_peers() {
+    let (mut sim, local) = game_speed_command_sim();
+    let leaver = sim.interner.intern("Leaver");
+    sim.houses
+        .register(crate::sim::house_state::HouseState::new(
+            leaver, 1, None, true, 0, 10,
+        ));
+    sim.session
+        .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::Wol);
+    sim.install_wol_start(1, Default::default());
+    sim.session.set_current_house_for_test(Some(local));
+
+    let exit = CommandEnvelope::new(leaver, 1, Command::ExitMatch);
+    let result = sim.advance_tick(&[exit], None, None, None, 67);
+
+    assert_eq!(result.executed_commands, 1);
+    let house = sim.houses.get(&leaver).unwrap();
+    assert!(house.is_to_die() || house.has_lost());
+    assert_eq!(
+        sim.take_departed_senders(),
+        [sim.houses.index_of(leaver).unwrap() as i8]
+    );
+}
+
 #[test]
 fn network_modal_does_not_execute_game_speed_ingress() {
     let (mut sim, owner) = game_speed_command_sim();
@@ -511,9 +548,6 @@ fn animation_boundary_fixture() -> (Simulation, RuleSet) {
     let mut rules =
         RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).expect("animation fixture rules");
     rules.install_art_data(ArtRegistry::from_ini(&art));
-    rules.bind_animation_sequences(
-        &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-    );
     let id = sim
         .spawn_object("E1", "Americans", 4, 4, 0, &rules)
         .expect("living infantry");
@@ -867,6 +901,66 @@ Rate=120
     );
 }
 
+/// Hover's wake (`HoverLocomotionClass::Process`, `0x00514A85..0x00514AC3`)
+/// starts at the Foot's whole Location (`+0x9C`), Z included: the Anim's
+/// Unlimbo (`0x005F4EC0`) keeps it through `AnimTypeClass` vt+0x6C
+/// (`0x0041CF80`) and `SetLocation` (`0x005F6940`). A hovering hull's wake
+/// starts at the hull's height, not on the water below it.
+#[test]
+fn a_hover_wake_starts_at_the_hulls_height() {
+    use crate::sim::movement::hover::HoverRuntime;
+    use crate::util::native_x87::NativeF64Bits;
+    let ini = IniFile::from_str(
+        "[General]\nWake=WAKE1\n\
+         [InfantryTypes]\n[VehicleTypes]\n0=HOVR\n[AircraftTypes]\n[BuildingTypes]\n\
+         [HOVR]\nStrength=300\nArmor=heavy\nSpeed=6\nMovementZone=Amphibious\n\
+         SpeedType=Hover\nLocomotor={4A582742-9839-11d1-B709-00A024DDAFD1}\n",
+    );
+    let art = IniFile::from_str("[WAKE1]\nLayer=ground\nYSortAdjust=-288\nRate=120\n");
+    let mut rules =
+        RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).expect("hover rules should parse");
+    rules.install_art_data(ArtRegistry::from_ini(&art));
+    rules.bind_anim_frame_count_for_test("WAKE1", 15);
+    let mut sim = Simulation::new();
+    let id = sim
+        .spawn_object("HOVR", "Americans", 0, 0, 64, &rules)
+        .expect("spawn hover");
+    // The gate reads the `CellClass+0xEC` mirror; stamp Water on the fixture.
+    let mut terrain = water_terrain(2, 1);
+    for cell in terrain.cells_mut_for_test() {
+        cell.land_type = crate::rules::terrain_rules::LandType::Water.as_index();
+    }
+    sim.resolved_terrain = Some(terrain);
+    let hover = sim.substrate.entities.get_mut(id).expect("hover");
+    let mut locomotor = LocomotorState::for_test_kind(LocomotorKind::Hover);
+    *locomotor.hover_runtime_mut().expect("Hover payload") =
+        HoverRuntime::moving_for_test(Some(DriveCoord::cell(1, 0, 0)), NativeF64Bits::ONE);
+    hover.locomotor = Some(locomotor);
+    // Afloat about HoverHeight's equilibrium above the level-0 water.
+    hover.position.set_exact_z_leptons_for_test(Some(90));
+    let hull = crate::sim::movement::ground_pose::object_location(
+        sim.substrate.entities.get(id).expect("hover"),
+        sim.resolved_terrain.as_ref(),
+    );
+    assert_eq!(hull.z, 90);
+
+    sim.spawn_wakes_for_frame(&rules);
+
+    let wakes: Vec<_> = sim
+        .logic_order()
+        .iter()
+        .filter_map(|id| sim.anim(*id))
+        .filter(|anim| sim.interner.resolve(anim.type_id()) == "WAKE1")
+        .map(|anim| anim.world_coord())
+        .collect();
+    assert_eq!(wakes.len(), 1, "one wake for the moving hover");
+    assert_eq!(
+        (wakes[0].x, wakes[0].y, wakes[0].z),
+        (hull.x, hull.y, hull.z),
+        "the wake starts at the hull, not on the water"
+    );
+}
+
 #[test]
 fn advance_tick_finishes_dying_infantry_from_rules_catalog() {
     let ini = IniFile::from_str(
@@ -883,9 +977,6 @@ fn advance_tick_finishes_dying_infantry_from_rules_catalog() {
     let mut rules =
         RuleSet::from_ini_with_fixed_art_for_test(&ini, &art_ini).expect("dying infantry rules");
     rules.install_art_data(ArtRegistry::from_ini(&art_ini));
-    rules.bind_animation_sequences(
-        &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art_ini),
-    );
     let mut sim = Simulation::new();
     sim.hash_state_every(std::num::NonZeroU64::MIN);
     let id = sim
@@ -2655,13 +2746,14 @@ fn move_command(entity_id: u64, (target_rx, target_ry): (u16, u16)) -> Command {
 /// bridgehead cells.
 const OPEN_SPEED_COSTS: crate::rules::terrain_rules::SpeedCostProfile =
     crate::rules::terrain_rules::SpeedCostProfile {
-        foot: Some(100),
-        track: Some(100),
-        wheel: Some(100),
-        float: Some(100),
-        amphibious: Some(100),
-        float_beach: Some(100),
-        hover: Some(100),
+        foot: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        track: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        wheel: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        amphibious: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        float_beach: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        hover: Some(crate::util::native_x87::NativeF32Bits::ONE),
+        winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
     };
 
 /// A water terrain grid for ship tests: every cell Water land with the Water
@@ -2818,6 +2910,8 @@ fn gsi_04_15_active_tube_leaf_preempts_unit_and_infantry_mission_host() {
         );
         building.lifecycle.set_in_limbo_for_test(false);
         sim.substrate.entities.insert(building);
+        // The player has seen the building: the campaign scan gate needs +0x41B.
+        crate::sim::arena_fixture::discover(&mut sim, 2);
         sim.add_entity_occupancy(2);
         sim.fog = crate::sim::vision::FogState::new(3, 1);
         crate::sim::vision::reveal_radius(&mut sim.fog, owner, 0, 0, 3);
@@ -3140,7 +3234,8 @@ fn structural_bridge_for_fallout(
         cell.bridge_deck_level = ground_level + 4;
         if water_below {
             let costs = SpeedCostProfile {
-                float: Some(100),
+                float: Some(crate::util::native_x87::NativeF32Bits::ONE),
+                winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
                 ..Default::default()
             };
             cell.land_type = LandType::Water.as_index();
@@ -3210,9 +3305,6 @@ fn walking_combat_test_rules() -> RuleSet {
          FireUp=164,6,6\nFireProne=212,6,6\nDie1=56,15,0\n",
     );
     rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
-    rules.bind_animation_sequences(
-        &crate::rules::infantry_sequence::parse_infantry_sequence_registry(&art),
-    );
     rules
 }
 
@@ -3544,6 +3636,9 @@ fn sonic_cell_target_uses_persistent_dummy_gettargetcoords_on_create_and_refresh
 /// (`0x006FA65A`) scans the enemy infantryman into range, and it fires Inviso
 /// bullets that land in each frame's Logic tail until the target dies, then
 /// holds no target.
+// Phobos `ROF.RandomDelay` (`0x006FD0B5`) redraws the full-rearm jitter, so
+// this stock golden only holds without the capability.
+#[cfg(not(feature = "phobos"))]
 #[test]
 fn guard_infantry_acquire_return_fire_and_finish_a_duel() {
     let rules = RuleSet::from_ini(&IniFile::from_str(
@@ -3581,6 +3676,10 @@ fn guard_infantry_acquire_return_fire_and_finish_a_duel() {
     let enemy = sim
         .spawn_object("E1", "Russians", 5, 1, 64, &rules)
         .expect("enemy infantryman");
+    // Both Houses are human, so the campaign scan gate admits each guard's
+    // enemy only as the player's GI (+0x41A) and an enemy it has seen (+0x41B).
+    crate::sim::arena_fixture::own(&mut sim, gi);
+    crate::sim::arena_fixture::discover(&mut sim, enemy);
     sim.path_grid = Some(std::sync::Arc::new(PathGrid::test_all_passable(12, 3)));
     let mut runtime = crate::sim::runtime::SimRuntime::from_simulation(sim);
     runtime.resources.rules = rules;
@@ -4047,8 +4146,8 @@ fn gate_test_rules() -> RuleSet {
 
 #[test]
 fn native_frame_committed_late_gate_captures_pre_increment_frame() {
-    // The native frame is committed LATE, so a Phase-1 consumer sees frame N
-    // during the whole advance. The host duration is deliberately one
+    // The native frame is committed LATE, so every step of the frame sees
+    // frame N during the whole advance. The host duration is deliberately one
     // millisecond: admission, not elapsed time, advances the frame.
 
     let mut sim = Simulation::new();
@@ -5399,6 +5498,7 @@ fn event33_select_command_raises_tags_once_in_payload_order_after_admission() {
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        None,
         &rules,
     );
     sim.classify_map_triggers(&rules);
@@ -5864,7 +5964,8 @@ fn move_event_issuer_does_not_replace_actor_owner() {
             recruitable_a: true,
             recruitable_b: true,
             group: -1,
-            structure_upgrades: [None, None, None],
+            follows: None,
+            structure_columns: Default::default(),
             structure_ai_sellable: false,
             structure_ai_repairable: false,
             structure_online: true,
@@ -6055,7 +6156,8 @@ fn attack_move_fight(rules: &RuleSet) -> Simulation {
                 recruitable_a: true,
                 recruitable_b: true,
                 group: -1,
-                structure_upgrades: [None, None, None],
+                follows: None,
+                structure_columns: Default::default(),
                 structure_ai_sellable: false,
                 structure_ai_repairable: false,
                 structure_online: true,
@@ -6076,7 +6178,8 @@ fn attack_move_fight(rules: &RuleSet) -> Simulation {
                 recruitable_a: true,
                 recruitable_b: true,
                 group: -1,
-                structure_upgrades: [None, None, None],
+                follows: None,
+                structure_columns: Default::default(),
                 structure_ai_sellable: false,
                 structure_ai_repairable: false,
                 structure_online: true,
@@ -6104,6 +6207,8 @@ fn attack_move_fight(rules: &RuleSet) -> Simulation {
 fn test_attack_move_lethal_hit_expires_the_target_at_the_kill() {
     let rules = walking_combat_test_rules();
     let mut sim = attack_move_fight(&rules);
+    // The player has seen the enemy: the campaign scan gate needs +0x41B.
+    crate::sim::arena_fixture::discover(&mut sim, 2);
     if let Some(e) = sim.substrate.entities.get_mut(2) {
         e.health.set_for_test(50);
     }
@@ -6335,6 +6440,8 @@ fn test_infantry_attack_move_kills_on_the_way_and_walks_on() {
         &[infantry("Americans", 20), infantry("Russians", 24)],
         Some(&rules),
     );
+    // The player has seen the enemy: the campaign scan gate needs +0x41B.
+    crate::sim::arena_fixture::discover(&mut sim, 2);
     // Infantry fear asks the owner's House whether a human controls it.
     for (owner, side_index, is_human) in [("Americans", 0, true), ("Russians", 1, false)] {
         let name = sim.interner.intern(owner);
@@ -6547,6 +6654,48 @@ fn test_lethal_hit_stuns_the_dying_infantry() {
     assert!(
         gi.navigation.nav_com().is_none(),
         "FootClass::Stun Assign_Destination(NULL)"
+    );
+}
+
+/// `TechnoClass::Stun @ 0x006FCD40` runs Kill_All_Spawns, ClearAllTargets
+/// and Detach_All(1) for a non-Foot object too (`JZ 0x006FCD7B`): a stunned
+/// building drops out of its attacker's Target.
+#[test]
+fn test_stunning_a_building_detaches_its_attackers() {
+    let rules = combat_test_rules();
+    let mut sim: Simulation = Simulation::new();
+    sim.spawn_from_map(
+        &[
+            MapEntity {
+                owner: "Russians".to_string(),
+                cell_x: 6,
+                cell_y: 2,
+                ..make_test_entity("GACNST", EntityCategory::Structure)
+            },
+            MapEntity {
+                cell_x: 2,
+                cell_y: 2,
+                ..make_test_entity("MTNK", EntityCategory::Unit)
+            },
+        ],
+        Some(&rules),
+    );
+    sim.substrate
+        .entities
+        .get_mut(2)
+        .unwrap()
+        .attack_target
+        .set_for_test(Some(TargetKind::Entity(1)));
+    sim.stun(1, UninitContext::with_rules(&rules));
+    assert_eq!(
+        sim.substrate
+            .entities
+            .get(2)
+            .unwrap()
+            .attack_target
+            .target(),
+        None,
+        "Detach_All(1) clears the tank's Target"
     );
 }
 
@@ -6881,9 +7030,10 @@ fn sale_death_is_ignored_before_ordinary_tail_drain() {
     );
 }
 
-/// Combat-death counterpart: a structure killed in combat (Phase 5) lives in the
-/// Dying window through Phase 7 and is freed only by the single end-of-tick drain. Its
-/// repair took its step in the building's own visit, before its death, and none after.
+/// Combat-death counterpart: a structure killed in combat in the object pass
+/// lives in the Dying window through the factory sweep and is freed only by the
+/// single end-of-tick drain. Its repair took its step in the building's own
+/// visit, before its death, and none after.
 #[test]
 fn combat_death_after_its_repair_visit_is_freed_at_end_of_tick() {
     use crate::sim::combat::Health;
@@ -6912,7 +7062,8 @@ fn combat_death_after_its_repair_visit_is_freed_at_end_of_tick() {
     // test happens on the first tick instead of after a turn-to-fire.
     atk.body_facing.snap(0x4000, 0);
     atk.health = Health::new(300);
-    // Damaged, auto-repairing enemy building MTNK destroys this tick at Phase 5.
+    // Damaged, auto-repairing enemy building MTNK destroys this tick in the
+    // object pass.
     let mut bld =
         GameEntity::test_default_of_category(2, "TARGB", "Russia", 7, 5, EntityCategory::Structure);
     bld.type_facts
@@ -6945,8 +7096,8 @@ fn combat_death_after_its_repair_visit_is_freed_at_end_of_tick() {
         "end-of-tick drain emptied the queue"
     );
     // The repair step belongs to the building's own LogicVector visit
-    // (`BuildingClass::UpdateRepairAndPower`, `0x004401B6`), which VERA runs
-    // before this tick's Phase 5 combat: frame 0 takes one step (Cost 1000 over
+    // (`BuildingClass::UpdateRepairAndPower`, `0x004401B6`), which runs
+    // before the MTNK's shot kills it: frame 0 takes one step (Cost 1000 over
     // 150 steps at 25% costs 1) while the building lives, and none after.
     assert_eq!(
         sim.houses.get(&russia).map(|h| h.economy().credits()),
@@ -7334,13 +7485,14 @@ fn parked_friendly_on_the_route_is_scattered_out_of_the_way() {
         use crate::map::resolved_terrain::zone_class;
         use crate::rules::terrain_rules::{LandType, SpeedCostProfile};
         let rock = SpeedCostProfile {
-            foot: Some(0),
-            track: Some(0),
-            wheel: Some(0),
-            float: Some(0),
-            amphibious: Some(0),
-            float_beach: Some(0),
-            hover: Some(0),
+            foot: Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+            track: Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+            wheel: Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+            float: Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+            amphibious: Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+            float_beach: Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+            hover: Some(crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO),
+            winged: Some(crate::util::native_x87::NativeF32Bits::ONE),
         };
         let terrain = sim.resolved_terrain.as_mut().expect("stacking terrain");
         for ry in (0..24).filter(|&ry| ry != PARKED_AT.1) {

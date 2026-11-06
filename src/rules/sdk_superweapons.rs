@@ -246,6 +246,7 @@ impl RuleSet {
                 visibility: HouseMask::from_bits(u32::from(definition.presentation.visibility))
                     .ok_or("invalid SuperWeapon presentation house bits")?,
                 sound: nullable_name(&definition.presentation.sound),
+                ..AresSuperWeaponPresentation::default()
             };
             // Validate the entire batch, including references in a currently
             // disabled mechanism, before publishing any effective field.
@@ -348,6 +349,14 @@ impl RuleSet {
                     candidate.aux_building.as_deref(),
                     Some(&buildings),
                     &charge,
+                    #[cfg(feature = "ares")]
+                    &crate::rules::superweapon_influence::SuperWeaponInfluence::default(),
+                    #[cfg(feature = "ares")]
+                    crate::rules::superweapon_targeting::AresSuperWeaponTargetingState::from_external_config(
+                        candidate.target_constraints,
+                        candidate.use_ai_targeting,
+                        candidate.generic_warhead.as_ref(),
+                    ),
                 ),
             );
             definitions.insert(definition.ordinal, candidate);

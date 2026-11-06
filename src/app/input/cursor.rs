@@ -116,7 +116,7 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
             CursorFeedbackKind::Scroll(dir)
         });
     }
-    if state.match_state.input.minimap_dragging
+    if state.match_state.input.minimap_press_active()
         || crate::app::presentation::sidebar_render::is_cursor_over_minimap(state)
     {
         // The radar's own action draws its row's mini set
@@ -126,7 +126,16 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
         ));
     }
     if current_sidebar_view_hit(state) {
-        return None;
+        return state.match_state.input.sidebar_cursor();
+    }
+    let (x, y) = state.match_state.input.cursor_px();
+    if state
+        .match_state
+        .match_presentation
+        .super_timer_dock
+        .over_toggle(x, y)
+    {
+        return Some(CursorFeedbackKind::Default);
     }
     let selected = crate::app::input::dispatch::selected_stable_ids_in_order(
         state
@@ -269,7 +278,7 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
     if !query.cell_visible(cell) {
         return Some(query.hidden_cell(cell));
     }
-    let owner = preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
+    let owner = preferred_local_owner_name(state)?;
     let hover_object = crate::app::input::entity_pick::hover_object_at_point(
         crate::app::input::entity_pick::presented(state, sim),
         world_x,
@@ -278,7 +287,14 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
         state.match_state.sandbox_full_visibility,
     );
     if selected.is_empty() {
-        return no_selection_cursor(hover_object.and_then(HoverObject::techno).as_ref());
+        let fog = (!state.match_state.sandbox_full_visibility).then(|| sim.fog());
+        let player = sim.interner().get(&owner);
+        let hover = hover_object.and_then(HoverObject::techno).filter(|hover| {
+            sim.entities().get(hover.stable_id).is_some_and(|entity| {
+                !crate::app::input::entity_pick::no_selection_refuses_select(entity, fog, player)
+            })
+        });
+        return no_selection_cursor(hover.as_ref());
     }
     query.selection_action(cell, hover_object)
 }
@@ -313,7 +329,6 @@ impl<'a> ActionQuery<'a> {
         selected: &'a [u64],
         mouse_over: bool,
     ) -> Self {
-        let owner = preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
         let mut modifier = crate::app::input::context_order::resolve_order_modifiers(
             crate::app::input::dispatch::is_ctrl_held(state),
             crate::app::input::dispatch::is_shift_held(state),
@@ -333,7 +348,7 @@ impl<'a> ActionQuery<'a> {
             sim,
             rules: state.rules(),
             overlays: state.overlay_registry(),
-            viewer: sim.interner().get(&owner),
+            viewer: preferred_local_owner_name(state).and_then(|owner| sim.interner().get(&owner)),
             selected,
             modifier,
             force_move_key,
@@ -421,6 +436,7 @@ impl<'a> ActionQuery<'a> {
                 sim,
                 rules,
                 id,
+                terrain_id,
                 None,
                 modifier,
                 force_move_key,
@@ -432,6 +448,7 @@ impl<'a> ActionQuery<'a> {
                 super::context_order::ObjectKeyAction::Move => {
                     key_move_feedback(sim, rules, id, terrain_id)
                 }
+                super::context_order::ObjectKeyAction::NoMove => CursorFeedbackKind::Invalid,
             };
             return Some(promote_attack_move_feedback(kind, attack_move));
         }
@@ -610,6 +627,7 @@ fn unforced_cell_attack_feedback(
         Some(
             feedback @ (CursorFeedbackKind::EnemyUnit
             | CursorFeedbackKind::EnemyOutOfRange
+            | CursorFeedbackKind::GuardArea
             | CursorFeedbackKind::Default),
         ) => Some(feedback),
         _ => None,
@@ -765,6 +783,7 @@ pub(super) fn capability_cursor_for_hover(
             sim,
             rules,
             best_id?,
+            hover.stable_id,
             Some(hover.stable_id),
             modifier,
             force_move_key,
@@ -943,6 +962,23 @@ pub(super) fn capability_cursor_for_hover(
             };
         }
 
+        #[cfg(feature = "ares")]
+        if rules.is_some_and(|rules| {
+            super::context_order::vehicle_capture_action(
+                sim,
+                rules,
+                best_id,
+                hover.stable_id,
+                modifier,
+                force_move_key,
+            )
+        }) {
+            // Ares100496EF selects TakeVehicle92. Its default constructor
+            //1000735C..10007370 copies native Enter25's complete descriptor.
+            // RESIDUAL: custom [MouseCursors] overrides are not bound yet.
+            return CursorFeedbackKind::Enter;
+        }
+
         // 5. Entry: a Unit's Select over a friendly building it may enter
         //    (refinery, Service Depot, Tank Bunker, Grinder), an Infantryman's
         //    over a Grinding= building, either's over a friendly passenger
@@ -976,16 +1012,18 @@ pub(super) fn capability_cursor_for_hover(
 
         let is_infantry = sel_entity.category() == EntityCategory::Infantry;
 
-        // 6. Infantry garrisoning uses the shared CanBeOccupiedBy-equivalent predicate.
-        //    garrisonable — only show Enter for those, not actual enemy-player buildings.
+        // 6. Infantry's garrison arm, shared with the click.
         if is_infantry
-            && !matches!(
-                modifier,
-                OrderModifier::ForceFire | OrderModifier::GuardArea
-            )
-            && hovered_obj.is_some_and(|object| object.can_be_occupied)
-            && let Some(rules) = rules
-            && crate::sim::passenger::can_enter_transport(sim, rules, best_id, hover.stable_id)
+            && rules.is_some_and(|rules| {
+                super::context_order::infantry_garrisons(
+                    sim,
+                    rules,
+                    best_id,
+                    hover.stable_id,
+                    modifier,
+                    force_move_key,
+                )
+            })
         {
             return CursorFeedbackKind::Enter;
         }
@@ -998,7 +1036,14 @@ pub(super) fn capability_cursor_for_hover(
         {
             return key_move_feedback(sim, rules, best_id, hover.stable_id);
         }
-        if modifier == OrderModifier::ForceFire {
+        if key_action == Some(super::context_order::ObjectKeyAction::NoMove) {
+            return CursorFeedbackKind::Invalid;
+        }
+        // Ctrl+Alt's refused key rungs leave Ctrl forcing the attack rung
+        // (`0x00700191..0x0070021A`).
+        if modifier == OrderModifier::ForceFire
+            || (modifier == OrderModifier::GuardArea && key_action.is_none())
+        {
             if let Some(kind) = force_fire_feedback(
                 sim,
                 best_id,
@@ -1021,13 +1066,26 @@ pub(super) fn capability_cursor_for_hover(
 
         // Native garrison precedes C4, which precedes the late infiltration
         // arm. C4 can terminate with ordinary Attack, not just Sabotage.
+        // Both need the Attack the click's arms need too.
+        let arm_attacks = rules.is_some_and(|rules| {
+            super::context_order::infantry_arm_attacks(
+                sim,
+                rules,
+                best_id,
+                hover.stable_id,
+                modifier,
+                force_move_key,
+                overlay_registry,
+            )
+        });
         let c4_action = rules.and_then(|rules| {
-            super::context_order::infantry_c4_action(sim, rules, best_id, hover, false)
+            super::context_order::infantry_c4_action(sim, rules, best_id, hover, arm_attacks)
         });
         if c4_action == Some(super::context_order::InfantryC4Action::Sabotage) {
             return CursorFeedbackKind::Demolish;
         }
         if c4_action.is_none()
+            && arm_attacks
             && matches!(
                 hover.kind,
                 HoverTargetKind::FriendlyStructure | HoverTargetKind::EnemyStructure
@@ -1093,34 +1151,12 @@ pub(super) fn capability_cursor_for_hover(
 
     // 9. Generic fallback.
     //
-    // A selected own unit under its own cursor answers NoMove, not Select:
-    // retail refuses the move order onto a cell held by an own *selected*
-    // techno, and the select action rejects an already-selected object — the
-    // self-click resolves to ACTION_SELF / ACTION_SELECT instead
-    // (`TechnoClass::What_Action_OnObject` `0x0070000B`, `[0xA8ECC8] == 1` at
-    // `0x007000C1`, see `self_click_command`) — so the barred cursor wins.
-    // Hovering an own unit that is NOT selected still takes Select, and a
-    // no-selection hover keeps DetermineAction's no-selection Select. An
-    // Aircraft cursor owner's 0 there becomes its Cell action instead
-    // (`0x00417D7C`), and a Building's stays 0 (`0x0044750D`), which the
-    // object action below answers.
-    if hover_is_selected_own_unit(hover, &selected)
-        && !best_id
-            .and_then(|id| sim.entities().get(id))
-            .is_some_and(|actor| {
-                matches!(
-                    actor.category(),
-                    EntityCategory::Aircraft | EntityCategory::Structure
-                )
-            })
-        // Unit `0x007403EB` and Infantry `0x0051F05E` make that 0 NoMove
-        // only for an object they may control (vt+0xA0); else it stays 0.
-        && best_id
-            .zip(rules)
-            .is_none_or(|(id, rules)| sim.techno_player_controllable(id, rules))
-    {
-        return CursorFeedbackKind::Invalid;
-    }
+    // A selected object under the cursor of a larger selection takes
+    // Techno's tail, whose 0 over a selected object (`0x007005BF`) the class
+    // tails answer: NoMove for a player's Unit or Infantryman it may control
+    // (`0x007403EB`, `0x0051F05E`), an Aircraft's Cell action (`0x00417D7C`)
+    // and a Building's 0 (`0x0044750D`). The click dispatches the same
+    // answer ([`super::context_order::attack_action`]).
     match hover.kind {
         HoverTargetKind::FriendlyUnit
         | HoverTargetKind::FriendlyStructure
@@ -1169,6 +1205,7 @@ pub(super) fn capability_cursor_for_hover(
                     }
                     AttackAction::NoMove => return CursorFeedbackKind::Invalid,
                     AttackAction::Select => return CursorFeedbackKind::FriendlyUnit,
+                    AttackAction::GuardArea => return CursorFeedbackKind::GuardArea,
                     AttackAction::Rally | AttackAction::Move => return CursorFeedbackKind::Move,
                     AttackAction::Attack => {}
                 }
@@ -1320,21 +1357,6 @@ fn no_selection_cursor(
     }
 }
 
-/// Whether the hovered own unit is itself selected — the self-hover that
-/// answers NoMove instead of Select. Retail refuses the move order onto a
-/// cell held by an own *selected* techno, and its select action rejects an
-/// already-selected object: the self-click resolves to ACTION_SELF /
-/// ACTION_SELECT instead (`TechnoClass::What_Action_OnObject` `0x0070000B`,
-/// `[0xA8ECC8] == 1` at `0x007000C1`, see `self_click_command`), so the
-/// barred cursor wins. An own unit that is not selected, a structure, or an
-/// enemy is not this arm.
-fn hover_is_selected_own_unit(
-    hover: &crate::app::input::entity_pick::HoverTargetKindWithId,
-    selected: &[u64],
-) -> bool {
-    hover.kind == HoverTargetKind::FriendlyUnit && selected.contains(&hover.stable_id)
-}
-
 /// The display mapping for Unit's shared repair-object action. Original
 /// Display4AAE90 rows33/17/19 are saved in bunker_attack_action repair_rows.
 fn unit_repair_feedback(
@@ -1463,6 +1485,7 @@ fn action_feedback(
         AttackAction::Rally | AttackAction::Move => Some(CursorFeedbackKind::Move),
         AttackAction::Select => Some(CursorFeedbackKind::FriendlyUnit),
         AttackAction::AttackSupport => Some(CursorFeedbackKind::Default),
+        AttackAction::GuardArea => Some(CursorFeedbackKind::GuardArea),
         AttackAction::Attack => Some(
             if attack_cursor_is_in_range(
                 sim,
@@ -1549,7 +1572,9 @@ pub(crate) fn select_best_for_action(
         let obj = rules.and_then(|r| sim.interner().object_type(entity.type_ref(), r));
         let priority = if entity.berserk.is_active() {
             0
-        } else if !obj.is_some_and(|obj| is_armed(entity, obj)) {
+        } else if !obj.zip(rules).is_some_and(|(obj, rules)| {
+            is_armed(entity, obj, sim.entities(), rules, sim.interner())
+        }) {
             2
         } else if entity.category() == EntityCategory::Structure {
             3
@@ -1712,6 +1737,8 @@ pub(crate) struct CursorAnimation {
     shape: Option<CursorId>,
     frame: usize,
     anchor_ms: u64,
+    /// When the next draw steps the frame; `None` for a still shape.
+    next_step_ms: Option<u64>,
 }
 
 impl CursorAnimation {
@@ -1720,6 +1747,7 @@ impl CursorAnimation {
             shape: None,
             frame: 0,
             anchor_ms: 0,
+            next_step_ms: None,
         }
     }
 
@@ -1731,21 +1759,32 @@ impl CursorAnimation {
         interval_ms: u64,
         now_ms: u64,
     ) -> usize {
+        let animated = frame_count > 1 && interval_ms > 0;
         if self.shape != Some(id) {
             self.shape = Some(id);
             self.frame = 0;
             self.anchor_ms = now_ms;
+            self.next_step_ms = animated.then(|| now_ms.saturating_add(interval_ms));
             return 0;
         }
-        if frame_count <= 1 || interval_ms == 0 {
+        if !animated {
+            self.next_step_ms = None;
             return 0;
         }
         if now_ms.saturating_sub(self.anchor_ms) >= interval_ms {
             self.frame = (self.frame + 1) % frame_count;
             self.anchor_ms = now_ms;
         }
+        self.next_step_ms = Some(self.anchor_ms.saturating_add(interval_ms));
         self.frame
     }
+}
+
+/// Whether the drawn software cursor's next frame is due: the next draw
+/// would step it.
+pub(crate) fn animation_step_due() -> bool {
+    let next = CURSOR_ANIMATION.with(|cell| cell.get().next_step_ms);
+    next.is_some_and(|next| cursor_animation_now_ms() >= next)
 }
 
 thread_local! {
@@ -1770,11 +1809,7 @@ pub(crate) fn software_cursor_frame_for(
     if sequence.frames.is_empty() {
         return None;
     }
-    let now_ms: u64 = cursor_animation_start()
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX);
+    let now_ms = cursor_animation_now_ms();
     let frame_idx = CURSOR_ANIMATION.with(|cell| {
         let mut animation = cell.get();
         let idx = animation.advance(id, sequence.frames.len(), sequence.interval_ms, now_ms);
@@ -1792,9 +1827,14 @@ pub(crate) fn current_software_cursor_frame(
     software_cursor_frame_for(CursorId::Default, sequence)
 }
 
-fn cursor_animation_start() -> &'static Instant {
+fn cursor_animation_now_ms() -> u64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    START.get_or_init(Instant::now)
+    START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 pub(crate) fn current_sidebar_view_hit(state: &AppState) -> bool {
@@ -2055,11 +2095,22 @@ fn apply_cursor_confinement_impl(state: &AppState, verbose: bool) {
             state.platform.pointer_held.set(wanted.is_some() && ok != 0);
         }
     }
-    // Other platforms: use winit's Confined grab. On X11/macOS this confines the
+    // macOS: winit 0.30 refuses a Confined grab there, so the lock is VERA's
+    // own: `hold_pointer_in_window` puts the pointer back each time it
+    // leaves the client area of the active window.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = verbose;
+        state.platform.pointer_held.set(cursor_clip_wanted(
+            state.platform.cursor_confined,
+            state.platform.window_active,
+        ));
+    }
+    // Other platforms: use winit's Confined grab. On X11 this confines the
     // pointer to the window; on pure Wayland cursor confinement is unsupported
     // and set_cursor_grab returns an error, which we log and tolerate so the
     // frame is never blocked.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         use winit::window::CursorGrabMode;
         // Other backends expose focus through winit's activation edges; a
@@ -2079,6 +2130,62 @@ fn apply_cursor_confinement_impl(state: &AppState, verbose: bool) {
         }
         state.platform.pointer_held.set(wanted && grabbed.is_ok());
     }
+}
+
+/// Show or hide the system arrow over the window. On macOS winit hides it
+/// only through the window's cursor rectangle, which AppKit applies while the
+/// window is key and the pointer has moved since, so after a focus change, a
+/// full-screen switch or a visit to the title bar the arrow can stand next to
+/// mouse.shp; the app-wide `NSCursor` hide holds it hidden regardless.
+/// Presentation-only.
+pub(crate) fn set_os_cursor_visible(state: &mut AppState, visible: bool) {
+    state.platform.os_cursor_visible = Some(visible);
+    state.platform.window.set_cursor_visible(visible);
+    #[cfg(target_os = "macos")]
+    super::mac_pointer::set_arrow_hidden(!visible);
+}
+
+/// The macOS half of the cursor lock, for a pointer that just left the client
+/// area: put it back on the nearest point inside and move the game's cursor
+/// there, so edge scrolling keeps reading the edge. True when it did; false
+/// when the lock is not holding the pointer (it is off, the window is not
+/// active, or the platform clips the pointer itself). Presentation-only.
+pub(crate) fn hold_pointer_in_window(state: &mut AppState) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if !state.platform.pointer_held.get() {
+            return false;
+        }
+        let Some(pointer) = super::mac_pointer::pointer_in_view(&state.platform.window) else {
+            return false;
+        };
+        let (x, y) = pointer.nearest_inside();
+        let position = winit::dpi::LogicalPosition::new(x, y);
+        if state.platform.window.set_cursor_position(position).is_err() {
+            return false;
+        }
+        let physical = position.to_physical::<f64>(state.platform.window.scale_factor());
+        state.set_cursor_from_window(physical.x as f32, physical.y as f32);
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        false
+    }
+}
+
+/// Re-read whether the pointer is over the client area when the window
+/// becomes active. macOS reports leaving and entering only on movement, so a
+/// window activated with the pointer elsewhere (a Dock click, Cmd-Tab) would
+/// otherwise keep the last answer and hide the arrow away from the game.
+pub(crate) fn refresh_pointer_in_client(state: &mut AppState) {
+    #[cfg(target_os = "macos")]
+    if let Some(pointer) = super::mac_pointer::pointer_in_view(&state.platform.window) {
+        state.platform.pointer_in_client = pointer.inside();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = state;
 }
 
 /// Drop the OS cursor clip entirely. Called on focus loss so alt-tab releases
@@ -2102,6 +2209,19 @@ pub(crate) fn release_cursor_confinement(state: &AppState) {
             .platform
             .window
             .set_cursor_grab(winit::window::CursorGrabMode::None);
+    }
+}
+
+/// Lock the cursor again on a click over the active window's client area,
+/// when the player's Lock Cursor choice is on but the lock key freed it.
+/// Presentation-only.
+pub(crate) fn relock_cursor_on_click(state: &mut AppState) {
+    if state.persistence.options_profile.lock_cursor
+        && !state.platform.cursor_confined
+        && state.platform.owns_pointer()
+    {
+        state.platform.cursor_confined = true;
+        apply_cursor_confinement(state);
     }
 }
 
@@ -2142,6 +2262,23 @@ mod tests {
         assert!(!super::cursor_clip_wanted(true, false));
         assert!(!super::cursor_clip_wanted(false, true));
         assert!(!super::cursor_clip_wanted(false, false));
+    }
+
+    /// SBGadget 6ABA40 and SelectClass 6AAD00 write the normal cursor only on
+    /// LEFTUP; a held left button over the sidebar keeps the last one.
+    #[test]
+    fn a_held_left_button_keeps_the_last_cursor_over_the_sidebar() {
+        let mut input = crate::app::input::state::MatchInputState::new(Default::default());
+        input.note_shown_cursor(Some(CursorFeedbackKind::Select));
+        assert_eq!(input.sidebar_cursor(), None);
+        input
+            .tactical_mouse
+            .record_physical_button(winit::event::MouseButton::Left, true);
+        assert_eq!(input.sidebar_cursor(), Some(CursorFeedbackKind::Select));
+        input
+            .tactical_mouse
+            .record_physical_button(winit::event::MouseButton::Left, false);
+        assert_eq!(input.sidebar_cursor(), None);
     }
 
     #[test]
@@ -3796,9 +3933,13 @@ mod cursor_animation_tests {
         let mut anim = CursorAnimation::new();
         anim.advance(CursorId::Move, 10, INTERVAL_MS, 0);
         assert_eq!(anim.advance(CursorId::Move, 10, INTERVAL_MS, 63), 0);
+        // The redraw gate's deadline: the draw that steps the frame.
+        assert_eq!(anim.next_step_ms, Some(64));
         assert_eq!(anim.advance(CursorId::Move, 10, INTERVAL_MS, 64), 1);
+        assert_eq!(anim.next_step_ms, Some(128));
         // A 1-second stall still yields a single step.
         assert_eq!(anim.advance(CursorId::Move, 10, INTERVAL_MS, 1_064), 2);
+        assert_eq!(anim.next_step_ms, Some(1_128));
     }
 
     #[test]
@@ -3845,6 +3986,10 @@ mod cursor_animation_tests {
         let mut anim = CursorAnimation::new();
         anim.advance(CursorId::IronCurtain, 5, 0, 0);
         assert_eq!(anim.advance(CursorId::IronCurtain, 5, 0, 10_000), 0);
+        assert_eq!(
+            anim.next_step_ms, None,
+            "nothing for the redraw gate to wait on"
+        );
     }
 
     /// Harvest shares cursor row 21 with an out-of-range attack, and is not the
@@ -3893,43 +4038,6 @@ mod cursor_animation_tests {
         assert_eq!(
             super::cursor_id_for_feedback(CursorFeedbackKind::Select),
             Some(CursorId::Select)
-        );
-    }
-
-    /// A selected own unit under its own cursor answers NoMove — the barred
-    /// cursor — not Select: retail's move order refuses a cell held by an own
-    /// selected techno and its select action rejects an already-selected one
-    /// (`TechnoClass::What_Action_OnObject` `0x0070000B`, `[0xA8ECC8] == 1` at
-    /// `0x007000C1`, see `self_click_command`). An own unit that is not
-    /// selected keeps Select; structures and enemies are not this arm.
-    #[test]
-    fn selected_own_unit_self_hover_answers_no_move() {
-        let hover = |kind, stable_id| HoverTargetKindWithId { kind, stable_id };
-        let selected = [7u64, 9];
-        assert!(super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyUnit, 9),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyUnit, 8),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyStructure, 9),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::EnemyUnit, 9),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyUnit, 9),
-            &[]
-        ));
-        // The cursor that answer lands on is row 19's barred frame.
-        assert_eq!(
-            super::cursor_id_for_feedback(CursorFeedbackKind::Invalid),
-            Some(CursorId::NoMove)
         );
     }
 

@@ -57,7 +57,10 @@ impl AudioDefinitions {
             Some(false) => SoundSampleReadMode::IndexedOnly,
             None => SoundSampleReadMode::profile_default(),
         };
-        let sound = select_ini(assets, "soundmd.ini")
+        // `[ini] sound`/`eva` override the profile's shared SOUNDMD/EVAMD names;
+        // both readers stay presentation-only and unlayered.
+        let roots = assets.ini_roots();
+        let sound = select_ini(assets, roots.sound())
             .map_err(|error| log::warn!("Audio definitions: {error}"))
             .ok();
         let sounds = Arc::new(
@@ -67,7 +70,7 @@ impl AudioDefinitions {
                     SoundRegistry::from_ini_admitting_with_mode(&selected.ini, index, sample_mode)
                 }),
         );
-        let eva = select_ini(assets, "evamd.ini")
+        let eva = select_ini(assets, roots.eva())
             .map_err(|error| log::warn!("Audio definitions: {error}"))
             .ok();
         let eva_registry = eva.as_ref().map_or_else(EvaRegistry::default, |selected| {
@@ -220,6 +223,45 @@ mod tests {
             legacy.eva().entry("EVA_Test"),
             explicit_default.eva().entry("EVA_Test")
         );
+    }
+
+    #[test]
+    fn selected_audio_roots_replace_the_shared_sound_and_eva_names() {
+        let directory = TestDirectory::new("custom-audio-roots");
+        let sound = b"[SoundList]\n0=Alt\n[Alt]\nSounds=alt\n";
+        let eva = b"[DialogList]\n0=EVA_Alt\n[EVA_Alt]\nAllied=cevaAlt\n";
+        directory.write("my-sound.ini", sound);
+        directory.write("my-eva.ini", eva);
+        directory.write(
+            "soundmd.ini",
+            b"[SoundList]\n0=Default\n[Default]\nSounds=default\n",
+        );
+        directory.write(
+            "evamd.ini",
+            b"[DialogList]\n0=EVA_Default\n[EVA_Default]\nAllied=cevaDefault\n",
+        );
+        let config = crate::util::ini_roots::IniRootConfig {
+            sound: Some("my-sound.ini".into()),
+            eva: Some("my-eva.ini".into()),
+            ..Default::default()
+        };
+        let assets = AssetManager::from_loose_root_for_test(directory.path())
+            .with_ini_roots(&config)
+            .unwrap();
+        let definitions = AudioDefinitions::select(&assets);
+
+        assert!(definitions.sounds().get("Alt").is_some());
+        assert!(definitions.sounds().get("Default").is_none());
+        assert_eq!(
+            definitions.eva().get("EVA_Alt", EvaSide::Allied),
+            Some("cevaAlt")
+        );
+        assert!(definitions.eva().entry("EVA_Default").is_none());
+        assert_eq!(
+            definitions.sound_source().unwrap().logical_name,
+            "my-sound.ini"
+        );
+        assert_eq!(definitions.eva_source().unwrap().logical_name, "my-eva.ini");
     }
 
     #[test]

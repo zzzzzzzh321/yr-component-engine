@@ -88,6 +88,13 @@ pub(super) fn publish_options(state: &mut AppState) -> Result<bool> {
             .clone(),
         random_map: random_map.clone(),
         admissions,
+        room: Some(
+            session
+                .network_setup()
+                .expect("projected setup")
+                .options
+                .room_options(),
+        ),
     })?;
     let admitted = queue_payload(
         state,
@@ -120,6 +127,9 @@ struct ExtendedOptions {
     effective_digest: String,
     random_map: Option<crate::app::shell_network_setup::maps::GeneratedMapManifest>,
     admissions: Vec<ExtendedAdmission>,
+    /// VERA's room options, which the native options text has no field for.
+    #[serde(default)]
+    room: Option<crate::skirmish_launch::RoomOptions>,
 }
 
 /// Host-authored admission projection for native Type3 assembly, derived from
@@ -152,6 +162,7 @@ pub(super) fn reapply_received_options(state: &mut AppState) -> Result<()> {
         options.source_sha256,
         options.effective_digest,
         options.selected_map_file,
+        options.room,
     )
 }
 
@@ -222,6 +233,7 @@ fn receive_options_text(
     source_sha256: String,
     effective_digest: String,
     selected_map_file: String,
+    room: Option<crate::skirmish_launch::RoomOptions>,
 ) -> Result<()> {
     ensure!(
         source_sha256.is_empty() || crate::map::source::valid_source_sha256(&source_sha256),
@@ -238,6 +250,9 @@ fn receive_options_text(
     options.launch.selected_map_file = Some(selected_map_file);
     options.map_metadata.source_sha256 = source_sha256;
     options.map_metadata.effective_digest = effective_digest;
+    if let Some(room) = room {
+        options.launch.options.set_room_options(room);
+    }
     crate::app::shell_network_setup::service_event(state, NetworkSetupEvent::HostSetup(options))?;
     state
         .match_state
@@ -257,9 +272,11 @@ fn receive_options_text(
 pub(super) fn publish_roster(state: &mut AppState) -> Result<bool> {
     let session = &state.match_state.session;
     ensure!(session.host(), "only the host publishes a LAN roster");
-    let rows = if session
-        .network_setup_capacity()
-        .is_some_and(|capacity| capacity > 8)
+    // A VERA room's spectator rows may lie past the native eight.
+    let rows = if session.network_several_observers()
+        || session
+            .network_setup_capacity()
+            .is_some_and(|capacity| capacity > 8)
     {
         NETWORK_PLAYER_SLOT_COUNT
     } else {
@@ -429,6 +446,7 @@ pub(super) fn receive_extended(
                 options.source_sha256,
                 options.effective_digest,
                 options.selected_map_file,
+                options.room,
             )?;
             super::maps::received_options(state, scope, options.random_map)
         }
@@ -882,7 +900,9 @@ mod tests {
         launch.rebuild_house_roster();
         let mut session = MatchSession::default();
         session.enter_network(NetworkReturnContext::LanLobby);
-        session.accept_network_setup(launch, host, Some(7)).unwrap();
+        session
+            .accept_network_setup(launch, host, Some(7), false)
+            .unwrap();
         session.set_network_start_seed(0xf1234567).unwrap();
         session
             .accept_network_map_metadata(
@@ -917,7 +937,7 @@ mod tests {
             })
             .collect();
         launch.rebuild_house_roster();
-        host.accept_network_setup(launch.clone(), true, None)
+        host.accept_network_setup(launch.clone(), true, None, false)
             .unwrap();
         host.select_network_map(launch.mode.clone(), "thirty.map".into(), 30)
             .unwrap();
@@ -932,7 +952,9 @@ mod tests {
         .unwrap();
         let mut guest = fixture(false);
         launch.local_player_index = 29;
-        guest.accept_network_setup(launch, false, None).unwrap();
+        guest
+            .accept_network_setup(launch, false, None, false)
+            .unwrap();
         let payload = projected_options(&host, 3, 0).unwrap().encode();
         let parts = crate::net::lan_messages::extended_setup::encode(
             crate::net::lan_messages::extended_setup::SetupKind::Options,
@@ -1214,7 +1236,8 @@ mod tests {
         let mut host = fixture(true);
         let mut launch = host.network_setup().unwrap().clone();
         launch.humans[1].raw_slot_index = Some(2);
-        host.accept_network_setup(launch, true, Some(7)).unwrap();
+        host.accept_network_setup(launch, true, Some(7), false)
+            .unwrap();
         host.set_network_row_kind(1, NetworkRowKind::Ai(AiDifficulty::Hard))
             .unwrap();
         let options = projected_options(&host, 3, 0).unwrap().encode();
@@ -1291,12 +1314,15 @@ mod tests {
         request.country = LaunchCountry::Yuri;
         request.country_random = false;
         let mut wol = lan.clone();
-        let result = lan.accept_lan_peer_choices(1, request.clone()).unwrap();
+        let result = lan
+            .accept_lan_peer_choices(1, request.clone(), false)
+            .unwrap();
         assert!(result.options);
         assert!(!result.roster);
         let slot = &lan.network_setup().unwrap().humans[1].slot;
         assert!(slot.color_random);
-        assert_eq!(slot.start_position, LaunchStartPosition::Auto);
+        // VERA shared control: the guest shares the host's start and House.
+        assert_eq!(slot.start_position, LaunchStartPosition::Position(3));
         assert_eq!(slot.team, LaunchTeam::Team(7));
         assert_eq!(slot.country, LaunchCountry::Yuri);
         wol.accept_network_peer_choices(1, request, false, Some(&[LaunchCountry::America]))

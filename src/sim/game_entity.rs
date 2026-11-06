@@ -79,6 +79,14 @@ pub(crate) enum TechnoConstructorInit {
     PreconsumedGenerated(GeneratedTechnoInit),
 }
 
+/// One object's +214 and network-game local group slot, read together when a
+/// conversion copies them to its new object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObjectGroupCopy {
+    object_group: i32,
+    local_control_group: Option<i32>,
+}
+
 /// Every game object (unit, infantry, building, aircraft) is one `GameEntity`.
 /// Core fields are always present; optional subsystems use `Option<T>`. A
 /// mechanism's own state is a record its module defines and alone writes
@@ -125,6 +133,18 @@ pub struct GameEntity {
     /// Ordered effect instances and their derived projection, owned by attach_effect.
     #[serde(default)]
     attach_effects: attach_effect::AttachEffects,
+    /// Phobos AttachEffect instances, owned by `sim::attach_effect`.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    phobos_attach_effects: crate::sim::attach_effect::AttachEffectList,
+    /// Derived from those instances each AI frame; never hashed.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    phobos_stat_multipliers: crate::sim::attach_effect::PhobosStatMultipliers,
+    /// Optional Phobos fallback; external components never construct or tick it.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    pub(super) shield: Option<crate::sim::shield::ShieldState>,
     /// The current gameplay component owns these bounded persistent bytes.
     #[serde(default)]
     pub(crate) mod_component: Vec<u8>,
@@ -140,10 +160,18 @@ pub struct GameEntity {
     /// pointer and Load453FB0 swizzles it. Capture never rerolls the reward.
     secret_lab_fallback: Option<(crate::rules::object_type::ObjectCategory, InternedId)>,
     /// gamemd.exe TechnoClass::Constructor @0x006F2B40 stores -1 at6F2D0F.
-    /// One signed +214 owner for scenario recruitment and local control groups.
-    /// Team removal, Limbo and ChangeOwner preserve it; raw Save70C250 and
+    /// One signed +214 owner for scenario recruitment and, outside network
+    /// games, local control groups (`local_control_group` holds a network
+    /// game's). Team removal, Limbo and ChangeOwner preserve it; raw Save70C250 and
     /// Load70BF50 retain it with the rest of the concrete object body.
     object_group: i32,
+    /// VERA network adaptation: a network game's group key (TeamAssign731060)
+    /// writes the local player's slot here, not +214. Natively that store is
+    /// local to one client, so +214 would split Recruit6EAA90,
+    /// WakeupGroup6E03B0 and the state hash between peers. Every +214 write
+    /// replaces it. Not saved: a network match refuses saved-game loads.
+    #[serde(skip)]
+    local_control_group: Option<i32>,
     /// One native Techno stage clock. Class receivers mutate through this
     /// owner; animation, miner and buildup components carry no competing copy.
     stage: crate::sim::stage::StageClass,
@@ -196,6 +224,16 @@ pub struct GameEntity {
     /// LimboLaunch has removed this Unit from Logic; Unlimbo preserves it.
     #[serde(default)]
     pub unit_firing_counter: crate::sim::animation::UnitFiringCounter,
+    /// UnitClass+6C8. The constructor clears this next-Unit reference at
+    /// 7353EC; the map reader74368C, ChangeOwner7463A0 and Find_Path4D3920
+    /// share it (original gamemd.exe instructions). Not yet ported: the
+    /// Accelerates speed hand-off in Process_Drive_Track 4B1218 / Ship 6A08F0
+    /// and the IsTrain-gated Stop_Moving/track consumers (no retail IsTrain).
+    unit_follower: Option<u64>,
+    /// UnitClass+6D0, constructed false at7353F8. This retained byte is
+    /// independent of incoming links: PointerExpired7446E0 clears only the
+    /// reference, and ChangeOwner7463A0 writes the byte separately (gamemd).
+    is_unit_follower: bool,
     /// The owning house (`TechnoClass+0x21C`), interned.
     /// `TechnoClass::ChangeOwner @ 0x007014A0` moves it; here only the store's
     /// owner-change path does ([`Self::set_owner_from_store`]).
@@ -253,6 +291,12 @@ pub struct GameEntity {
     #[cfg(feature = "phobos")]
     #[serde(default)]
     pub(crate) phobos_placement: crate::sim::house_tracking::PhobosPlacement,
+    /// Phobos `TechnoExt::WHAnimRemainingCreationInterval`: shared by every
+    /// interval-bearing warhead this Techno fires.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    pub(crate) wh_anim_remaining_creation_interval:
+        crate::sim::warhead_anim::TechnoWarheadAnimInterval,
     /// The raw signed type `Sight=`, a [`SightFacts`] that
     /// `sim::vision` owns.
     ///
@@ -314,7 +358,7 @@ pub struct GameEntity {
     /// [`RemovalFacts`]: crate::sim::world::RemovalFacts
     #[serde(default)]
     pub(crate) removal_facts: crate::sim::world::RemovalFacts,
-    /// The kill credit and the UnInit loss guard, a [`KillRecord`] that
+    /// The kill credit and the closed-record guard, a [`KillRecord`] that
     /// `combat::record_kill` owns.
     ///
     /// [`KillRecord`]: crate::sim::combat::KillRecord
@@ -517,6 +561,9 @@ pub struct GameEntity {
     /// Per-instance Deliver.BaseNormal override, not a mutation of its type.
     #[serde(default)]
     unit_delivery_no_base: bool,
+    /// Ares launch source; the entity owns its lifetime and save state.
+    #[serde(default)]
+    hunter_seeker_origin: Option<crate::sim::hunter_seeker::HunterSeekerOrigin>,
     /// Building+66C charger pointers and +661 weapon latch, owned by
     /// `sim::tesla_charging` independently of House power accounting.
     #[serde(default)]
@@ -596,12 +643,6 @@ pub struct GameEntity {
     /// Instance stealth grant; sim::cloak_disguise owns its mutations.
     #[serde(default)]
     pub(crate) stealth_ability: StealthAbility,
-    /// Last sensor coverage actually deposited into CellClass counters.
-    /// Removal must use these cached owner/location/radius values after the
-    /// entity's current facts have changed.
-    /// `sensor_lifecycle` owns it.
-    #[serde(default)]
-    pub(crate) sensor_deposit: Option<crate::sim::sensor_lifecycle::SensorDeposit>,
     /// Core disguise identity, timestamp, and reveal tuple, owned by
     /// `cloak_disguise`.
     #[serde(default)]
@@ -736,6 +777,13 @@ pub struct GameEntity {
     ///
     /// [`CapturedInfantryType`]: crate::sim::world::CapturedInfantryType
     pub(crate) capture_infantry_type_index: crate::sim::world::CapturedInfantryType,
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    pub(crate) vehicle_driver: crate::sim::vehicle_theft::VehicleDriverState,
+    /// Ares TechnoExt+A8/AC, owned by sim::bounty; presentation only.
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    pub(crate) bounty_display: crate::sim::bounty::BountyDisplayState,
     /// Shared Building C4/PostMortem detonation latch: the marker `+0x6DF`
     /// with its C4Timer (`+0x528`) and C4AppliedBy (`+0x540`). The C4 plant
     /// (`sim::c4_plant`) owns one producer; qualifying delayed-death receiver
@@ -840,7 +888,16 @@ pub struct GameEntity {
     /// The actual Spark system link (`TechnoClass+0x308`), shared by
     /// FireAt and Cyborg AI; particles::spawn owns its mutations.
     #[serde(default)]
-    pub(crate) spark_particle_system: crate::sim::particles::spawn::AttachedSpark,
+    pub(crate) spark_particle_system: crate::sim::particles::spawn::AttachedParticleSystem,
+    /// The Fire system link (`TechnoClass+0x304`) FireAt's
+    /// `UseFireParticles` arm creates (`0x006FF1A7`). It is released by
+    /// [`Self::release_fire_particle_system`].
+    #[serde(default)]
+    pub(crate) fire_particle_system: crate::sim::particles::spawn::AttachedParticleSystem,
+    /// The Railgun system link (`TechnoClass+0x314`) FireAt's `IsRailgun`
+    /// arm creates; it gates the next railgun shot until the system expires.
+    #[serde(default)]
+    pub(crate) railgun_particle_system: crate::sim::particles::spawn::AttachedParticleSystem,
     /// The damage-Smoke system handle (`TechnoClass+0x310`), a
     /// [`DamageSmoke`] that `particles::spawn` owns.
     ///
@@ -905,6 +962,12 @@ impl GameEntity {
         self.mod_presentation = projection;
     }
 
+    /// Read-only state owned by the optional native fallback.
+    #[cfg(feature = "phobos")]
+    pub fn shield(&self) -> Option<&crate::sim::shield::ShieldState> {
+        self.shield.as_ref()
+    }
+
     pub fn mod_component(&self) -> &[u8] {
         &self.mod_component
     }
@@ -930,6 +993,20 @@ impl GameEntity {
         self.unit_delivery_no_base = self.category() == EntityCategory::Structure && !base_normal;
     }
 
+    pub(crate) fn hunter_seeker_origin(
+        &self,
+    ) -> Option<crate::sim::hunter_seeker::HunterSeekerOrigin> {
+        self.hunter_seeker_origin
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn set_hunter_seeker_origin(
+        &mut self,
+        origin: crate::sim::hunter_seeker::HunterSeekerOrigin,
+    ) {
+        self.hunter_seeker_origin = Some(origin);
+    }
+
     /// Saved extension effects must be admitted by the exact restored policy.
     /// Keep the raw delivery override private to its entity owner.
     pub(crate) fn validate_unit_delivery_authority(
@@ -938,6 +1015,10 @@ impl GameEntity {
     ) -> Result<(), &'static str> {
         if self.unit_delivery_no_base && !custom_payloads {
             return Err("delivery base overrides require an admitted custom payload policy");
+        }
+        #[cfg(not(feature = "ares"))]
+        if self.hunter_seeker_origin.is_some() {
+            return Err("hunter seeker launch sources require a build with the ares feature");
         }
         Ok(())
     }
@@ -1129,14 +1210,27 @@ impl GameEntity {
 impl GameEntity {
     /// Native703860 base decision through the shared cloak owner. Accepted
     /// Technos have one real owner; retained +41A belongs to discovery, not cloak.
-    /// Building4544A0 delegates here only with its +6ED override stage zero.
-    /// The nonzero building override has no Rust producer and remains separate.
+    /// `owned_by_current_house` is that +41A as the caller reads it: drawing
+    /// the actual byte, shared decisions
+    /// [`Simulation::shared_owned_by_current_house`](crate::sim::world::Simulation::shared_owned_by_current_house).
+    /// A Building with a nonzero fade stage (`+0x6ED`) answers through its
+    /// own override (`BuildingClass::GetVisualState @ 0x004544A0`).
     pub fn visual_character(
         &self,
         cloaking_stages: i32,
         invisible: bool,
+        owned_by_current_house: bool,
         query: crate::sim::cloak_disguise::VisualCharacterQuery,
     ) -> u8 {
+        let stage = self.building_cloak_stage();
+        if stage != 0 {
+            return crate::sim::cloak_disguise::building_stage_visual_character(
+                stage,
+                owned_by_current_house,
+                true,
+                query,
+            );
+        }
         let (state, progress) = self
             .cloak
             .as_ref()
@@ -1147,10 +1241,18 @@ impl GameEntity {
             cloaking_stages,
             invisible,
             self.category == EntityCategory::Structure,
-            self.discovery.owned_by_current_house(),
+            owned_by_current_house,
             true,
             query,
         )
+    }
+
+    /// A Building's fade stage, `BuildingClass+0x6ED` (0 opaque, 15 faded
+    /// out); 0 for every other object.
+    pub fn building_cloak_stage(&self) -> u8 {
+        self.cloak
+            .as_ref()
+            .map_or(0, crate::sim::cloak_disguise::CloakRuntime::building_stage)
     }
 
     /// `Techno70BE50`: actual COM410220 reads Abstract+10, then native7C5F00
@@ -1555,10 +1657,62 @@ impl GameEntity {
         self.object_group
     }
 
+    /// The group the local player's keys see: +214, or the network game slot
+    /// a key wrote since the last +214 write.
+    pub const fn control_group(&self) -> i32 {
+        match self.local_control_group {
+            Some(group) => group,
+            None => self.object_group,
+        }
+    }
+
     /// Callers own admission/order; scenario readers and
-    /// TeamType::Get_Group6F1870 supply raw signed values.
+    /// TeamType::Get_Group6F1870 supply raw signed values. Replaces a network
+    /// game's local slot, as the native store overwrites the key's value.
     pub(crate) fn assign_object_group(&mut self, group: i32) {
         self.object_group = group;
+        self.local_control_group = None;
+    }
+
+    /// A network game's TeamAssign731060 store (`local_control_group`).
+    pub(crate) fn assign_local_control_group(&mut self, group: i32) {
+        self.local_control_group = Some(group);
+    }
+
+    /// Techno+214 as Deploy7397CC and Mission_Selling44A052 copy it to the
+    /// new object, carrying a network game's local slot along.
+    pub(crate) const fn object_group_copy(&self) -> ObjectGroupCopy {
+        ObjectGroupCopy {
+            object_group: self.object_group,
+            local_control_group: self.local_control_group,
+        }
+    }
+
+    pub(crate) fn assign_object_group_copy(&mut self, copy: ObjectGroupCopy) {
+        self.object_group = copy.object_group;
+        self.local_control_group = copy.local_control_group;
+    }
+
+    /// UnitClass+6C8, the next Unit in the authored FOLLOWS chain.
+    pub(crate) const fn unit_follower(&self) -> Option<u64> {
+        self.unit_follower
+    }
+
+    /// UnitClass+6D0; this is saved state, not a derived incoming-link count.
+    pub(crate) const fn is_unit_follower(&self) -> bool {
+        self.is_unit_follower
+    }
+
+    /// The map/owner/expiry callers own admission and ordering. In particular,
+    /// changing this reference does not change either Unit's follower byte.
+    pub(crate) fn set_unit_follower(&mut self, follower: Option<u64>) {
+        assert_eq!(self.category, EntityCategory::Unit);
+        self.unit_follower = follower;
+    }
+
+    pub(crate) fn set_is_unit_follower(&mut self, is_follower: bool) {
+        assert_eq!(self.category, EntityCategory::Unit);
+        self.is_unit_follower = is_follower;
     }
 
     pub(crate) const fn production_start_price(&self) -> i32 {
@@ -1650,6 +1804,12 @@ impl GameEntity {
     /// (`FacingClass::Current @ 0x004C93D0`).
     pub fn barrel_elevation(&self) -> &crate::sim::movement::FacingClass {
         &self.barrel_elevation
+    }
+
+    /// Install a fixture's barrel elevation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_barrel_elevation_for_test(&mut self, facing: crate::sim::movement::FacingClass) {
+        self.barrel_elevation = facing;
     }
 
     /// Whether the barrel elevation still holds its constructor value, which
@@ -1750,6 +1910,12 @@ impl GameEntity {
         self.useless
     }
 
+    /// Ares TechnoExt+9C. Gameplay and drawing read the same driver state.
+    #[cfg(feature = "ares")]
+    pub fn driver_killed(&self) -> bool {
+        self.vehicle_driver.killed()
+    }
+
     /// `Mission_Harvest`'s two writes to Techno+3D0 (`0x0073E8FA`,
     /// `0x0073E925`). Other systems only read this shared Techno state.
     pub(crate) fn set_useless(&mut self, useless: bool) {
@@ -1801,6 +1967,8 @@ impl GameEntity {
             house_tracking_latches: Default::default(),
             #[cfg(feature = "phobos")]
             phobos_placement: Default::default(),
+            #[cfg(feature = "phobos")]
+            wh_anim_remaining_creation_interval: Default::default(),
             #[cfg(feature = "debug-tools")]
             debug_log: None,
             stable_id,
@@ -1810,9 +1978,14 @@ impl GameEntity {
             production_start_price: 0,
             emp: Default::default(),
             attach_effects: Default::default(),
+            #[cfg(feature = "phobos")]
+            phobos_attach_effects: Default::default(),
+            #[cfg(feature = "phobos")]
+            phobos_stat_multipliers: Default::default(),
             techno_ctor_random_word,
             secret_lab_fallback: None,
             object_group: -1,
+            local_control_group: None,
             stage: crate::sim::stage::StageClass::constructed(construction_frame as i32),
             discovery: Default::default(),
             building_upgrades: crate::sim::building_upgrades::BuildingUpgrades::default(),
@@ -1825,6 +1998,8 @@ impl GameEntity {
             barrel_elevation: crate::sim::movement::FacingClass::new(0, BARREL_ELEVATION_ROT),
             body_frame_counter: Default::default(),
             unit_firing_counter: Default::default(),
+            unit_follower: None,
+            is_unit_follower: false,
             owner,
             initial_owner: owner,
             original_factory_country: None,
@@ -1892,6 +2067,7 @@ impl GameEntity {
             building_art: Default::default(),
             building_online: Default::default(),
             unit_delivery_no_base: false,
+            hunter_seeker_origin: None,
             tesla_charge: Default::default(),
             tesla_charger: Default::default(),
             building_last_operational: Default::default(),
@@ -1909,7 +2085,6 @@ impl GameEntity {
             mega_mission: Default::default(),
             cloak: None,
             stealth_ability: StealthAbility::default(),
-            sensor_deposit: None,
             disguise: Some(DisguiseRuntime::new(construction_frame)),
             low_bridge_tube_state: None,
             capture_manager: None,
@@ -1946,6 +2121,10 @@ impl GameEntity {
             passenger_role: PassengerRole::default(),
             display_type_override: Default::default(),
             capture_infantry_type_index: crate::sim::world::CapturedInfantryType::constructed(),
+            #[cfg(feature = "ares")]
+            vehicle_driver: Default::default(),
+            #[cfg(feature = "ares")]
+            bounty_display: Default::default(),
             pending_c4_detonation: Default::default(),
             has_been_captured: Default::default(),
             no_survivor: Default::default(),
@@ -1970,11 +2149,15 @@ impl GameEntity {
             suspended_attack_target: Default::default(),
             base_defense_response: BaseDefenseResponseState::default(),
             spark_particle_system: Default::default(),
+            fire_particle_system: Default::default(),
+            railgun_particle_system: Default::default(),
             damage_smoke_system_id: Default::default(),
             transport_unload_keep_count: Default::default(),
             produce_cash: crate::sim::credit_income::ProduceCash::new(construction_frame),
             drain: Default::default(),
             parasite: crate::sim::combat::parasite::FootParasite::new(construction_frame),
+            #[cfg(feature = "phobos")]
+            shield: None,
             mod_component: Vec::new(),
             mod_presentation: Default::default(),
         }
@@ -2066,26 +2249,74 @@ impl GameEntity {
         self.fall.rate()
     }
 
+    /// Object+84: the retained attached-Anim flag consumed by ObjectAI5F3FB2.
     pub(crate) fn is_parachuted(&self) -> bool {
         self.fall.parachuted()
+    }
+
+    pub(crate) fn set_attached_anim_flag(&mut self, attached: bool) {
+        self.fall.set_attached_anim_flag(attached);
     }
 
     pub(crate) fn parachute_animation(&self) -> Option<u64> {
         self.fall.parachute_animation()
     }
 
-    pub(crate) fn set_parachute_animation(&mut self, animation: Option<u64>) {
-        self.fall.set_parachute_animation(animation);
+    /// Paradrop5F5AF1 publishes the new canopy at Object+88, through
+    /// [`EntityStore::write_held_anim`](crate::sim::entity_store::EntityStore::write_held_anim).
+    pub(crate) fn hold_parachute_animation(
+        &mut self,
+        animation: u64,
+        _: crate::sim::entity_store::AnimHolderAuthority,
+    ) {
+        self.fall.set_parachute_animation(Some(animation));
+    }
+
+    /// Paradrop without a constructed canopy leaves Object+88 empty.
+    pub(crate) fn clear_parachute_animation(&mut self) {
+        self.fall.set_parachute_animation(None);
     }
 
     pub(crate) fn parachute_animation_expired(&mut self, animation: u64) {
         self.fall.parachute_animation_expired(animation);
     }
 
-    /// Paradrop5F5940 raises +84/+8D and resets +2C before placement.
+    /// The Anims held in the fields `Simulation::notify_anim_pointer_expired`
+    /// clears when an Anim expires: Object+88's parachute (the owner's
+    /// Detach710410 reaching5F6DA0), the Ares EMP sparkle, the Ares
+    /// attached-effect Anims (10058770) and its ParasiteClass's grapple Anim
+    /// (Anim4's holder announcement725A16..725A4C, PointerExpired
+    /// 62A484..62A490). A field one of those callbacks compares must be
+    /// named here, and stored only through
+    /// [`EntityStore::write_held_anim`](crate::sim::entity_store::EntityStore::write_held_anim).
+    pub(crate) fn held_anims(&self) -> impl Iterator<Item = u64> + '_ {
+        let held = [
+            self.parachute_animation(),
+            self.emp_sparkle(),
+            self.parasite.class().and_then(|class| class.grapple_anim()),
+        ]
+        .into_iter()
+        .flatten();
+        let held = held.chain(self.attached_effect_anims());
+        held
+    }
+
+    /// Retail gamemd.exe TechnoClass::Detach710410, then
+    /// ObjectClass::DetachParachute5F6DA0: owner+60 clears only matching
+    /// retained Anim identities, before the child's owner reference clears.
+    pub(crate) fn attached_anim_expired(&mut self, animation: u64) {
+        self.expire_behind_anim(animation);
+        self.drain.expire_anim(animation);
+        self.mind_control.anim_pointer_expired(animation);
+        self.expire_deploy_anim(animation);
+        self.parachute_animation_expired(animation);
+    }
+
+    /// Paradrop5F5965 raises +8D. SetOwnerObject424C30 owns +84; Paradrop
+    /// preserves the rate retained from any preceding fall.
     pub(crate) fn begin_parachute_fall(&mut self, z: i32) {
         self.position.put_z(z);
-        self.fall.begin_parachute();
+        self.fall.begin_fall();
     }
 
     /// DropAsBomb5F416A/71 writes neither Location nor FallRate nor +84.
@@ -2193,6 +2424,37 @@ impl GameEntity {
     /// `Object+0x6C`, Health, above 0.
     pub fn is_alive(&self) -> bool {
         self.health.current() > 0
+    }
+
+    /// The particle systems GetROF and FireAt test (`+0x304`, `+0x308`,
+    /// `+0x314`) as they are linked now.
+    pub(crate) fn live_particles(&self) -> crate::sim::combat::rof::LiveParticles {
+        crate::sim::combat::rof::LiveParticles {
+            spark: self.spark_particle_system.system().is_some(),
+            fire: self.fire_particle_system.system().is_some(),
+            railgun: self.railgun_particle_system.system().is_some(),
+        }
+    }
+
+    /// Release the Fire system link: Foot `Set_Destination_Internal` with a
+    /// destination (`0x004D954B`, `navcom::publish_nav_com`), `Assign_Target` to a target the object
+    /// cannot fire at (`0x006FCF61`) and the death arm of ReceiveDamage
+    /// (`0x00702216`) each call the system's vt+0xF8, which only sets its
+    /// done byte (`0x006301E0`), and clear `+0x304`. Only the system's own AI
+    /// reads that byte, so the system applies the release there
+    /// ([`crate::sim::particles::ParticleSystem::apply_fire_link_release`]).
+    pub(crate) fn release_fire_particle_system(&mut self) {
+        self.fire_particle_system.forget();
+    }
+
+    /// Whether a cell object-list walk that damages what it finds (Wave
+    /// `DamageArea`, the railgun line) still reaches this object: alive, not
+    /// in its death sequence, not in limbo.
+    pub(crate) fn reachable_in_cell_list(&self) -> bool {
+        self.is_alive()
+            && !self.death.is_dying()
+            && !self.lifecycle.in_limbo()
+            && self.lifecycle.object_alive()
     }
 
     /// Whether ObjectClass native-alive state is set. This is intentionally
@@ -2338,6 +2600,11 @@ impl GameEntity {
     pub(crate) fn hash_capture_infantry_type(&self, hasher: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         self.capture_infantry_type_index.get().hash(hasher);
+        #[cfg(feature = "ares")]
+        if self.vehicle_driver != Default::default() {
+            b"ares-vehicle-driver-v1".hash(hasher);
+            self.vehicle_driver.hash(hasher);
+        }
     }
 }
 
@@ -2360,9 +2627,7 @@ mod tests {
             cloak.set_state_for_test(row["state"].as_i64().unwrap() as i32);
             cloak.set_depth_for_test(row["depth"].as_i64().unwrap() as u32);
             entity.cloak = Some(cloak);
-            entity
-                .discovery
-                .set_owned_by_current_house_for_test(row["owned"].as_bool().unwrap());
+            let owned = row["owned"].as_bool().unwrap();
             let query = if row["force"].as_bool().unwrap() {
                 crate::sim::cloak_disguise::VisualCharacterQuery::sensor(false, false, false)
             } else {
@@ -2371,7 +2636,7 @@ mod tests {
                 )
             };
             assert_eq!(
-                entity.visual_character(row["stage"].as_i64().unwrap() as i32, false, query),
+                entity.visual_character(row["stage"].as_i64().unwrap() as i32, false, owned, query),
                 row["character"].as_u64().unwrap() as u8,
                 "native control {row}"
             );
@@ -2499,5 +2764,125 @@ mod mission_shadow_tests {
             MissionId::from_known(MissionType::Guard)
         );
         assert_eq!(restored.mission.ai_counter(), 99);
+    }
+}
+
+#[cfg(feature = "phobos")]
+impl GameEntity {
+    /// Phobos AttachEffect instances, in attach order. Presentation reads the
+    /// list for animation draw offsets and tint; only `sim::attach_effect`
+    /// writes it.
+    pub fn phobos_attach_effects(&self) -> &crate::sim::attach_effect::AttachEffectList {
+        &self.phobos_attach_effects
+    }
+
+    pub(crate) fn phobos_attach_effects_mut(
+        &mut self,
+    ) -> &mut crate::sim::attach_effect::AttachEffectList {
+        &mut self.phobos_attach_effects
+    }
+
+    /// The stat fold `sim::attach_effect` recomputes from the instance list
+    /// every AI frame.
+    pub(crate) fn phobos_stat_multipliers(
+        &self,
+    ) -> &crate::sim::attach_effect::PhobosStatMultipliers {
+        &self.phobos_stat_multipliers
+    }
+
+    /// `TechnoExt::RecalculateStatMultipliers` (Body.Update.cpp:1124): refolds
+    /// the stat cache from this entity's own instance list, which each
+    /// `sim::attach_effect` pass calls once it puts the list back.
+    pub(crate) fn recalculate_phobos_stat_multipliers(
+        &mut self,
+        effects: &[crate::rules::attach_effect::AttachEffectType],
+    ) {
+        self.phobos_stat_multipliers = self.phobos_attach_effects.stat_multipliers(effects);
+    }
+
+    /// A live effect drives future frames, so it joins the state hash; an
+    /// entity with none contributes nothing.
+    pub(crate) fn hash_phobos_attach_effects<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        use std::hash::Hash;
+        if !self.phobos_attach_effects.is_empty() {
+            b"phobos-attach-effects-v1".hash(hasher);
+            self.phobos_attach_effects.hash(hasher);
+        }
+    }
+}
+
+/// The derived AttachEffect stat factors, identity when the feature is off so
+/// shared code paths need no feature gates.
+impl GameEntity {
+    /// The cached AttachEffect speed factor; identity without the feature.
+    pub(crate) fn phobos_speed_multiplier(&self) -> f64 {
+        #[cfg(feature = "phobos")]
+        {
+            self.phobos_stat_multipliers.speed
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            1.0
+        }
+    }
+
+    /// The cached AttachEffect armor factor for the unrestricted effects.
+    pub(crate) fn phobos_armor_multiplier(&self) -> f64 {
+        #[cfg(feature = "phobos")]
+        {
+            self.phobos_stat_multipliers.armor
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            1.0
+        }
+    }
+
+    /// The cached AttachEffect ROF factor; identity without the feature.
+    pub(crate) fn phobos_rof_multiplier(&self) -> f64 {
+        #[cfg(feature = "phobos")]
+        {
+            self.phobos_stat_multipliers.rof
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            1.0
+        }
+    }
+
+    /// `Cloakable` from the active AttachEffects; false without the feature.
+    pub(crate) fn phobos_cloakable(&self) -> bool {
+        #[cfg(feature = "phobos")]
+        {
+            self.phobos_stat_multipliers.cloakable
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            false
+        }
+    }
+
+    /// `ForceDecloak` from the active AttachEffects; false without the feature.
+    pub(crate) fn phobos_force_decloak(&self) -> bool {
+        #[cfg(feature = "phobos")]
+        {
+            self.phobos_stat_multipliers.force_decloak
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            false
+        }
+    }
+
+    /// `Unkillable` from the active AttachEffects; false without the feature.
+    pub(crate) fn phobos_unkillable(&self) -> bool {
+        #[cfg(feature = "phobos")]
+        {
+            self.phobos_stat_multipliers.unkillable
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            false
+        }
     }
 }

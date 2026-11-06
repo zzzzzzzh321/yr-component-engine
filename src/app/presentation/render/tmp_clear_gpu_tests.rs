@@ -277,7 +277,7 @@ fn assert_paid_deso_light_lifecycle(packet_path: &'static str, profile_path: &'s
                 - input["viewport_y"].as_i64().unwrap() as f32,
         ];
         let a = a.as_mut().unwrap();
-        a.rebuild_if_needed(
+        a.rebuild_submitted(
             &gpu.device,
             &gpu.queue,
             scene.sim().fog(),
@@ -556,11 +556,10 @@ fn assert_retail_amcv_sight_raster(moving: bool) {
             // An equal LocalSize writer would not exercise that callback.
             // No frame between demotion and restoration releases the source.
             let runtime = &mut scene.runtime;
-            assert!(
-                runtime
-                    .simulation
-                    .change_visible_map_area([2, 2, 1, 1], &runtime.resources.rules,)
-            );
+            assert!(runtime.simulation.change_visible_map_area(
+                [2, 2, 1, 1],
+                crate::sim::world::UninitContext::with_rules(&runtime.resources.rules),
+            ));
             assert!(
                 !runtime
                     .simulation
@@ -569,11 +568,10 @@ fn assert_retail_amcv_sight_raster(moving: bool) {
                     .unwrap()
                     .in_playfield()
             );
-            assert!(
-                runtime
-                    .simulation
-                    .change_visible_map_area(restore_local_size, &runtime.resources.rules,)
-            );
+            assert!(runtime.simulation.change_visible_map_area(
+                restore_local_size,
+                crate::sim::world::UninitContext::with_rules(&runtime.resources.rules),
+            ));
             assert!(
                 runtime
                     .simulation
@@ -649,7 +647,7 @@ fn assert_retail_amcv_sight_raster(moving: bool) {
             input["full_view"]["view_origin"][0].as_i64().unwrap() as f32,
             input["full_view"]["view_origin"][1].as_i64().unwrap() as f32 + 15.0,
         ];
-        source.rebuild_if_needed(
+        source.rebuild_submitted(
             &gpu.device,
             &gpu.queue,
             scene.sim().fog(),

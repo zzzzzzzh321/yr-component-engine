@@ -21,6 +21,11 @@ pub struct ObserverDrawContext {
     pub is_campaign: bool,
     /// Original House50B6F0, distinct from either alliance direction.
     pub owner_is_current_player: bool,
+    /// Phobos `IsControlledByCurrentPlayer_Wrapper` (`0x70EE5D`/`0x70EE70`,
+    /// `0x7062FB`): whether this viewer sees through the disguise owner for
+    /// the blur/real-type decision. Without Phobos it equals
+    /// `owner_is_current_player`.
+    pub disguise_owner_visible: bool,
     /// Object+1BC returned a Cell for the disguise observer query.
     pub disguise_cell_present: bool,
     /// Original Cell4870F0 for this viewer at that Cell.
@@ -43,6 +48,7 @@ impl Default for ObserverDrawContext {
             invisible: false,
             is_campaign: false,
             owner_is_current_player: false,
+            disguise_owner_visible: false,
             disguise_cell_present: false,
             detects_disguise: false,
             drawn_voxel: None,
@@ -66,6 +72,11 @@ pub const FX_SHADOW: u32 = 1 << 6;
 /// Voxel body waterline clip. `sinking_row` carries Techno+3CA's retained
 /// world row; ordinary alpha remains in its own lane.
 pub(crate) const FX_SINKING_CLIP: u32 = 1 << 7;
+/// DSurface4C0750's dashed stores, kept or skipped per pixel by the live
+/// tactical A (`fs_surface_store` in batch_shader.wgsl): store where it is
+/// nonzero, or where it is zero (the second rally pass).
+pub(crate) const FX_SURFACE_A_NONZERO: u32 = 1 << 8;
+pub(crate) const FX_SURFACE_A_ZERO: u32 = 1 << 9;
 
 /// Resolved native visual character; the simulation owns the query and clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +91,10 @@ pub struct CloakDrawInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisguiseDrawInput {
     pub active: bool,
+    /// The viewer half of the real-type decision: Phobos'
+    /// `IsControlledByCurrentPlayer_Wrapper` answer when the capability is
+    /// compiled in, else the original House50B6F0 flag. Named for the stock
+    /// input it replaces.
     pub owner_is_current_player: bool,
     pub cell_present: bool,
     pub detected: bool,
@@ -138,8 +153,8 @@ pub struct DrawDecision {
     pub visible: bool,
     pub state: DrawState,
     /// The unmodified `TechnoClass::GetVisualState` result supplied by the
-    /// existing GameEntity visual-character owner. Building4544A0 delegates
-    /// to that owner for its ordinary stage-zero path; callers that need the
+    /// existing GameEntity visual-character owner, which also answers a
+    /// fading Building's override (Building4544A0); callers that need the
     /// native enum must not infer it from the GPU-ready `state` fields.
     pub(crate) native_visual_state: u8,
 }
@@ -280,13 +295,34 @@ impl DrawState {
     /// `+0x270`; an erased building's anims take their translucency from
     /// their own `+0x119` (`0x004521C0`), and one created during the erase
     /// draws opaque (`0x00451B25`).
+    ///
+    /// A fading Building's slot anims never read its GetVisualState: they
+    /// draw as at stage zero and fade through their own `+0x178`
+    /// ([`building_slot_anim_ramp`]).
     pub(crate) fn for_building_slot_anims(
         building: &GameEntity,
         current_frame: u32,
         remap_row: u32,
         observer: ObserverDrawContext,
     ) -> DrawDecision {
-        Self::entity_decision(building, current_frame, remap_row, observer, false)
+        let decision = Self::entity_decision(building, current_frame, remap_row, observer, false);
+        if building.building_cloak_stage() == 0 {
+            return decision;
+        }
+        DrawDecision {
+            native_visual_state: decision.native_visual_state,
+            ..Self::resolve(
+                DrawStateInput {
+                    cloak: None,
+                    disguise: None,
+                    warp_out: false,
+                    warp_in: false,
+                    double_thick_building: observer.double_thick_building,
+                },
+                current_frame,
+                remap_row,
+            )
+        }
     }
 
     fn entity_decision(
@@ -304,6 +340,7 @@ impl DrawState {
         let character = entity.visual_character(
             observer.cloaking_stages,
             observer.invisible,
+            entity.discovery.owned_by_current_house(),
             crate::sim::cloak_disguise::VisualCharacterQuery::screen(
                 true,
                 observer.observer_present,
@@ -346,7 +383,7 @@ impl DrawState {
     ) -> Option<DisguiseDrawInput> {
         entity.disguise.as_ref().map(|disguise| DisguiseDrawInput {
             active: disguise.is_disguised(),
-            owner_is_current_player: observer.owner_is_current_player,
+            owner_is_current_player: observer.disguise_owner_visible,
             cell_present: observer.disguise_cell_present,
             detected: observer.detects_disguise,
             // +1EC/+1F4, which a DisguiseWhenStill= Unit's shot starts
@@ -363,6 +400,22 @@ impl DrawState {
     ) -> bool {
         Self::disguise_input(entity, current_frame, observer)
             .is_some_and(|input| !input.shows_real_type(current_frame))
+    }
+}
+
+/// The `+0x178` a Building writes into each slot Anim: its fade stage
+/// (`+0x6ED`), or 16 at stage 15 when its own GetVisualState(0, 0) is 5
+/// (`BuildingClass::UpdateCloak @ 0x00454E3A..0x00454E70`; a slot created
+/// mid-fade gets the same at `0x004519B9`). `AnimClass::DrawIt` turns it into
+/// 25%, 50% or no draw ([`crate::sim::anim_class::anim_translucency_selection`]).
+/// The 16 depends on the local player's sensors, so presentation derives it
+/// and the simulation never stores it. Residual: native writes it only when
+/// the stage changes, so a sensor gained or lost while the stage holds at 15
+/// reaches the anims at the next write; this follows it at once.
+pub(crate) fn building_slot_anim_ramp(building: &GameEntity, building_visual_state: u8) -> u8 {
+    match building.building_cloak_stage() {
+        15 if building_visual_state == 5 => 16,
+        stage => stage,
     }
 }
 
@@ -559,6 +612,40 @@ mod tests {
             DrawState::for_building_slot_anims(&building, 0, 3, ObserverDrawContext::default())
                 .state;
         assert_eq!((anims.fx_flags, anims.fx_params[0]), (0, 1.0));
+    }
+
+    /// A fading building's body follows its GetVisualState (`0x004544A0`)
+    /// while its slot anims draw as at stage zero and fade only through the
+    /// `+0x178` it writes them (`0x00454E3A..0x00454E70`): at stage 11 an
+    /// unsensed enemy's body is gone and its anims still draw; at 15 their
+    /// ramp is 16 unless the player senses the building.
+    #[test]
+    fn a_fading_building_hands_its_slot_anims_a_ramp_not_its_visual_state() {
+        let mut building = entity();
+        building.set_category_for_test(EntityCategory::Structure);
+        let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
+        let sensed = ObserverDrawContext {
+            detects_cloak: true,
+            ..ObserverDrawContext::default()
+        };
+        for (stage, observer, body_visible, ramp) in [
+            (11, ObserverDrawContext::default(), false, 11),
+            (15, ObserverDrawContext::default(), false, 16),
+            (15, sensed, true, 15),
+        ] {
+            cloak.set_building_stage_for_test(stage);
+            building.cloak = Some(cloak);
+            let body = DrawState::for_entity(&building, 0, 3, observer);
+            let anims = DrawState::for_building_slot_anims(&building, 0, 3, observer);
+            assert_eq!(body.visible, body_visible, "stage {stage} body");
+            assert!(anims.visible, "stage {stage} anims");
+            assert_eq!(anims.state.fx_params[0], 1.0, "stage {stage} anim material");
+            assert_eq!(
+                building_slot_anim_ramp(&building, anims.native_visual_state),
+                ramp,
+                "stage {stage} ramp"
+            );
+        }
     }
 
     #[test]
