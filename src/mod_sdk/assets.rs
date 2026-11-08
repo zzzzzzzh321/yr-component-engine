@@ -148,8 +148,8 @@ impl PreparedProcessModBinding {
     }
 }
 
-/// The Rules registry retains this same Program before its first Country
-/// body. Missing still-unknown legacy payloads keep the original late binder.
+/// The Rules registry retains this same Program before physical Rules readers
+/// and Country bodies. Missing legacy payloads keep the original late binder.
 pub(crate) fn early_configuration_seed(
     assets: &crate::assets::asset_manager::AssetManager,
 ) -> Result<Option<Arc<Program>>, String> {
@@ -160,7 +160,7 @@ pub(crate) fn early_configuration_seed(
     let admitted = AdmittedComponent::load(bytes, &identity.sha256)?;
     super::startup::require_startup_frontier(&admitted, early)?;
     let program = admitted.into_configuration_seed();
-    Ok(program.has_early_configuration().then(|| Arc::new(program)))
+    Ok(program.requires_rules_seed().then(|| Arc::new(program)))
 }
 
 /// Restore the exact saved configuration after projecting retained Rules.

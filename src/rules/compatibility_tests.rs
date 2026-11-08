@@ -37,7 +37,8 @@ fn compiled_capability_controls_real_readers_and_roundtrip() {
         );
         let strike = rules.super_weapon("STRIKE").unwrap();
         assert_eq!(strike.generic_warhead.as_ref().unwrap().damage, 75);
-        assert!(rules.warhead("PAYLOAD").is_some());
+        assert!(rules.warhead("PAYLOAD").is_none());
+        assert_eq!(strike.generic_warhead.as_ref().unwrap().warhead, None);
         let delivery = rules.super_weapon("DELIVERY").unwrap();
         assert_eq!(delivery.unit_delivery.as_ref().unwrap().deferment, 7);
         assert_eq!(delivery.unit_delivery.as_ref().unwrap().types.len(), 1);

@@ -27,7 +27,7 @@ impl Simulation {
         let Some(cell) = self.session.waypoint_cell(waypoint) else {
             return false;
         };
-        let Some(location) = self.direct_strike_coord(cell) else {
+        let Some(location) = self.direct_strike_coord(cell, None) else {
             return false;
         };
         let Some(bounds) = self.playfield_bounds else {
@@ -106,7 +106,7 @@ impl Simulation {
         let Some(cell) = self.session.waypoint_cell(waypoint) else {
             return false;
         };
-        self.launch_nuke_payload_at_cell(rules, cell, Some(50), None)
+        self.launch_nuke_payload_at_cell(rules, cell, Some(50), None, None)
             .is_some()
     }
 
@@ -120,34 +120,73 @@ impl Simulation {
     /// Super's bullet creation returns null (`0x006CDB93`), native skips the
     /// PSIWARN, Fire, EVA line and DigSound; VERA still plays them. Only a
     /// failed bullet creation reaches it.
+    /// Installed Nuclear10073145..10073255 uses the bound payload and exact
+    /// Vertical/nonvertical vectors; it shares construction and Fire admission.
     pub(crate) fn launch_nuke_payload_at_cell(
         &mut self,
         rules: &RuleSet,
         cell: (i16, i16),
         speed_override: Option<i32>,
         warning_house: Option<InternedId>,
+        nuclear: Option<(u32, &crate::rules::superweapon_type::NuclearSettings)>,
     ) -> Option<DriveCoord> {
-        let location = self.direct_strike_coord(cell)?;
-        let weapon_handle = rules.weapon_handle("NukePayload")?;
+        // Ares10073019 looks up the packed target before reading its Cell
+        // coordinates. Stock actions retain their separate ground/world lookup.
+        let native_cell = nuclear.map(|_| {
+            ProjectileTarget::looked_up_cell(
+                self.resolved_terrain.as_ref(),
+                cell.0 as u16,
+                cell.1 as u16,
+            )
+        });
+        let location = self.direct_strike_coord(cell, native_cell)?;
+        let weapon_handle = match nuclear {
+            Some((_, settings)) => settings.payload?,
+            None => rules.weapon_handle("NukePayload")?,
+        };
         let weapon = rules.weapon_by_handle(weapon_handle)?;
-        let warhead = weapon.warhead.as_deref().and_then(|id| rules.warhead(id))?;
+        let warhead = nuclear
+            .map_or(weapon.warhead.as_deref(), |(_, settings)| {
+                settings.warhead_for(weapon)
+            })
+            .and_then(|id| rules.warhead(id))?;
+        let projectile = weapon
+            .projectile
+            .as_deref()
+            .and_then(|id| rules.projectile(id));
+        if nuclear.is_some() && projectile.is_none() {
+            return None; // Activate10073159 refuses a null payload BulletType.
+        }
         // 6E34D3's Map565730 looks up world XY again. Preserve truncation
         // and the retained Dummy rather than assuming the packed waypoint
         // is always the CellClass that becomes the Bullet's target.
-        let target = self.direct_strike_target(location);
+        let target = native_cell.unwrap_or_else(|| self.direct_strike_target(location));
         let payload = ProjectilePayload::new(
-            weapon.damage,
+            nuclear.map_or(weapon.damage, |(_, settings)| settings.damage_for(weapon)),
             self.interner.intern(&warhead.id),
             weapon
                 .projectile
                 .as_deref()
                 .map(|id| self.interner.intern(id)),
-            false,
+            nuclear.is_some() && weapon.bright, //1007318B reads Weapon.Bright.
         )
         .with_installed_weapon(Some(weapon_handle));
-        let stable_id = self.substrate.allocate_stable_id();
-        let native_id = self.next_native_runtime_id();
-        if let Some(owner) = warning_house {
+        // CreateBullet precedes PsiWarn100731A7..100731DC. Reserve both
+        // identities and run construction once through the shared owner;
+        // admit_fired_bullet reuses this unfired Bullet for Fire.
+        let stable_id = self.construct_projectile(RAD_NO_ATTACKER, target, payload, rules);
+        let native_id = self
+            .projectiles
+            .get(stable_id)
+            .expect("constructed direct Nuclear Bullet")
+            .native_unique_id();
+        let warning = nuclear.map_or(
+            Some(crate::rules::effect_asset_catalog::PSI_WARNING_ANIM),
+            |(_, settings)| settings.psi_warning.as_deref(),
+        );
+        if let Some(owner) = warning_house
+            && let Some(warning) = warning
+        {
             //43B5E0 uses the target Cell's GetCoords, not this producer's
             //raised bridge coordinate. The House belongs to the warning;
             //the bullet keeps its original null source/firer House.
@@ -164,7 +203,7 @@ impl Simulation {
             };
             self.spawn_bullet_warning(
                 rules,
-                crate::rules::effect_asset_catalog::PSI_WARNING_ANIM,
+                warning,
                 crate::sim::anim_class::AnimWorldCoord {
                     x: coord.x,
                     y: coord.y,
@@ -174,12 +213,31 @@ impl Simulation {
                 owner,
             );
         }
-        let origin = ProjectileCoord::new(location.x, location.y, location.z.wrapping_add(20000));
-        // Double7EDA88 is -100. The shared table/pitch kernel also serves
-        // the silo and NukeMaker, whose callers pass different scales.
-        let velocity = crate::sim::projectile::launch::missile_launch_velocity(
-            NativeF64Bits::from_bits(0xc059_0000_0000_0000),
-        );
+        let (altitude, velocity) = if nuclear.is_some() {
+            // Activate10073209..1007323D: exact axis vectors, not the stock
+            // table/pitch expression. A nonvertical payload starts at target Z.
+            if projectile.is_some_and(|projectile| projectile.vertical) {
+                (
+                    20000,
+                    crate::sim::projectile::ProjectileVelocity::new(0, 0, -100),
+                )
+            } else {
+                (
+                    0,
+                    crate::sim::projectile::ProjectileVelocity::new(0, 100, 0),
+                )
+            }
+        } else {
+            // Double7EDA88 is -100. Stock producers retain their shared kernel.
+            (
+                20000,
+                crate::sim::projectile::launch::missile_launch_velocity(NativeF64Bits::from_bits(
+                    0xc059_0000_0000_0000,
+                )),
+            )
+        };
+        let origin =
+            ProjectileCoord::new(location.x, location.y, location.z.wrapping_add(altitude));
         if let Some(bullet) = FiredBullet::launched(
             self,
             rules,
@@ -191,16 +249,35 @@ impl Simulation {
             origin,
             velocity,
         ) {
-            admit_fired_bullet(self, rules, weapon, stable_id, bullet);
+            admit_fired_bullet(
+                self,
+                rules,
+                weapon,
+                stable_id,
+                bullet.with_launching_super_weapon(nuclear.map(|(ordinal, _)| ordinal)),
+            );
+        } else {
+            self.retire_non_entity_object(
+                stable_id,
+                crate::sim::world::UninitContext::new(rules, None),
+            );
+            if nuclear.is_some() {
+                return None;
+            }
         }
         // 6E35D1 returns true independently of Fire's Boolean result.
         Some(location)
     }
 
     /// Shared coordinate setup in 95's6E3446..6E3495 and 96's6E3917..6E3975.
-    /// Ground578080 and packed lookup5657A0 remain separate, in that order.
+    /// Their Ground578080 and packed lookup5657A0 stay in that order; installed
+    /// Nuclear10073058 supplies its already-looked-up Cell and uses GetCoords.
     /// These callers test structural bit100 alone (camera uses100/400).
-    fn direct_strike_coord(&self, cell: (i16, i16)) -> Option<DriveCoord> {
+    fn direct_strike_coord(
+        &self,
+        cell: (i16, i16),
+        native_cell: Option<ProjectileTarget>,
+    ) -> Option<DriveCoord> {
         let cells = NativeCellQuery::canonical(self.resolved_terrain.as_ref()?);
         let centre = cell_center(
             CellCoordinate {
@@ -209,13 +286,33 @@ impl Simulation {
             },
             0,
         );
-        let mut location = DriveCoord {
-            x: centre.x,
-            y: centre.y,
-            z: 0,
+        let mut location = if let Some(target) = native_cell {
+            let coord = match target {
+                ProjectileTarget::Cell { rx, ry } => crate::sim::projectile::cell_ground_coord(
+                    self.resolved_terrain.as_ref(),
+                    rx,
+                    ry,
+                ),
+                ProjectileTarget::DummyCell => crate::sim::projectile::dummy_cell_ground_coord(
+                    &self.effective_shared_cell_dummy(),
+                ),
+                _ => unreachable!("Nuclear activation supplies a looked-up Cell"),
+            };
+            DriveCoord {
+                x: coord.x,
+                y: coord.y,
+                z: coord.z,
+            }
+        } else {
+            let mut coord = DriveCoord {
+                x: centre.x,
+                y: centre.y,
+                z: 0,
+            };
+            coord.z = query_ground_height(&cells, coord)
+                .expect("direct strike ground query requires a supported native slope");
+            coord
         };
-        location.z = query_ground_height(&cells, location)
-            .expect("direct strike ground query requires a supported native slope");
         if cells.flags(cells.lookup(cell)) & 0x100 != 0 {
             location.z = location.z.wrapping_add(BRIDGE_DECK_HEIGHT_LEPTONS);
         }

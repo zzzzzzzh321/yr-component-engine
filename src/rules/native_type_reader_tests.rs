@@ -466,7 +466,11 @@ fn retail_references_publish_their_authored_names() {
     }
     for super_weapon in rules.super_weapons.values() {
         let authored = authored(&super_weapon.id, "WeaponType");
-        assert_eq!(super_weapon.weapon_type, authored, "{}", super_weapon.id);
+        let published = super_weapon
+            .weapon_type
+            .and_then(|handle| rules.weapon_by_handle(handle))
+            .map(|weapon| weapon.id.as_str());
+        assert_eq!(published, authored.as_deref(), "{}", super_weapon.id);
         counts[7] += usize::from(authored.is_some());
     }
     assert_eq!(

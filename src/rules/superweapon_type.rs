@@ -19,6 +19,7 @@
 
 use crate::rules::ini_parser::IniSection;
 use crate::rules::ini_value::truncate_native_bytes;
+use crate::rules::ruleset::WeaponHandle;
 
 /// `SuperWeaponTypeClass` constructor recharge, `0x1194` frames (5 minutes)
 /// at `0x006CE5E9`.
@@ -147,12 +148,49 @@ impl SuperWeaponKind {
 /// `src/Ext/SWType/Body.cpp` in https://github.com/Ares-Developers/Ares.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenericWarheadSettings {
-    /// Bound by the ordered Rules processor, including otherwise unreferenced
-    /// Warheads. An absent/null reference makes the launch unavailable.
+    /// Bound by the ordered Rules processor's existing-Warhead lookup.
+    /// An absent/null reference makes the launch unavailable.
     pub warhead: Option<String>,
     pub damage: i32,
     pub ai_targeting: GenericWarheadAiTargeting,
     pub targeting: crate::rules::superweapon_targeting::SuperWeaponTargeting,
+}
+
+/// Explicit installed Nuclear handler selection. Native Type history remains
+/// separate; the physical Process reader owns the payload and Warhead slots.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NuclearSettings {
+    pub source_ordinal: u32,
+    pub payload: Option<WeaponHandle>,
+    pub warhead: Option<String>,
+    /// Nuclear100732F0 uses the payload damage for every negative override.
+    pub damage: i32,
+    pub silo_launch: bool,
+    /// NukeTakeOff100366EA: omitted uses current General.NukeTakeOff;
+    /// an explicit null suppresses the animation.
+    pub take_off: Option<Option<String>>,
+    pub psi_warning: Option<String>,
+    /// Unset follows current General.DigSound; explicit null remains silent.
+    pub activation_sound: Option<Option<String>>,
+}
+
+impl NuclearSettings {
+    /// Nuclear100732F0: only a nonnegative override replaces payload damage.
+    pub(crate) fn damage_for(&self, weapon: &crate::rules::weapon_type::WeaponType) -> i32 {
+        if self.damage >= 0 {
+            self.damage
+        } else {
+            weapon.damage
+        }
+    }
+
+    /// Nuclear10073320: a null common override falls back to the payload WH.
+    pub(crate) fn warhead_for<'a>(
+        &'a self,
+        weapon: &'a crate::rules::weapon_type::WeaponType,
+    ) -> Option<&'a str> {
+        self.warhead.as_deref().or(weapon.warhead.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -397,9 +435,9 @@ pub struct SuperWeaponType {
     /// it, so it names the `[SuperWeaponTypes]` entry at that position
     /// (retail ChronoWarpSpecial: `ChronoSphere`, 3).
     pub pre_dependent: i32,
-    /// `WeaponType=` (+9C), the WeaponType the ordered Rules processor
-    /// resolved (e.g., NukeCarrier for the nuke).
-    pub weapon_type: Option<String>,
+    /// `WeaponType=` (+9C), the actual Weapon resolved by ReadINI6CEA8C.
+    /// Mission_Missile44CAD0/44CAFF uses this pointer without a name lookup.
+    pub weapon_type: Option<WeaponHandle>,
     /// `AuxBuilding=` (+C8), the BuildingType the ordered Rules processor
     /// resolved: a required secondary building (e.g., NukeSilo for nuke).
     pub aux_building: Option<String>,
@@ -460,6 +498,8 @@ pub struct SuperWeaponType {
     /// Present only for the explicitly selected Ares extension; stock types
     /// retain their existing readers and behavior.
     pub generic_warhead: Option<GenericWarheadSettings>,
+    /// Set only by an admitted explicit Nuclear resource declaration.
+    pub nuclear: Option<NuclearSettings>,
     /// Pointer bindings retained by the ordered Ares reader.
     pub hunter_seeker: Option<crate::rules::hunter_seeker::HunterSeekerSettings>,
 }
@@ -640,6 +680,7 @@ impl SuperWeaponType {
             sw_sidebar_significance: section.read_int("SuperWeaponSidebar.Significance", 0),
             #[cfg(not(feature = "ares"))]
             generic_warhead: None,
+            nuclear: None,
             #[cfg(feature = "ares")]
             generic_warhead: (ares && kind == SuperWeaponKind::GenericWarhead).then(|| {
                 GenericWarheadSettings {

@@ -3091,10 +3091,29 @@ fn nuke_maker(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDe
         .and_then(|weapon| weapon.projectile.as_deref())
         .and_then(|projectile| rules.projectile(projectile))
         .map_or(0, |projectile| projectile.detonation_altitude);
-    let weapon_handle = rules.weapon_handle(NUKE_PAYLOAD_WEAPON);
+    let launching_super_weapon = world
+        .projectiles
+        .get(detonation.projectile_id)
+        .and_then(|projectile| projectile.launching_super_weapon());
+    let nuclear = launching_super_weapon
+        .and_then(|ordinal| rules.nuclear_super_weapon(ordinal))
+        .and_then(|definition| definition.nuclear.as_ref())
+        .filter(|settings| settings.payload.is_some());
+    // Ares NukeMaker10036880 selects the admitted handler's actual payload
+    // slot. A null slot logs and returns0 at10036914..27: Syringe's zero
+    // return resumes original46B371, including its literal NukePayload lookup
+    // and unmodified weapon arguments. Child association still propagates.
+    let weapon_handle = match nuclear {
+        Some(settings) => settings.payload,
+        None => rules.weapon_handle(NUKE_PAYLOAD_WEAPON),
+    };
     let weapon = weapon_handle.and_then(|handle| rules.weapon_by_handle(handle));
     let warhead = weapon
-        .and_then(|weapon| weapon.warhead.as_deref())
+        .and_then(|weapon| {
+            nuclear.map_or(weapon.warhead.as_deref(), |settings| {
+                settings.warhead_for(weapon)
+            })
+        })
         .and_then(|name| rules.warhead(name));
     let (Some(target_coords), Some(weapon), Some(warhead)) = (target_coords, weapon, warhead)
     else {
@@ -3110,7 +3129,7 @@ fn nuke_maker(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDe
     let native_unique_id = world.next_native_runtime_id();
     let velocity = crate::sim::projectile::launch::missile_launch_velocity(FALL_SCALE);
     let payload = ProjectilePayload::new(
-        weapon.damage,
+        nuclear.map_or(weapon.damage, |settings| settings.damage_for(weapon)),
         world.interner.intern(&warhead.id),
         weapon
             .projectile
@@ -3130,7 +3149,15 @@ fn nuke_maker(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDe
         origin,
         velocity,
     ) {
-        super::admit_fired_bullet(world, rules, weapon, bullet_id, bullet);
+        // Ares10036958 copies the parent association after construction and
+        // before Fire, without selecting a weapon-aware range budget.
+        super::admit_fired_bullet(
+            world,
+            rules,
+            weapon,
+            bullet_id,
+            bullet.with_launching_super_weapon(launching_super_weapon),
+        );
     }
 }
 

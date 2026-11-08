@@ -1049,7 +1049,7 @@ impl NativeRulesProcessOwner {
         state.bind_fixed_sound_source(Arc::clone(&self.sources.fixed_sounds));
         if let Some(program) = self
             .sdk_configuration_program()
-            .filter(|p| p.has_early_configuration())
+            .filter(|p| p.requires_rules_seed())
         {
             state.retain_sdk_configuration_program(Some(Arc::new(
                 program.fresh_configuration_seed(),

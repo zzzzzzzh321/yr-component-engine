@@ -215,6 +215,9 @@ pub(crate) struct FiredBullet {
     /// Only a weapon-aware factory supplies a budget. A known payload weapon
     /// alone does not imply this writer (stock shrapnel retains bare INT_MAX).
     pub(super) projectile_range: Option<i32>,
+    /// Installed Nuclear's actual SWType definition, assigned before Fire
+    /// on direct/child construction (Ares10073113/10036958).
+    pub(super) launching_super_weapon: Option<u32>,
 }
 
 /// An Object target's OnBridge (`+0x8C`); `false` for anything else.
@@ -230,6 +233,11 @@ pub(super) fn target_on_bridge(world: &Simulation, target: ProjectileTarget) -> 
 }
 
 impl FiredBullet {
+    pub(crate) fn with_launching_super_weapon(mut self, source: Option<u32>) -> Self {
+        self.launching_super_weapon = source;
+        self
+    }
+
     /// A bullet `BulletClass::Fire` launches from `origin` at `velocity` and
     /// that moves at the velocity's magnitude, as the silo's missile and
     /// NukeMaker's warhead do (FireAt keeps its own launch speed and its own
@@ -297,6 +305,7 @@ impl FiredBullet {
                 .clamp(0.0, f64::from(u16::MAX)) as u16,
             target_on_bridge: target_on_bridge(world, target),
             projectile_range: None,
+            launching_super_weapon: None,
         })
     }
 }
@@ -412,6 +421,11 @@ pub(crate) fn admit_fired_bullet(
     }
     if let Some(range) = bullet.projectile_range {
         world.projectiles.set_weapon_fuel(bullet_id, range);
+    }
+    if let Some(source) = bullet.launching_super_weapon {
+        world
+            .projectiles
+            .set_launching_super_weapon(bullet_id, Some(source));
     }
     let spawn = delivery.spawn(&world.substrate.entities, rules, projectile_type, bullet);
     world.fire_constructed_projectile(bullet_id, spawn);

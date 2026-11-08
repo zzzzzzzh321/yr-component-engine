@@ -639,6 +639,7 @@ fn process_native_rules_cold_start_inner(
         selected_rules_root,
         "Animations",
         RulesTypeFamily::Animation,
+        32,
     );
     let after_animation_master = processor.native_type_construction_events.len();
     processor.process_anim_family(fixed_art);
@@ -647,6 +648,7 @@ fn process_native_rules_cold_start_inner(
         selected_rules_root,
         "BuildingTypes",
         RulesTypeFamily::Building,
+        32,
     );
     let after_building_master = processor.native_type_construction_events.len();
     processor.process_techno_family(
@@ -720,7 +722,12 @@ fn process_native_noncampaign_rules_prepass_inner(
     selected_rules_root: &IniFile,
 ) -> Result<(NativeTypeConstructionTrace, [usize; 3]), NativeRulesProcessingFailure> {
     let mut processor = RulesPassProcessor::with_registry_state(registry_state);
-    processor.allocate_explicit_family(selected_rules_root, "Countries", RulesTypeFamily::Country);
+    processor.allocate_explicit_family(
+        selected_rules_root,
+        "Countries",
+        RulesTypeFamily::Country,
+        32,
+    );
     let after_countries = processor.native_type_construction_events.len();
     processor.allocate_general_references(selected_rules_root);
     let after_general = processor.native_type_construction_events.len();
@@ -746,7 +753,7 @@ pub(crate) fn read_native_multiplayer_country(
     current: i32,
 ) -> (i32, NativeTypeConstructionTrace) {
     let mut processor = RulesPassProcessor::with_registry_state(registry);
-    processor.allocate_explicit_family(root, "Countries", RulesTypeFamily::Country);
+    processor.allocate_explicit_family(root, "Countries", RulesTypeFamily::Country, 32);
     let name = settings
         .section_or_empty("MultiPlayer")
         .read_string("Side", "", 0x80);
@@ -1487,8 +1494,31 @@ impl ProcessedRulesLayers {
                 ));
             }
         }
+        if registry
+            .families
+            .values()
+            .flatten()
+            .any(|member| member.nuclear_super_weapon_references.is_some())
+            && !registry
+                .sdk_configuration_seed
+                .as_ref()
+                .is_some_and(|program| {
+                    program.has_super_read() && program.validate_restore().is_ok()
+                })
+        {
+            return Err(RulesError::InvalidSavedState(
+                "saved Nuclear references require their admitted component",
+            ));
+        }
         for (&family, members) in &registry.families {
             for member in members {
+                if member.nuclear_super_weapon_references.is_some()
+                    && family != RulesTypeFamily::SuperWeapon
+                {
+                    return Err(RulesError::InvalidSavedState(
+                        "saved Nuclear references belong to another type family",
+                    ));
+                }
                 if let Some(warhead) = &member.generic_super_weapon_warhead {
                     if family != RulesTypeFamily::SuperWeapon
                         || !registry
@@ -1673,6 +1703,14 @@ impl ProcessedRulesLayers {
                     .is_some_and(|index| index >= weapon_count)
                 || member
                     .shrapnel_weapon
+                    .is_some_and(|index| index >= weapon_count)
+                || member
+                    .super_weapon_weapon
+                    .is_some_and(|index| index >= weapon_count)
+                || member
+                    .nuclear_super_weapon_references
+                    .as_ref()
+                    .and_then(|state| state.payload)
                     .is_some_and(|index| index >= weapon_count)
                 || member
                     .weapon
@@ -2367,10 +2405,10 @@ impl ProcessedRulesLayers {
     /// after every reached pass.
     pub(crate) fn super_weapon_reference_states(
         &self,
-    ) -> impl Iterator<Item = (&str, (Option<&str>, Option<&str>))> {
+    ) -> impl Iterator<Item = (&str, (Option<usize>, Option<&str>))> {
         self.member_states(RulesTypeFamily::SuperWeapon, |member| {
             (
-                member.super_weapon_weapon.as_deref(),
+                member.super_weapon_weapon,
                 member.super_weapon_aux_building.as_deref(),
             )
         })
@@ -2433,13 +2471,28 @@ impl ProcessedRulesLayers {
         self.member_states(RulesTypeFamily::Vehicle, |member| &member.ore_gathering)
     }
 
-    /// Ares GenericWarhead references, resolved by the same ordered type
-    /// allocator as native references. Kept separate from the retail fields.
+    /// Common Ares SW.Warhead pointer, read by its lookup-only parser.
     pub(crate) fn generic_super_weapon_warhead_states(
         &self,
     ) -> impl Iterator<Item = (&str, Option<&str>)> {
         self.member_states(RulesTypeFamily::SuperWeapon, |member| {
             member.generic_super_weapon_warhead.as_deref()
+        })
+    }
+
+    /// One source directory for immutable payload binding. The outer Nuclear
+    /// option proves that its bounded physical reference action was selected.
+    pub(crate) fn super_weapon_resource_reference_states(
+        &self,
+    ) -> impl Iterator<Item = (&str, (Option<&str>, Option<Option<usize>>))> {
+        self.member_states(RulesTypeFamily::SuperWeapon, |member| {
+            (
+                member.generic_super_weapon_warhead.as_deref(),
+                member
+                    .nuclear_super_weapon_references
+                    .as_ref()
+                    .map(|state| state.payload),
+            )
         })
     }
 
@@ -4458,7 +4511,7 @@ impl NativeRulesRegistryState {
         if !self
             .sdk_configuration_seed
             .as_ref()
-            .is_some_and(|program| program.has_early_configuration())
+            .is_some_and(|program| program.requires_rules_seed())
         {
             self.sdk_configuration_seed = None;
         }
@@ -5310,11 +5363,13 @@ struct ProcessedType {
     /// Constructor6440B9 and reached reader644461 store -1 for no behavior.
     #[serde(default)]
     particle_system_behavior: crate::rules::particle_system_type::ParticleSystemBehavesLike,
-    /// SuperWeaponType+9C `WeaponType=`, the stored ID of its WeaponType:
+    /// SuperWeaponType+9C `WeaponType=`, the actual Weapon array slot:
     /// constructor null (`0x006CE5CB`); ReadINI (`0x006CEA4A..0x006CEA8C`)
     /// keeps it on an empty ReadString128 and otherwise stores
     /// `WeaponTypeClass::FindOrAllocate @ 0x00772FA0`, null for `none`.
-    super_weapon_weapon: Option<String>,
+    /// Mission_Missile44CAD0/44CAFF consumes that same pointer even when
+    /// separately allocated instances share a stored24 name.
+    super_weapon_weapon: Option<usize>,
     /// SuperWeaponType+C8 `AuxBuilding=` (`0x006CED07..0x006CED2E`), read the
     /// same way through BuildingType's factory (`0x004653C0`).
     super_weapon_aux_building: Option<String>,
@@ -5350,8 +5405,13 @@ struct ProcessedType {
     #[cfg(feature = "phobos")]
     #[serde(default)]
     phobos_insignia: crate::rules::insignia_type::PhobosInsignia,
-    /// Ares `SW.Warhead=`, read only for Type=GenericWarhead.
+    /// Common SW.Warhead nullable pointer:10033701 ->10008D00, FindOnly2048.
+    /// Shared by GenericWarhead and the explicitly selected Nuclear handler.
     generic_super_weapon_warhead: Option<String>,
+    /// Present only after the component selected the bounded Nuclear reader.
+    /// This ownership marker survives an explicitly null payload.
+    #[serde(default)]
+    nuclear_super_weapon_references: Option<NuclearSuperWeaponReferences>,
     unit_delivery: Option<UnitDeliveryRules>,
     #[serde(default)]
     hunter_seeker: Option<crate::rules::hunter_seeker::HunterSeekerSettings>,
@@ -5372,6 +5432,13 @@ struct ProcessedType {
     /// slot returned by the factory, even when stored24 names coincide.
     #[serde(default)]
     airburst_weapon: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct NuclearSuperWeaponReferences {
+    /// Nuclear Initialize10073374 and its FindOnly reader10073441 retain the
+    /// actual Weapon identity, independently of SWType's native carrier+9C.
+    payload: Option<usize>,
 }
 
 /// The ObjectType `Image` and TechnoType pointer fields each reached ReadINI
@@ -5871,6 +5938,7 @@ impl ProcessedType {
             #[cfg(feature = "phobos")]
             phobos_insignia: Default::default(),
             generic_super_weapon_warhead: None,
+            nuclear_super_weapon_references: None,
             particle_warhead: None,
             voxel_anim_references: VoxelAnimTypeReferences::default(),
             voxel_anim_damage: 0,
@@ -6247,7 +6315,7 @@ impl RulesPassProcessor {
             if family == RulesTypeFamily::Side {
                 self.process_side_registry(pass)?;
             } else {
-                self.allocate_explicit_family(pass, registry, family);
+                self.allocate_explicit_family(pass, registry, family, 32);
             }
         }
 
@@ -6348,12 +6416,13 @@ impl RulesPassProcessor {
         pass: &IniFile,
         registry: &str,
         family: RulesTypeFamily,
+        capacity: usize,
     ) {
         let Some(section) = pass.section(registry) else {
             return;
         };
         for key in section.keys() {
-            let identity = section.read_string(key, "", 32);
+            let identity = section.read_string(key, "", capacity);
             if !identity.is_empty() {
                 self.find_or_allocate(family, &identity);
             }
@@ -6703,7 +6772,6 @@ impl RulesPassProcessor {
     /// Unit Parser1002D970/Find1002DCF0 and the Survivor.SideN Infantry
     /// reads 1003E040..1003E070 look up registered types only.
     /// A successful none clears; absent/unknown retains.
-    #[cfg(feature = "ares")]
     fn resolve_existing_type_from(
         &self,
         section: &IniSection,
@@ -7409,6 +7477,26 @@ impl RulesPassProcessor {
             owner: "ArmorTypes".into(),
             animation_count: 0,
         });
+        // Installed679A15 ->1002AEF0 reads each WeaponTypes entry once with
+        // ReadString2048 at1002B337, then Weapon factory10010570 at1002B345.
+        // This precedes this pass's SW reference and Weapon body sweeps. Only
+        // the explicit declaration selects this master list; no final replay.
+        if let Some(program) = self.sdk_configuration_seed.as_deref()
+            && program.has_master_type_lists()
+        {
+            let policy =
+                program
+                    .master_type_lists_policy()
+                    .map_err(|value| RulesError::InvalidValue {
+                        section: "vera-mod".into(),
+                        key: "master_type_lists".into(),
+                        expected: "accepted master type-list policy".into(),
+                        value,
+                    })?;
+            if policy.is_some_and(|policy| policy.weapon_types) {
+                self.allocate_explicit_family(pass, "WeaponTypes", RulesTypeFamily::Weapon, 2048);
+            }
+        }
         // Installed BeforeTypeData679A15 reads ArmorTypes/defaults before
         // any ordinary ObjectType/Warhead body in this Process pass.
         #[cfg(feature = "ares")]
@@ -7835,7 +7923,10 @@ impl RulesPassProcessor {
         if !body_read
             && matches!(
                 policy,
-                Some(vera_mod_api::SuperReferenceRead::WarheadFromCurrentSection)
+                Some(
+                    vera_mod_api::SuperReferenceRead::WarheadFromCurrentSection
+                        | vera_mod_api::SuperReferenceRead::NuclearFromCurrentSection { .. }
+                )
             )
         {
             return Err(error(
@@ -7845,6 +7936,77 @@ impl RulesPassProcessor {
         // Publishing is deliberately left to the caller, after the selected
         // original read succeeds. A refused plan never replaces this seed.
         Ok((Some(candidate), policy))
+    }
+
+    /// The selected physical SWTypeExt read, after native WeaponType= and
+    /// before this pass's Anim/Weapon body sweeps. Initialize10073366 allocates
+    /// only NukePayload; PSIWARN1007337A is a Find, owned by the scoped reader.
+    fn read_super_weapon_references(
+        &mut self,
+        index: usize,
+        raw: &IniSection,
+        action: Option<vera_mod_api::SuperReferenceRead>,
+        kind: Option<&str>,
+    ) -> Result<(), RulesError> {
+        use vera_mod_api::SuperReferenceRead;
+        let nuclear = matches!(
+            action,
+            Some(SuperReferenceRead::NuclearFromCurrentSection { .. })
+        );
+        if let Some(SuperReferenceRead::NuclearFromCurrentSection { initialize: true }) = action {
+            if self.families[&RulesTypeFamily::SuperWeapon][index]
+                .nuclear_super_weapon_references
+                .is_some()
+            {
+                return Err(RulesError::InvalidValue {
+                    section: raw.name.clone(),
+                    key: "configure_super_read".into(),
+                    expected: "one Nuclear handler initialization".into(),
+                    value: "repeated Nuclear initialization".into(),
+                });
+            }
+            let payload = self.find_or_allocate(RulesTypeFamily::Weapon, "NukePayload");
+            self.family_mut(RulesTypeFamily::SuperWeapon)[index].nuclear_super_weapon_references =
+                Some(NuclearSuperWeaponReferences { payload });
+        }
+        let read_warhead = match action {
+            Some(SuperReferenceRead::Retain) => false,
+            Some(SuperReferenceRead::WarheadFromCurrentSection) => true,
+            Some(SuperReferenceRead::NuclearFromCurrentSection { .. }) => true,
+            None => {
+                crate::rules::ARES_ENABLED
+                    && kind.is_some_and(|kind| kind.eq_ignore_ascii_case("GenericWarhead"))
+            }
+        };
+        // Common10033701 ->10008D00/10008A30: ReadString2048 then Warhead
+        // Find10008B00. Empty/unknown retains, none clears; never allocate.
+        if read_warhead
+            && let Some(warhead) =
+                self.resolve_existing_type_from(raw, "SW.Warhead", RulesTypeFamily::Warhead)
+        {
+            self.family_mut(RulesTypeFamily::SuperWeapon)[index].generic_super_weapon_warhead =
+                warhead;
+        }
+        if nuclear {
+            // Nuclear10073441 ->1000A370 shares the registered-pointer parser:
+            // current Weapon array only, ReadString2048, null-before-Find.
+            let payload = read_ares_registered_index(
+                raw,
+                "Nuke.Payload",
+                self.families
+                    .get(&RulesTypeFamily::Weapon)
+                    .into_iter()
+                    .flatten()
+                    .map(|member| member.native_stored_id.as_str()),
+            );
+            let state = self.family_mut(RulesTypeFamily::SuperWeapon)[index]
+                .nuclear_super_weapon_references
+                .get_or_insert_default();
+            if let Some(payload) = payload {
+                state.payload = payload;
+            }
+        }
+        Ok(())
     }
 
     fn process_super_weapon_family(
@@ -7857,9 +8019,12 @@ impl RulesPassProcessor {
             if let Some((_id, raw, effective)) =
                 self.begin_rules_member_read(RulesTypeFamily::SuperWeapon, index, pass)
             {
-                if let Some(weapon) =
-                    self.resolve_scalar_from(&raw, "WeaponType", RulesTypeFamily::Weapon, 0x80)
-                {
+                if let Some(weapon) = self.resolve_scalar_index_from(
+                    &raw,
+                    "WeaponType",
+                    RulesTypeFamily::Weapon,
+                    0x80,
+                ) {
                     self.family_mut(RulesTypeFamily::SuperWeapon)[index].super_weapon_weapon =
                         weapon;
                 }
@@ -7907,6 +8072,7 @@ impl RulesPassProcessor {
                 };
                 let (candidate, reference_read) =
                     self.prepare_super_reference_read(pass, index, true, kind.map(str::to_owned))?;
+                self.read_super_weapon_references(index, &raw, reference_read, kind)?;
                 #[cfg(feature = "ares")]
                 {
                     // LoadFromINIFile10033250: the first call runs the Type
@@ -8034,24 +8200,6 @@ impl RulesPassProcessor {
                         .read_pass(&raw);
                     self.family_mut(RulesTypeFamily::SuperWeapon)[index]
                         .super_weapon_availability = availability;
-                }
-                let read_warhead = match reference_read {
-                    Some(vera_mod_api::SuperReferenceRead::Retain) => false,
-                    Some(vera_mod_api::SuperReferenceRead::WarheadFromCurrentSection) => true,
-                    None => {
-                        crate::rules::ARES_ENABLED
-                            && kind.is_some_and(|kind| kind.eq_ignore_ascii_case("GenericWarhead"))
-                    }
-                };
-                // Same SW.Warhead scalar slot and FindOrAllocate owner as the
-                // existing Ares GenericWarhead.cpp reader: no final lookup or
-                // preliminary INI scan may replace this physical allocation.
-                if read_warhead
-                    && let Some(warhead) =
-                        self.resolve_scalar_from(&raw, "SW.Warhead", RulesTypeFamily::Warhead, 0x80)
-                {
-                    self.family_mut(RulesTypeFamily::SuperWeapon)[index]
-                        .generic_super_weapon_warhead = warhead;
                 }
                 if let Some(candidate) = candidate {
                     self.sdk_configuration_seed = Some(std::sync::Arc::new(candidate));

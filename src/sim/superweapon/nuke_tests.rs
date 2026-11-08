@@ -724,7 +724,9 @@ fn retail_nuclear_missile_rises_falls_and_strikes_its_target() {
     assert_eq!(
         (
             nuke.kind,
-            nuke.weapon_type.as_deref(),
+            nuke.weapon_type
+                .and_then(|handle| rules.weapon_by_handle(handle))
+                .map(|weapon| weapon.id.as_str()),
             nuke.ai_defend_against,
             nuke.recharge_time_frames
         ),

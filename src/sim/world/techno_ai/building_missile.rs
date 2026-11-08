@@ -34,7 +34,9 @@ use crate::sim::combat::{FiredBullet, admit_fired_bullet};
 use crate::sim::components::AnimClassSpawnDescriptor;
 use crate::sim::mission::authority::LiveReadyInputProvider;
 use crate::sim::mission::{MissionId, MissionType};
-use crate::sim::projectile::{ProjectileCoord, ProjectilePayload, ProjectileTarget, cell_ground_coord};
+use crate::sim::projectile::{
+    ProjectileCoord, ProjectilePayload, ProjectileTarget, cell_ground_coord,
+};
 use crate::sim::world::Simulation;
 use crate::util::native_x87::NativeF64Bits;
 
@@ -134,12 +136,33 @@ fn spawn_warning(
     rules: &RuleSet,
     id: u64,
 ) -> Option<crate::sim::anim_class::AnimId> {
-    let owner = sim.substrate.entities.get(id)?.owner();
+    let entity = sim.substrate.entities.get(id)?;
+    let owner = entity.owner();
+    let firing = entity
+        .mission_leaf
+        .as_building()
+        .map_or(-1, |leaf| leaf.firing_super_weapon());
+    // Ares NukePsiWarning10036750 supplies the selected handler's Anim,
+    // and skips the warning block entirely for an explicit null.
+    let name = match nuclear_settings(rules, firing) {
+        Some(settings) => settings.psi_warning.as_deref()?,
+        None => WARNING_ANIM,
+    };
     let (rx, ry) = sim.houses.get(&owner)?.nuke_target();
     let coord = cell_ground_coord(sim.resolved_terrain.as_ref(), rx, ry);
-    let anim = spawn_anim(sim, rules, WARNING_ANIM, coord, true)?;
+    let anim = spawn_anim(sim, rules, name, coord, true)?;
     sim.substrate.set_anim_owner_house(anim, owner);
     Some(anim)
+}
+
+fn nuclear_settings(
+    rules: &RuleSet,
+    firing: i32,
+) -> Option<&crate::rules::superweapon_type::NuclearSettings> {
+    u32::try_from(firing)
+        .ok()
+        .and_then(|ordinal| rules.nuclear_super_weapon(ordinal))
+        .and_then(|definition| definition.nuclear.as_ref())
 }
 
 /// Status 2 (`0x0044CA97..0x0044CCB6`): the missile, a bullet of the firing
@@ -166,12 +189,12 @@ fn launch_missile(
         .mission_leaf
         .as_building()
         .map_or(-1, |leaf| leaf.firing_super_weapon());
+    let nuclear = nuclear_settings(rules, firing);
     let weapon_handle = usize::try_from(firing)
         .ok()
         .and_then(|index| rules.super_weapon_order.get(index))
         .and_then(|name| rules.super_weapon(name))
-        .and_then(|sw| sw.weapon_type.as_deref())
-        .and_then(|name| rules.weapon_handle(name));
+        .and_then(|sw| sw.weapon_type);
     let weapon = weapon_handle.and_then(|handle| rules.weapon_by_handle(handle));
     let warhead = weapon
         .and_then(|weapon| weapon.warhead.as_deref())
@@ -201,7 +224,18 @@ fn launch_missile(
         sim.substrate
             .set_anim_attached_bullet(warning, Some(bullet_id));
     }
-    let velocity = crate::sim::projectile::launch::missile_launch_velocity(MISSILE_VELOCITY_SCALE);
+    // Installed NukeTakeOff10036679..100366AE replaces the stock table
+    // expression with exact axial velocity, selected by the carrier's type.
+    let velocity = if nuclear.is_some() {
+        let vertical = weapon
+            .projectile
+            .as_deref()
+            .and_then(|name| rules.projectile(name))
+            .is_some_and(|projectile| projectile.vertical);
+        crate::sim::projectile::ProjectileVelocity::new(0, 0, if vertical { 10 } else { 100 })
+    } else {
+        crate::sim::projectile::launch::missile_launch_velocity(MISSILE_VELOCITY_SCALE)
+    };
     // The target is the CellClass `Map[NukeTarget]` gives (`0x0044CAB0..0x0044CAB5`,
     // then CreateBullet at `0x0044CAED`): the shared dummy for a cell off the map.
     let target = ProjectileTarget::looked_up_cell(sim.resolved_terrain.as_ref(), rx, ry);
@@ -212,7 +246,7 @@ fn launch_missile(
             .projectile
             .as_deref()
             .map(|id| sim.interner.intern(id)),
-        weapon.bright,
+        true, // CreateBullet44CAC6 pushes literal Bright=1.
     )
     .with_installed_weapon(weapon_handle);
     if let Some(bullet) = FiredBullet::launched(
@@ -227,9 +261,20 @@ fn launch_missile(
         velocity,
     ) {
         admit_fired_bullet(sim, rules, weapon, bullet_id, bullet);
+        // Ares100366E7 associates only after the silo's successful Fire.
+        if let Some(settings) = nuclear {
+            sim.projectiles
+                .set_launching_super_weapon(bullet_id, Some(settings.source_ordinal));
+        }
     }
-    let take_off = rules.general.nuke_take_off.clone();
-    if let Some(anim) = spawn_anim(sim, rules, &take_off, origin, false) {
+    //100366EA..10036706: absence reads the current General default; an
+    // explicit null remains disabled instead of falling back to that default.
+    let take_off = nuclear
+        .and_then(|settings| settings.take_off.as_ref())
+        .map_or(Some(rules.general.nuke_take_off.as_str()), |name| {
+            name.as_deref()
+        });
+    if let Some(anim) = take_off.and_then(|name| spawn_anim(sim, rules, name, origin, false)) {
         sim.substrate.set_anim_z_adjust(anim, TAKE_OFF_Z_ADJUST);
     }
     if let Some(entity) = sim.substrate.entities.get_mut(id) {

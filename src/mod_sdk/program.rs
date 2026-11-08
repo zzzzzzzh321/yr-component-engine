@@ -30,6 +30,20 @@ struct Executor {
     module: LoadedModule,
 }
 
+impl Executor {
+    fn evaluate_startup(&self, context: Context) -> Result<Plan, String> {
+        let request = Request {
+            api_version: api::API_VERSION,
+            context,
+            config: Vec::new(),
+            state: Vec::new(),
+        };
+        self.runtime
+            .evaluate(&self.module, &request, Arc::new(StartupHost))
+            .map_err(|e| e.to_string())
+    }
+}
+
 fn component_runtime() -> Result<Arc<ComponentRuntime>, String> {
     // Compilation is process-wide, bounded by the runtime's existing component
     // cache. Configuration, Store memory and guest instances remain per call;
@@ -116,6 +130,10 @@ impl AdmittedComponent {
                 .manifest
                 .hooks
                 .contains(&api::HookKind::LongListReaders)
+            || self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::MasterTypeLists)
             || self.manifest.hooks.contains(&api::HookKind::SpawnIdentity)
             || self
                 .manifest
@@ -201,16 +219,7 @@ impl AdmittedComponent {
     }
 
     fn evaluate_startup(&self, context: Context) -> Result<Plan, String> {
-        let request = Request {
-            api_version: api::API_VERSION,
-            context,
-            config: Vec::new(),
-            state: Vec::new(),
-        };
-        self.executor
-            .runtime
-            .evaluate(&self.executor.module, &request, Arc::new(StartupHost))
-            .map_err(|e| e.to_string())
+        self.executor.evaluate_startup(context)
     }
 
     /// Start the same immutable gameplay configuration before cold Rules
@@ -359,6 +368,12 @@ impl Program {
             || self.has_loading_theme_resource()
             || self.has_cameo_resource()
             || self.has_type_sound_resource()
+    }
+
+    /// Retain installed Rules declarations as well as synchronous callbacks.
+    /// Pure declarations do not advance the configuration timeline early.
+    pub(crate) fn requires_rules_seed(&self) -> bool {
+        self.has_early_configuration() || self.has_master_type_lists()
     }
 
     /// Query the selected physical source using the accepted configuration.
@@ -745,6 +760,26 @@ impl Program {
     }
     pub fn manifest(&self) -> &api::ModuleManifest {
         &self.manifest
+    }
+
+    pub(crate) fn has_master_type_lists(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::MasterTypeLists)
+    }
+
+    /// Installed declaration, independent of the retained Rules configuration.
+    /// The Rules owner queries once per physical pass before type loading.
+    pub(crate) fn master_type_lists_policy(
+        &self,
+    ) -> Result<Option<api::MasterTypeListsPolicy>, String> {
+        if !self.has_master_type_lists() {
+            return Ok(None);
+        }
+        Ok(self
+            .executor()?
+            .evaluate_startup(Context::MasterTypeLists)?
+            .master_type_lists)
     }
 
     pub(crate) fn weapon_resource_policy(

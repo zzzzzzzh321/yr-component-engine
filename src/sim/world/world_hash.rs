@@ -979,6 +979,10 @@ impl Simulation {
                 b"bullet-travel-budget-v1".hash(hasher);
                 fuel.hash(hasher);
             }
+            if let Some(source) = projectile.launching_super_weapon() {
+                b"bullet-launching-super-weapon-v1".hash(hasher);
+                source.hash(hasher);
+            }
             projectile.proximity_reference().hash(hasher);
             projectile.last_distance_half().hash(hasher);
             projectile.tracks_target().hash(hasher);

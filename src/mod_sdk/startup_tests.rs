@@ -93,6 +93,103 @@ fn long_list_owner(assets: &AssetManager) -> crate::rules::process_owner::Native
         .unwrap()
 }
 
+#[test]
+fn pure_master_type_lists_seed_survives_cold_projection_and_scenario_clear() {
+    use crate::rules::process_owner::NativeScenarioRulesPrefix;
+    use vera_mod_api::{self as api, Context, HookKind, ModuleManifest, Plan, Request};
+    let request = Request {
+        api_version: api::API_VERSION,
+        context: Context::MasterTypeLists,
+        config: vec![],
+        state: vec![],
+    };
+    let policy = api::MasterTypeListsPolicy { weapon_types: true };
+    let mut selected = Plan::unchanged(&request);
+    selected.master_type_lists = Some(policy);
+    // Any configuration callback during native reading must fail: this module
+    // subscribes only to the pure declaration, not synchronous configuration.
+    let mut unexpected = Plan::unchanged(&request);
+    unexpected.state.push(1);
+    let wasm = vera_mod_runtime::test_support::component_fixture_by_kind(
+        &ModuleManifest {
+            api_version: api::API_VERSION,
+            id: "pure-master-seed".into(),
+            version: "1".into(),
+            state_version: 1,
+            config_version: 1,
+            hooks: vec![
+                HookKind::Configure,
+                HookKind::Attach,
+                HookKind::Damage,
+                HookKind::Tick,
+                HookKind::MasterTypeLists,
+            ],
+        },
+        &serde_json::to_vec(&unexpected).unwrap(),
+        &[("master_type_lists", &serde_json::to_vec(&selected).unwrap())],
+    );
+    let dir = audio_test_install("sdk-pure-master-seed");
+    early_component(&dir, &wasm);
+    let root = "[WeaponTypes]\n0=RootOnly\n[RootOnly]\nDamage=13\n";
+    write(&dir, "rulesmd.ini", root.as_bytes());
+    write(&dir, "artmd.ini", b"");
+    let assets = open(&dir);
+    let assert_seed = |program: &Program| {
+        assert!(program.requires_rules_seed());
+        assert!(!program.has_early_configuration());
+        assert_eq!(program.sha256(), sha256_hex(&wasm));
+        assert_eq!(program.master_type_lists_policy().unwrap(), Some(policy));
+    };
+    let mut owner = long_list_owner(&assets);
+    assert_seed(owner.sdk_configuration_program().unwrap());
+    let isolated = owner.startup_compatibility_projection().unwrap();
+    assert_seed(isolated.sdk_configuration_seed().unwrap());
+    assert_eq!(
+        RuleSet::from_processed_rules(&isolated)
+            .unwrap()
+            .weapon("RootOnly")
+            .unwrap()
+            .damage,
+        13
+    );
+    assert!(
+        RuleSet::from_rules_layers(&crate::rules::native_processing::RulesLayerStack::new(
+            IniFile::from_str(root)
+        ))
+        .unwrap()
+        .weapon("RootOnly")
+        .is_none(),
+        "a WeaponTypes section alone does not select the external master reader"
+    );
+    owner
+        .load_scenario(
+            NativeScenarioRulesPrefix::NonCampaign(None),
+            &IniFile::from_str("[WeaponTypes]\n0=MapOnly\n[MapOnly]\nDamage=37\n"),
+        )
+        .unwrap();
+    assert_seed(owner.sdk_configuration_program().unwrap());
+    let rules = RuleSet::from_processed_rules(owner.saved_scenario_rules().unwrap()).unwrap();
+    assert_eq!(rules.weapon("RootOnly").unwrap().damage, 13);
+    assert_eq!(
+        rules.weapon("MapOnly").unwrap().damage,
+        37,
+        "the map master registers before that pass's Weapon body sweep"
+    );
+    assert!(
+        owner
+            .saved_scenario_rules()
+            .unwrap()
+            .sdk_configuration_steps()
+            .iter()
+            .any(|step| matches!(
+                step,
+                crate::rules::native_processing::SdkConfigurationStep::Boundary(
+                    api::ConfigurationBoundary::ScenarioClear
+                )
+            ))
+    );
+}
+
 fn reload(rules: &RuleSet) -> i32 {
     rules
         .object("TANK")

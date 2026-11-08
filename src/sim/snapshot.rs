@@ -369,6 +369,11 @@ pub enum SnapshotRestoreError {
         projectile_id: u64,
         weapon_ordinal: u32,
     },
+    #[error("invalid saved Bullet {projectile_id} launching SuperWeapon slot {super_ordinal}")]
+    InvalidProjectileSuperWeapon {
+        projectile_id: u64,
+        super_ordinal: u32,
+    },
     #[error("invalid saved TechnoType TechLevel state: {reason}")]
     InvalidTypeTechLevels { reason: String },
     #[error("invalid scalable Bullet runtime: {0}")]
@@ -2161,6 +2166,14 @@ impl Simulation {
         // BulletType+AC. A saved ordinal must resolve in the reconstructed
         // frozen rules before this simulation can resume.
         for (&projectile_id, projectile) in self.projectiles.iter() {
+            if let Some(ordinal) = projectile.launching_super_weapon()
+                && rules.nuclear_super_weapon(ordinal).is_none()
+            {
+                return Err(SnapshotRestoreError::InvalidProjectileSuperWeapon {
+                    projectile_id,
+                    super_ordinal: ordinal,
+                });
+            }
             if let Some(handle) = projectile.payload().installed_weapon()
                 && rules.weapon_by_handle(handle).is_none()
             {

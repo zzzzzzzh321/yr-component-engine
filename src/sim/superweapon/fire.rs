@@ -132,12 +132,13 @@ impl Simulation {
         let semantics = rules.superweapon_semantics();
         if (selection.is_some() && !semantics.paid_launches)
             || (!semantics.custom_payloads
-                && matches!(
-                    sw.kind,
-                    SuperWeaponKind::GenericWarhead
-                        | SuperWeaponKind::UnitDelivery
-                        | SuperWeaponKind::HunterSeeker
-                ))
+                && (sw.nuclear.is_some()
+                    || matches!(
+                        sw.kind,
+                        SuperWeaponKind::GenericWarhead
+                            | SuperWeaponKind::UnitDelivery
+                            | SuperWeaponKind::HunterSeeker
+                    )))
         {
             return false;
         }
@@ -408,18 +409,20 @@ fn click_fire(
     if needs_native_admission && !click_fire_admission(sim, owner, sw_type_id, sw) {
         return false;
     }
-    if sw.kind == SuperWeaponKind::GenericWarhead
+    if sw.nuclear.is_none()
+        && sw.kind == SuperWeaponKind::GenericWarhead
         && !super::generic_warhead::can_launch(sim, rules, sw, cell)
     {
         return false;
     }
     let extension_effect = rules.superweapon_semantics().custom_payloads
-        && matches!(
-            sw.kind,
-            crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
-                | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
-                | crate::rules::superweapon_type::SuperWeaponKind::HunterSeeker
-        );
+        && (sw.nuclear.is_some()
+            || matches!(
+                sw.kind,
+                crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
+                    | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
+                    | crate::rules::superweapon_type::SuperWeaponKind::HunterSeeker
+            ));
     if let Some((money_type, money_sw)) = payment
         && !extension_effect
         && money_sw.money_amount != 0
@@ -507,12 +510,18 @@ fn click_fire_admission(
     if !instance.click_fire_admits() && !sw.post_click {
         return false;
     }
-    if sw.kind == SuperWeaponKind::LightningStorm && super::lightning_storm::has_deferment(sim) {
+    if sw.nuclear.is_none()
+        && sw.kind == SuperWeaponKind::LightningStorm
+        && super::lightning_storm::has_deferment(sim)
+    {
         sim.sound_events
             .emit(SimSoundEvent::LightningStormRefused { owner });
         return false;
     }
-    if sw.kind == SuperWeaponKind::PsychicDominator && super::psychic_dominator::active(sim) {
+    if sw.nuclear.is_none()
+        && sw.kind == SuperWeaponKind::PsychicDominator
+        && super::psychic_dominator::active(sim)
+    {
         sim.sound_events
             .emit(SimSoundEvent::PsychicDominatorRefused { owner });
         return false;
@@ -534,6 +543,15 @@ fn launch(
     frame_effects: FrameEffects<'_>,
 ) -> bool {
     use super::paradrop::ParaDropKind;
+    // Ares SWTypeExt's initialized handler survives later stock Type reads.
+    // Dispatch the admitted handler before interpreting the retained enum.
+    if sw.nuclear.is_some() {
+        let activated = super::nuke::launch(sim, rules, owner, sw_type_id, sw, (rx, ry));
+        if activated {
+            super::finish_ares_launch(sim, rules, owner, sw_type_id, (rx, ry));
+        }
+        return activated;
+    }
     // Every native stock case except ChronoWarp begins with rawReady+6F
     // (ForceShield6CD072..6CD077; case4 starts6CC4B2 with radar production).
     // Drain ClickFire can reach Launch after Reset retained state1 but cleared

@@ -404,12 +404,26 @@ pub(super) fn dispatch_sim_sound_events(
                 // ForceShield's cue was dispatched at its early activation
                 // boundary; this later fact still reaches the shared Ready
                 // cleanup below without playing the cue twice.
-                let cue = if sw.kind == crate::rules::superweapon_type::SuperWeaponKind::ForceShield
-                {
-                    SuperWeaponLaunchCue::default()
+                let cue_kind = if sw.nuclear.is_some() {
+                    crate::rules::superweapon_type::SuperWeaponKind::MultiMissile
                 } else {
-                    superweapon_launch_cue(sw.kind, &rules.general, sw.start_sound.as_deref())
+                    sw.kind
                 };
+                let mut cue =
+                    if cue_kind == crate::rules::superweapon_type::SuperWeaponKind::ForceShield {
+                        SuperWeaponLaunchCue::default()
+                    } else {
+                        superweapon_launch_cue(cue_kind, &rules.general, sw.start_sound.as_deref())
+                    };
+                // Nuclear10073290 uses the nullable ActivationSound independently
+                // of DigSound; unset inherits, explicit none suppresses it.
+                if let Some(nuclear) = &sw.nuclear {
+                    cue.sound_id = nuclear
+                        .activation_sound
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| rules.general.dig_sound.clone());
+                }
                 // The EVA column is picked for the *listening* client's
                 // side, not the launcher's: `VoxClass::PlayEVA` takes
                 // only the event name; the consumer resolves the side.
@@ -429,7 +443,7 @@ pub(super) fn dispatch_sim_sound_events(
                 });
                 // The player's tail ([`launch_drops_ready_line`]): after
                 // the case's line, the queued Ready line is dropped.
-                if let Some(ready) = launch_drops_ready_line(sw.kind)
+                if let Some(ready) = launch_drops_ready_line(cue_kind)
                     && owner_is_local(sim.interner(), owner, local_owner_name)
                 {
                     if let Some(activated) = activated {
@@ -2298,6 +2312,55 @@ mod tests {
             ),
         ] {
             launch_drops_the_ready_line(name, activated, ready);
+        }
+    }
+
+    #[test]
+    fn installed_nuclear_launch_keeps_nullable_activation_sound_and_handler() {
+        let mut rules =
+            crate::rules::ruleset::RuleSet::from_ini(&crate::rules::ini_parser::IniFile::from_str(
+                "[General]\nFixtureOnly=1\n[SuperWeaponTypes]\n0=Atomic\n\
+                 [Atomic]\nType=ForceShield\n",
+            ))
+            .unwrap();
+        rules.general.dig_sound = Some("Dig".into());
+        let mut sim = Simulation::new();
+        let owner = sim.intern("Local");
+        let sw_type = sim.intern("Atomic");
+        for (configured, expected) in [
+            (None, "Dig"),
+            (Some(None), ""),
+            (Some(Some("AtomicLaunch".into())), "AtomicLaunch"),
+        ] {
+            rules.super_weapons.get_mut("Atomic").unwrap().nuclear =
+                Some(crate::rules::superweapon_type::NuclearSettings {
+                    source_ordinal: 0,
+                    payload: None,
+                    warhead: None,
+                    damage: -1,
+                    silo_launch: true,
+                    take_off: None,
+                    psi_warning: None,
+                    activation_sound: configured,
+                });
+            let mut output = SoundEventQueue::new();
+            dispatch_sim_sound_events(
+                [SimSoundEvent::SuperWeaponLaunched {
+                    owner,
+                    sw_type,
+                    world: crate::sim::components::DriveCoord::cell(20, 20, 0).into(),
+                }],
+                &sim,
+                &rules,
+                Some("Local"),
+                &mut |_| true,
+                &mut output,
+            );
+            assert!(matches!(output.drain().as_slice(), [
+                GameSoundEvent::SuperWeaponActivated { sound_id, eva_event: Some(line), .. },
+                GameSoundEvent::EvaRemove { event },
+            ] if sound_id == expected && line == "EVA_NuclearMissileLaunched"
+                && event == "EVA_NuclearMissileReady"));
         }
     }
 

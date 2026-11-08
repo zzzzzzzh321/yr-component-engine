@@ -117,13 +117,84 @@ fn cameo_metadata_uses_actual_suffixes_and_retained_image_sources() {
             &crate::rules::sound_ini::SoundRegistry::default(),
         )
         .unwrap();
-    assert!(!continued.sdk_registry_pass(true).cameo_view().reads.is_empty());
+    assert!(
+        !continued
+            .sdk_registry_pass(true)
+            .cameo_view()
+            .reads
+            .is_empty()
+    );
     continued
         .process_country_only_pass(&IniFile::empty(), false)
         .unwrap();
     assert!(
-        continued.sdk_registry_pass(true).cameo_view().reads.is_empty(),
+        continued
+            .sdk_registry_pass(true)
+            .cameo_view()
+            .reads
+            .is_empty(),
         "Country-only work does not replay the preceding cameo suffixes"
+    );
+}
+
+#[test]
+fn nuclear_psi_default_uses_the_actual_animation_prefix_without_allocation() {
+    use vera_mod_api::{NullableResourceName, SuperReadValue};
+    let pass = IniFile::from_str(
+        "[SuperWeaponTypes]\n0=NUKE\n[NUKE]\nType=MultiMissile\n\
+         [VehicleTypes]\n0=TANK\n[TANK]\nPrimary=GUN\n[GUN]\nAnim=PsiWarn\n",
+    );
+    let mut processor = RulesPassProcessor::default();
+    let seed = serde_json::to_vec(&SuperReadValue {
+        read: 0,
+        current: (),
+    })
+    .unwrap();
+    let read = |registry: &SdkRegistryPass, key| {
+        registry.read_superweapon_value(
+            "super-nuclear-psi-default",
+            "NUKE",
+            pass.section("NUKE").unwrap(),
+            key,
+            &seed,
+        )
+    };
+    processor
+        .apply_pass(
+            &pass,
+            &IniFile::empty(),
+            &EvaRegistry::default(),
+            true,
+            &crate::rules::sound_ini::SoundRegistry::default(),
+        )
+        .unwrap();
+    let first = processor.sdk_registry_pass(true);
+    assert_eq!(
+        serde_json::from_slice::<NullableResourceName>(&read(&first, "").unwrap()).unwrap(),
+        NullableResourceName::Clear,
+        "the later Weapon Anim constructor cannot repair the earlier Initialize Find"
+    );
+    assert!(
+        processor
+            .find_existing(RulesTypeFamily::Animation, "PSIWARN")
+            .is_some()
+    );
+    assert!(read(&first, "Nuke.PsiWarning").is_err());
+    processor
+        .apply_pass(
+            &pass,
+            &IniFile::empty(),
+            &EvaRegistry::default(),
+            true,
+            &crate::rules::sound_ini::SoundRegistry::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<NullableResourceName>(
+            &read(&processor.sdk_registry_pass(true), "").unwrap()
+        )
+        .unwrap(),
+        NullableResourceName::Named("PsiWarn".into())
     );
 }
 
@@ -205,9 +276,7 @@ fn faction_metadata_preserves_side_sweep_and_country_only_frontiers() {
 
 #[test]
 fn faction_pointer_reader_uses_the_reached_family_prefix() {
-    use vera_mod_api::{
-        FactionNullableRef, FactionReadValue, ProductionObjectKind, ProductionTypeRef,
-    };
+    use vera_mod_api::{FactionNullableRef, FactionReadValue, ProductionObjectKind, ProductionTypeRef};
     let pass = IniFile::from_str(
         "[Countries]\n0=COUNTRY\n[Sides]\nFIRST=COUNTRY\n[FIRST]\nHunterSeeker=FUTURE\n[BuildingTypes]\n0=YARD\n[YARD]\nFreeUnit=FUTURE\n",
     );
@@ -3116,6 +3185,245 @@ fn child_weapon_pointers_keep_colliding_instances_across_reads_and_saved_source(
             ))
         ));
     }
+}
+
+#[test]
+fn super_weapon_pointer_keeps_the_actual_instance_across_mode_map_and_saved_source() {
+    use crate::rules::ruleset::RuleSet;
+    const STORED: &str = "ABCDEFGHIJKLMNOPQRSTUVWX";
+    let mut layers = RulesLayerStack::new(IniFile::from_str("[Warheads]\n0=WH\n[WH]\n"));
+    layers.push(
+        RulesLayerKind::GameMode,
+        IniFile::from_str(
+            "[SuperWeaponTypes]\n0=NUKE\n1=MISSING\n2=EMPTY\n3=NULL\n4=ANGLE\n5=ALIAS\n\
+             [NUKE]\nType=MultiMissile\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+             [MISSING]\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWX\n\
+             [EMPTY]\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWX\n\
+             [NULL]\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWX\n\
+             [ANGLE]\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWX\n\
+             [ALIAS]\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWX\n\
+             [ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=30\nProjectile=SHOT\nWarhead=WH\n[SHOT]\n",
+        ),
+    );
+    let mode = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
+    let early = mode.super_weapon("NUKE").unwrap().weapon_type.unwrap();
+    assert_eq!(mode.weapon_by_handle(early).unwrap().damage, 30);
+
+    // ReadINI6CEA7D allocates before this pass's Weapon sweep679B10. The
+    // full25 input creates C1; failed ReadInt retains C0's30 and C1's ctor0.
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str(
+            "[NUKE]\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+             [MISSING]\nFixtureOnly=1\n[EMPTY]\nWeaponType=\n\
+             [NULL]\nWeaponType=none\n[ANGLE]\nWeaponType=<none>\n\
+             [ALIAS]\nWeaponType=ABCDEFGHIJKLMNOPQRSTUVWX\n\
+             [ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=invalidh\nProjectile=SHOT\nWarhead=WH\n",
+        ),
+    );
+    let processed = layers.process().unwrap();
+    let rules = RuleSet::from_processed_rules(&processed).unwrap();
+    let actual = rules.super_weapon("NUKE").unwrap().weapon_type.unwrap();
+    assert_ne!(actual, early);
+    assert_eq!(rules.weapon_handle(STORED), Some(early));
+    assert_eq!(rules.weapon_by_handle(actual).unwrap().id, STORED);
+    assert_eq!(rules.weapon_by_handle(actual).unwrap().damage, 0);
+    assert_eq!(
+        rules
+            .weapon_by_handle(actual)
+            .unwrap()
+            .projectile
+            .as_deref(),
+        Some("SHOT")
+    );
+    assert_eq!(rules.weapon_by_handle(early).unwrap().damage, 30);
+    for name in ["MISSING", "EMPTY", "ALIAS"] {
+        assert_eq!(
+            rules.super_weapon(name).unwrap().weapon_type,
+            Some(early),
+            "{name}"
+        );
+    }
+    for name in ["NULL", "ANGLE"] {
+        assert_eq!(
+            rules.super_weapon(name).unwrap().weapon_type,
+            None,
+            "{name}"
+        );
+    }
+
+    let bytes = save_codec::serialize(&processed).unwrap();
+    let mut restored: ProcessedRulesLayers = save_codec::deserialize(&bytes).unwrap();
+    let restored_rules = RuleSet::from_processed_rules(&restored).unwrap();
+    assert_eq!(
+        restored_rules.super_weapon("NUKE").unwrap().weapon_type,
+        Some(actual)
+    );
+    assert_eq!(
+        restored_rules.simulation_config_hash(),
+        rules.simulation_config_hash()
+    );
+    let set_pointer = |processed: &mut ProcessedRulesLayers, index| {
+        processed
+            .native_type_construction_trace
+            .registry_state
+            .families
+            .get_mut(&RulesTypeFamily::SuperWeapon)
+            .unwrap()
+            .iter_mut()
+            .find(|member| member.native_stored_id == "NUKE")
+            .unwrap()
+            .super_weapon_weapon = Some(index);
+    };
+    // The saved prior changes only the pointer, isolating its hash contribution.
+    set_pointer(&mut restored, early.index());
+    let rebound = RuleSet::from_processed_rules(&restored).unwrap();
+    assert_eq!(rules.source_ini_hash(), rebound.source_ini_hash());
+    assert_ne!(
+        rules.simulation_config_hash(),
+        rebound.simulation_config_hash()
+    );
+    let weapon_count = restored
+        .native_type_construction_trace
+        .registry_state
+        .families[&RulesTypeFamily::Weapon]
+        .len();
+    set_pointer(&mut restored, weapon_count);
+    assert!(matches!(
+        RuleSet::from_processed_rules(&restored),
+        Err(RulesError::InvalidSavedState(
+            "type reference is outside its registry"
+        ))
+    ));
+}
+
+#[test]
+fn nuclear_reference_action_initializes_once_and_only_finds_current_payloads() {
+    use vera_mod_api::SuperReferenceRead::NuclearFromCurrentSection;
+    let mut processor = RulesPassProcessor::default();
+    let index = processor
+        .find_or_allocate(RulesTypeFamily::SuperWeapon, "NUKE")
+        .unwrap();
+    let initial = IniFile::from_str(
+        "[NUKE]\nNuke.Payload=Later\nSW.Warhead=UnknownWH\n\
+         [NukePayload]\nDamage=11\n[Later]\nDamage=37\n",
+    );
+    let state = |processor: &RulesPassProcessor| {
+        let member = &processor.families[&RulesTypeFamily::SuperWeapon][index];
+        (
+            member
+                .nuclear_super_weapon_references
+                .as_ref()
+                .unwrap()
+                .payload,
+            member.generic_super_weapon_warhead.clone(),
+        )
+    };
+    processor
+        .read_super_weapon_references(
+            index,
+            initial.section("NUKE").unwrap(),
+            Some(NuclearFromCurrentSection { initialize: true }),
+            None,
+        )
+        .unwrap();
+    let default = state(&processor).0.unwrap();
+    assert_eq!(processor.family_len(RulesTypeFamily::Weapon), 1);
+    assert_eq!(processor.family_len(RulesTypeFamily::Warhead), 0);
+    assert_eq!(
+        processor.family_len(RulesTypeFamily::Animation),
+        0,
+        "Initialize1007337A only finds PSIWARN; it allocates no Anim"
+    );
+    assert_eq!(
+        processor.families[&RulesTypeFamily::Weapon][default]
+            .weapon
+            .damage,
+        0
+    );
+    processor.process_weapon_family(&initial);
+    assert_eq!(
+        processor.families[&RulesTypeFamily::Weapon][default]
+            .weapon
+            .damage,
+        11
+    );
+    assert_eq!(
+        state(&processor),
+        (Some(default), None),
+        "unknown overrides allocate nothing"
+    );
+
+    // The real BeforeTypeData list owner may register the map-only Weapon
+    // before the next SW visit; the body remains unread until its later sweep.
+    let later = processor
+        .find_or_allocate(RulesTypeFamily::Weapon, "Later")
+        .unwrap();
+    processor
+        .find_or_allocate(RulesTypeFamily::Warhead, "PayloadWH")
+        .unwrap();
+    let map =
+        IniFile::from_str("[NUKE]\nNuke.Payload=later\nSW.Warhead=payloadwh\n[Later]\nDamage=37\n");
+    processor
+        .read_super_weapon_references(
+            index,
+            map.section("NUKE").unwrap(),
+            Some(NuclearFromCurrentSection { initialize: false }),
+            None,
+        )
+        .unwrap();
+    assert_eq!(state(&processor), (Some(later), Some("PayloadWH".into())));
+    assert_eq!(
+        processor.families[&RulesTypeFamily::Weapon][later]
+            .weapon
+            .damage,
+        0
+    );
+    processor.process_weapon_family(&map);
+    assert_eq!(
+        processor.families[&RulesTypeFamily::Weapon][later]
+            .weapon
+            .damage,
+        37
+    );
+    for (value, expected) in [
+        ("", Some(later)),
+        ("Unknown", Some(later)),
+        ("none", None),
+        ("<none>", None),
+    ] {
+        // Empty values are omitted by the physical loader. Keep the actual
+        // Nuclear body present so its reached suffix can retain both pointers.
+        let pass = IniFile::from_str(&format!(
+            "[NUKE]\nType=MultiMissile\nNuke.Payload={value}\nSW.Warhead={value}\n"
+        ));
+        processor
+            .read_super_weapon_references(
+                index,
+                pass.section("NUKE").unwrap(),
+                Some(NuclearFromCurrentSection { initialize: false }),
+                None,
+            )
+            .unwrap();
+        assert_eq!(state(&processor).0, expected, "{value}");
+        assert_eq!(
+            state(&processor).1.as_deref(),
+            expected.map(|_| "PayloadWH"),
+            "{value}"
+        );
+    }
+    assert!(
+        processor
+            .read_super_weapon_references(
+                index,
+                initial.section("NUKE").unwrap(),
+                Some(NuclearFromCurrentSection { initialize: true }),
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(processor.family_len(RulesTypeFamily::Weapon), 2);
+    assert_eq!(processor.family_len(RulesTypeFamily::Warhead), 1);
 }
 
 #[test]

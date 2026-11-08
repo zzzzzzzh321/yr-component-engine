@@ -143,6 +143,75 @@ pub(super) fn launch(
     if !super::is_charged(sim, owner, sw_type_id) {
         return false;
     }
+    if let Some(nuclear) = sw.nuclear.as_ref() {
+        // Ares Nuclear::Activate10072FF0 scans the owner's retained Building
+        // vector, using the shared launch-site availability/operational owner.
+        // Unlike stock6CDCF0, it does not pick a BuildingType first. The
+        // installed definition ordinal, not the stock Type enum, is kept in
+        // Building+5F8 (10073113) and follows its Bullet through NukeMaker.
+        let one_time = sim
+            .super_weapons
+            .get(&owner)
+            .and_then(|weapons| weapons.get(&sw_type_id))
+            .is_some_and(|instance| instance.is_active && instance.one_time);
+        let silo = (!one_time && nuclear.silo_launch)
+            .then(|| {
+                super::targeting::launch_sites(sim, rules, owner, sw)
+                    .into_iter()
+                    .find_map(|(id, site)| {
+                        (site.eligible
+                            && sim.substrate.entities.get(id).is_some_and(|building| {
+                                building.health.current() != 0
+                                    && sim
+                                        .interner
+                                        .object_type(building.type_ref(), rules)
+                                        .is_some_and(|object| object.nuke_silo)
+                            }))
+                        .then_some(id)
+                    })
+            })
+            .flatten();
+        let location = if let Some(silo) = silo {
+            if let Some(entity) = sim.substrate.entities.get_mut(silo) {
+                entity
+                    .mission_leaf
+                    .set_building_firing_super_weapon(nuclear.source_ordinal as i32);
+            }
+            crate::sim::world::queue_and_commence(sim, silo, MissionType::Missile, rules);
+            if let Some(house) = sim.houses.get_mut(&owner) {
+                house.set_nuke_target(cell);
+            }
+            let ground = crate::sim::projectile::cell_ground_coord(
+                sim.resolved_terrain.as_ref(),
+                cell.0,
+                cell.1,
+            );
+            Some(crate::sim::components::DriveCoord {
+                x: ground.x,
+                y: ground.y,
+                z: ground.z,
+            })
+        } else {
+            // Nuclear10073145 falls back to its direct payload for no silo,
+            // SiloLaunch=no or the active one-time branch; failure constructs
+            // no effect and must not settle the common launch payment.
+            sim.launch_nuke_payload_at_cell(
+                rules,
+                (cell.0 as i16, cell.1 as i16),
+                None,
+                Some(owner),
+                Some((nuclear.source_ordinal, nuclear)),
+            )
+        };
+        if let Some(location) = location {
+            sim.sound_events.emit(SimSoundEvent::SuperWeaponLaunched {
+                owner,
+                sw_type: sw_type_id,
+                world: location.into(),
+            });
+        }
+        return location.is_some();
+    }
     if sim
         .super_weapons
         .get(&owner)
@@ -156,6 +225,7 @@ pub(super) fn launch(
             (cell.0 as i16, cell.1 as i16),
             None,
             Some(owner),
+            None,
         );
         // The cue (`0x006CDCAE`) plays at the strike coordinate
         // `0x006CDA88..0x006CDAF5` built.

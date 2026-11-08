@@ -5275,6 +5275,11 @@ impl RuleSet {
             }
         }
         let match_rules_policy = self.collect_match_rules_policy()?;
+        if superweapons.has_nuclear()
+            && match_rules_policy.and_then(|policy| policy.projectile_fuel) != Some(true)
+        {
+            return Err("Ares Nuclear requires the shared projectile travel-budget owner".into());
+        }
         // CanTargetHouse10051B70 needs the retained Warhead relationships.
         // Admit the candidate projection or the raw legacy reader, never a
         // stale external binding or a silent stock fallback for explicit true.
@@ -7138,7 +7143,13 @@ impl RuleSet {
                 .values_mut()
                 .find(|super_weapon| super_weapon.id.eq_ignore_ascii_case(name))
             {
-                super_weapon.weapon_type = weapon.map(str::to_owned);
+                // ReadINI6CEA8C stores the actual Weapon pointer used by
+                // Mission_Missile44CAD0/44CAFF; saved bounds were checked above.
+                super_weapon.weapon_type = weapon.map(|index| {
+                    WeaponHandle(
+                        u32::try_from(index).expect("Weapon array exceeds stable identity"),
+                    )
+                });
                 super_weapon.aux_building = aux_building.map(str::to_owned);
             }
         }
@@ -10198,6 +10209,7 @@ impl RuleSet {
                 }
             }
         }
+        // Native SW+9C is an actual Weapon identity, including colliding IDs.
         Self::by_upper_id(self.super_weapons.iter().map(|(id, super_weapon)| {
             (id, (&super_weapon.weapon_type, &super_weapon.aux_building))
         }))
@@ -10211,6 +10223,15 @@ impl RuleSet {
         );
         if !generic_warheads.is_empty() {
             generic_warheads.hash(&mut hasher);
+        }
+        let nuclear = Self::by_upper_id(
+            self.super_weapons
+                .iter()
+                .filter_map(|(id, sw)| sw.nuclear.as_ref().map(|settings| (id, settings))),
+        );
+        if !nuclear.is_empty() {
+            b"ares-nuclear-v1".hash(&mut hasher);
+            nuclear.hash(&mut hasher);
         }
         let hunters = Self::by_upper_id(
             self.super_weapons
@@ -17137,7 +17158,7 @@ Projectile=Invisible
                 rules.projectiles.get_mut("SHOT").unwrap().shrapnel_weapon = Some(WeaponHandle(0));
             }),
             ("WeaponType", |rules| {
-                rules.super_weapons.get_mut("NUKE").unwrap().weapon_type = Some("GUN".into());
+                rules.super_weapons.get_mut("NUKE").unwrap().weapon_type = Some(WeaponHandle(0));
             }),
         ];
         for (key, edit) in edits {

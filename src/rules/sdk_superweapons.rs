@@ -1,7 +1,7 @@
 //! One atomic projection of immutable Super resources into the existing types.
 //! Allocation, physical reader history and all live Super state stay with their
 //! original owners; this binder does not read new INI or allocate references.
-use super::RuleSet;
+use super::{RuleSet, WeaponHandle};
 use crate::rules::ini_parser::IniSection;
 use crate::rules::native_processing::ProcessedRulesLayers;
 use crate::rules::superweapon_targeting::{
@@ -10,8 +10,8 @@ use crate::rules::superweapon_targeting::{
 use crate::rules::superweapon_type::{
     AresSuperWeaponAvailability, AresSuperWeaponCharge, AresSuperWeaponMetadata,
     AresSuperWeaponPresentation, DeliveryOwner, DeliveryType, GenericWarheadAiTargeting,
-    GenericWarheadSettings, SuperWeaponBuildingRequirements, SuperWeaponKind, SuperWeaponType,
-    UnitDeliveryRules,
+    GenericWarheadSettings, NuclearSettings, SuperWeaponBuildingRequirements, SuperWeaponKind,
+    SuperWeaponType, UnitDeliveryRules,
 };
 use crate::util::native_x87::NativeF64Bits;
 use std::collections::{BTreeMap, HashMap};
@@ -30,6 +30,9 @@ pub(super) struct SdkSuperWeaponSource {
     body: Option<IniSection>,
     profile: Option<SuperWeaponType>,
     warhead: Option<String>,
+    /// Outer Some is authority from the original Nuclear physical action;
+    /// inner None is its retained null payload, not an absent declaration.
+    nuclear_payload: Option<Option<WeaponHandle>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -47,14 +50,22 @@ pub(super) struct SuperWeaponResourceBindings {
     types: Option<HashMap<String, SuperWeaponType>>,
 }
 
+impl SuperWeaponResourceBindings {
+    pub(super) fn has_nuclear(&self) -> bool {
+        self.types
+            .as_ref()
+            .is_some_and(|types| types.values().any(|sw| sw.nuclear.is_some()))
+    }
+}
+
 impl RuleSet {
     pub(super) fn capture_superweapon_resource_sources(
         &mut self,
         processed: &ProcessedRulesLayers,
     ) {
         self.sdk_superweapon_sources = processed
-            .generic_super_weapon_warhead_states()
-            .map(|(name, warhead)| SdkSuperWeaponSource {
+            .super_weapon_resource_reference_states()
+            .map(|(name, (warhead, nuclear_payload))| SdkSuperWeaponSource {
                 stored_id: name.to_owned(),
                 projected_id: self
                     .super_weapon_order
@@ -64,9 +75,16 @@ impl RuleSet {
                     .unwrap_or_else(|| name.to_owned()),
                 body: processed.ini().section(name).cloned(),
                 profile: self.super_weapon(name).cloned(),
-                // This is the original SW.Warhead slot after its physical
-                // FindOrAllocate. Never resolve the declaration's Type name.
+                // This is the original common SW.Warhead slot after its
+                // physical FindOnly read. Never resolve a declaration's name.
                 warhead: warhead.map(str::to_owned),
+                nuclear_payload: nuclear_payload.map(|payload| {
+                    payload.map(|index| {
+                        WeaponHandle(
+                            u32::try_from(index).expect("Weapon array exceeds stable identity"),
+                        )
+                    })
+                }),
             })
             .collect();
     }
@@ -114,6 +132,26 @@ impl RuleSet {
             .providers
             .get(building)
             .map(Vec::as_slice)
+    }
+
+    /// Installed Nuclear10073113 stores the actual SW definition ordinal.
+    /// Saved Bullet associations may resolve only that admitted unique source.
+    pub(crate) fn nuclear_super_weapon(&self, ordinal: u32) -> Option<&SuperWeaponType> {
+        self.external_superweapons.as_ref()?;
+        let source = self.sdk_superweapon_sources.get(ordinal as usize)?;
+        let super_weapon = self.super_weapons.get(&source.projected_id)?;
+        (super_weapon.nuclear.as_ref()?.source_ordinal == ordinal
+            && self
+                .sdk_superweapon_sources
+                .iter()
+                .filter(|other| {
+                    other
+                        .projected_id
+                        .eq_ignore_ascii_case(&source.projected_id)
+                })
+                .count()
+                == 1)
+            .then_some(super_weapon)
     }
 
     pub(super) fn collect_superweapon_resource_bindings(
@@ -252,6 +290,59 @@ impl RuleSet {
             // disabled mechanism, before publishing any effective field.
             match &mut definition.payload {
                 SuperWeaponPayloadPolicy::Retail => {}
+                SuperWeaponPayloadPolicy::Nuclear {
+                    damage,
+                    silo_launch,
+                    take_off,
+                    psi_warning,
+                    activation_sound,
+                } => {
+                    let payload = source.nuclear_payload.ok_or(
+                        "Nuclear declaration requires its original physical reference reader",
+                    )?;
+                    if self
+                        .sdk_superweapon_sources
+                        .iter()
+                        .filter(|other| {
+                            other
+                                .projected_id
+                                .eq_ignore_ascii_case(&source.projected_id)
+                        })
+                        .count()
+                        != 1
+                    {
+                        return Err(
+                            "Nuclear declaration requires a unique native SuperWeapon projection"
+                                .into(),
+                        );
+                    }
+                    for animation in [&mut *take_off, &mut *psi_warning] {
+                        if let NullableResourceName::Named(name) = animation {
+                            *name = self
+                                .sdk_animation_names
+                                .iter()
+                                .find(|id| id.eq_ignore_ascii_case(name))
+                                .ok_or_else(|| format!("unregistered Nuclear animation: {name}"))?
+                                .clone();
+                        }
+                    }
+                    resolve_sound(activation_sound)?;
+                    // Nuclear100732F0/10073320 use the retained payload's
+                    // Damage/WH unless the common nullable override applies.
+                    // Native kind/action history remains with stock_type.
+                    if policy.semantics.custom_payloads {
+                        candidate.nuclear = Some(NuclearSettings {
+                            source_ordinal: definition.ordinal,
+                            payload,
+                            warhead: source.warhead.clone(),
+                            damage: *damage,
+                            silo_launch: *silo_launch,
+                            take_off: nullable_name(take_off),
+                            psi_warning: nullable_name(psi_warning).flatten(),
+                            activation_sound: nullable_name(activation_sound),
+                        });
+                    }
+                }
                 SuperWeaponPayloadPolicy::GenericWarhead { damage, targeting } => {
                     let requirements = |target, house| -> Result<TargetRequirements, String> {
                         Ok(TargetRequirements {
@@ -474,7 +565,7 @@ fn stock_type(source: &SdkSuperWeaponSource) -> SuperWeaponType {
         false,
     );
     if let Some(profile) = &source.profile {
-        stock.weapon_type = profile.weapon_type.clone();
+        stock.weapon_type = profile.weapon_type;
         stock.aux_building = profile.aux_building.clone();
         stock.special_sound = profile.special_sound.clone();
         stock.start_sound = profile.start_sound.clone();

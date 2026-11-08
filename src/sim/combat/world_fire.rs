@@ -1900,6 +1900,7 @@ pub(super) fn emit_admitted_fire(
                     // Ares TechnoClass_Fire_CreateBullet1001ADE0 ->
                     // CreateBullet100191E0 overrides the bare +15C budget.
                     projectile_range: weapon.firing_policy().and_then(|p| p.projectile_range),
+                    launching_super_weapon: None,
                     origin,
                     velocity,
                     // Bullet::Fire normalizes ROT>0 after FireAt's scalar

@@ -22,6 +22,7 @@ const BASE: &str = "[Clear]\nBuildable=yes\n[VeraFeatures]\nAresProduction=no\n\
 [Americans]\nName=USAlias\nParentCountry=Americans\n[Russians]\nName=RUAlias\nParentCountry=Russians\n\
 [Sides]\nGDI=Americans\nNod=Russians\nCivilian=Neutral\n\
 [InfantryTypes]\n[VehicleTypes]\n[AircraftTypes]\n[BuildingTypes]\n0=LAUNCHER\n1=TARGET\n2=DELIVERYBASE\n\
+[Warheads]\n0=Payload\n\
 [LAUNCHER]\nStrength=200\nArmor=wood\nSuperWeapon=Strike\nSuperWeapon2=Delivery\nSuperWeapons=Sphere\n\
 [TARGET]\nStrength=200\nArmor=wood\n[DELIVERYBASE]\nStrength=1000\nPower=200\nBaseNormal=yes\nAdjacent=1\n\
 [SuperWeaponTypes]\n0=Reveal\n1=Strike\n2=Delivery\n3=Sphere\n4=Warp\n\
@@ -68,6 +69,15 @@ struct Scene {
 }
 impl Scene {
     fn new(label: &str, module: Option<&[u8]>, root: &str, map: &str) -> Self {
+        Self::with_mode(label, module, root, None, map)
+    }
+    fn with_mode(
+        label: &str,
+        module: Option<&[u8]>,
+        root: &str,
+        mode: Option<&str>,
+        map: &str,
+    ) -> Self {
         let dir = audio_test_install(label);
         std::fs::write(dir.path().join("rulesmd.ini"), root).unwrap();
         std::fs::write(dir.path().join("artmd.ini"), ART).unwrap();
@@ -76,9 +86,10 @@ impl Scene {
         }
         let assets = open(&dir);
         let mut owner = process(&assets);
+        let mode = mode.map(IniFile::from_str);
         let (mut rules, ..) = owner
             .load_scenario(
-                NativeScenarioRulesPrefix::NonCampaign(None),
+                NativeScenarioRulesPrefix::NonCampaign(mode.as_ref()),
                 &IniFile::from_str(map),
             )
             .unwrap()
@@ -122,9 +133,12 @@ impl Scene {
         self.sim.interner.get(name).unwrap()
     }
     fn launcher(&mut self) -> u64 {
+        self.launcher_at(6, 6)
+    }
+    fn launcher_at(&mut self, rx: u16, ry: u16) -> u64 {
         let id = self
             .sim
-            .spawn_object_at_height("LAUNCHER", "Americans", 6, 6, 0, 0, &self.rules)
+            .spawn_object_at_height("LAUNCHER", "Americans", rx, ry, 0, 0, &self.rules)
             .unwrap();
         let owner = self.id("Americans");
         grant_provided_supers(&mut self.sim, &self.rules, owner);
@@ -265,7 +279,9 @@ fn sdk_super_read_chronology_provider_grant_and_stock_controls() {
         );
     // The physical parser omits an empty value. A comma is a present list
     // with no tokens, so this really replaces the earlier forbidden mask.
-    let map = "[Late]\nType=GenericWarhead\nSW.Warhead=LatePayload\n[LatePayload]\nCellSpread=2\n[Strike]\nSW.ForbiddenHouses=,\n";
+    // Ares common SW.Warhead100336F0/10008B00 is FindOnly. Declare the
+    // intended WH before its Super read; that read never allocates a WH.
+    let map = "[Warheads]\n0=LatePayload\n[Late]\nType=GenericWarhead\nSW.Warhead=LatePayload\n[LatePayload]\nCellSpread=2\n[Strike]\nSW.ForbiddenHouses=,\n";
     for (label, module, enabled) in [
         ("super-current", Some(current.as_slice()), true),
         ("super-none", None, crate::rules::ARES_ENABLED),
@@ -334,7 +350,7 @@ fn sdk_super_read_chronology_provider_grant_and_stock_controls() {
             );
         } else {
             assert_eq!(strike.kind, SuperWeaponKind::NoEffect);
-            assert!(scene.rules.warhead("LatePayload").is_none());
+            assert!(scene.rules.warhead("LatePayload").is_some());
         }
         let building = scene.launcher();
         let names: Vec<_> = provided_supers(
@@ -410,6 +426,9 @@ fn sdk_super_read_chronology_provider_grant_and_stock_controls() {
         }
     }
 }
+
+#[path = "sdk_nuclear_tests.rs"]
+mod nuclear;
 
 #[cfg(not(feature = "ares"))]
 #[test]

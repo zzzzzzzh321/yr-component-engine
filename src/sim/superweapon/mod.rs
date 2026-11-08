@@ -751,15 +751,17 @@ impl SuperWeaponInstance {
                 self.charge_drain_state = 0;
             }
             if rules.superweapon_semantics().grant_charge_history
-                && matches!(
-                    sw.kind,
-                    crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
-                        | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
-                        | crate::rules::superweapon_type::SuperWeaponKind::HunterSeeker
-                )
+                && (sw.nuclear.is_some()
+                    || matches!(
+                        sw.kind,
+                        crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
+                            | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
+                            | crate::rules::superweapon_type::SuperWeaponKind::HunterSeeker
+                    ))
                 && let Some(metadata) = rules.super_weapon_metadata(&sw.id)
             {
-                // These handlers already retain successful launch history.
+                // These handlers, including installed Nuclear, retain
+                // successful launch history through finish_ares_launch.
                 // Stock redirects need their own success boundary before using
                 // initial/virtual charge; do not invent history for them.
                 self.apply_ares_grant_charge(sw, metadata.charge(), frame);

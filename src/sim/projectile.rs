@@ -1195,6 +1195,11 @@ pub struct Projectile {
     /// Bullet Save46AFB0/Load46AE70 includes this live counter, not a re-read.
     #[serde(default)]
     fuel_remaining: Option<i32>,
+    /// Ares NukeTakeOff100366E7 retains the actual launching SuperWeaponType
+    /// in BulletExt+8; NukeMaker10036880 reads it and10036930 propagates it.
+    /// This association belongs to the Bullet, independently of Weapon+130.
+    #[serde(default)]
+    launching_super_weapon: Option<u32>,
     /// The ProximityDetector's reference (`+0xB8 + 0x18` = `+0xD0`), which
     /// Fire's `Setup` (`0x00468A80..0x00468A93`, `0x004E1130`) takes from the
     /// target coordinate Fire kept, as a `FlakScatter=` Inviso bullet's
@@ -1404,6 +1409,10 @@ impl Projectile {
 
     pub(crate) const fn fuel_remaining(&self) -> Option<i32> {
         self.fuel_remaining
+    }
+
+    pub(crate) const fn launching_super_weapon(&self) -> Option<u32> {
+        self.launching_super_weapon
     }
 
     pub const fn proximity_reference(&self) -> ProjectileCoord {
@@ -1964,6 +1973,7 @@ impl ProjectileStore {
                 fuse_frames_remaining: None,
                 ranged_fuse: false,
                 fuel_remaining: None,
+                launching_super_weapon: None,
                 proximity_reference: zero,
                 last_distance_half: 0,
                 tracks_target: false,
@@ -2054,6 +2064,14 @@ impl ProjectileStore {
     pub(crate) fn initialize_fuel(&mut self, id: u64, enabled: bool) {
         if let Some(projectile) = self.get_mut(id) {
             projectile.fuel_remaining = enabled.then_some(i32::MAX);
+        }
+    }
+
+    /// Ares NukeTakeOff100366E7 / NukeMaker10036958. Restore keeps the saved
+    /// association; it never replays constructor or launch decisions.
+    pub(crate) fn set_launching_super_weapon(&mut self, id: u64, source: Option<u32>) {
+        if let Some(projectile) = self.get_mut(id) {
+            projectile.launching_super_weapon = source;
         }
     }
 

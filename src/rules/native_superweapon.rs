@@ -233,6 +233,22 @@ impl SdkRegistryPass {
             return Err("SuperWeapon reader is not available at this physical read kind".into());
         }
         match reader {
+            "super-nuclear-psi-default" => {
+                if !key.is_empty() {
+                    return Err("Nuclear Psi default accepts no authored key".into());
+                }
+                // Nuclear Initialize1007337A ->Anim Find1000D3E0 uses the
+                // literal PSIWARN against the then-current registry, without
+                // allocation. A later Anim constructor cannot repair it.
+                let animation = ares_type_index_of_name(
+                    "PSIWARN",
+                    self.animations[..point.animations]
+                        .iter()
+                        .map(String::as_str),
+                )
+                .map(|index| self.animations[index].clone());
+                encode(&animation.map_or(NullableResourceName::Clear, NullableResourceName::Named))
+            }
             "super-country-mask" => encode(&read_country_mask(section, key, |name| {
                 house_type_index_of_name(
                     name,
