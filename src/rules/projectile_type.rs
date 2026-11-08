@@ -18,6 +18,7 @@
 
 use crate::rules::ini_parser::{IniFile, IniSection};
 use crate::rules::object_image::{ImageTheater, ObjectImageKind, ObjectImageState};
+use crate::rules::ruleset::WeaponHandle;
 use crate::util::native_x87::NativeF64Bits;
 
 /// Shared inputs captured by ObjectType::LoadSHP5F9070; asset binding resolves
@@ -147,8 +148,9 @@ pub struct ProjectileType {
     /// `ShrapnelWeapon=` (+2B4), the WeaponType fired for each shrapnel
     /// fragment, as the ordered Rules processor resolved it.
     pub shrapnel_weapon: Option<String>,
-    /// Airburst child weapon (+2B0), retained by the ordered Rules reader.
-    pub airburst_weapon: Option<String>,
+    /// Actual Airburst child Weapon array slot (+2B0). ReadINI46C2DB retains
+    /// the factory pointer; a stored name cannot identify colliding instances.
+    pub airburst_weapon: Option<WeaponHandle>,
     /// Immutable component projection, rebuilt from its frozen configuration.
     resource_policy: Option<vera_mod_api::ProjectileResourcePolicy>,
     /// Phobos `BulletTypeExt` airburst/splits settings. Absent keys keep the

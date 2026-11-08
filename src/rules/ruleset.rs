@@ -5372,16 +5372,15 @@ impl RuleSet {
         }
         if ares_fan {
             for projectile in self.projectiles.values() {
-                if let Some(child) = projectile.airburst_weapon.as_deref() {
-                    // BulletType's AirburstWeapon is still a legacy name
-                    // projection. This separate factory must not borrow an
-                    // arbitrary same-name instance's travel declaration.
-                    if weapon_name_counts.get(&child.to_ascii_uppercase()).copied() != Some(1) {
-                        return Err(format!(
-                            "Ares child factory requires an unambiguous Weapon pointer projection: {child}"
-                        ));
-                    }
-                    let child_handle = self.weapon_handle(child).expect("registered child Weapon");
+                if let Some(child_handle) = projectile.airburst_weapon {
+                    // Ares1001A0BB/1001921F consumes this exact Weapon and
+                    // its Ext+C8 budget; the child's +130 still stays null.
+                    let child = self.weapon_by_handle(child_handle).ok_or_else(|| {
+                        format!(
+                            "Ares child factory Weapon pointer is outside its registry: {}",
+                            child_handle.index()
+                        )
+                    })?;
                     let range_bound = policies
                         .iter()
                         .find(|(handle, _, _)| *handle == child_handle)
@@ -5390,7 +5389,9 @@ impl RuleSet {
                         .is_some();
                     if !range_bound {
                         return Err(format!(
-                            "Ares child factory requires weapon range binding: {child}"
+                            "Ares child factory requires weapon range binding: {} (instance {})",
+                            child.id,
+                            child_handle.index()
                         ));
                     }
                 }
@@ -7103,7 +7104,13 @@ impl RuleSet {
                 .values_mut()
                 .find(|projectile| projectile.id.eq_ignore_ascii_case(name))
             {
-                projectile.airburst_weapon = airburst.map(str::to_owned);
+                // ReadINI46C2DB and Ares1001A0BB retain the actual pointer.
+                // validate_saved_state checked its array bound before projection.
+                projectile.airburst_weapon = airburst.map(|index| {
+                    WeaponHandle(
+                        u32::try_from(index).expect("Weapon array exceeds stable identity"),
+                    )
+                });
                 projectile.shrapnel_weapon = shrapnel.map(str::to_owned);
             }
         }
@@ -10062,7 +10069,7 @@ impl RuleSet {
                     .map(|weapon| (id, weapon))
             }));
         if !airburst_weapons.is_empty() {
-            b"airburst-weapons-v1".hash(&mut hasher);
+            b"airburst-weapon-instances-v2".hash(&mut hasher);
             airburst_weapons.hash(&mut hasher);
         }
         // A later invalid raw token retains BulletType+294. Equal flattened

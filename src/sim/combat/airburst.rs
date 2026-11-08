@@ -35,8 +35,7 @@ fn emit_retail(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileD
     };
     let Some(weapon) = kind
         .airburst_weapon
-        .as_deref()
-        .and_then(|id| rules.weapon(id))
+        .and_then(|handle| rules.weapon_by_handle(handle))
     else {
         return;
     };
@@ -130,10 +129,11 @@ fn emit_ares(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDet
     let Some(policy) = kind.airburst_policy() else {
         return;
     };
+    // DetonateAt_Splits1001A0BB reads BulletType+2B0's actual Weapon;
+    // equal stored IDs must not select another allocation's fields/Ext.
     let Some(weapon) = kind
         .airburst_weapon
-        .as_deref()
-        .and_then(|id| rules.weapon(id))
+        .and_then(|handle| rules.weapon_by_handle(handle))
     else {
         return;
     };

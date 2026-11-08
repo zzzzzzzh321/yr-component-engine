@@ -86,10 +86,7 @@ pub(super) fn emit(world: &mut Simulation, rules: &RuleSet, detonation: &Project
     if !(parent_type.airburst || parent_type.splits()) {
         return;
     }
-    let Some(weapon_name) = parent_type.airburst_weapon.as_deref() else {
-        return;
-    };
-    let Some(weapon_handle) = rules.weapon_handle(weapon_name) else {
+    let Some(weapon_handle) = parent_type.airburst_weapon else {
         return;
     };
     let Some(weapon) = rules.weapon_by_handle(weapon_handle) else {

@@ -2,9 +2,11 @@
 
 ## 当前开发状态
 
-当前候选为 **0.33／配置23／状态1／API v1**。新增可选 `weapon_instance_resource`：用 `WeaponTypeRef.ordinal` 标识真实 Weapon 数组槽，同一个24字节存储名可以对应不同实例。插件经 `weapon-registry-view` 取得有序目录，再通过 `weapon-instance-effective:<scalar>` 与 `WeaponReadValue { identity, current }` 读取该实例保留的物理历史；数值解析仍由同一宿主读取器完成。
+当前候选为 **0.34／配置23／状态1／API v1**。0.33起支持可选 `weapon_instance_resource`：用 `WeaponTypeRef.ordinal` 标识真实 Weapon 数组槽，同一个24字节存储名可以对应不同实例。插件经 `weapon-registry-view` 取得有序目录，再通过 `weapon-instance-effective:<scalar>` 与 `WeaponReadValue { identity, current }` 读取该实例保留的物理历史；数值解析仍由同一宿主读取器完成。
 
 实例策略包含现有弹药与开火策略。外层 `Some` 明确拥有这两个投影，即使两项都为 `None`；外层 `None` 才允许按唯一名称回退旧严格接口。新组件的 Ammo、ApplyDamage、ProjectileRange 按实例冻结；旧组件保持原请求格式，在同名多实例域明确拒绝，避免借用第一项或最后一项配置。资源接纳时查询一次，实际开火、在飞弹体与恢复继续保留同一个 Weapon 槽，不逐发调用 Wasm。
+
+0.34配套宿主将 `AirburstWeapon` 保留为实际Weapon数组槽，贯通保存的规则、资源接纳和原版／Ares子弹工厂，读取该实例的伤害、亮光与冻结航程。Ares子弹仍保留原生空的installed Weapon引用；父类型引用与子弹安装引用是两回事。本增量不新增SDK回调、配置字段或逐帧Wasm调用。
 
 本版完整存档布局变化；旧完整存档保留原引擎与精确组件。Projectile／Warhead 和专门工厂的其它指针投影仍有独立限制，完整 Ares 兼容继续推进。下文早期版本段落描述对应历史接口；当前实例接口见[资源契约](api/src/resource.rs)。
 

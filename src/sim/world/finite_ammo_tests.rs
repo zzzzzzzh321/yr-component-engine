@@ -1805,3 +1805,6 @@ mod projectile_scatter_tests;
 
 #[path = "weapon_instance_tests.rs"]
 mod weapon_instance_tests;
+
+#[path = "airburst_weapon_instance_tests.rs"]
+mod airburst_weapon_instance_tests;

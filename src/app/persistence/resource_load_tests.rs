@@ -1087,7 +1087,7 @@ fn sdk_super_saved_resources_prepare_cold() {
     }
     let module = std::fs::read(
         std::env::var_os("VERA20K_ARES_COMPONENT")
-            .expect("set VERA20K_ARES_COMPONENT to the actual .28 component"),
+            .expect("set VERA20K_ARES_COMPONENT to the actual component"),
     )
     .unwrap();
     assert!(module.len() <= 16 * 1024 * 1024);
@@ -1117,7 +1117,7 @@ fn sdk_super_saved_resources_prepare_cold() {
 [VehicleTypes]\nSDKRestoreSource=SDKRestoreSource\n\
 [SDKRestoreSource]\nImage=GTNK\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
 [ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=100\nRange=6\nSpeed=40\nProjectile=SDKRestoreShot\nWarhead=SDKRestorePayload\nAmmo=2\nApplyDamage=yes\nProjectileRange=2\n\
-[SDKRestoreShot]\nImage=DRAGON\nROT=1\nShrapnelWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\nShrapnelCount=0\n",
+[SDKRestoreShot]\nImage=DRAGON\nROT=1\nAirburst=no\nAirburstWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\n",
     )
     .expect("actual component restore requires retail assets");
     assert!(
@@ -1192,6 +1192,28 @@ fn sdk_super_saved_resources_prepare_cold() {
         )
         .unwrap();
         assert_eq!((primary.damage, primary.range_leptons), (100, 6 * 256));
+        // This dormant reference deliberately points to a late, unread
+        // constructor. The live valid-child factory/flight is covered by
+        // sdk_airburst_child_keeps_actual_weapon_through_factory_flight_and_restore.
+        let child = rules
+            .projectile("SDKRestoreShot")
+            .unwrap()
+            .airburst_weapon
+            .unwrap();
+        assert_ne!(
+            child,
+            rules.weapon_handle("ABCDEFGHIJKLMNOPQRSTUVWX").unwrap()
+        );
+        let child = rules.weapon_by_handle(child).unwrap();
+        assert_eq!(
+            (child.id.as_str(), child.damage),
+            ("ABCDEFGHIJKLMNOPQRSTUVWX", 0)
+        );
+        assert!(child.projectile.is_none());
+        assert_eq!(
+            child.firing_policy().unwrap().projectile_range,
+            Some(100_000)
+        );
         assert_eq!(
             rules
                 .weapons_iter()
