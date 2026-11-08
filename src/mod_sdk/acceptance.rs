@@ -29,9 +29,9 @@ const AMMO_UNIT_INI: &str = "Ammo=5\r\nInitialAmmo=5\r\nReload=1000\r\nPrimary=S
 const AMMO_PROBE_INI: &str = "\r\n[SDKAmmoGun]\r\nDamage=1\r\nROF=15\r\nRange=6\r\nSpeed=100\r\nProjectile=InvisibleLow\r\nWarhead=SDKProbeWH\r\nAmmo=2\r\n";
 
 const PROBE_MAP: &str = "sdk-probe.map";
-// The default-installation probe also retains a real, originally unlisted WH
-// through the same-pass Super reference reader and the saved resource envelope.
-const SUPER_PROBE_INI: &str = "\r\n[SuperWeaponTypes]\r\nSDKProbe=SDKSuperStrike\r\n[SDKSuperStrike]\r\nType=GenericWarhead\r\nSW.Warhead=SDKSuperPayload\r\nSW.Damage=1\r\nMoney.Amount=-333\r\n[SDKSuperPayload]\r\nCellSpread=0.5\r\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\r\n";
+// Common SW.Warhead FindOnly100336F0 never allocates its target. Register the
+// payload before the Super sweep, then retain it through the saved envelope.
+const SUPER_PROBE_INI: &str = "\r\n[Warheads]\r\nSDKSuperProbe=SDKSuperPayload\r\n[SuperWeaponTypes]\r\nSDKProbe=SDKSuperStrike\r\n[SDKSuperStrike]\r\nType=GenericWarhead\r\nSW.Warhead=SDKSuperPayload\r\nSW.Damage=1\r\nMoney.Amount=-333\r\n[SDKSuperPayload]\r\nCellSpread=0.5\r\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\r\n";
 // An authored demonstration layer, never a host implementation of shield rules.
 // A 100% receiver for every retail armor isolates the component from unrelated
 // weapon/armor tuning. Only the authored feature selection differs by mode.
@@ -488,9 +488,9 @@ fn run_probe(
                 && rules
                     .warhead("SDKSuperPayload")
                     .is_some_and(|wh| wh.cell_spread_f64 == 0.5),
-            "SuperWeapon did not retain its original unlisted Warhead allocation"
+            "SuperWeapon did not retain its originally registered Warhead reference"
         );
-        Some(json!({"unlistedWarheadBound":true,"moneyAmount":sw.money_amount}))
+        Some(json!({"registeredWarheadBound":true,"moneyAmount":sw.money_amount}))
     } else {
         None
     };
