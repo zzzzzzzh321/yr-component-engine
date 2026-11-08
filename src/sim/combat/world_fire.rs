@@ -983,11 +983,7 @@ fn fireat_damage(
     is_garrison: bool,
 ) -> i32 {
     let stages = fire_damage_stages(world, rules, snap, obj, is_garrison);
-    damage::attacker::fire_damage(
-        weapon.damage,
-        weapon.is_sonic || weapon.use_fire_particles,
-        &stages,
-    )
+    damage::attacker::fire_damage(weapon.damage, !weapon.applies_ordinary_damage(), &stages)
 }
 
 /// Phobos `BulletExt`'s construction-time `TechnoExt::GetCurrentFirepowerMultiplier`:
@@ -1562,9 +1558,13 @@ pub(super) fn emit_admitted_fire(
         .map_or(0, |entity| entity.prism_support_count.count());
     let warhead = selected.warhead;
     let damage_stages = fire_damage_stages(world, rules, snap, obj, is_garrison);
+    // Ares TechnoClass_Fire_AllowDamage1004A370 at6FE31C selects the same
+    // pre-firepower zeroing gate (false resumes6FE3DF). The later occupied,
+    // bunker and open-topped folds remain in the original damage owner.
+    // EstimateDamage has no matching Ares hook and keeps its stock gate.
     let base_damage = damage::attacker::fire_damage(
         weapon.damage,
-        weapon.is_sonic || weapon.use_fire_particles,
+        !weapon.applies_ordinary_damage(),
         &damage_stages,
     );
     // FireAt6FE460..6FE4EF constructs a retained DiskLaser before GetROF,

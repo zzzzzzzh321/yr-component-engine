@@ -1,4 +1,4 @@
-//! Registered Scenario ammo overrides with physical retail weapons/art/assets.
+//! Registered Scenario weapon overrides with physical retail weapons/art/assets.
 //! Clear arena, human roster, visibility and pre-Logic semantic command delivery
 //! are supplied boundaries; these are not original whole-frame or input goldens.
 
@@ -153,6 +153,10 @@ impl Scene {
     }
 
     fn shot(&mut self, source: u64, target: u64) -> i32 {
+        self.shot_event(source, target).0
+    }
+
+    fn shot_event(&mut self, source: u64, target: u64) -> (i32, SimFireEvent) {
         for _ in 0..180 {
             let now = self.now();
             let output = self.frame();
@@ -162,7 +166,7 @@ impl Scene {
                 .find(|shot| shot.attacker_id == source)
             {
                 assert_eq!(shot.target, TargetKind::Entity(target));
-                return now;
+                return (now, shot.clone());
             }
         }
         panic!("ordinary target/facing/FireAt never produced a shot");
@@ -205,6 +209,318 @@ impl Scene {
         restored.rebuild_lighting_sources_after_load(&resources.rules);
         restored
     }
+}
+
+#[test]
+#[cfg(not(feature = "ares"))]
+#[ignore = "requires retail assets, VERA_SDK_FIRING_WASM and VERA_SDK_FIRING_PREVIOUS_WASM"]
+fn sdk_firing_apply_damage_reaches_fireat_and_keeps_stock_and_previous_component() {
+    let new = std::fs::read(std::env::var_os("VERA_SDK_FIRING_WASM").unwrap()).unwrap();
+    let old = std::fs::read(std::env::var_os("VERA_SDK_FIRING_PREVIOUS_WASM").unwrap()).unwrap();
+    let patch = "[LTNK]\nPrimary=FiringSonic\nElitePrimary=FiringSonic\nAmmo=1\nInitialAmmo=1\nReload=1000\nCanPassiveAquire=no\n\
+        [MTNK]\nPrimary=FiringParticles\nElitePrimary=FiringParticles\nAmmo=1\nInitialAmmo=1\nReload=1000\nCanPassiveAquire=no\n\
+        [HTNK]\nPrimary=FiringDisabled\nElitePrimary=FiringDisabled\nAmmo=1\nInitialAmmo=1\nReload=1000\nCanPassiveAquire=no\n\
+        [SREF]\nWeapon1=FiringOrdinary\nEliteWeapon1=FiringOrdinary\nAmmo=1\nInitialAmmo=1\nReload=1000\nCanPassiveAquire=no\n\
+        [GACNST]\nSelfHealing=no\n\
+        [FiringSonic]\nDamage=40\nAmbientDamage=0\nROF=40\nRange=8\nProjectile=Cannon\nSpeed=20\nWarhead=FiringWH\nIsSonic=yes\nApplyDamage=yes\n\
+        [FiringParticles]\nDamage=40\nAmbientDamage=0\nROF=40\nRange=8\nProjectile=Cannon\nSpeed=20\nWarhead=FiringWH\nUseFireParticles=yes\n\
+        [FiringDisabled]\nDamage=40\nROF=40\nRange=8\nProjectile=Cannon\nSpeed=20\nWarhead=FiringWH\nApplyDamage=no\n\
+        [FiringOrdinary]\nDamage=40\nROF=40\nRange=8\nProjectile=Cannon\nSpeed=20\nWarhead=FiringWH\n\
+        [FiringWH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\nCellSpread=0\n";
+    for (label, component, sonic_hurts, ordinary_hurts) in [
+        ("stock", None, false, true),
+        ("previous .28", Some(old.as_slice()), false, true),
+        ("firing component", Some(new.as_slice()), true, false),
+    ] {
+        let Some(mut scene) = Scene::with_component(patch, component) else {
+            return;
+        };
+        // The arena allocates 32x32 terrain, but its MapClass In_Bounds
+        // (568300) diamond is 20x20. A Cannon first visits ordinary AI in
+        // the firing frame, whose map tail retires out-of-bounds shots.
+        // Keep the complete northbound flights inside that real diamond.
+        let pairs = [
+            ("LTNK", (6, 22), (6, 16)),
+            ("MTNK", (14, 14), (14, 8)),
+            ("HTNK", (22, 14), (22, 8)),
+            ("SREF", (26, 24), (26, 18)),
+        ]
+        .map(|(kind, source_cell, target_cell)| {
+            for cell in [source_cell, target_cell] {
+                assert!(
+                    scene
+                        .0
+                        .simulation
+                        .map_cell_in_bounds((cell.0 as i16, cell.1 as i16)),
+                    "{label}: {kind} flight endpoint {cell:?} is inside the map diamond"
+                );
+            }
+            let target = scene.spawn("GACNST", "Russians", target_cell);
+            let source = scene.spawn(kind, "Americans", source_cell);
+            let health = scene.actor(target).health.current();
+            scene.command(
+                "Americans",
+                Command::Attack {
+                    attacker_id: source,
+                    target_id: target,
+                },
+            );
+            (source, target, health)
+        });
+        let mut shots = [0; 4];
+        let mut payloads = [None; 4];
+        for _ in 0..150 {
+            let output = scene.frame();
+            for (index, &(source, target, _)) in pairs.iter().enumerate() {
+                let fired = output
+                    .fire_events
+                    .iter()
+                    .filter(|shot| shot.attacker_id == source)
+                    .count();
+                shots[index] += fired;
+                if fired != 0 {
+                    let shot = output
+                        .fire_events
+                        .iter()
+                        .find(|shot| shot.attacker_id == source)
+                        .unwrap();
+                    // Retail SREF uses Weapon1, not Primary. Observe the
+                    // selected weapon so an unrelated Inviso shot cannot
+                    // masquerade as this travelling-projectile control.
+                    assert_eq!(
+                        scene.0.simulation.interner.resolve(shot.weapon_id),
+                        [
+                            "FiringSonic",
+                            "FiringParticles",
+                            "FiringDisabled",
+                            "FiringOrdinary"
+                        ][index],
+                        "{label}: source {source} fires the configured control weapon"
+                    );
+                    let bullet = scene
+                        .0
+                        .simulation
+                        .projectiles()
+                        .iter()
+                        .map(|(_, bullet)| bullet)
+                        .find(|bullet| {
+                            bullet.source_id() == source
+                                && bullet.target()
+                                    == crate::sim::projectile::ProjectileTarget::Entity(target)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{label}: source {source}, index {index}, target {target}: \
+                                 the real in-bounds Cannon survives its first Logic visit"
+                            )
+                        });
+                    payloads[index] = Some(bullet.payload().base_damage);
+                }
+            }
+        }
+        assert_eq!(shots, [1; 4], "{label}: actual finite-ammo FireAt visits");
+        // TechnoClass_Fire_AllowDamage1004A370 / hook6FE31C selects
+        // conventional damage before the original attacker/receiver chain.
+        // Inspect the real Bullet payload before impact: Wave's direct
+        // ReceiveDamage path floors even AmbientDamage=0 to one, unlike
+        // the zero-damage Bullet AreaDamage early-out. Total sonic-target
+        // HP therefore cannot isolate conventional damage from that Wave.
+        assert_eq!(
+            payloads.map(|damage| damage.expect("observed actual shot payload") > 0),
+            [sonic_hurts, false, ordinary_hurts, true],
+            "{label}: explicit and constructor-default ApplyDamage payloads"
+        );
+        let hurt = pairs.map(|(_, target, health)| scene.actor(target).health.current() < health);
+        assert_eq!(
+            &hurt[1..],
+            &[false, ordinary_hurts, true],
+            "{label}: ordinary bullet and fire-particle-default health paths"
+        );
+    }
+}
+
+#[test]
+#[cfg(not(feature = "ares"))]
+#[ignore = "requires retail assets, VERA_SDK_FIRING_WASM and VERA_SDK_FIRING_PREVIOUS_WASM"]
+fn sdk_firing_directional_muzzle_survives_saved_program_rebinding() {
+    let new = std::fs::read(std::env::var_os("VERA_SDK_FIRING_WASM").unwrap()).unwrap();
+    let old = std::fs::read(std::env::var_os("VERA_SDK_FIRING_PREVIOUS_WASM").unwrap()).unwrap();
+    // A non-power-of-two list uses its reached16-way prefix in Ares;
+    // stock and old components select the first entry for Count!=8.
+    let animations = std::iter::once("GUNFIRE")
+        .chain(std::iter::repeat_n("PIFF", 16))
+        .collect::<Vec<_>>()
+        .join(",");
+    let patch = format!(
+        "[LTNK]\nPrimary=FiringFacing\nElitePrimary=FiringFacing\nAmmo=2\nInitialAmmo=2\nReload=1000\nCanPassiveAquire=no\n\
+         [FiringFacing]\nDamage=1\nROF=45\nRange=8\nProjectile=InvisibleLow\nWarhead=SA\nAnim={animations}\n"
+    );
+    for (label, component, expected) in [
+        ("stock", None, "GUNFIRE"),
+        ("previous .28", Some(old.as_slice()), "GUNFIRE"),
+        ("firing component", Some(new.as_slice()), "PIFF"),
+    ] {
+        let Some(mut scene) = Scene::with_component(&patch, component) else {
+            return;
+        };
+        assert_eq!(
+            scene
+                .0
+                .resources
+                .rules
+                .weapon("FiringFacing")
+                .unwrap()
+                .anim
+                .len(),
+            17
+        );
+        let target = scene.spawn("GACNST", "Russians", (16, 14));
+        let source = scene.spawn("LTNK", "Americans", (16, 20));
+        scene.command(
+            "Americans",
+            Command::Attack {
+                attacker_id: source,
+                target_id: target,
+            },
+        );
+        let (_, shot) = scene.shot_event(source, target);
+        assert_eq!(
+            shot.muzzle_anim
+                .map(|id| scene.0.simulation.interner.resolve(id)),
+            Some(expected),
+            "{label}: TechnoClass_Fire_Facings10047CF0 / hook6FF2D1"
+        );
+        if component != Some(new.as_slice()) {
+            continue;
+        }
+        let rearm = scene.actor(source).rearm_timer.timer();
+        assert!(rearm.remaining(scene.now()) > 0);
+        let saved = GameSnapshot::save_validated(
+            &scene.0.simulation,
+            0,
+            scene.0.resources.rules.simulation_config_hash(),
+            "directional firing resource",
+            0,
+        );
+        let restored = scene.restored(&saved);
+        scene.0.resources.rules.external_mod = Some(std::sync::Arc::new(
+            restored
+                .external_mod
+                .clone()
+                .expect("saved firing component"),
+        ));
+        scene.0.resources.rules.bind_resource_policies().unwrap();
+        scene.0.replace_simulation(restored);
+        assert_eq!(scene.actor(source).rearm_timer.timer(), rearm);
+        let (_, next) = scene.shot_event(source, target);
+        assert_eq!(
+            next.muzzle_anim
+                .map(|id| scene.0.simulation.interner.resolve(id)),
+            Some("PIFF"),
+            "same saved configuration rebuilds the direction policy"
+        );
+        assert_eq!(
+            scene.count(source),
+            0,
+            "both actual shots spend their rounds"
+        );
+    }
+}
+
+#[test]
+#[cfg(not(feature = "ares"))]
+#[ignore = "requires retail assets and VERA_SDK_FIRING_WASM"]
+fn sdk_firing_muzzle_keeps_real_garrison_and_open_topped_overrides() {
+    let wasm = std::fs::read(std::env::var_os("VERA_SDK_FIRING_WASM").unwrap()).unwrap();
+    let animations = std::iter::once("GUNFIRE")
+        .chain(std::iter::repeat_n("PIFF", 15))
+        .collect::<Vec<_>>()
+        .join(",");
+    let patch = format!(
+        "[E1]\nPrimary=FiringOccupied\nElitePrimary=FiringOccupied\nOccupyWeapon=FiringOccupied\nEliteOccupyWeapon=FiringOccupied\nCanPassiveAquire=no\n\
+         [INIT]\nPrimary=FiringOpen\nElitePrimary=FiringOpen\nCanPassiveAquire=no\n\
+         [BFRT]\nCanPassiveAquire=no\n\
+         [FiringOccupied]\nDamage=1\nROF=45\nRange=8\nProjectile=InvisibleLow\nWarhead=SA\nAnim={animations}\nOccupantAnim=UCFLASH\n\
+         [FiringOpen]\nDamage=1\nROF=45\nRange=8\nProjectile=InvisibleLow\nWarhead=SA\nOpenToppedAnim=GUNFIRE\n"
+    );
+    let Some(mut scene) = Scene::with_component(&patch, Some(&wasm)) else {
+        return;
+    };
+    let bunker = scene.spawn("NABNKR", "Americans", (8, 12));
+    let occupant = scene.spawn("E1", "Americans", (8, 15));
+    let carrier = scene.spawn("BFRT", "Americans", (22, 12));
+    let rider = scene.spawn("INIT", "Americans", (20, 14));
+    scene.command(
+        "Americans",
+        Command::CaptureBuilding {
+            engineer_id: occupant,
+            target_building_id: bunker,
+        },
+    );
+    scene.command(
+        "Americans",
+        Command::clicked_mission(
+            rider,
+            crate::sim::mission::MissionType::Enter,
+            TargetKind::Entity(carrier),
+        ),
+    );
+    for _ in 0..300 {
+        if scene
+            .actor(bunker)
+            .passenger_role
+            .occupants()
+            .ids()
+            .contains(&occupant)
+            && scene.actor(rider).passenger_role.open_transport_id() == Some(carrier)
+        {
+            break;
+        }
+        scene.frame();
+    }
+    assert!(
+        scene
+            .actor(bunker)
+            .passenger_role
+            .occupants()
+            .ids()
+            .contains(&occupant)
+    );
+    assert_eq!(
+        scene.actor(rider).passenger_role.open_transport_id(),
+        Some(carrier)
+    );
+    let garrison_target = scene.spawn("GACNST", "Russians", (8, 6));
+    scene.command(
+        "Americans",
+        Command::Attack {
+            attacker_id: bunker,
+            target_id: garrison_target,
+        },
+    );
+    let (_, shot) = scene.shot_event(bunker, garrison_target);
+    assert!(shot.occupied_building);
+    assert_eq!(
+        shot.muzzle_anim
+            .map(|id| scene.0.simulation.interner.resolve(id)),
+        Some("UCFLASH"),
+        "original6FF31B occupied override follows the new direction selection"
+    );
+    let open_target = scene.spawn("GACNST", "Russians", (22, 6));
+    scene.command(
+        "Americans",
+        Command::Attack {
+            attacker_id: carrier,
+            target_id: open_target,
+        },
+    );
+    let (_, shot) = scene.shot_event(rider, open_target);
+    assert_eq!(
+        shot.muzzle_anim
+            .map(|id| scene.0.simulation.interner.resolve(id)),
+        Some("GUNFIRE"),
+        "original6FF32F uses OpenToppedAnim only when no ordinary Anim was selected"
+    );
 }
 
 fn fired(output: &SimFrameOutput, source: u64) -> bool {

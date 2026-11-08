@@ -5,6 +5,35 @@ use std::sync::Arc;
 use vera_mod_api::{self as api, Context};
 use vera_mod_runtime::HostServices;
 
+#[test]
+fn sdk_firing_nullable_projection_retains_reached_reads_and_excludes_preallocation_keys() {
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=Early\n[Early]\nPrimary=EarlyGun\n\
+         [EarlyGun]\nApplyDamage=yes\n[LateGun]\nApplyDamage=no\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str(
+            "[VehicleTypes]\n1=Late\n[Late]\nPrimary=LateGun\n[EarlyGun]\nApplyDamage=garbage\n",
+        ),
+    );
+    let processed = layers.process().unwrap();
+    let host = NativeHost::configuration(processed.sdk_passes().last().unwrap().clone(), vec![]);
+    let read = |name| {
+        serde_json::from_slice::<Option<bool>>(
+            &host
+                .config_read(name, "ApplyDamage", "ares-nullable-bool", b"null")
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    // Ares WeaponType_LoadFromINI10055D90 only reaches an allocated type's
+    // physical section. The shared final projection uses that same body,
+    // not all text that happened to name a future weapon before allocation.
+    assert_eq!(read("EarlyGun"), Some(true));
+    assert_eq!(read("LateGun"), None);
+}
+
 fn entity() -> api::EntityContext {
     api::EntityContext {
         id: 1,

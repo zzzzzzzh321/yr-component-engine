@@ -34,9 +34,38 @@ pub fn muzzle_anim_index_8way(f16: u16) -> u8 {
     (dir_from_facing16(f16) + 1) & 7
 }
 
+/// Direction bins selected by an admitted weapon policy. Original Ares
+/// TechnoClass_Fire_Facings10047CF0 (hook6FF2D1):
+/// add the 45-degree art offset in u32, then round to the selected power of
+/// two. The full direction-word mode deliberately keeps the unwrapped sum;
+/// the animation owner still checks that index against its actual list.
+pub(crate) fn muzzle_anim_index_for_facings(f16: u16, facings: u32) -> u32 {
+    if facings <= 1 {
+        return 0;
+    }
+    let shifted = u32::from(f16) + 0x2000;
+    if facings == 65_536 {
+        return shifted;
+    }
+    debug_assert!(facings.is_power_of_two() && facings < 65_536);
+    (((shifted >> (15 - facings.ilog2())) + 1) >> 1) & (facings - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admitted_muzzle_bins_keep_native_rotation_rounding_and_word_mode() {
+        // Fire_Facings10047CF0:16-way at north starts two bins into the art;
+        // a half-bin boundary rounds up, and the ordinary circle wraps.
+        assert_eq!(muzzle_anim_index_for_facings(0, 16), 2);
+        assert_eq!(muzzle_anim_index_for_facings(0x0800, 16), 3);
+        assert_eq!(muzzle_anim_index_for_facings(0xE000, 16), 0);
+        assert_eq!(muzzle_anim_index_for_facings(0xFFFF, 1), 0);
+        // The native e>=16 arm does not mask the result back to16 bits.
+        assert_eq!(muzzle_anim_index_for_facings(0xFFFF, 65_536), 0x11FFF);
+    }
 
     #[test]
     fn dir_from_facing16_ignores_low_byte() {

@@ -754,6 +754,22 @@ impl Program {
         Ok(plan.weapon_resource)
     }
 
+    pub(crate) fn weapon_firing_resource_policy(
+        &self,
+        context: api::WeaponFiringResourceContext,
+    ) -> Result<Option<api::WeaponFiringPolicy>, String> {
+        if !self
+            .manifest
+            .hooks
+            .contains(&api::HookKind::WeaponFiringResource)
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate(Context::WeaponFiringResource(context), &[])?
+            .weapon_firing_resource)
+    }
+
     pub(crate) fn has_foundation_resource(&self) -> bool {
         self.manifest
             .hooks

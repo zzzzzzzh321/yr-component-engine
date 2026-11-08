@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn sdk_hook_binary_ordinals_preserve_accepted_component_saves() {
+    // Program persists ModuleManifest through the existing bincode1 layout.
+    // These are the accepted API1 ordinals before the optional firing hook.
+    assert_eq!(
+        crate::util::save_codec::serialize(&api::HookKind::TypeResource).unwrap(),
+        5u32.to_le_bytes()
+    );
+    assert_eq!(
+        crate::util::save_codec::serialize(&api::HookKind::SuperWeaponResource).unwrap(),
+        27u32.to_le_bytes()
+    );
+    assert_eq!(
+        crate::util::save_codec::serialize(&api::HookKind::WeaponFiringResource).unwrap(),
+        28u32.to_le_bytes()
+    );
+}
+
+#[test]
 fn repeated_admission_shares_compilation_without_trusting_a_cached_identity() {
     let request = Request {
         api_version: api::API_VERSION,

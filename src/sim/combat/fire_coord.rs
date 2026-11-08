@@ -971,6 +971,15 @@ pub(crate) fn muzzle_anim_name(
 ) -> Option<&str> {
     let picked = if occupied_fire {
         weapon.occupant_anim.as_deref()
+    } else if let Some(policy) = weapon.firing_policy() {
+        // Ares TechnoClass_Fire_Facings10047CF0 returns to6FF31B, before the
+        // original occupied/open-topped overrides. Only the bound facing
+        // count changes; the animation references and coordinate owner stay.
+        let index = crate::util::direction_tables::quantize::muzzle_anim_index_for_facings(
+            aim_facing16,
+            policy.muzzle_facings,
+        );
+        weapon.anim.get(index as usize).map(String::as_str)
     } else {
         match weapon.anim.len() {
             0 => None,

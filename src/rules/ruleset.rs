@@ -5289,7 +5289,24 @@ impl RuleSet {
                     .map(|program| program.weapon_resource_policy(&name))
                     .transpose()?
                     .flatten();
-                Ok((name, policy))
+                let weapon = self.weapon(&name).expect("retained weapon");
+                let context = vera_mod_api::WeaponFiringResourceContext {
+                    weapon_name: name.clone(),
+                    animation_count: weapon
+                        .anim
+                        .len()
+                        .try_into()
+                        .map_err(|_| "weapon animation count exceeds SDK width")?,
+                    is_sonic: weapon.is_sonic,
+                    use_fire_particles: weapon.use_fire_particles,
+                };
+                let firing = self
+                    .external_mod
+                    .as_ref()
+                    .map(|program| program.weapon_firing_resource_policy(context))
+                    .transpose()?
+                    .flatten();
+                Ok((name, policy, firing))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let type_policies = self
@@ -5386,9 +5403,10 @@ impl RuleSet {
         for (object, sounds) in self.object_list.iter_mut().zip(type_sounds) {
             object.bind_external_promotion_sounds(sounds);
         }
-        for (name, policy) in policies {
+        for (name, policy, firing) in policies {
             let handle = self.weapon_handle(&name).expect("retained weapon");
             self.weapon_types[handle.0 as usize].bind_resource_policy(policy);
+            self.weapon_types[handle.0 as usize].bind_firing_policy(firing);
         }
         for ((object, policy), target) in self
             .object_list

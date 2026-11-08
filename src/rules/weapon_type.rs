@@ -72,6 +72,8 @@ pub struct WeaponType {
     /// Derived, immutable external resource policy. The component's frozen
     /// configuration is authoritative; load and restore rebuild this projection.
     resource_policy: Option<vera_mod_api::WeaponResourcePolicy>,
+    /// Derived firing facts, rebuilt from the admitted component on load/restore.
+    firing_policy: Option<vera_mod_api::WeaponFiringPolicy>,
     /// `RevealOnFire=` (`+0x137`, default yes): a launched shot reveals the
     /// firer to a human victim (FireAt `0x006FF66C`). Retail turns it off on
     /// the sniper, Virus, disguise and Mirage weapons.
@@ -123,7 +125,7 @@ pub struct WeaponType {
     pub open_topped_anim: Option<String>,
     /// Particle system spawned when this weapon fires.
     pub attached_particle_system: Option<String>,
-    /// Comma-separated list of impact animations, indexed by damage magnitude.
+    /// Native `Anim=` muzzle animation references, selected at firing time.
     pub anim: Vec<String>,
 
     // ── Color fields (3 bytes each, "R,G,B" format) ──────────────────
@@ -286,6 +288,23 @@ impl WeaponType {
         self.resource_policy = policy;
     }
 
+    pub(crate) fn firing_policy(&self) -> Option<vera_mod_api::WeaponFiringPolicy> {
+        self.firing_policy
+    }
+
+    pub(crate) fn bind_firing_policy(&mut self, policy: Option<vera_mod_api::WeaponFiringPolicy>) {
+        self.firing_policy = policy;
+    }
+
+    /// Ordinary shot damage is selected before the existing firepower stages.
+    /// Missing capability preserves the native Sonic/fire-particle default.
+    pub(crate) fn applies_ordinary_damage(&self) -> bool {
+        self.firing_policy
+            .map_or(!self.is_sonic && !self.use_fire_particles, |policy| {
+                policy.apply_damage
+            })
+    }
+
     /// `WeaponTypeExt::HasRequiredAttachedEffects` reads no list: every shot
     /// passes without asking the target.
     pub fn has_attach_effect_gates(&self) -> bool {
@@ -444,6 +463,7 @@ impl WeaponType {
             down_report: Vec::new(),
             burst: section.read_int("Burst", 1),
             resource_policy: None,
+            firing_policy: None,
             // Constructor 1 (`0x00771DBB`); ReadINI passes it as the default
             // (`0x00772182..0x00772196`).
             reveal_on_fire: section.read_bool("RevealOnFire", true),
