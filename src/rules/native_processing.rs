@@ -496,7 +496,7 @@ impl RulesLayerStack {
                     partial_trace: Box::new(partial_trace),
                 });
             }
-            sdk_registries.push(processor.sdk_registry_pass());
+            sdk_registries.push(processor.sdk_registry_pass(true));
             if index == 0 && reset_color_add_after_root {
                 // Reset668A34..668A56 clears all16 RGB triples AFTER root
                 // Process668A27. It leaves the four selector DWORDs alone.
@@ -841,6 +841,9 @@ const PARADROP_INFANTRY_KEYS: [&str; 4] = [
 pub(crate) struct SdkRegistryPass {
     animations: Vec<String>,
     reads: Vec<SdkRegistryRead>,
+    // Immutable snapshots of the actual Weapon instances' reached Rules reads.
+    // A later Projectile with the same stored ID is a different native owner.
+    weapon_bodies: std::sync::Arc<Vec<IniSection>>,
     production: vera_mod_api::ProductionRegistryView,
     foundation: vera_mod_api::FoundationRegistryView,
     cameo: vera_mod_api::CameoRegistryView,
@@ -903,6 +906,13 @@ impl SdkRegistryPass {
         &self.production
     }
     pub(crate) fn names(&self, registry: &str) -> Vec<String> {
+        if registry == "$weapon-config" {
+            return self
+                .weapon_bodies
+                .iter()
+                .map(|body| body.name.clone())
+                .collect();
+        }
         if registry == "$animations" {
             return self.animations.clone();
         }
@@ -912,6 +922,21 @@ impl SdkRegistryPass {
             .filter(|read| read.registry == registry && seen.insert(read.owner.as_str()))
             .map(|read| read.owner.clone())
             .collect()
+    }
+
+    pub(crate) fn weapon_effective_section(&self, owner: &str) -> Result<&IniSection, String> {
+        self.weapon_bodies
+            .iter()
+            .find(|body| body.name == owner)
+            .ok_or_else(|| "retained Weapon reader requires its registered owner".into())
+    }
+
+    pub(crate) fn weapon_effective_input_bytes(&self) -> Result<usize, String> {
+        self.weapon_bodies.iter().try_fold(0usize, |size, body| {
+            serde_json::to_vec(body)
+                .map(|bytes| size.saturating_add(bytes.len()))
+                .map_err(|error| error.to_string())
+        })
     }
 
     pub(crate) fn read_animation_reference(
@@ -2113,9 +2138,7 @@ impl ProcessedRulesLayers {
     pub(crate) fn particle_system_type_projections(
         &self,
     ) -> impl Iterator<Item = crate::rules::particle_system_type::ParticleSystemType> {
-        use crate::rules::{
-            particle_system_type::ParticleSystemType, particle_type::ParticleTypeId,
-        };
+        use crate::rules::{particle_system_type::ParticleSystemType, particle_type::ParticleTypeId};
         self.native_type_construction_trace
             .registry_state()
             .families
@@ -2150,6 +2173,7 @@ impl ProcessedRulesLayers {
                 };
                 WeaponState {
                     id: member.native_stored_id.as_str(),
+                    body: &member.body,
                     damage: member.weapon.damage,
                     speed: member.weapon.speed,
                     range_leptons: member.weapon.range_leptons,
@@ -5596,6 +5620,7 @@ impl WeaponSlots {
 /// as stored IDs, for `RuleSet`.
 pub(crate) struct WeaponState<'a> {
     pub(crate) id: &'a str,
+    pub(crate) body: &'a IniSection,
     pub(crate) damage: i32,
     pub(crate) speed: i32,
     pub(crate) range_leptons: i32,
@@ -6111,7 +6136,7 @@ impl RulesPassProcessor {
         self.sdk_configuration_steps
             .push(SdkConfigurationStep::RulesPass {
                 ini: pass.clone(),
-                registry: self.sdk_registry_pass(),
+                registry: self.sdk_registry_pass(true),
             });
         result
     }
@@ -7093,8 +7118,18 @@ impl RulesPassProcessor {
         });
     }
 
-    fn sdk_registry_pass(&self) -> SdkRegistryPass {
+    fn sdk_registry_pass(&self, include_weapon_bodies: bool) -> SdkRegistryPass {
         SdkRegistryPass {
+            weapon_bodies: std::sync::Arc::new(if include_weapon_bodies {
+                self.families
+                    .get(&RulesTypeFamily::Weapon)
+                    .into_iter()
+                    .flatten()
+                    .map(|member| member.body.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            }),
             faction: vera_mod_api::FactionRegistryView {
                 sides: self
                     .families
@@ -7698,7 +7733,7 @@ impl RulesPassProcessor {
             .sdk_configuration_seed
             .as_ref()
             .expect("checked configuration seed")
-            .configure_super_read(pass, context, self.sdk_registry_pass())
+            .configure_super_read(pass, context, self.sdk_registry_pass(false))
             .map_err(error)?;
         if !body_read
             && matches!(

@@ -591,9 +591,14 @@ fn sdk_resources_high_weapon_slots_use_native_reading_elite_fallback_and_priorit
             .weapon_id,
         Some("Last")
     );
+    // GetWeapon70E140 returns the valid WeaponStruct even when its
+    // WeaponType pointer is null; only an out-of-bounds index has no record.
+    let empty = combat_weapon::weapon_for_index(object, 0, 3)
+        .expect("an empty in-bounds slot still owns its weapon record");
+    assert_eq!(empty.weapon_id, None, "empty slot stays empty");
     assert!(
-        combat_weapon::weapon_for_index(object, 0, 3).is_none(),
-        "empty slot stays empty"
+        empty.weapon(rules).is_none(),
+        "empty slot resolves no weapon"
     );
     assert!(
         combat_weapon::weapon_for_index(object, 0, 18).is_none(),

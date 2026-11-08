@@ -21,6 +21,11 @@ New enum variants append, preserving accepted saved manifest ordinals. Older
 guests receive no new request, and old nonempty configurations do not acquire
 the new domain. This is a bounded increment toward full Ares compatibility.
 
+Configuration uses the `$weapon-config` catalog and `weapon-effective:` scalar
+service, derived from actual Weapon instances' reached bodies. A later same-ID
+Projectile cannot replace this source. The shared INI converters and input-work
+budget remain host-owned; the plugin uses `ConfigView::retained_weapon_read`.
+
 Version 0.28 moves the existing SuperWeapon extensions into
 `features/superweapons/`. `configure_super_read` runs at the original Rules
 visit, preserving first-visit initialization and SW.Warhead reference allocation;

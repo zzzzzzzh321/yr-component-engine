@@ -467,7 +467,7 @@ impl RulesPassProcessor {
             self.sdk_configuration_steps
                 .push(SdkConfigurationStep::CountryPass {
                     ini: pass.clone(),
-                    registry: self.sdk_registry_pass(),
+                    registry: self.sdk_registry_pass(true),
                 });
         }
         result

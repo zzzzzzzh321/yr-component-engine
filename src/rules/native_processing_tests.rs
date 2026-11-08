@@ -117,12 +117,12 @@ fn cameo_metadata_uses_actual_suffixes_and_retained_image_sources() {
             &crate::rules::sound_ini::SoundRegistry::default(),
         )
         .unwrap();
-    assert!(!continued.sdk_registry_pass().cameo_view().reads.is_empty());
+    assert!(!continued.sdk_registry_pass(true).cameo_view().reads.is_empty());
     continued
         .process_country_only_pass(&IniFile::empty(), false)
         .unwrap();
     assert!(
-        continued.sdk_registry_pass().cameo_view().reads.is_empty(),
+        continued.sdk_registry_pass(true).cameo_view().reads.is_empty(),
         "Country-only work does not replay the preceding cameo suffixes"
     );
 }
@@ -143,7 +143,7 @@ fn faction_metadata_preserves_side_sweep_and_country_only_frontiers() {
             &crate::rules::sound_ini::SoundRegistry::default(),
         )
         .unwrap();
-    let full = processor.sdk_registry_pass();
+    let full = processor.sdk_registry_pass(true);
     assert_eq!(full.faction_view().sides, ["FIRST", "LATER"]);
     let reads = &full.faction_view().reads;
     assert_eq!(reads.len(), 3);
@@ -186,7 +186,7 @@ fn faction_metadata_preserves_side_sweep_and_country_only_frontiers() {
         country: 1, primary_rules: true, body_read: false, parent, side: -1,
     } if parent.is_empty()));
     processor.process_country_only_pass(&pass, true).unwrap();
-    let country_only = processor.sdk_registry_pass();
+    let country_only = processor.sdk_registry_pass(true);
     assert_eq!(country_only.faction_view().reads.len(), 2);
     assert!(
         country_only
@@ -221,7 +221,7 @@ fn faction_pointer_reader_uses_the_reached_family_prefix() {
             &crate::rules::sound_ini::SoundRegistry::default(),
         )
         .unwrap();
-    let first = processor.sdk_registry_pass();
+    let first = processor.sdk_registry_pass(true);
     let seed = serde_json::to_vec(&FactionReadValue {
         read: 0,
         current: FactionNullableRef::<ProductionTypeRef>::Unset,
@@ -264,7 +264,7 @@ fn faction_pointer_reader_uses_the_reached_family_prefix() {
         )
         .unwrap();
     assert_eq!(
-        read(&processor.sdk_registry_pass()),
+        read(&processor.sdk_registry_pass(true)),
         FactionNullableRef::Resolved(ProductionTypeRef {
             category: ProductionObjectKind::Unit,
             ordinal: 0

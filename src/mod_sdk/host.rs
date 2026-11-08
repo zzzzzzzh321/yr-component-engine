@@ -90,6 +90,7 @@ pub(super) struct NativeHost {
     faction_message: OnceLock<Result<Vec<u8>, String>>,
     superweapon_inputs: bool,
     superweapon_message: OnceLock<Result<Vec<u8>, String>>,
+    weapon_inputs: bool,
 }
 
 impl NativeHost {
@@ -108,6 +109,7 @@ impl NativeHost {
             faction_message: OnceLock::new(),
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
+            weapon_inputs: false,
         }
     }
 
@@ -149,6 +151,11 @@ impl NativeHost {
         self
     }
 
+    pub(super) fn enable_weapon_inputs(mut self) -> Self {
+        self.weapon_inputs = true;
+        self
+    }
+
     pub(super) fn simulation() -> Self {
         Self {
             ini: None,
@@ -164,6 +171,7 @@ impl NativeHost {
             faction_message: OnceLock::new(),
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
+            weapon_inputs: false,
         }
     }
 
@@ -280,6 +288,17 @@ impl NativeHost {
         })
     }
 
+    fn weapon_source_bytes(&self) -> usize {
+        if !self.weapon_inputs || self.ini.is_none() {
+            return 0;
+        }
+        self.registries.as_ref().map_or(0, |registry| {
+            registry
+                .weapon_effective_input_bytes()
+                .unwrap_or(usize::MAX)
+        })
+    }
+
     fn cameo_view_bytes(&self) -> Result<&[u8], String> {
         if !self.cameo_inputs || self.ini.is_none() {
             return Err("cameo configuration is unavailable".into());
@@ -306,6 +325,7 @@ impl HostServices for NativeHost {
             .saturating_add(self.cameo_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.superweapon_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.superweapon_source_bytes())
+            .saturating_add(self.weapon_source_bytes())
     }
 
     fn config(&self, section: &str, key: &str) -> Option<String> {
@@ -498,6 +518,41 @@ impl HostServices for NativeHost {
                 .ok_or("missing SuperWeapon read points")?
                 .superweapon_effective_section(input.read, owner)?;
             (section, reader, input.current)
+        } else if let Some(reader) = reader.strip_prefix("weapon-effective:") {
+            if !self.weapon_inputs {
+                return Err("component has no retained Weapon configuration capability".into());
+            }
+            // Select the actual Weapon instance's reached body; the flat INI
+            // can have been replaced by a later same-ID Projectile. Delegate
+            // scalar conversion to the same native reader below, without a
+            // second parser or an external copy of interpreted gameplay.
+            if !matches!(
+                reader,
+                "presence"
+                    | "int"
+                    | "ares-int"
+                    | "bool"
+                    | "ares-bool"
+                    | "ares-nullable-bool"
+                    | "nullable-int"
+                    | "ares-nullable-int"
+                    | "double-bits"
+                    | "ares-double-bits"
+            ) && !reader.starts_with("name:")
+                && !reader.starts_with("string:")
+            {
+                return Err("unsupported retained Weapon scalar reader".into());
+            }
+            let section = self
+                .registries
+                .as_ref()
+                .ok_or("missing retained Weapon source")?
+                .weapon_effective_section(owner)?;
+            (
+                section,
+                reader,
+                serde_json::from_slice(current).map_err(|e| e.to_string())?,
+            )
         } else {
             (
                 ini.section_or_empty(section),
@@ -704,6 +759,15 @@ impl HostServices for NativeHost {
     }
 
     fn registry(&self, name: &str) -> Vec<String> {
+        if name == "$weapon-config" {
+            return if self.weapon_inputs && self.ini.is_some() {
+                self.registries
+                    .as_ref()
+                    .map_or_else(Vec::new, |r| r.names(name))
+            } else {
+                Vec::new()
+            };
+        }
         if name == "$sounds" {
             return if self.fixed_sounds().is_ok() {
                 vec!["FixedSounds".into()]

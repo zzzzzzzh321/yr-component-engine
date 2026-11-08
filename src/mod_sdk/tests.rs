@@ -18,20 +18,116 @@ fn sdk_firing_nullable_projection_retains_reached_reads_and_excludes_preallocati
         ),
     );
     let processed = layers.process().unwrap();
-    let host = NativeHost::configuration(processed.sdk_passes().last().unwrap().clone(), vec![]);
+    let host = NativeHost::configuration(processed.sdk_passes().last().unwrap().clone(), vec![])
+        .with_registries(processed.sdk_registries().last().unwrap().clone())
+        .enable_weapon_inputs();
     let read = |name| {
         serde_json::from_slice::<Option<bool>>(
             &host
-                .config_read(name, "ApplyDamage", "ares-nullable-bool", b"null")
+                .config_read(
+                    name,
+                    "ApplyDamage",
+                    "weapon-effective:ares-nullable-bool",
+                    b"null",
+                )
                 .unwrap(),
         )
         .unwrap()
     };
     // Ares WeaponType_LoadFromINI10055D90 only reaches an allocated type's
-    // physical section. The shared final projection uses that same body,
+    // physical section. The scoped source uses that same Weapon body,
     // not all text that happened to name a future weapon before allocation.
     assert_eq!(read("EarlyGun"), Some(true));
     assert_eq!(read("LateGun"), None);
+}
+
+#[test]
+#[ignore = "requires VERA_SDK_FIRING_WASM"]
+fn sdk_firing_retained_weapon_source_survives_later_same_id_projectile_and_restore() {
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=Early\n[Early]\nPrimary=Shared\n\
+         [Shared]\nIsSonic=yes\nApplyDamage=yes\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str(
+            "[VehicleTypes]\n1=Late\n[Late]\nPrimary=NewGun\n\
+         [NewGun]\nProjectile=Shared\n[Shared]\nROT=1\n",
+        ),
+    );
+    let processed = layers.process().unwrap();
+    // The same-ID Projectile only saw the later physical body. A flat
+    // projection cannot stand for both native instances' retained history.
+    let flat = processed.sdk_passes().last().unwrap();
+    assert_eq!(
+        flat.section_or_empty("Shared")
+            .read_ares_nullable_bool("ApplyDamage", None),
+        None
+    );
+    let host = NativeHost::configuration(flat.clone(), vec![])
+        .with_registries(processed.sdk_registries().last().unwrap().clone())
+        .enable_weapon_inputs();
+    assert_eq!(
+        host.config_read(
+            "Shared",
+            "ApplyDamage",
+            "weapon-effective:ares-nullable-bool",
+            b"null"
+        )
+        .unwrap(),
+        b"true"
+    );
+    assert!(
+        host.config_read(
+            "Unallocated",
+            "ApplyDamage",
+            "weapon-effective:ares-nullable-bool",
+            b"null"
+        )
+        .is_err()
+    );
+    assert!(
+        NativeHost::simulation()
+            .config_read(
+                "Shared",
+                "ApplyDamage",
+                "weapon-effective:ares-nullable-bool",
+                b"null"
+            )
+            .is_err()
+    );
+    assert!(
+        host.config_read(
+            "Shared",
+            "ApplyDamage",
+            "weapon-effective:rules-registry-view",
+            b"null"
+        )
+        .is_err()
+    );
+    let mut rules = crate::rules::ruleset::RuleSet::from_processed_rules(&processed).unwrap();
+    let module = std::fs::read(std::env::var_os("VERA_SDK_FIRING_WASM").unwrap()).unwrap();
+    let digest = crate::util::sha256::sha256_hex(&module);
+    let program = Program::load_with_registries(
+        module,
+        &digest,
+        processed.sdk_passes(),
+        &["Early".into(), "Late".into()],
+        &[],
+        &rules.weapon_names(),
+        processed.sdk_registries(),
+    )
+    .unwrap();
+    let saved = crate::util::save_codec::serialize(&program).unwrap();
+    let restored: Program = crate::util::save_codec::deserialize(&saved).unwrap();
+    rules.external_mod = Some(std::sync::Arc::new(restored));
+    rules.bind_resource_policies().unwrap();
+    let weapon = rules.weapon("Shared").unwrap();
+    assert!(weapon.is_sonic);
+    assert!(
+        weapon.firing_policy().unwrap().apply_damage,
+        "Ares WeaponType_LoadFromINI10055D90 retains its earlier successful ApplyDamage read"
+    );
 }
 
 fn entity() -> api::EntityContext {

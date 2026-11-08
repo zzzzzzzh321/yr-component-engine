@@ -686,6 +686,9 @@ impl Program {
         if self.has_super_read() {
             host = host.enable_superweapon_inputs().enable_type_sound_inputs();
         }
+        if self.has_weapon_firing_resource() {
+            host = host.enable_weapon_inputs();
+        }
         self.configure(
             executor,
             context,
@@ -758,16 +761,18 @@ impl Program {
         &self,
         context: api::WeaponFiringResourceContext,
     ) -> Result<Option<api::WeaponFiringPolicy>, String> {
-        if !self
-            .manifest
-            .hooks
-            .contains(&api::HookKind::WeaponFiringResource)
-        {
+        if !self.has_weapon_firing_resource() {
             return Ok(None);
         }
         Ok(self
             .evaluate(Context::WeaponFiringResource(context), &[])?
             .weapon_firing_resource)
+    }
+
+    fn has_weapon_firing_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::WeaponFiringResource)
     }
 
     pub(crate) fn has_foundation_resource(&self) -> bool {

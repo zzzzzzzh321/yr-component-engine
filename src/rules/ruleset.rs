@@ -37,9 +37,7 @@ use crate::rules::native_processing::{
     CountryProjection, CountryVeterancyState, ProcessedRulesLayers, RulesLayerStack,
     SideProjection, house_type_index_of_name,
 };
-use crate::rules::object_type::{
-    BuildCategory, FactoryType, HouseMasks, ObjectCategory, ObjectType,
-};
+use crate::rules::object_type::{BuildCategory, FactoryType, HouseMasks, ObjectCategory, ObjectType};
 use crate::rules::particle_system_type::{ParticleSystemType, ParticleSystemTypeId};
 use crate::rules::particle_type::{ParticleType, ParticleTypeId};
 use crate::rules::prerequisite::{Prerequisite, PrerequisiteGroup};
@@ -5819,9 +5817,7 @@ impl RuleSet {
         ),
         String,
     > {
-        use crate::rules::prerequisite::{
-            FrozenProductionObject, production_category, production_kind,
-        };
+        use crate::rules::prerequisite::{FrozenProductionObject, production_category, production_kind};
         use vera_mod_api::{
             ProductionRequirement as Requirement, ProductionResourceContext as Query,
             ProductionResourcePolicy as Policy,
@@ -7806,11 +7802,10 @@ impl RuleSet {
         let mut weapons: LookupMap<String, WeaponHandle> = LookupMap::default();
         let mut weapon_types: Vec<WeaponType> = Vec::new();
         for state in processed.weapon_states() {
-            let Some(section) = ini.section(state.id) else {
-                log::trace!("Weapon '{}' allocated but has no section", state.id);
-                continue;
-            };
-            let mut weapon = WeaponType::from_ini_section(&section.name, section);
+            // Weapon7729F0's flags and scalar readers belong to this reached
+            // native instance too. A later Projectile with the same stored ID
+            // may replace the flat INI section without changing this Weapon.
+            let mut weapon = WeaponType::from_ini_section(state.id, state.body);
             weapon.speed = state.speed;
             weapon.range_leptons = state.range_leptons;
             weapon.projectile = state.projectile.map(str::to_owned);
@@ -7825,7 +7820,7 @@ impl RuleSet {
             // reserve is `insert`'s, so the keys iterate in the order they
             // did when the map held the weapons themselves.
             weapons.reserve(1);
-            match weapons.entry(section.name.clone()) {
+            match weapons.entry(state.id.to_owned()) {
                 std::collections::hash_map::Entry::Occupied(slot) => {
                     weapon_types[slot.get().0 as usize] = weapon;
                 }
