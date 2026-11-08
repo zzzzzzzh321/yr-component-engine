@@ -1789,3 +1789,6 @@ fn sdk_projectile_range_fireat_retains_flight_budget_across_actual_snapshot() {
         );
     }
 }
+
+#[path = "projectile_scatter_tests.rs"]
+mod projectile_scatter_tests;

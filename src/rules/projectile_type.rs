@@ -354,6 +354,15 @@ pub(crate) fn read_phobos_gravity(section: &IniSection) -> Option<NativeF64Bits>
 }
 
 impl ProjectileType {
+    pub(crate) const fn ballistic_scatter_policy(
+        &self,
+    ) -> Option<vera_mod_api::BallisticScatterPolicy> {
+        match self.resource_policy {
+            Some(policy) => policy.ballistic_scatter,
+            None => None,
+        }
+    }
+
     pub(crate) const fn airburst_policy(&self) -> Option<vera_mod_api::AirburstPolicy> {
         match self.resource_policy {
             Some(policy) => policy.airburst,

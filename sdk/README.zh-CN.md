@@ -34,7 +34,9 @@
 
 0.19 增加独立的纯启动声明 `long_list_readers`，在冷启动读取前选定 House 的 `Allies` 与 Techno 的 `Prerequisite`／`PrerequisiteOverride` 容量。安装 Ares 组件即使用2048，不增加 INI 开关；显式 `Retail128` 覆盖旧内置模式，未声明则沿用原模式。General 六类前置仍为128，物理 INI 行仍受原511字节限制。实际组件、定向联盟、保存恢复、资源管理器重建、旧实现及真实资源加载检查通过。新增资源序列化字段沿现有保存格式识别，不承诺旧完整存档自动迁移。
 
-保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.31.0 开发候选**，配置版本 **21**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
+保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.32.0 开发候选**，配置版本 **22**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
+
+0.32 在同一 `projectile_resource` 中增加可选散布上下界。插件独立领域通过 `projectile-effective:ares-nullable-leptons` 读取 `BallisticScatter.Min/Max`，只有原生解析成功才成为有效覆盖，0 与未配置严格区分。普通 FireAt 的 plain／flak 分别沿原调用点取全局缺省，随机流、距离／角度计算、飞行、爆炸和恢复继续归原有所有者。`Inviso + FlakScatter` 的额外放置仍用原全局值，不套入新字段；历史缺域保持旧行为，无新 Hook 或逐帧 WASM 调用。完整 Ares 兼容仍见插件兼容台账。
 
 0.30 在既有不可变策略上增加 `match_rules.projectile_fuel` 和 `weapon_firing_resource.projectile_range`（有符号 lepton）。独立的 `weapons/projectile_range` 域通过 `weapon-effective:ares-leptons` 读取实际到达的物理 Weapon 节。普通 FireAt 使用武器预算；裸构造和原版碎片弹保留 INT_MAX。引擎唯一的 ProjectileStore 保存、扣除并校验剩余三维路程，耗尽进入原引爆尾，不逐帧调用 WASM。`Ranged=no`、无插件及旧组件保持原路径。0.31普通Ares Airburst／Splits子弹工厂也已接入这一预算；Firestorm与其它专门创建器仍是独立残余。旧完整存档请使用原配套引擎与组件，布局校验不绕过。
 

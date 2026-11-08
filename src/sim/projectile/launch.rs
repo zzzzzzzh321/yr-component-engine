@@ -16,6 +16,7 @@ use super::{ProjectileCoord, ProjectileVelocity};
 use crate::sim::rng::SimRng;
 use crate::util::direction_tables::{facing16_from_angle, radians_from_facing16};
 use crate::util::native_random::RANDOM_RANGED_UNIT_SCALE;
+use vera_mod_api::BallisticScatterPolicy;
 
 const POSITIVE_HEIGHT_ANGLE: NativeF64Bits = NativeF64Bits::from_bits(0x3fe9_21d9_f4d3_7c12);
 /// `[0x007E3CC0]` = 2π.
@@ -292,11 +293,15 @@ pub fn high_arc_root(
 /// delta's length over the weapon's range (vt+0x168, `0x007012C0`); the plain
 /// arm draws the magnitude from `RandomRanged(BallisticScatter / 2,
 /// BallisticScatter)`. A zero range faults natively; here it scatters by zero.
+/// Installed Ares Fire_BallisticScatter1/2 (`10019930`/`10019980`, hooks at
+/// `6FE709`/`6FE7FE`) replace only these magnitude bounds. Unset overrides
+/// retain this caller's defaults, not Bullet::Fire's later placement bounds.
 pub(crate) fn fireat_launch_scatter(
     delta: ProjectileCoord,
     ballistic_scatter: i32,
     weapon_range: i32,
     flak: bool,
+    overrides: Option<BallisticScatterPolicy>,
     rng: &mut SimRng,
 ) -> ProjectileCoord {
     let trig = TrigTable::embedded();
@@ -305,6 +310,7 @@ pub(crate) fn fireat_launch_scatter(
         ballistic_scatter,
         weapon_range,
         flak,
+        overrides,
         |low, high| rng.next_range_i32_inclusive(low, high),
         trig,
     )
@@ -316,14 +322,21 @@ fn launch_scatter_with(
     ballistic_scatter: i32,
     weapon_range: i32,
     flak: bool,
+    overrides: Option<BallisticScatterPolicy>,
     mut random_ranged: impl FnMut(i32, i32) -> i32,
     trig: &TrigTable,
 ) -> ProjectileCoord {
+    let overrides = overrides.unwrap_or_default();
+    // 10019946..10019962 /10019997..100199B8: the two nullable fields
+    // override independently. Plain's CDQ/SUB/SAR halving is toward zero.
+    let low = overrides
+        .min
+        .unwrap_or(if flak { 0 } else { ballistic_scatter / 2 });
+    let high = overrides.max.unwrap_or(ballistic_scatter);
     let magnitude = if flak {
-        flak_magnitude(delta, ballistic_scatter, weapon_range, &mut random_ranged)
+        flak_magnitude(delta, (low, high), weapon_range, &mut random_ranged)
     } else {
-        // 0x006FE815..0x006FE81C: the halving is CDQ/SUB/SAR, toward zero.
-        random_ranged(ballistic_scatter / 2, ballistic_scatter)
+        random_ranged(low, high)
     };
     let raw = random_ranged(0, 0x7fff_fffe);
     scatter_delta(delta, magnitude, raw, trig)
@@ -373,7 +386,7 @@ fn flak_placement_with(
     );
     let magnitude = flak_magnitude(
         delta,
-        ballistic_scatter << 1,
+        (0, ballistic_scatter << 1),
         weapon_range,
         &mut random_ranged,
     );
@@ -382,16 +395,17 @@ fn flak_placement_with(
 }
 
 /// Both flak arms' magnitude (`0x006FE6AD..0x006FE73D`, again at
-/// `0x0046874E..0x004687E5`): `RandomRanged(0, ceiling)` times the delta's
+/// `0x0046874E..0x004687E5`): the caller's magnitude draw times the delta's
 /// length ([`flak_scatter_distance`]), `IMUL` then `IDIV` by the range.
+/// Preserve the distance calculation before the magnitude RNG request.
 fn flak_magnitude(
     delta: ProjectileCoord,
-    ceiling: i32,
+    bounds: (i32, i32),
     range: i32,
     random_ranged: &mut impl FnMut(i32, i32) -> i32,
 ) -> i32 {
     let distance = flak_scatter_distance(delta);
-    random_ranged(0, ceiling)
+    random_ranged(bounds.0, bounds.1)
         .wrapping_mul(distance)
         .checked_div(range)
         .unwrap_or(0)
@@ -1191,6 +1205,80 @@ mod tests {
         crate::test_fixture::json("tools/projectile_oracle/launch_scatter.json")
     }
 
+    #[test]
+    fn ares_ballistic_scatter_matches_original_numeric_and_rng_controls() {
+        // Eight original controls: installed10019930/10019980 + Scenario RNG,
+        // followed by the original supplied-draw scatter numeric boundary.
+        // These are leaf/RNG controls, not an entire injected FireAt frame.
+        let seed0: &[u32] = &[1229352179, 1781224790, 2424954917];
+        let seed1: &[u32] = &[2025287381, 660436142, 3663968561];
+        for (flak, min, max, seed, expected, raw, indices) in [
+            (false, None, None, 0, [2195, 356, 104], seed0, (3, 106)),
+            (true, None, None, 0, [2208, 805, 104], &seed0[..2], (2, 105)),
+            (false, Some(64), None, 1, [1983, 741, 104], seed1, (3, 106)),
+            (true, Some(64), None, 1, [1959, 826, 104], seed1, (3, 106)),
+            (
+                false,
+                None,
+                Some(640),
+                0,
+                [2225, 837, 104],
+                &seed0[..2],
+                (2, 105),
+            ),
+            (
+                true,
+                None,
+                Some(640),
+                0,
+                [2208, 805, 104],
+                &seed0[..2],
+                (2, 105),
+            ),
+            (
+                true,
+                Some(0),
+                Some(0),
+                1,
+                [2048, 512, 104],
+                &seed1[..1],
+                (1, 104),
+            ),
+            (
+                false,
+                Some(96),
+                Some(-32),
+                0,
+                [2085, 472, 104],
+                seed0,
+                (3, 106),
+            ),
+        ] {
+            let mut rng = SimRng::new(seed);
+            assert_eq!(
+                fireat_launch_scatter(
+                    ProjectileCoord::new(2048, 512, 104),
+                    256,
+                    1536,
+                    flak,
+                    Some(BallisticScatterPolicy { min, max }),
+                    &mut rng,
+                ),
+                ProjectileCoord::new(expected[0], expected[1], expected[2]),
+                "flak={flak}, min={min:?}, max={max:?}",
+            );
+            // The equal-zero bounds consume no magnitude word, but still
+            // draw the angle. Other ranges may reject a word before accepting.
+            let mut native_stream = SimRng::new(seed);
+            for &word in raw {
+                assert_eq!(native_stream.next_u32(), word);
+            }
+            let state = rng.logical_state();
+            assert_eq!((state.index_a, state.index_b), indices);
+            assert_eq!(state, native_stream.logical_state());
+        }
+    }
+
     /// `tools/projectile_oracle/launch_scatter.json`: FireAt's launch scatter
     /// on the original instructions, both arms. The Rust scatter runs with
     /// the recorded draws, and its `RandomRanged` bounds must match the
@@ -1212,6 +1300,7 @@ mod tests {
                 int("scatter"),
                 int("range"),
                 flak,
+                None,
                 |low, high| {
                     bounds.push((low, high));
                     draws.next().unwrap().as_i64().unwrap() as i32

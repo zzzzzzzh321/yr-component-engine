@@ -1702,6 +1702,9 @@ pub(super) fn emit_admitted_fire(
                     rules.combat_damage.ballistic_scatter,
                     range,
                     flak,
+                    // Ares10019930/10019980 use this actual fired Projectile's
+                    // nullable limits. Bullet::Fire's second scatter is separate.
+                    projectile_type.and_then(|kind| kind.ballistic_scatter_policy()),
                     &mut world.scenario_rng,
                 )
             }

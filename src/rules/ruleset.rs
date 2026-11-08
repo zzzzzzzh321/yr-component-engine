@@ -9032,6 +9032,18 @@ impl RuleSet {
                     .hash(&mut hasher);
             }
         }
+        let mut projectile_scatter: Vec<_> = self
+            .projectiles
+            .iter()
+            .filter_map(|(name, kind)| kind.ballistic_scatter_policy().map(|p| (name, p)))
+            .collect();
+        projectile_scatter.sort_unstable_by_key(|(name, _)| *name);
+        if !projectile_scatter.is_empty() {
+            b"projectile-scatter-policies-v1".hash(&mut hasher);
+            for (name, p) in projectile_scatter {
+                (name, p.min, p.max).hash(&mut hasher);
+            }
+        }
         // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);
         self.source_ini_hash.hash(&mut hasher);

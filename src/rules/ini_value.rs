@@ -608,12 +608,16 @@ impl IniSection {
     /// physical reads retain the integer, rather than scaling it again.
     pub fn read_ares_leptons(&self, key: &str, current: i32) -> i32 {
         self.read_string_with(key, 2048, current, |previous, value| {
-            parse_ares_double_bits(value).map_or(previous, |value| {
-                MaskedX87Chop53::fistp_i32_masked(MaskedX87Chop53::mul(
-                    MaskedX87Chop53::load_f64(value),
-                    MaskedX87Chop53::load_i32(256),
-                ))
-            })
+            parse_ares_leptons(value).unwrap_or(previous)
+        })
+    }
+
+    /// Ares Nullable<Leptons>10019660 ->1000A6D0: only a successful parse
+    /// sets presence. Missing/invalid text retains the previous pair; zero
+    /// and masked INT_MIN results are valid values, not absence sentinels.
+    pub fn read_ares_nullable_leptons(&self, key: &str, current: Option<i32>) -> Option<i32> {
+        self.read_string_with(key, 2048, current, |previous, value| {
+            parse_ares_leptons(value).or(previous)
         })
     }
 
@@ -1903,6 +1907,17 @@ fn parse_ares_double_bits(value: &str) -> Option<NativeF64Bits> {
     } else {
         number.to_bits()
     }))
+}
+
+/// Valueable<Leptons>1000A6D0's shared parse/conversion, also called by its
+/// nullable wrapper. Failed scans never rescale an already converted field.
+fn parse_ares_leptons(value: &str) -> Option<i32> {
+    parse_ares_double_bits(value).map(|value| {
+        MaskedX87Chop53::fistp_i32_masked(MaskedX87Chop53::mul(
+            MaskedX87Chop53::load_f64(value),
+            MaskedX87Chop53::load_i32(256),
+        ))
+    })
 }
 
 /// The single Ares Parser<int> core, also used by compound int/bool readers.

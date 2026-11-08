@@ -155,7 +155,7 @@ fn sdk_projectile_range_reader_uses_native_scaled_signed_conversion() {
     // ReadString and scanf supplied (range-numeric-sidecar in local scratch).
     let host = NativeHost::configuration(
         IniFile::from_str(
-            "[W]\nFraction=2.5001\nNegative=-2.5001\nPercent=25%\nOverflow=8388608\nBad=invalid\n",
+            "[W]\nFraction=2.5001\nNegative=-2.5001\nPercent=25%\nOverflow=8388608\nBad=invalid\nZero=0\n",
         ),
         vec![],
     );
@@ -174,6 +174,32 @@ fn sdk_projectile_range_reader_uses_native_scaled_signed_conversion() {
         )
         .unwrap();
         assert_eq!(value, expected, "{key}");
+        let nullable: Option<i32> = serde_json::from_slice(
+            &host
+                .config_read("W", key, "ares-nullable-leptons", b"null")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            nullable,
+            if matches!(key, "Bad" | "Absent") {
+                None
+            } else {
+                Some(expected)
+            }
+        );
+    }
+    assert_eq!(
+        host.config_read("W", "Zero", "ares-nullable-leptons", b"null")
+            .unwrap(),
+        b"0"
+    );
+    for key in ["Bad", "Absent"] {
+        assert_eq!(
+            host.config_read("W", key, "ares-nullable-leptons", b"640")
+                .unwrap(),
+            b"640"
+        );
     }
 }
 
@@ -1204,4 +1230,85 @@ fn sdk_airburst_retained_projectile_source_excludes_later_same_id_weapon() {
     assert!(!policy.around_target);
     assert_eq!(policy.spread_bits, 2.5f64.to_bits());
     assert!(!rules.projectile("LateShot").unwrap().splits());
+}
+
+#[test]
+#[ignore = "requires actual .32/.31 VERA_SDK_SCATTER[_PREVIOUS]_WASM"]
+fn sdk_scatter_nullable_history_old_omission_and_frozen_rebind() {
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=Source\n[Source]\nPrimary=Gun\n\
+         [Gun]\nProjectile=Shot\n[Shot]\nBallisticScatter.Min=invalid\nBallisticScatter.Max=invalid\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[Shot]\nBallisticScatter.Min=0\nBallisticScatter.Max=250%\n"),
+    );
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[Shot]\nBallisticScatter.Min=invalid\nBallisticScatter.Max=none\n"),
+    );
+    let processed = layers.process().unwrap();
+    let load = |variable: &str| {
+        let bytes = std::fs::read(std::env::var_os(variable).unwrap()).unwrap();
+        let mut rules = crate::rules::ruleset::RuleSet::from_processed_rules(&processed).unwrap();
+        let program = Program::load_with_registries(
+            bytes.clone(),
+            &crate::util::sha256::sha256_hex(&bytes),
+            processed.sdk_passes(),
+            &["Source".into()],
+            &[],
+            &rules.weapon_names(),
+            processed.sdk_registries(),
+        )
+        .unwrap();
+        rules.external_mod = Some(Arc::new(program));
+        rules.bind_resource_policies().unwrap();
+        rules
+    };
+    let current = load("VERA_SDK_SCATTER_WASM");
+    let expected = Some(api::BallisticScatterPolicy {
+        min: Some(0),
+        max: Some(640),
+    });
+    assert_eq!(
+        current
+            .projectile("Shot")
+            .unwrap()
+            .ballistic_scatter_policy(),
+        expected
+    );
+    assert_eq!(
+        load("VERA_SDK_SCATTER_PREVIOUS_WASM")
+            .projectile("Shot")
+            .unwrap()
+            .ballistic_scatter_policy(),
+        None
+    );
+    let saved =
+        crate::util::save_codec::serialize(current.external_mod.as_deref().unwrap()).unwrap();
+    let restored: Program = crate::util::save_codec::deserialize(&saved).unwrap();
+    restored.validate_restore().unwrap();
+    // The immutable query needs no physical source on restored Program.
+    assert_eq!(
+        restored
+            .projectile_resource_policy("Shot")
+            .unwrap()
+            .unwrap()
+            .ballistic_scatter,
+        expected
+    );
+    let mut rebound = current.clone();
+    rebound.external_mod = Some(Arc::new(restored));
+    rebound.bind_resource_policies().unwrap();
+    assert_eq!(
+        rebound.simulation_config_hash(),
+        current.simulation_config_hash()
+    );
+    assert_eq!(
+        rebound
+            .projectile("Shot")
+            .unwrap()
+            .ballistic_scatter_policy(),
+        expected
+    );
 }

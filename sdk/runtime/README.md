@@ -104,3 +104,10 @@ their retained input bytes are charged to configuration execution. Final
 binding never reopens physical sources. The hook appends ordinal29, leaving
 accepted manifest values unchanged. Raw binary64 policy inputs preserve the
 native reader's results without guest-side parsing or per-frame calls.
+
+`ares-nullable-leptons` takes/returns a nullable signed32 JSON integer. It
+shares the `ares-leptons` parser/conversion above; only a successful physical
+read changes absence into a value. Zero and INT_MIN are valid values. Missing,
+empty or invalid text retains the previous pair without scaling it again.
+The retained Weapon/Projectile scalar adapter exposes it through the same
+independent capability gates, without a second parser or scalar sentinel.

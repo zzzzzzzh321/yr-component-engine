@@ -4188,6 +4188,7 @@ mod tests {
             256,
             1280,
             false,
+            None,
             &mut rng,
         );
         assert_eq!(rng.logical_state(), reference.logical_state());
@@ -4211,6 +4212,7 @@ mod tests {
             256,
             1280,
             true,
+            None,
             &mut flak_rng,
         );
         assert_eq!(flak_rng.logical_state(), flak_reference.logical_state());
