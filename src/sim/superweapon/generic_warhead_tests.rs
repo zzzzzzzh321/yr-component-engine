@@ -11,6 +11,8 @@ use crate::sim::superweapon::SuperWeaponInstance;
 use crate::sim::world::SimSoundEvent;
 
 const RULES: &str = "\
+[Warheads]
+0=Payload
 [SuperWeaponTypes]
 0=Strike
 [Strike]

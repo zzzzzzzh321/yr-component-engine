@@ -421,3 +421,63 @@ fn sdk_nuclear_direct_overrides_restore_receiver_and_refused_payload() {
     assert_eq!(refused.sim.houses[&owner].economy().credits(), credits);
     assert_eq!(refused.sim.super_weapons[&owner][&sw].ares_launch_count, 0);
 }
+
+#[test]
+#[ignore = "requires VERA_SDK_NUCLEAR_WASM (.36)"]
+fn sdk_nuclear_common_warhead_survives_intermediate_custom_type() {
+    let module = component("VERA_SDK_NUCLEAR_WASM");
+    // Common10033701 reads WH before the selected handler at10033ABD. A
+    // physically reached custom-Type body must update this same pointer even
+    // when the final map returns to the first mapped Nuclear handler.
+    let root = format!(
+        "{}\n[WeaponTypes]\n0=TransitionPayload\n\
+         [Atomic]\nType=MultiMissile\nAction=Nuke\nNuke.Payload=TransitionPayload\n\
+         Nuke.SiloLaunch=no\nIsPowered=no\nRechargeTime=1\nSW.InitialReady=yes\n\
+         [TransitionPayload]\nDamage=75\nSpeed=100\nProjectile=TransitionFall\nWarhead=Payload\n\
+         [TransitionFall]\nArm=2\nVertical=yes\nAcceleration=1\nDetonationAltitude=30000\n\
+         [TransitionWH]\nCellSpread=1.5\nPercentAtMax=1\n\
+         Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
+        BASE.replace("4=Warp\n", "4=Warp\n5=Atomic\n")
+            .replace(
+                "[Warheads]\n0=Payload\n",
+                "[Warheads]\n0=Payload\n1=TransitionWH\n"
+            )
+            .replace("SuperWeapon=Strike\n", "SuperWeapon=Atomic\n")
+            // A stale null override falls back to this muted payload WH.
+            .replace(
+                "Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%",
+                "Verses=0%,0%,0%,0%,0%,0%,0%,0%,0%,0%,0%"
+            )
+    );
+    let mut scene = Scene::with_mode(
+        "nuclear-common-wh",
+        Some(&module),
+        &root,
+        Some("[Atomic]\nType=UnitDelivery\nSW.Warhead=TransitionWH\nSW.Damage=90\n"),
+        "[Atomic]\nType=ForceShield\n",
+    );
+    let definition = scene.rules.super_weapon("Atomic").unwrap();
+    assert_eq!(definition.kind, SuperWeaponKind::ForceShield);
+    let settings = definition.nuclear.as_ref().unwrap();
+    assert_eq!(settings.warhead.as_deref(), Some("TransitionWH"));
+    assert_eq!(settings.damage, 90);
+    let payload = settings.payload.unwrap();
+    scene.launcher();
+    let target = scene
+        .sim
+        .spawn_object_at_height("TARGET", "Russians", 20, 20, 0, 0, &scene.rules)
+        .unwrap();
+    let health = scene.sim.entities().get(target).unwrap().health.current();
+    assert!(scene.fire("Atomic", (20, 20)));
+    let bullet = bullet_with(&scene.sim, payload).unwrap();
+    assert_eq!(
+        scene
+            .sim
+            .interner
+            .resolve(scene.sim.projectiles.get(bullet).unwrap().payload().warhead),
+        "TransitionWH"
+    );
+    scene.roundtrip();
+    advance_until(&mut scene, 600, |sim| sim.projectiles.get(bullet).is_none());
+    assert!(scene.sim.entities().get(target).unwrap().health.current() < health);
+}

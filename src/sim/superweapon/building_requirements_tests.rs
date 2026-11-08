@@ -442,7 +442,7 @@ fn absent_tags_preserve_stock_and_resolved_extension_lists_participate_in_hash()
 #[test]
 fn generic_warhead_uses_the_same_gate_before_damage_and_charge() {
     let rules = rules_with(
-        "[BlackWidowSpecial]\nType=GenericWarhead\nSW.Warhead=Payload\nSW.Damage=75\n[Payload]\nCellSpread=0.5\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
+        "[Warheads]\n0=Payload\n[BlackWidowSpecial]\nType=GenericWarhead\nSW.Warhead=Payload\nSW.Damage=75\n[Payload]\nCellSpread=0.5\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
     );
     let mut sim = world(&rules);
     let target = spawn(&mut sim, &rules, "GAMERC", OTHER, 15);

@@ -1111,6 +1111,7 @@ fn sdk_super_saved_resources_prepare_cold() {
     let mut save = incoming_save(
         "TEMPERATE",
         "\
+[Warheads]\nSDKRestore=SDKRestorePayload\n\
 [SuperWeaponTypes]\nSDKRestore=SDKRestoreStrike\n\
 [SDKRestoreStrike]\nType=GenericWarhead\nSW.Warhead=SDKRestorePayload\nMoney.Amount=-333\n\
 [SDKRestorePayload]\nCellSpread=0.5\nPercentAtMax=1\n\
@@ -1135,8 +1136,9 @@ fn sdk_super_saved_resources_prepare_cold() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("saved SuperWeapon references require their admitted component"),
-        "the original WH slot must require the new App admission before projection: {error}"
+        error.contains("saved SuperWeapon references require their admitted component")
+            || error.contains("saved Nuclear references require their admitted component"),
+        "retained Super references must require App admission before projection: {error}"
     );
 
     let cold_owner = retail_rules_owner(&save.assets);

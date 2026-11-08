@@ -12,6 +12,10 @@ projectile. Stock superweapon types keep their existing behavior.
 ; Use the next available list entry in your mod.
 12=ExampleStrike
 
+[Warheads]
+; Register the intended payload before the SuperWeapon read.
+2000=ExamplePayload
+
 [ExampleStrike]
 Type=GenericWarhead
 SW.Warhead=ExamplePayload
@@ -37,9 +41,10 @@ Provide the normal art/cameo assets for your mod.
 
 ## Supported behavior
 
-- `SW.Warhead` resolves through the ordered rules type registry. It can be
-  the only reference to that warhead. Later layers retain an omitted reference
-  and can clear it with `none`.
+- `SW.Warhead` uses an existing-only lookup in the ordered Warhead registry.
+  Declare a new payload in `[Warheads]`, or arrange for an earlier physical
+  pass to have allocated it. This key never allocates a missing warhead.
+  Missing, empty and unknown values retain the old slot; `none` clears it.
 - `SW.Damage` is a signed integer, defaulting to zero. There is no implicit
   weapon or default warhead. A missing/null warhead refuses launch without
   consuming the charge.

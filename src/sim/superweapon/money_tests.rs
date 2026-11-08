@@ -428,7 +428,7 @@ fn superweapon_money_generic_payload_and_target_preflight_precede_settlement() {
         ini.merge(&IniFile::from_str("[BuildingTypes]\n0=LAUNCHER\n\
             [LAUNCHER]\nStrength=200\nSuperWeapon=Reveal\n\
             [Reveal]\nType=GenericWarhead\nAction=Attack\nSW.Warhead=Payload\nSW.Damage=25\nMoney.Amount=-500\n\
-            [Payload]\nCellSpread=1\nPercentAtMax=1\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n"));
+            [Warheads]\n0=Payload\n[Payload]\nCellSpread=1\nPercentAtMax=1\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n"));
         ini.merge(&IniFile::from_str(&format!("[Reveal]\n{override_tags}")));
         let rules = RuleSet::from_ini_with_fixed_art_for_test(
             &ini,
