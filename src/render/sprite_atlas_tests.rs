@@ -2741,6 +2741,7 @@ fn building_palette_groups_survive_refresh_and_palette_texture_growth() {
         anim_damage: None,
         warhead_house_filter: None,
         airburst_tail: None,
+        projectile_fuel: None,
     });
     let off = vera_mod_runtime::test_support::component_fixture_by_kind(
         &ModuleManifest {

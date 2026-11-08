@@ -538,6 +538,7 @@ impl HostServices for NativeHost {
                     | "ares-nullable-int"
                     | "double-bits"
                     | "ares-double-bits"
+                    | "ares-leptons"
             ) && !reader.starts_with("name:")
                 && !reader.starts_with("string:")
             {
@@ -629,6 +630,10 @@ impl HostServices for NativeHost {
                     .read_double(key, f64::from_bits(value.as_u64().ok_or_else(bad)?))
                     .to_bits()
             ),
+            "ares-leptons" => serde_json::json!(section.read_ares_leptons(
+                key,
+                serde_json::from_value(value).map_err(|e| e.to_string())?
+            )),
             "ares-double-bits" => serde_json::json!(
                 section
                     .read_ares_double_bits(

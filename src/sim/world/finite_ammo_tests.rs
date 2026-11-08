@@ -1618,3 +1618,174 @@ fn moving_finite_unit_extends_its_quotient_reload_then_adds_only_one_round_at_a_
         "a full magazine leaves the old timer"
     );
 }
+
+#[test]
+#[cfg(not(feature = "ares"))]
+#[ignore = "requires retail assets, VERA_SDK_RANGE_WASM and VERA_SDK_RANGE_PREVIOUS_WASM"]
+fn sdk_projectile_range_fireat_retains_flight_budget_across_actual_snapshot() {
+    let current = std::fs::read(std::env::var_os("VERA_SDK_RANGE_WASM").unwrap()).unwrap();
+    let previous =
+        std::fs::read(std::env::var_os("VERA_SDK_RANGE_PREVIOUS_WASM").unwrap()).unwrap();
+    let patch = "[LTNK]\nPrimary=FuelLong\nElitePrimary=FuelLong\nAmmo=1\nInitialAmmo=1\nReload=1000\nCanPassiveAquire=no\n\
+        [MTNK]\nPrimary=FuelShort\nElitePrimary=FuelShort\nAmmo=1\nInitialAmmo=1\nReload=1000\nCanPassiveAquire=no\n\
+        [HTNK]\nPrimary=FuelFree\nElitePrimary=FuelFree\nAmmo=1\nInitialAmmo=1\nReload=1000\nCanPassiveAquire=no\n\
+        [FuelLong]\nDamage=40\nROF=40\nRange=8\nProjectile=Cannon\nSpeed=20\nWarhead=FuelWH\nProjectileRange=12\n\
+        [FuelShort]\nDamage=40\nROF=40\nRange=8\nProjectile=Cannon\nSpeed=20\nWarhead=FuelWH\nProjectileRange=0\n\
+        [FuelFree]\nDamage=40\nROF=40\nRange=8\nProjectile=FuelUnranged\nSpeed=20\nWarhead=FuelWH\nProjectileRange=0\n\
+        [Cannon]\nRanged=yes\nArm=1000\nDropping=yes\n\
+        [FuelUnranged]\nImage=120MM\nArcing=yes\nRanged=no\n\
+        [FuelWH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\nCellSpread=0\n";
+    for (label, component, enabled) in [
+        ("retail", None, false),
+        ("previous", Some(previous.as_slice()), false),
+        ("range", Some(current.as_slice()), true),
+    ] {
+        let Some(mut scene) = Scene::with_component(patch, component) else {
+            return;
+        };
+        let target = scene.spawn("GACNST", "Russians", (6, 16));
+        let source = scene.spawn("LTNK", "Americans", (6, 22));
+        scene.command(
+            "Americans",
+            Command::Attack {
+                attacker_id: source,
+                target_id: target,
+            },
+        );
+        let (_, event) = scene.shot_event(source, target);
+        assert_eq!(
+            scene.0.simulation.interner.resolve(event.weapon_id),
+            "FuelLong"
+        );
+        let (&id, bullet) = scene
+            .0
+            .simulation
+            .projectiles()
+            .iter()
+            .find(|(_, bullet)| bullet.source_id() == source)
+            .expect("in-bounds real Cannon flight");
+        let fuel = bullet.fuel_remaining();
+        assert_eq!(
+            fuel.is_some(),
+            enabled,
+            "{label}: explicit cohort ownership"
+        );
+        if !enabled {
+            continue;
+        }
+        assert!(
+            (0..3072).contains(&fuel.unwrap()),
+            "first Logic visit spends some range"
+        );
+        let payload = bullet.payload();
+        let bytes = GameSnapshot::save_validated(
+            &scene.0.simulation,
+            0,
+            scene.0.resources.rules.simulation_config_hash(),
+            "in-flight travel budget",
+            0,
+        );
+        let restored = scene.restored(&bytes);
+        assert_eq!(
+            restored.projectiles().get(id).unwrap().fuel_remaining(),
+            fuel
+        );
+        scene.0.replace_simulation(restored);
+        let hash = scene.0.simulation.state_hash();
+        scene
+            .0
+            .simulation
+            .projectiles
+            .set_weapon_fuel(id, fuel.unwrap() + 1);
+        assert_ne!(
+            hash,
+            scene.0.simulation.state_hash(),
+            "remaining travel participates in hash"
+        );
+        scene
+            .0
+            .simulation
+            .projectiles
+            .set_weapon_fuel(id, fuel.unwrap());
+        scene.frame();
+        assert!(
+            scene
+                .0
+                .simulation
+                .projectiles()
+                .get(id)
+                .unwrap()
+                .fuel_remaining()
+                < fuel,
+            "restore resumes the live budget instead of resetting to weapon default"
+        );
+
+        // Bare construction retains INT_MAX even with the same known weapon.
+        let bare = scene.0.simulation.construct_projectile(
+            source,
+            crate::sim::projectile::ProjectileTarget::Entity(target),
+            payload,
+            &scene.0.resources.rules,
+        );
+        assert_eq!(
+            scene
+                .0
+                .simulation
+                .projectiles()
+                .get(bare)
+                .unwrap()
+                .fuel_remaining(),
+            Some(i32::MAX)
+        );
+        let short_target = scene.spawn("GACNST", "Russians", (14, 8));
+        let short = scene.spawn("MTNK", "Americans", (14, 14));
+        let free_target = scene.spawn("GACNST", "Russians", (22, 8));
+        let free = scene.spawn("HTNK", "Americans", (22, 14));
+        let initial = (
+            scene.actor(short_target).health.current(),
+            scene.actor(free_target).health.current(),
+        );
+        scene.command(
+            "Americans",
+            Command::Attack {
+                attacker_id: short,
+                target_id: short_target,
+            },
+        );
+        scene.shot_event(short, short_target);
+        assert!(
+            !scene
+                .0
+                .simulation
+                .projectiles()
+                .iter()
+                .any(|(_, bullet)| bullet.source_id() == short),
+            "zero budget detonates on first flight despite Arm and Dropping"
+        );
+        scene.command(
+            "Americans",
+            Command::Attack {
+                attacker_id: free,
+                target_id: free_target,
+            },
+        );
+        scene.shot_event(free, free_target);
+        assert!(
+            scene
+                .0
+                .simulation
+                .projectiles()
+                .iter()
+                .any(|(_, bullet)| bullet.source_id() == free),
+            "Ranged=no ignores a zero travel budget"
+        );
+        for _ in 0..100 {
+            scene.frame();
+        }
+        assert_eq!(scene.actor(short_target).health.current(), initial.0);
+        assert!(
+            scene.actor(free_target).health.current() < initial.1,
+            "non-ranged shot still uses the ordinary impact receiver"
+        );
+    }
+}

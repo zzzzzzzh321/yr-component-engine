@@ -85,7 +85,7 @@ fn reconstruct_without_a_live_owner_keeps_the_saved_house() {
     let (mut world, rules, source, bullet, _) = scene();
     let americans = world.interner.intern("Americans");
     world.substrate.entities.remove(source);
-    Simulation::construct_bullet_scheme(
+    Simulation::finish_projectile_construction(
         &world.interner,
         &world.substrate,
         &world.houses,

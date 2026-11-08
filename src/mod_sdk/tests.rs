@@ -9,12 +9,12 @@ use vera_mod_runtime::HostServices;
 fn sdk_firing_nullable_projection_retains_reached_reads_and_excludes_preallocation_keys() {
     let mut layers = RulesLayerStack::new(IniFile::from_str(
         "[VehicleTypes]\n0=Early\n[Early]\nPrimary=EarlyGun\n\
-         [EarlyGun]\nApplyDamage=yes\n[LateGun]\nApplyDamage=no\n",
+         [EarlyGun]\nApplyDamage=yes\nProjectileRange=2.5001\n[LateGun]\nApplyDamage=no\nProjectileRange=12\n",
     ));
     layers.push(
         RulesLayerKind::Scenario,
         IniFile::from_str(
-            "[VehicleTypes]\n1=Late\n[Late]\nPrimary=LateGun\n[EarlyGun]\nApplyDamage=garbage\n",
+            "[VehicleTypes]\n1=Late\n[Late]\nPrimary=LateGun\n[EarlyGun]\nApplyDamage=garbage\nProjectileRange=invalid\n",
         ),
     );
     let processed = layers.process().unwrap();
@@ -39,6 +39,25 @@ fn sdk_firing_nullable_projection_retains_reached_reads_and_excludes_preallocati
     // not all text that happened to name a future weapon before allocation.
     assert_eq!(read("EarlyGun"), Some(true));
     assert_eq!(read("LateGun"), None);
+    let range = |name| {
+        serde_json::from_slice::<i32>(
+            &host
+                .config_read(
+                    name,
+                    "ProjectileRange",
+                    "weapon-effective:ares-leptons",
+                    b"100000",
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(range("EarlyGun"), 640);
+    assert_eq!(
+        range("LateGun"),
+        100000,
+        "preallocation text is not a reached read"
+    );
 }
 
 #[test]
@@ -128,6 +147,34 @@ fn sdk_firing_retained_weapon_source_survives_later_same_id_projectile_and_resto
         weapon.firing_policy().unwrap().apply_damage,
         "Ares WeaponType_LoadFromINI10055D90 retains its earlier successful ApplyDamage read"
     );
+}
+
+#[test]
+fn sdk_projectile_range_reader_uses_native_scaled_signed_conversion() {
+    // Installed Ares1000A6D0/10076B60/100772C1 executed controls, with
+    // ReadString and scanf supplied (range-numeric-sidecar in local scratch).
+    let host = NativeHost::configuration(
+        IniFile::from_str(
+            "[W]\nFraction=2.5001\nNegative=-2.5001\nPercent=25%\nOverflow=8388608\nBad=invalid\n",
+        ),
+        vec![],
+    );
+    for (key, expected) in [
+        ("Fraction", 640),
+        ("Negative", -640),
+        ("Percent", 64),
+        ("Overflow", i32::MIN),
+        ("Bad", 100000),
+        ("Absent", 100000),
+    ] {
+        let value: i32 = serde_json::from_slice(
+            &host
+                .config_read("W", key, "ares-leptons", b"100000")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value, expected, "{key}");
+    }
 }
 
 fn entity() -> api::EntityContext {

@@ -212,6 +212,9 @@ pub(crate) struct FiredBullet {
     /// `[ESP+0x84]`), which AreaFire's own-cell retarget does not replace.
     /// Other launchers take their target's.
     pub(super) target_on_bridge: bool,
+    /// Only a weapon-aware factory supplies a budget. A known payload weapon
+    /// alone does not imply this writer (stock shrapnel retains bare INT_MAX).
+    pub(super) projectile_range: Option<i32>,
 }
 
 /// An Object target's OnBridge (`+0x8C`); `false` for anything else.
@@ -293,6 +296,7 @@ impl FiredBullet {
             speed: crate::sim::projectile::projectile_velocity_magnitude(velocity)
                 .clamp(0.0, f64::from(u16::MAX)) as u16,
             target_on_bridge: target_on_bridge(world, target),
+            projectile_range: None,
         })
     }
 }
@@ -382,7 +386,7 @@ pub(crate) fn admit_fired_bullet(
     );
     let spawn = delivery.spawn(&world.substrate.entities, rules, projectile_type, bullet);
     world.admit_projectile(bullet_id, spawn);
-    Simulation::construct_bullet_scheme(
+    Simulation::finish_projectile_construction(
         &world.interner,
         &world.substrate,
         &world.houses,
@@ -390,6 +394,9 @@ pub(crate) fn admit_fired_bullet(
         bullet_id,
         rules,
     );
+    if let Some(range) = bullet.projectile_range {
+        world.projectiles.set_weapon_fuel(bullet_id, range);
+    }
     #[cfg(test)]
     if let Some(fixture) = world.receiver_fixture.as_mut() {
         fixture

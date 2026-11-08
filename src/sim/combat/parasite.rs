@@ -1235,7 +1235,7 @@ impl Simulation {
                 == Some(crate::sim::world::display_layers::DisplayLayer::SURFACE);
             if self.unregister_non_entity_object(bullet) {
                 self.projectiles.set_owner(bullet, firer);
-                Self::construct_bullet_scheme(
+                Self::finish_projectile_construction(
                     &self.interner,
                     &self.substrate,
                     &self.houses,

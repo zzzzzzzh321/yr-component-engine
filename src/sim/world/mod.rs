@@ -5291,7 +5291,7 @@ impl Simulation {
             target,
             payload,
         );
-        Self::construct_bullet_scheme(
+        Self::finish_projectile_construction(
             &self.interner,
             &self.substrate,
             &self.houses,
@@ -5342,11 +5342,12 @@ impl Simulation {
         stable_id
     }
 
-    /// `BulletClass::Construct @ 0x004664C0`, `0x00466519..0x0046653B`: a
+    /// Finalize type-dependent state for Construct4664C0 and re-Construct.
+    /// `0x00466519..0x0046653B`: a
     /// `FirersPalette=` BulletType (`+0x2A9`) whose Owner (`+0xB0`) exists
     /// keeps the Owner's House colour scheme at `+0x114`; every other bullet
     /// keeps -1. Runs after each admission and re-Construct.
-    pub(crate) fn construct_bullet_scheme(
+    pub(crate) fn finish_projectile_construction(
         interner: &StringInterner,
         substrate: &ObjectSubstrate,
         houses: &crate::sim::houses::Houses,
@@ -5354,6 +5355,9 @@ impl Simulation {
         bullet: u64,
         rules: &RuleSet,
     ) {
+        // Ares Initialize_Ranged1001A920 at4664FB initializes bare Bullet+15C.
+        // A weapon-aware caller may override it afterwards; restore never does.
+        projectiles.initialize_fuel(bullet, rules.projectile_fuel_enabled());
         let Some(projectile) = projectiles.get(bullet) else {
             return;
         };
@@ -5391,7 +5395,7 @@ impl Simulation {
     }
 
     /// Admit the bullets a detonation spawned (`BulletClass::SpawnShrapnel
-    /// @ 0x0046A310`), each [`Self::construct_bullet_scheme`]d as every
+    /// @ 0x0046A310`), each [`Self::finish_projectile_construction`]d as every
     /// constructed bullet is. SpawnShrapnel then Fires each one (vt+0x1F0,
     /// `0x0046A875`, `0x0046AD29`), whose Inviso arm (`0x004688B7..0x00468986`)
     /// stands an `Inviso=` child on its target's vt+0x58, the coordinate the
@@ -5422,7 +5426,7 @@ impl Simulation {
                 .is_some_and(|kind| kind.inviso);
             let placement = projectile.initial_target_position;
             self.admit_projectile(stable_id, projectile);
-            Self::construct_bullet_scheme(
+            Self::finish_projectile_construction(
                 &self.interner,
                 &self.substrate,
                 &self.houses,

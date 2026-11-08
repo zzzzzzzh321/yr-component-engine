@@ -36,7 +36,7 @@ Reader names are `int`, `bool`, `double-bits`, `nullable-int`, `nullable-bool`,
 `nullable-double-bits`, `string:N`, `name:N`, `nullable-name:N`, `list:N`,
 `int-list` and `color-rgb`.
 The development host also exposes the existing `ares-int`, `ares-bool`,
-`ares-nullable-bool`, `ares-double-bits` readers and
+`ares-nullable-bool`, `ares-double-bits`, `ares-leptons` readers and
 `ares-ref:$animations@<scope>` for registered references. These delegate to the
 same native readers used by the engine. Reference scopes preserve the visible
 registry prefix at each reached physical Rules reader; the final registry must
@@ -90,3 +90,9 @@ the real reset/read chronology and exact-component opaque continuation.
 no entity state or operations. EMP counters and phase-sensitive status transitions
 remain in the existing host owner. `ares-nullable-ref` preserves explicit unset /
 clear / named resource states through the same native reference reader and prefix.
+
+`ares-leptons` takes/returns a signed32 JSON integer. A successful Ares binary64
+parse (including percentage scaling) is multiplied by 256 and truncated with
+the existing signed32 masked conversion; missing/invalid text retains the prior
+integer. It is also available through `weapon-effective:` with that retained
+Weapon body's authority and capability gate. It is not the stock `Range` reader.

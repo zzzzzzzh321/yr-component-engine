@@ -3,10 +3,21 @@
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.29.0 development candidate**, config version **19**, state version **1**;
+is the **0.30.0 development candidate**, config version **20**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.
+
+Version 0.30 adds optional `MatchRulesPolicy.projectile_fuel` and
+`WeaponFiringPolicy.projectile_range` (signed leptons). The independent
+`weapons/projectile_range` component domain reads `ProjectileRange` through
+`weapon-effective:ares-leptons` at reached physical Rules passes. The matching
+host owns the saved/hashed live Bullet budget, true 3D distance and existing
+impact tail. Ordinary FireAt supplies the weapon budget; bare and stock
+shrapnel constructors retain INT_MAX. `Ranged=no`, retail and older guests
+preserve their prior flight behavior. Ares Airburst replacement/Firestorm and
+other specialized factories are separate compatibility residuals. Use the
+original engine/component pair for older full saves; layout guards remain.
 
 Version 0.29 adds optional `weapon_firing_resource` queries with actual bound
 weapon names, animation counts and Sonic/fire-particle facts. The component

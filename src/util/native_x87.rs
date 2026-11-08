@@ -79,6 +79,8 @@ pub enum NativeX87Error {
     StoreOverflow { format: &'static str },
     #[error("x87 division by zero is outside the verified finite domain")]
     DivisionByZero,
+    #[error("a negative square root is outside the verified finite domain")]
+    NegativeSquareRoot,
     #[error("x87 integer conversion is outside the verified signed 64-bit domain")]
     IntegerConversion,
 }
@@ -264,6 +266,39 @@ impl X87Chop53 {
             sign: lhs.sign ^ rhs.sign,
             exponent: lhs.exponent - rhs.exponent + (top as i32 - 64),
             significand: (quotient >> shift) as u64,
+        })
+    }
+
+    /// Non-negative finite `FSQRT` with nearest, 53-bit rounding. Ares CRT
+    /// `10083B00` temporarily clears RC in `10087F25` before `10083B33 FSQRT`,
+    /// retaining PC53, then restores the caller's chop control word.
+    pub fn sqrt_nearest53(value: X87Value) -> Result<X87Value, NativeX87Error> {
+        if value.is_zero() {
+            return Ok(value);
+        }
+        if value.sign {
+            return Err(NativeX87Error::NegativeSquareRoot);
+        }
+
+        // Normalize the root's significand before rounding. The radicand is
+        // at most 106 bits; no host floating-point square root is involved.
+        let shift = 52 + value.exponent.rem_euclid(2) as u32;
+        let radicand = (value.significand as u128) << shift;
+        let mut significand = radicand.isqrt();
+        // sqrt(n) > q + 1/2 iff n - q*q > q for integer n and q=floor(sqrt(n)).
+        // Equality at the halfway point is impossible for an integer radicand.
+        if radicand - significand * significand > significand {
+            significand += 1;
+        }
+        let mut exponent = value.exponent.div_euclid(2);
+        if significand == 1_u128 << 53 {
+            significand >>= 1;
+            exponent += 1;
+        }
+        Ok(X87Value {
+            sign: false,
+            exponent,
+            significand: significand as u64,
         })
     }
 
@@ -543,6 +578,20 @@ pub fn distance_3d_leptons(lhs: [i32; 3], rhs: [i32; 3]) -> i32 {
     sqrt_approx_length([0, 1, 2].map(|axis| lhs[axis].wrapping_sub(rhs[axis])))
 }
 
+/// Ares `BulletClass_Update_Ranged @ 1001ACBE..1001AD02`: wrapping coordinate
+/// deltas, PC53/chop `(dx²+dy²)+dz²`, true nearest-53 sqrt, then CRT100772B0's
+/// signed32 truncation. This does not use gamemd's f32 `Sqrt_Approx` distance.
+pub fn true_distance_3d_leptons(lhs: [i32; 3], rhs: [i32; 3]) -> i32 {
+    let squares = [0, 1, 2].map(|axis| {
+        let delta = X87Chop53::load_i32(lhs[axis].wrapping_sub(rhs[axis]));
+        X87Chop53::mul(delta, delta)
+    });
+    let squared = X87Chop53::add(X87Chop53::add(squares[0], squares[1]), squares[2]);
+    let root = X87Chop53::sqrt_nearest53(squared)
+        .expect("a sum of i32 squares is non-negative and finite");
+    MaskedX87Chop53::fistp_i32_masked(root.into())
+}
+
 /// The x87 length native distances take: each component `FILD`ed, squared and
 /// added in `components` order (`(c0*c0 + c1*c1) + c2*c2`), the sum through
 /// [`sqrt_approx_f32`] and the root through `Math::ftol @ 0x007C5F00` as a
@@ -633,6 +682,21 @@ fn shift_right_jam_u128(value: u128, distance: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ares_true_distance_matches_original_numeric_controls() {
+        // Original Ares numeric execution, including the CRT integer fallback
+        // for signed32 overflow; no game or complete INI-parser claim.
+        for (lhs, rhs, expected) in [
+            ([3, 4, 12], [0, 0, 0], 13),
+            ([101, 203, 17], [0, 0, 0], 227),
+            ([-2_147_483_646, 0, 0], [i32::MAX, 0, 0], 3),
+            ([134_217_728, 16_384, 0], [0, 0, 0], 134_217_729),
+            ([i32::MAX, i32::MAX, 0], [0, 0, 0], i32::MIN),
+        ] {
+            assert_eq!(super::true_distance_3d_leptons(lhs, rhs), expected);
+        }
+    }
+
     #[test]
     fn compare_orders_against_zero_by_sign_not_exponent() {
         use super::{NativeF64Bits, X87Chop53, X87Ordering};

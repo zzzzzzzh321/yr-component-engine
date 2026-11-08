@@ -275,6 +275,7 @@ mod tests {
             anim_damage: None,
             warhead_house_filter: None,
             airburst_tail: None,
+            projectile_fuel: None,
         });
         assert!(rules.ai_side_token_admits(4, 3));
         assert!(!rules.ai_side_token_admits(4, 0));

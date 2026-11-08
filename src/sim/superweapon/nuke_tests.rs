@@ -8,9 +8,7 @@
 use super::SuperWeaponInstance;
 use super::chronosphere_tests::{retail_rules_binding, world_with};
 use crate::map::lighting::{ParsedLightingProfiles, parse_lighting_profiles};
-use crate::map::resolved_terrain::{
-    ResolvedTerrainCell, SharedCellDummy, test_flat_cell, test_grid,
-};
+use crate::map::resolved_terrain::{ResolvedTerrainCell, SharedCellDummy, test_flat_cell, test_grid};
 use crate::rules::ini_parser::IniFile;
 use crate::rules::ruleset::RuleSet;
 use crate::rules::superweapon_type::SuperWeaponKind;
@@ -372,6 +370,7 @@ fn wait_matches_native() {
                 false,
                 false,
                 0,
+                false,
                 false,
                 |_, _, _| None,
                 Some(&context),

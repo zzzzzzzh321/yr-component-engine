@@ -6114,6 +6114,14 @@ impl RuleSet {
         self.match_rules_policy
     }
 
+    /// Ares BulletClass_Initialize_Ranged1001A920 and Update_Ranged1001AC90.
+    /// Only an explicitly admitted component selects this extra state machine.
+    pub(crate) fn projectile_fuel_enabled(&self) -> bool {
+        self.match_rules_policy
+            .and_then(|policy| policy.projectile_fuel)
+            .unwrap_or(false)
+    }
+
     /// Ares TechnoClass_ReceiveDamage_Abilities1004AA5F..1004AA85 selects
     /// CanTargetHouse10051B70 at the original late gate, independently of EMP.
     /// Warhead relationships and live House identity keep their existing owners.

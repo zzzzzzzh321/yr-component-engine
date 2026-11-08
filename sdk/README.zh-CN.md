@@ -34,7 +34,9 @@
 
 0.19 增加独立的纯启动声明 `long_list_readers`，在冷启动读取前选定 House 的 `Allies` 与 Techno 的 `Prerequisite`／`PrerequisiteOverride` 容量。安装 Ares 组件即使用2048，不增加 INI 开关；显式 `Retail128` 覆盖旧内置模式，未声明则沿用原模式。General 六类前置仍为128，物理 INI 行仍受原511字节限制。实际组件、定向联盟、保存恢复、资源管理器重建、旧实现及真实资源加载检查通过。新增资源序列化字段沿现有保存格式识别，不承诺旧完整存档自动迁移。
 
-保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.29.0 开发候选**，配置版本 **19**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
+保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.30.0 开发候选**，配置版本 **20**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
+
+0.30 在既有不可变策略上增加 `match_rules.projectile_fuel` 和 `weapon_firing_resource.projectile_range`（有符号 lepton）。独立的 `weapons/projectile_range` 域通过 `weapon-effective:ares-leptons` 读取实际到达的物理 Weapon 节。普通 FireAt 使用武器预算；裸构造和原版碎片弹保留 INT_MAX。引擎唯一的 ProjectileStore 保存、扣除并校验剩余三维路程，耗尽进入原引爆尾，不逐帧调用 WASM。`Ranged=no`、无插件及旧组件保持原路径。Ares Airburst 替换扇面、Firestorm 与其它专门创建器仍是独立残余。旧完整存档请使用原配套引擎与组件，布局校验不绕过。
 
 阵营增量将 Side／Country 的初始化、一次父国继承和静态声明交给 `features/factions`，原引擎继续执行乘员、伪装、AI 防御与阵营条件、空降／降落伞和初始军衔。独立的 `configure_country_read` 在真实 Country 读取前选择原版短列表或 2048 容量的只查找读取器；`configure_faction_pass` 只处理实际发生的 Country-only 读取。已完成的步骤逐一发布同一 Program 检查点，独立启动投影只完成自己的读取记录，保留真实进程的配置历史。`faction_resource` 按实际类别内编号和 stored ID 查询冻结策略，引用保留未设置、清空和已解析三态。接口见 [阵营声明](api/src/faction.rs)。
 

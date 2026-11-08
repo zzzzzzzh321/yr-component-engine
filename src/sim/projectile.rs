@@ -1185,6 +1185,11 @@ pub struct Projectile {
     arm_timer: crate::sim::timer::CdTimer,
     fuse_frames_remaining: Option<u16>,
     ranged_fuse: bool,
+    /// Ares Bullet+15C: remaining three-dimensional travel, initialized by
+    /// the existing constructor owner. None keeps the retail/older guest path.
+    /// Bullet Save46AFB0/Load46AE70 includes this live counter, not a re-read.
+    #[serde(default)]
+    fuel_remaining: Option<i32>,
     /// The ProximityDetector's reference (`+0xB8 + 0x18` = `+0xD0`), which
     /// Fire's `Setup` (`0x00468A80..0x00468A93`, `0x004E1130`) takes from the
     /// target coordinate Fire kept, as a `FlakScatter=` Inviso bullet's
@@ -1205,17 +1210,17 @@ pub struct Projectile {
     /// Owner's House colour scheme for a `FirersPalette=` type
     /// (`0x00466519..0x0046653B`; -1 otherwise), which the draw selects
     /// (`0x004683A1`). VERA keeps that House; the presentation maps it to its
-    /// scheme. Written by [`Simulation::construct_bullet_scheme`].
+    /// scheme. Written by [`Simulation::finish_projectile_construction`].
     ///
-    /// [`Simulation::construct_bullet_scheme`]: crate::sim::world::Simulation::construct_bullet_scheme
+    /// [`Simulation::finish_projectile_construction`]: crate::sim::world::Simulation::finish_projectile_construction
     #[serde(default)]
     firer_house: Option<InternedId>,
     /// Phobos `BulletExt::FirerHouse`, set by `BulletExt::InitializeState`
     /// (`0x466556`): the Owner Techno's House at construction, kept after the
     /// owner expires. Independent of the palette-only `firer_house` above.
-    /// Written by [`Simulation::construct_bullet_scheme`].
+    /// Written by [`Simulation::finish_projectile_construction`].
     ///
-    /// [`Simulation::construct_bullet_scheme`]: crate::sim::world::Simulation::construct_bullet_scheme
+    /// [`Simulation::finish_projectile_construction`]: crate::sim::world::Simulation::finish_projectile_construction
     #[cfg(feature = "phobos")]
     #[serde(default)]
     phobos_firer_house: Option<InternedId>,
@@ -1390,6 +1395,10 @@ impl Projectile {
 
     pub const fn ranged_fuse(&self) -> bool {
         self.ranged_fuse
+    }
+
+    pub(crate) const fn fuel_remaining(&self) -> Option<i32> {
+        self.fuel_remaining
     }
 
     pub const fn proximity_reference(&self) -> ProjectileCoord {
@@ -1949,6 +1958,7 @@ impl ProjectileStore {
                 arm_timer: crate::sim::timer::CdTimer::started(binary_frame as i32, 0),
                 fuse_frames_remaining: None,
                 ranged_fuse: false,
+                fuel_remaining: None,
                 proximity_reference: zero,
                 last_distance_half: 0,
                 tracks_target: false,
@@ -2019,6 +2029,24 @@ impl ProjectileStore {
     pub(crate) fn set_firer_house(&mut self, id: u64, house: Option<InternedId>) {
         if let Some(projectile) = self.get_mut(id) {
             projectile.firer_house = house;
+        }
+    }
+
+    /// Ares Initialize_Ranged1001A920: every bare constructor starts INT_MAX.
+    /// This is deliberately separate from the weapon-aware factory override.
+    pub(crate) fn initialize_fuel(&mut self, id: u64, enabled: bool) {
+        if let Some(projectile) = self.get_mut(id) {
+            projectile.fuel_remaining = enabled.then_some(i32::MAX);
+        }
+    }
+
+    /// Ares CreateBullet100191E0 writes +15C only after successful creation.
+    /// Stock shrapnel only binds its weapon at1001ABF0 and never calls this.
+    pub(crate) fn set_weapon_fuel(&mut self, id: u64, range: i32) {
+        if let Some(projectile) = self.get_mut(id)
+            && let Some(fuel) = projectile.fuel_remaining.as_mut()
+        {
+            *fuel = range;
         }
     }
 
@@ -2206,6 +2234,7 @@ impl ProjectileStore {
             target_is_aircraft,
             safety_altitude,
             false,
+            false,
             collides_at,
             nuke,
         )
@@ -2226,6 +2255,7 @@ impl ProjectileStore {
         target_is_aircraft: bool,
         safety_altitude: i32,
         degenerates: bool,
+        ranged: bool,
         mut collides_at: impl FnMut(
             &Projectile,
             ProjectileCoord,
@@ -2459,6 +2489,26 @@ impl ProjectileStore {
         // 467B9E commits the selected candidate before the shared probe.
         // Every admitted impact bypasses 468BB0, irrespective of ROT.
         let selected_candidate = snap_impact.unwrap_or(candidate);
+        // Ares Update_Ranged1001AC90, installed467B94 before SetLocation:
+        // only BulletType.Ranged spends the actual 3D step. Exhaustion sets
+        // the existing impact flag, bypassing the probe but retaining ground,
+        // Arm/proximity, JumpJet and the ordinary detonation/cleanup tail.
+        if ranged && let Some(fuel) = projectile.fuel_remaining.as_mut() {
+            let step = crate::util::native_x87::true_distance_3d_leptons(
+                [
+                    selected_candidate.x,
+                    selected_candidate.y,
+                    selected_candidate.z,
+                ],
+                [
+                    previous_position.x,
+                    previous_position.y,
+                    previous_position.z,
+                ],
+            );
+            *fuel = fuel.wrapping_sub(step);
+            impact_flag |= *fuel <= 0;
+        }
         projectile.position = selected_candidate;
         let collision_impact = (!impact_flag)
             .then(|| {
@@ -3014,9 +3064,7 @@ pub fn projectile_shp_frame_with_velocity(
     if projectile_type.rotates {
         return 0;
     }
-    use crate::util::direction_tables::{
-        DRAGON_FRAME_TABLE, facing16_from_angle, step32_from_facing16,
-    };
+    use crate::util::direction_tables::{DRAGON_FRAME_TABLE, facing16_from_angle, step32_from_facing16};
     use crate::util::native_x87::X87Chop53 as X;
     use native_math::{atan, d};
     // FCHS of the velocity Y, `Math::atan2 @ 0x004CAE30`, then the DirStruct
@@ -3334,6 +3382,92 @@ mod tests {
     }
 
     #[test]
+    fn projectile_fuel_spends_the_3d_step_at_the_existing_impact_seam() {
+        let mut store = ProjectileStore::new();
+        let mut shot = spawn(ProjectileTarget::Entity(99));
+        shot.origin = ProjectileCoord::new(100, 100, 100);
+        shot.velocity = ProjectileVelocity::new(3, 4, 12);
+        shot.trajectory = ProjectileTrajectory::Ballistic;
+        shot.arm_frames = 100;
+        shot.ranged_fuse = true;
+        shot.collision.dropping = true;
+        let id = store.spawn(1, shot);
+        store.initialize_fuel(id, true);
+        store.set_weapon_fuel(id, 13);
+        let head = store.begin_ai_visit(id).unwrap();
+        let impact = store
+            .advance_after_head(
+                head,
+                1,
+                |_, _| Some(ProjectileCoord::new(2000, 100, 100)),
+                None,
+                &SharedCellDummy::fresh(),
+                0,
+                false,
+                false,
+                0,
+                false,
+                true,
+                |_, _, phase| {
+                    assert!(
+                        !matches!(phase, ProjectileCollisionPhase::Shared),
+                        "fuel impact bypasses the shared probe"
+                    );
+                    None
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(store.get(id).unwrap().fuel_remaining(), Some(0));
+        assert_eq!(
+            impact.detonations.len(),
+            1,
+            "Arm and Dropping do not block fuel impact"
+        );
+        assert_eq!(
+            impact.detonations[0].impact,
+            ProjectileCoord::new(103, 104, 112)
+        );
+
+        // A map-exit return precedes467B94, retaining the budget and deleting
+        // without a detonation even when the old budget was already zero.
+        let id = store.spawn(2, shot);
+        store.initialize_fuel(id, true);
+        store.set_weapon_fuel(id, 0);
+        let head = store.begin_ai_visit(id).unwrap();
+        let exited = store
+            .advance_after_head(
+                head,
+                1,
+                |_, _| Some(ProjectileCoord::new(2000, 100, 100)),
+                None,
+                &SharedCellDummy::fresh(),
+                0,
+                false,
+                false,
+                0,
+                false,
+                true,
+                |_, candidate, phase| {
+                    matches!(phase, ProjectileCollisionPhase::Ordinary { .. }).then_some(
+                        ProjectileCollisionResponse::Ordinary {
+                            candidate,
+                            velocity: shot.velocity,
+                            impact: false,
+                            near_target: false,
+                            left_map: true,
+                        },
+                    )
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(exited.expired, vec![id]);
+        assert!(exited.detonations.is_empty());
+        assert_eq!(store.get(id).unwrap().fuel_remaining(), Some(0));
+    }
+
+    #[test]
     fn degenerates_obeys_collision_and_dropping_fuse_admission() {
         // Original467C70..467CA4: Dropping suppresses a detector-only
         // detonation, making that visit eligible for degeneration. A real
@@ -3364,6 +3498,7 @@ mod tests {
                     false,
                     0,
                     true,
+                    false,
                     |_, candidate, phase| {
                         (collision && matches!(phase, ProjectileCollisionPhase::Shared))
                             .then_some(ProjectileCollisionResponse::TargetZClamp(candidate))

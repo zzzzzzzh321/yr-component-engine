@@ -383,6 +383,7 @@ impl Simulation {
                 target_is_aircraft,
                 rules.general.safety_altitude,
                 projectile_type.is_some_and(|kind| kind.degenerates),
+                projectile_type.is_some_and(|kind| kind.ranged),
                 |projectile, candidate, phase| {
                     collision_world.collide(projectile, candidate, phase)
                 },

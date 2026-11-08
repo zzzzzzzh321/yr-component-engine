@@ -603,6 +603,20 @@ impl IniSection {
         })
     }
 
+    /// Ares Valueable<Leptons>1000A6D0: successful binary64/percent reads
+    /// multiply by 256, then CRT100772B0 truncates to signed32. Failed
+    /// physical reads retain the integer, rather than scaling it again.
+    pub fn read_ares_leptons(&self, key: &str, current: i32) -> i32 {
+        self.read_string_with(key, 2048, current, |previous, value| {
+            parse_ares_double_bits(value).map_or(previous, |value| {
+                MaskedX87Chop53::fistp_i32_masked(MaskedX87Chop53::mul(
+                    MaskedX87Chop53::load_f64(value),
+                    MaskedX87Chop53::load_i32(256),
+                ))
+            })
+        })
+    }
+
     /// Ares Nullable<double>10008CE0 ->10008E90 ->10076B60: only a
     /// successful shared double parse sets presence. `none` is invalid,
     /// so it retains the pair instead of clearing a prior value.
@@ -1991,9 +2005,7 @@ fn leading_float_token(s: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        crt_atoi, long_list_read_capacity, parse_leading_f32, strtok, truncate_native_bytes,
-    };
+    use super::{crt_atoi, long_list_read_capacity, parse_leading_f32, strtok, truncate_native_bytes};
     use crate::rules::ini_parser::{IniFile, IniSection};
 
     #[cfg(feature = "ares")]
