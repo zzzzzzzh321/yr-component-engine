@@ -15,6 +15,7 @@ reads `AirburstSpread`, `RetargetAccuracy`, `Splits`, `RetargetSelf` and nullabl
 bodies. `AresReplacement` selects the shared host fan; live identities, target
 array, Scenario RNG and child flight stay with existing owners. Ares children
 use weapon Damage/Speed/Bright/range without installing a Weapon pointer.
+Admission requires the shared travel budget and retained Warhead relationships.
 Historical frozen omission keeps the previous tail. The host explicitly reports
 native nonterminating circle inputs and the null-Weapon Inviso/FlakScatter crash
 combination; it does not substitute clipping or a factory Weapon pointer.
@@ -27,8 +28,9 @@ Version 0.30 adds optional `MatchRulesPolicy.projectile_fuel` and
 host owns the saved/hashed live Bullet budget, true 3D distance and existing
 impact tail. Ordinary FireAt supplies the weapon budget; bare and stock
 shrapnel constructors retain INT_MAX. `Ranged=no`, retail and older guests
-preserve their prior flight behavior. Ares Airburst replacement/Firestorm and
-other specialized factories are separate compatibility residuals. Use the
+preserve their prior flight behavior. Version 0.31 also supplies this budget to
+the ordinary Ares Airburst/Splits factory; Firestorm and other specialized
+factories remain separate compatibility residuals. Use the
 original engine/component pair for older full saves; layout guards remain.
 
 Version 0.29 adds optional `weapon_firing_resource` queries with actual bound
