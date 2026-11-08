@@ -81,10 +81,7 @@ impl Default for RuntimeLimits {
 
 impl RuntimeLimits {
     fn fuel_for(&self, kind: &str, input_bytes: usize) -> u64 {
-        let base = if matches!(
-            kind,
-            "configure" | "configure_boundary" | "configure_super_read"
-        ) {
+        let base = if is_configuration_call(kind) {
             self.configure_fuel
         } else {
             self.fuel
@@ -95,6 +92,17 @@ impl RuntimeLimits {
             .min(self.max_input_fuel);
         base.saturating_add(input_fuel)
     }
+}
+
+fn is_configuration_call(kind: &str) -> bool {
+    matches!(
+        kind,
+        "configure"
+            | "configure_boundary"
+            | "configure_super_read"
+            | "configure_country_read"
+            | "configure_faction_pass"
+    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -387,10 +395,7 @@ impl ComponentRuntime {
             .table_elements(65_536)
             .trap_on_grow_failure(true)
             .build();
-        let configuration_bytes = if matches!(
-            kind,
-            "configure" | "configure_boundary" | "configure_super_read"
-        ) {
+        let configuration_bytes = if is_configuration_call(kind) {
             host.configuration_input_bytes()
         } else {
             0

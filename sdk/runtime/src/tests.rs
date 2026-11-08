@@ -279,6 +279,14 @@ fn runtime_separates_bounded_configuration_work_from_actor_work() {
             .evaluate(&workload, &configure, Arc::new(ManifestHost))
             .is_ok()
     );
+    for kind in ["configure_country_read", "configure_faction_pass"] {
+        assert!(
+            runtime
+                .call(&workload.component, kind, b"{}", Arc::new(ManifestHost))
+                .is_ok(),
+            "{kind} uses the bounded configuration budget"
+        );
+    }
     let infinite = load(
         &runtime,
         &fixture(API_VERSION, "(loop $spin (br $spin))", ""),
@@ -416,6 +424,19 @@ fn runtime_counts_frozen_configuration_input_within_the_existing_cap() {
             .evaluate(&workload, &configure, Arc::new(MetadataHost))
             .is_ok()
     );
+    for kind in ["configure_country_read", "configure_faction_pass"] {
+        assert!(
+            runtime
+                .call(&workload.component, kind, b"{}", Arc::new(ManifestHost))
+                .is_err()
+        );
+        assert!(
+            runtime
+                .call(&workload.component, kind, b"{}", Arc::new(MetadataHost))
+                .is_ok(),
+            "{kind} counts frozen metadata within the existing input cap"
+        );
+    }
     assert!(
         runtime
             .evaluate(&workload, &request(), Arc::new(MetadataHost))

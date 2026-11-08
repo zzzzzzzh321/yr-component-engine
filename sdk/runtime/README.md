@@ -13,8 +13,10 @@ messages have separate bounds. Host adapters must themselves be trusted and
 bounded; fuel limits guest instructions, not arbitrary Rust callbacks or code
 compilation. Content admission and host operation validation remain mandatory.
 
-Defaults allocate base fuel of 50 million to each one-time physical Configure
-pass or `configure_boundary` call and 5 million to each manifest/resource/gameplay call. Every call also
+Defaults allocate base fuel of 50 million to physical configuration calls
+(`configure`, `configure_boundary`, `configure_super_read`,
+`configure_country_read`, `configure_faction_pass`) and 5 million to each
+manifest/resource/gameplay call. Every call also
 receives 256 fuel per serialized input byte, since decoding opaque JSON byte
 arrays consumes guest instructions before the requested logic runs. This total
 is shared by decoding and logic; it is not a separate strict 5-million gameplay
