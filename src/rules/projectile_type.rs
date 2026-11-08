@@ -145,9 +145,9 @@ pub struct ProjectileType {
     color_scheme: i32,
 
     // --- String/reference fields ---
-    /// `ShrapnelWeapon=` (+2B4), the WeaponType fired for each shrapnel
-    /// fragment, as the ordered Rules processor resolved it.
-    pub shrapnel_weapon: Option<String>,
+    /// Actual Shrapnel Weapon array slot (+2B4). ReadINI46C31F retains
+    /// the factory pointer; SpawnShrapnel46A414 uses that exact instance.
+    pub shrapnel_weapon: Option<WeaponHandle>,
     /// Actual Airburst child Weapon array slot (+2B0). ReadINI46C2DB retains
     /// the factory pointer; a stored name cannot identify colliding instances.
     pub airburst_weapon: Option<WeaponHandle>,

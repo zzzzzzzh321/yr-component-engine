@@ -2986,111 +2986,136 @@ fn airburst_reference_retains_rebinds_and_keeps_native_factory_timing() {
 }
 
 #[test]
-fn airburst_pointer_keeps_colliding_instances_across_reads_and_saved_source() {
+fn child_weapon_pointers_keep_colliding_instances_across_reads_and_saved_source() {
     use crate::rules::ruleset::RuleSet;
     const STORED: &str = "ABCDEFGHIJKLMNOPQRSTUVWX";
-    // Weapon772FA0 allocates a distinct full25 input after stored24 exists.
-    // Bullet46C2C6 does this after the Weapon sweep;46C2DB keeps its result.
-    let root = IniFile::from_str(
-        "[VehicleTypes]\n0=PROBE\n1=SOURCE\n\
+    for key in ["AirburstWeapon", "ShrapnelWeapon"] {
+        let shrapnel = key == "ShrapnelWeapon";
+        let child_handle = |rules: &RuleSet| {
+            let projectile = rules.projectile("SHOT").unwrap();
+            if shrapnel {
+                projectile.shrapnel_weapon
+            } else {
+                projectile.airburst_weapon
+            }
+        };
+        // Weapon772FA0 allocates a distinct full25 input after stored24 exists.
+        // Bullet46C2C6/46C305 do this after the Weapon sweep;46C2DB/46C31F
+        // keep the actual result consumed by Airburst and SpawnShrapnel46A414.
+        let root = IniFile::from_str(&format!(
+            "[VehicleTypes]\n0=PROBE\n1=SOURCE\n\
          [PROBE]\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n[SOURCE]\nPrimary=ROOT\n\
          [ROOT]\nProjectile=SHOT\nWarhead=WH\n\
          [ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=30\nRange=6\nSpeed=20\nProjectile=MINI\nWarhead=WH\n\
-         [SHOT]\nAirburst=yes\nAirburstWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\n[MINI]\n\
+         [SHOT]\nAirburst=yes\n{key}=ABCDEFGHIJKLMNOPQRSTUVWXY\n[MINI]\n\
          [Warheads]\n0=WH\n[WH]\n",
-    );
-    let first = RulesLayerStack::new(root.clone()).process().unwrap();
-    let late_index = first
-        .projectile_weapon_states()
-        .find(|(name, _)| *name == "SHOT")
-        .unwrap()
-        .1
-        .0
-        .unwrap();
-    assert_eq!(first.weapon_states().nth(late_index).unwrap().damage, 0);
-    assert!(
-        first
-            .weapon_states()
-            .nth(late_index)
+        ));
+        let first = RulesLayerStack::new(root.clone()).process().unwrap();
+        let late_index = first
+            .projectile_weapon_states()
+            .find(|(name, _)| *name == "SHOT")
+            .map(|(_, fields)| if shrapnel { fields.1 } else { fields.0 })
             .unwrap()
-            .projectile
-            .is_none()
-    );
-    let second = |reference: &str| {
-        let mut layers = RulesLayerStack::new(root.clone());
-        // Failed hexadecimal ReadInt retains30 for the early object and0
-        // for the late constructor. It supplies valid Projectile/WH to both.
-        layers.push(
-            RulesLayerKind::Scenario,
-            IniFile::from_str(&format!(
-                "[ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=invalidh\nRange=6\nSpeed=20\n\
-             Projectile=MINI\nWarhead=WH\n{reference}",
-            )),
-        );
-        layers.process().unwrap()
-    };
-    let processed = second("");
-    let rules = RuleSet::from_processed_rules(&processed).unwrap();
-    let actual = rules.projectile("SHOT").unwrap().airburst_weapon.unwrap();
-    let early = rules.weapon_handle(STORED).unwrap();
-    assert_eq!(actual.index(), late_index);
-    assert_ne!(
-        actual, early,
-        "the late actual pointer is not the first same ID"
-    );
-    assert_eq!(rules.weapon_by_handle(actual).unwrap().id, STORED);
-    assert_eq!(rules.weapon_by_handle(actual).unwrap().damage, 0);
-    assert_eq!(rules.weapon_by_handle(early).unwrap().damage, 30);
-
-    let alias =
-        RuleSet::from_processed_rules(&second("[SHOT]\nAirburstWeapon=ABCDEFGHIJKLMNOPQRSTUVWX\n"))
             .unwrap();
-    assert_eq!(
-        alias.projectile("SHOT").unwrap().airburst_weapon,
-        Some(early)
-    );
-    let weapon_fields = |rules: &RuleSet| {
-        rules
-            .weapons_iter()
-            .map(|weapon| (weapon.id.clone(), weapon.damage, weapon.projectile.clone()))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(weapon_fields(&rules), weapon_fields(&alias));
-    assert_ne!(
-        rules.simulation_config_hash(),
-        alias.simulation_config_hash(),
-        "equal stored names with different child pointers must hash differently"
-    );
+        assert_eq!(first.weapon_states().nth(late_index).unwrap().damage, 0);
+        assert!(
+            first
+                .weapon_states()
+                .nth(late_index)
+                .unwrap()
+                .projectile
+                .is_none()
+        );
+        let second = |reference: &str| {
+            let mut layers = RulesLayerStack::new(root.clone());
+            // Failed hexadecimal ReadInt retains30 for the early object and0
+            // for the late constructor. It supplies valid Projectile/WH to both.
+            layers.push(
+                RulesLayerKind::Scenario,
+                IniFile::from_str(&format!(
+                    "[ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=invalidh\nRange=6\nSpeed=20\n\
+             Projectile=MINI\nWarhead=WH\n{reference}",
+                )),
+            );
+            layers.process().unwrap()
+        };
+        let processed = second("");
+        let rules = RuleSet::from_processed_rules(&processed).unwrap();
+        let actual = child_handle(&rules).unwrap();
+        let early = rules.weapon_handle(STORED).unwrap();
+        assert_eq!(actual.index(), late_index);
+        assert_ne!(
+            actual, early,
+            "the late actual pointer is not the first same ID"
+        );
+        assert_eq!(rules.weapon_by_handle(actual).unwrap().id, STORED);
+        assert_eq!(rules.weapon_by_handle(actual).unwrap().damage, 0);
+        assert_eq!(rules.weapon_by_handle(early).unwrap().damage, 30);
 
-    let bytes = save_codec::serialize(&processed).unwrap();
-    let mut restored: ProcessedRulesLayers = save_codec::deserialize(&bytes).unwrap();
-    let restored_rules = RuleSet::from_processed_rules(&restored).unwrap();
-    assert_eq!(
-        restored_rules.projectile("SHOT").unwrap().airburst_weapon,
-        Some(actual)
-    );
-    assert_eq!(
-        restored_rules.simulation_config_hash(),
-        rules.simulation_config_hash()
-    );
-    let families = &mut restored
-        .native_type_construction_trace
-        .registry_state
-        .families;
-    let weapon_count = families[&RulesTypeFamily::Weapon].len();
-    families
-        .get_mut(&RulesTypeFamily::Projectile)
-        .unwrap()
-        .iter_mut()
-        .find(|member| member.native_stored_id.as_str() == "SHOT")
-        .unwrap()
-        .airburst_weapon = Some(weapon_count);
-    assert!(matches!(
-        RuleSet::from_processed_rules(&restored),
-        Err(RulesError::InvalidSavedState(
-            "type reference is outside its registry"
-        ))
-    ));
+        let alias = RuleSet::from_processed_rules(&second(&format!(
+            "[SHOT]\n{key}=ABCDEFGHIJKLMNOPQRSTUVWX\n"
+        )))
+        .unwrap();
+        assert_eq!(child_handle(&alias), Some(early));
+        for (value, expected) in [("", Some(actual)), ("none", None), ("<none>", None)] {
+            let reread =
+                RuleSet::from_processed_rules(&second(&format!("[SHOT]\n{key}={value}\n")))
+                    .unwrap();
+            assert_eq!(child_handle(&reread), expected, "{key}={value}");
+        }
+        let weapon_fields = |rules: &RuleSet| {
+            rules
+                .weapons_iter()
+                .map(|weapon| (weapon.id.clone(), weapon.damage, weapon.projectile.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(weapon_fields(&rules), weapon_fields(&alias));
+        let bytes = save_codec::serialize(&processed).unwrap();
+        let mut restored: ProcessedRulesLayers = save_codec::deserialize(&bytes).unwrap();
+        let restored_rules = RuleSet::from_processed_rules(&restored).unwrap();
+        assert_eq!(child_handle(&restored_rules), Some(actual));
+        assert_eq!(
+            restored_rules.simulation_config_hash(),
+            rules.simulation_config_hash()
+        );
+        let set_pointer = |processed: &mut ProcessedRulesLayers, index| {
+            let projectile = processed
+                .native_type_construction_trace
+                .registry_state
+                .families
+                .get_mut(&RulesTypeFamily::Projectile)
+                .unwrap()
+                .iter_mut()
+                .find(|member| member.native_stored_id.as_str() == "SHOT")
+                .unwrap();
+            if shrapnel {
+                projectile.shrapnel_weapon = Some(index);
+            } else {
+                projectile.airburst_weapon = Some(index);
+            }
+        };
+        // A declared saved-state prior isolates pointer hashing from raw INI text.
+        set_pointer(&mut restored, early.index());
+        let rebound = RuleSet::from_processed_rules(&restored).unwrap();
+        assert_eq!(rules.source_ini_hash(), rebound.source_ini_hash());
+        assert_ne!(
+            rules.simulation_config_hash(),
+            rebound.simulation_config_hash(),
+            "equal stored names with different child pointers must hash differently"
+        );
+        let weapon_count = restored
+            .native_type_construction_trace
+            .registry_state
+            .families[&RulesTypeFamily::Weapon]
+            .len();
+        set_pointer(&mut restored, weapon_count);
+        assert!(matches!(
+            RuleSet::from_processed_rules(&restored),
+            Err(RulesError::InvalidSavedState(
+                "type reference is outside its registry"
+            ))
+        ));
+    }
 }
 
 #[test]

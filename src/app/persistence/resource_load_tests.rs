@@ -1117,7 +1117,7 @@ fn sdk_super_saved_resources_prepare_cold() {
 [VehicleTypes]\nSDKRestoreSource=SDKRestoreSource\n\
 [SDKRestoreSource]\nImage=GTNK\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
 [ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=100\nRange=6\nSpeed=40\nProjectile=SDKRestoreShot\nWarhead=SDKRestorePayload\nAmmo=2\nApplyDamage=yes\nProjectileRange=2\n\
-[SDKRestoreShot]\nImage=DRAGON\nROT=1\nAirburst=no\nAirburstWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\n",
+[SDKRestoreShot]\nImage=DRAGON\nROT=1\nAirburst=no\nAirburstWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\nShrapnelWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\n",
     )
     .expect("actual component restore requires retail assets");
     assert!(
@@ -1192,30 +1192,29 @@ fn sdk_super_saved_resources_prepare_cold() {
         )
         .unwrap();
         assert_eq!((primary.damage, primary.range_leptons), (100, 6 * 256));
-        // This dormant reference deliberately points to a late, unread
-        // constructor. The live valid-child factory/flight is covered by
-        // sdk_airburst_child_keeps_actual_weapon_through_factory_flight_and_restore.
-        let child = rules
-            .projectile("SDKRestoreShot")
-            .unwrap()
-            .airburst_weapon
-            .unwrap();
-        assert_ne!(
-            child,
-            rules.weapon_handle("ABCDEFGHIJKLMNOPQRSTUVWX").unwrap()
-        );
-        let child = rules.weapon_by_handle(child).unwrap();
-        assert_eq!(
-            (child.id.as_str(), child.damage),
-            ("ABCDEFGHIJKLMNOPQRSTUVWX", 0)
-        );
-        assert!(child.projectile.is_none());
+        // Each dormant long reference constructs its own late unread Weapon.
+        // Cold resource preparation must retain both, without reopening the map.
+        let projectile = rules.projectile("SDKRestoreShot").unwrap();
+        assert_ne!(projectile.airburst_weapon, projectile.shrapnel_weapon);
+        for child in [projectile.airburst_weapon, projectile.shrapnel_weapon] {
+            let child = child.unwrap();
+            assert_ne!(
+                child,
+                rules.weapon_handle("ABCDEFGHIJKLMNOPQRSTUVWX").unwrap()
+            );
+            let child = rules.weapon_by_handle(child).unwrap();
+            assert_eq!(
+                (child.id.as_str(), child.damage),
+                ("ABCDEFGHIJKLMNOPQRSTUVWX", 0)
+            );
+            assert!(child.projectile.is_none());
+        }
         assert_eq!(
             rules
                 .weapons_iter()
                 .filter(|weapon| weapon.id == "ABCDEFGHIJKLMNOPQRSTUVWX")
                 .count(),
-            2
+            3
         );
     }
     assert_eq!(frontend.logical_state(), frontend_before);

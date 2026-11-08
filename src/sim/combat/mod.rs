@@ -149,7 +149,7 @@ pub use effects::{
 pub use in_range::can_fire_at_target;
 pub use in_range::{MaplessTarget, can_fire_at_target_in_query, mapless_in_range};
 pub use object_health::{Health, health_category};
-pub(crate) use projectile_delivery::{FiredBullet, admit_fired_bullet};
+pub(crate) use projectile_delivery::{FiredBullet, admit_fired_bullet, inviso_fire_placement};
 pub(crate) use receiver_call::{
     BaseDefenseResponseCallSite, EntityDamageEvent, RAD_NO_ATTACKER, ReceiverCallFlags,
     receiver_divisors, wave_post_object_damage,

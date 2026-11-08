@@ -276,6 +276,7 @@ mod tests {
             warhead_house_filter: None,
             airburst_tail: None,
             projectile_fuel: None,
+            shrapnel_weapon_assignment: None,
         });
         assert!(rules.ai_side_token_admits(4, 3));
         assert!(!rules.ai_side_token_admits(4, 0));

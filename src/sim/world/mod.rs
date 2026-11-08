@@ -5433,14 +5433,12 @@ impl Simulation {
     /// spawn captured ([`ProjectileStore::fire_inviso`]); its OnBridge stays
     /// clear, as only FireAt copies one.
     ///
-    /// RESIDUAL: a child has no WeaponType. The constructor zeroes `+0x130`
-    /// (`0x00466401`) and only SetWeaponType (`0x0046B260`, called from
-    /// `0x0044CAFF`, `0x006CDB7E`, `0x006E34E6`, `0x006FE573` and
-    /// `0x0070D764`) writes it, so a `FlakScatter=` child would fault reading
-    /// its `Range=` in Fire's flak placement (`0x004687E5`). VERA stands it on
-    /// its target. Trigger: a shrapnel weapon whose projectile is `Inviso=`
-    /// and `FlakScatter=`; the five retail shrapnel weapons' projectiles are
-    /// `Inviso=` without it. Effect: native crashes.
+    /// Ares1001ABF0 installs the actual fragment Weapon before Fire, allowing
+    /// its ordinary flak placement and later RadLevel consumer. Bare ctor fuel
+    /// remains INT_MAX; this is not the weapon-aware CreateBullet factory.
+    /// RESIDUAL (retail only): Inviso+FlakScatter without an installed Weapon
+    /// faults natively at4687E5. VERA retains target placement without RNG;
+    /// the five retail fragment projectiles do not enable FlakScatter.
     ///
     /// [`ProjectileStore::fire_inviso`]: crate::sim::projectile::ProjectileStore::fire_inviso
     pub(crate) fn admit_projectile_spawns(
@@ -5456,7 +5454,14 @@ impl Simulation {
                 .and_then(|id| rules.projectile(self.interner.resolve(id)))
                 .is_some_and(|kind| kind.inviso);
             let placement = projectile.initial_target_position;
-            self.admit_projectile(stable_id, projectile);
+            self.projectiles.construct(
+                stable_id,
+                projectile.native_unique_id,
+                self.session.binary_frame(),
+                projectile.source_id,
+                projectile.target,
+                projectile.payload,
+            );
             Self::finish_projectile_construction(
                 &self.interner,
                 &self.substrate,
@@ -5465,6 +5470,7 @@ impl Simulation {
                 stable_id,
                 rules,
             );
+            self.fire_constructed_projectile(stable_id, projectile);
             #[cfg(test)]
             if let Some(fixture) = self.receiver_fixture.as_mut() {
                 fixture
@@ -5472,6 +5478,20 @@ impl Simulation {
                     .push((stable_id, inviso, projectile));
             }
             if inviso {
+                let placement = projectile
+                    .payload
+                    .installed_weapon()
+                    .and_then(|weapon| rules.weapon_by_handle(weapon))
+                    .map_or(placement, |weapon| {
+                        crate::sim::combat::inviso_fire_placement(
+                            &mut self.scenario_rng,
+                            rules,
+                            projectile.collision.flak_scatter,
+                            weapon,
+                            projectile.origin,
+                            placement,
+                        )
+                    });
                 self.projectiles.fire_inviso(stable_id, placement, false);
             }
         }

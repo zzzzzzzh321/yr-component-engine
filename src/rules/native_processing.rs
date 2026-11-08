@@ -1672,6 +1672,9 @@ impl ProcessedRulesLayers {
                     .airburst_weapon
                     .is_some_and(|index| index >= weapon_count)
                 || member
+                    .shrapnel_weapon
+                    .is_some_and(|index| index >= weapon_count)
+                || member
                     .weapon
                     .projectile
                     .is_some_and(|index| index >= projectile_count)
@@ -2491,9 +2494,9 @@ impl ProcessedRulesLayers {
     /// Each BulletType's retained child weapons (+2B0/+2B4), in native read order.
     pub(crate) fn projectile_weapon_states(
         &self,
-    ) -> impl Iterator<Item = (&str, (Option<usize>, Option<&str>))> {
+    ) -> impl Iterator<Item = (&str, (Option<usize>, Option<usize>))> {
         self.member_states(RulesTypeFamily::Projectile, |member| {
-            (member.airburst_weapon, member.shrapnel_weapon.as_deref())
+            (member.airburst_weapon, member.shrapnel_weapon)
         })
     }
 
@@ -5361,8 +5364,9 @@ struct ProcessedType {
     anim_references: AnimTypeReferences,
     /// BulletType+2B4 `ShrapnelWeapon=`, read the same way by BulletType
     /// ReadINI (`0x0046C2E1..0x0046C31F`) over the constructor's null
-    /// (`0x0046BC82`).
-    shrapnel_weapon: Option<String>,
+    /// (`0x0046BC82`). SpawnShrapnel46A414 consumes that actual Weapon
+    /// array slot, independently of its possibly colliding stored24 name.
+    shrapnel_weapon: Option<usize>,
     /// Constructor46BC7C clears+2B0. ReadString128 at46C2B9 retains the
     /// existing pointer on empty input;46C2DB stores the actual Weapon array
     /// slot returned by the factory, even when stored24 names coincide.
@@ -9198,9 +9202,12 @@ impl RulesPassProcessor {
                 ) {
                     self.family_mut(RulesTypeFamily::Projectile)[index].airburst_weapon = weapon;
                 }
-                if let Some(weapon) =
-                    self.resolve_scalar_from(&raw, "ShrapnelWeapon", RulesTypeFamily::Weapon, 0x80)
-                {
+                if let Some(weapon) = self.resolve_scalar_index_from(
+                    &raw,
+                    "ShrapnelWeapon",
+                    RulesTypeFamily::Weapon,
+                    0x80,
+                ) {
                     self.family_mut(RulesTypeFamily::Projectile)[index].shrapnel_weapon = weapon;
                 }
             }

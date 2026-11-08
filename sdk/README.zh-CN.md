@@ -1,8 +1,10 @@
 # VERA Mod SDK：外置功能原型
 
+0.35／配置24／状态1新增可选 `MatchRulesPolicy.shrapnel_weapon_assignment`。新对局及真实重建边界默认声明启用；历史非空配置缺字段时保持原行为。`ShrapnelWeapon` 保留实际 Weapon 数组引用，安装引用后的碎片弹通过共享 Fire 读取该实例的 Range，并在引爆时读取 RadLevel。其裸构造航程仍为 INT_MAX，不复制 Weapon 的 ProjectileRange；这与 Airburst 工厂不同。字段为资源接纳时的静态声明，需配套宿主，不新增逐帧Wasm调用。验证范围包括实际组件开火、碎片飞行、保存恢复和伤害接收，完整Ares兼容仍在推进。
+
 ## 当前开发状态
 
-当前候选为 **0.34／配置23／状态1／API v1**。0.33起支持可选 `weapon_instance_resource`：用 `WeaponTypeRef.ordinal` 标识真实 Weapon 数组槽，同一个24字节存储名可以对应不同实例。插件经 `weapon-registry-view` 取得有序目录，再通过 `weapon-instance-effective:<scalar>` 与 `WeaponReadValue { identity, current }` 读取该实例保留的物理历史；数值解析仍由同一宿主读取器完成。
+当前候选为 **0.35／配置24／状态1／API v1**。0.33起支持可选 `weapon_instance_resource`：用 `WeaponTypeRef.ordinal` 标识真实 Weapon 数组槽，同一个24字节存储名可以对应不同实例。插件经 `weapon-registry-view` 取得有序目录，再通过 `weapon-instance-effective:<scalar>` 与 `WeaponReadValue { identity, current }` 读取该实例保留的物理历史；数值解析仍由同一宿主读取器完成。
 
 实例策略包含现有弹药与开火策略。外层 `Some` 明确拥有这两个投影，即使两项都为 `None`；外层 `None` 才允许按唯一名称回退旧严格接口。新组件的 Ammo、ApplyDamage、ProjectileRange 按实例冻结；旧组件保持原请求格式，在同名多实例域明确拒绝，避免借用第一项或最后一项配置。资源接纳时查询一次，实际开火、在飞弹体与恢复继续保留同一个 Weapon 槽，不逐发调用 Wasm。
 

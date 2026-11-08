@@ -444,9 +444,9 @@ pub(crate) fn admit_fired_bullet(
 /// Scenario draws). `weapon` is the bullet's WeaponType (`+0x130`, which
 /// FireAt sets to its fired weapon at `0x006FE573`) and `origin` the
 /// coordinate Fire was given.
-/// SpawnShrapnel's Fire leaves its children on their target
-/// (`Simulation::admit_projectile_spawns`).
-fn inviso_fire_placement(
+/// Direct constructors without an installed Weapon cannot take the flak arm;
+/// callers retain their existing retail null-Weapon fallback in that case.
+pub(crate) fn inviso_fire_placement(
     scenario_rng: &mut crate::sim::rng::SimRng,
     rules: &RuleSet,
     flak_scatter: bool,

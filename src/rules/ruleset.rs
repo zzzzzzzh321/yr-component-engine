@@ -5367,6 +5367,11 @@ impl RuleSet {
         if ares_fan && match_rules_policy.and_then(|p| p.projectile_fuel) != Some(true) {
             return Err("Ares fan requires the shared projectile travel-budget owner".into());
         }
+        if match_rules_policy.and_then(|p| p.shrapnel_weapon_assignment) == Some(true)
+            && match_rules_policy.and_then(|p| p.projectile_fuel) != Some(true)
+        {
+            return Err("Ares shrapnel requires the shared projectile travel-budget owner".into());
+        }
         if ares_fan && match_rules_policy.and_then(|p| p.warhead_house_filter) != Some(true) {
             return Err("Ares fan requires retained Warhead relationship bindings".into());
         }
@@ -6214,6 +6219,14 @@ impl RuleSet {
     pub(crate) fn projectile_fuel_enabled(&self) -> bool {
         self.match_rules_policy
             .and_then(|policy| policy.projectile_fuel)
+            .unwrap_or(false)
+    }
+
+    /// Ares Shrapnel hooks1001ABF0 write the actual Weapon into child+130
+    /// after Construct, preserving Initialize_Ranged1001A920's bare budget.
+    pub(crate) fn shrapnel_weapon_assignment_enabled(&self) -> bool {
+        self.match_rules_policy
+            .and_then(|policy| policy.shrapnel_weapon_assignment)
             .unwrap_or(false)
     }
 
@@ -7104,14 +7117,19 @@ impl RuleSet {
                 .values_mut()
                 .find(|projectile| projectile.id.eq_ignore_ascii_case(name))
             {
-                // ReadINI46C2DB and Ares1001A0BB retain the actual pointer.
+                // ReadINI46C2DB/46C31F retain the actual Weapon pointers;
+                // SpawnShrapnel46A414 consumes the latter without a name lookup.
                 // validate_saved_state checked its array bound before projection.
                 projectile.airburst_weapon = airburst.map(|index| {
                     WeaponHandle(
                         u32::try_from(index).expect("Weapon array exceeds stable identity"),
                     )
                 });
-                projectile.shrapnel_weapon = shrapnel.map(str::to_owned);
+                projectile.shrapnel_weapon = shrapnel.map(|index| {
+                    WeaponHandle(
+                        u32::try_from(index).expect("Weapon array exceeds stable identity"),
+                    )
+                });
             }
         }
         for (name, (weapon, aux_building)) in processed.super_weapon_reference_states() {
@@ -9164,6 +9182,13 @@ impl RuleSet {
             }
             .hash(&mut hasher);
         }
+        if let Some(enabled) = self
+            .match_rules_policy
+            .and_then(|policy| policy.shrapnel_weapon_assignment)
+        {
+            b"shrapnel-weapon-assignment-v1".hash(&mut hasher);
+            enabled.hash(&mut hasher);
+        }
         let mut projectile_fans: Vec<_> = self
             .projectiles
             .iter()
@@ -10055,6 +10080,15 @@ impl RuleSet {
             })
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
+        // The retained +2B4 pointer identifies an actual native Weapon array
+        // slot even when two instances have the same stored24-byte name.
+        if self
+            .projectiles
+            .values()
+            .any(|projectile| projectile.shrapnel_weapon.is_some())
+        {
+            b"shrapnel-weapon-instances-v1".hash(&mut hasher);
+        }
         Self::by_upper_id(
             self.projectiles
                 .iter()
@@ -17100,7 +17134,7 @@ Projectile=Invisible
                 rules.weapon_mut_for_test("GUN").unwrap().range_leptons = 1;
             }),
             ("ShrapnelWeapon", |rules| {
-                rules.projectiles.get_mut("SHOT").unwrap().shrapnel_weapon = Some("GUN".into());
+                rules.projectiles.get_mut("SHOT").unwrap().shrapnel_weapon = Some(WeaponHandle(0));
             }),
             ("WeaponType", |rules| {
                 rules.super_weapons.get_mut("NUKE").unwrap().weapon_type = Some("GUN".into());

@@ -1808,3 +1808,6 @@ mod weapon_instance_tests;
 
 #[path = "airburst_weapon_instance_tests.rs"]
 mod airburst_weapon_instance_tests;
+
+#[path = "shrapnel_weapon_instance_tests.rs"]
+mod shrapnel_weapon_instance_tests;

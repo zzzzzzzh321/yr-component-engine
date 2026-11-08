@@ -52,10 +52,10 @@ pub(super) fn emit_projectile_shrapnel(
     else {
         return;
     };
-    let Some(child_weapon_name) = parent_projectile.shrapnel_weapon.as_deref() else {
+    let Some(child_weapon_handle) = parent_projectile.shrapnel_weapon else {
         return;
     };
-    let Some(child_weapon) = rules.weapon(child_weapon_name) else {
+    let Some(child_weapon) = rules.weapon_by_handle(child_weapon_handle) else {
         return;
     };
     let Some(child_projectile) = child_weapon
@@ -189,6 +189,14 @@ pub(super) fn emit_projectile_shrapnel(
                 world.interner.intern(child_warhead_name),
                 Some(world.interner.intern(&child_projectile.id)),
                 child_weapon.bright,
+            )
+            // Ares BulletClass_Shrapnel_WeaponType1/2 at46A5B2/46AA27
+            // ->1001ABF0 writes the actual Weapon into child+130. Unlike
+            // Airburst10019210 it never copies Ext+C8 into the fuel budget.
+            .with_installed_weapon(
+                rules
+                    .shrapnel_weapon_assignment_enabled()
+                    .then_some(child_weapon_handle),
             ),
             speed_leptons_per_frame: child_weapon.speed.clamp(1, i32::from(u16::MAX)) as u16,
             velocity: crate::sim::projectile::launch::shrapnel_launch_velocity(
