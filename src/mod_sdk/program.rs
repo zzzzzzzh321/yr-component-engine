@@ -689,6 +689,9 @@ impl Program {
         if self.has_weapon_firing_resource() {
             host = host.enable_weapon_inputs();
         }
+        if self.has_projectile_resource() {
+            host = host.enable_projectile_inputs();
+        }
         self.configure(
             executor,
             context,
@@ -767,6 +770,29 @@ impl Program {
         Ok(self
             .evaluate(Context::WeaponFiringResource(context), &[])?
             .weapon_firing_resource)
+    }
+
+    pub(crate) fn projectile_resource_policy(
+        &self,
+        name: &str,
+    ) -> Result<Option<api::ProjectileResourcePolicy>, String> {
+        if !self.has_projectile_resource() {
+            return Ok(None);
+        }
+        Ok(self
+            .evaluate(
+                Context::ProjectileResource(api::ProjectileResourceContext {
+                    projectile_name: name.to_owned(),
+                }),
+                &[],
+            )?
+            .projectile_resource)
+    }
+
+    fn has_projectile_resource(&self) -> bool {
+        self.manifest
+            .hooks
+            .contains(&api::HookKind::ProjectileResource)
     }
 
     fn has_weapon_firing_resource(&self) -> bool {

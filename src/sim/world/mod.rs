@@ -5326,13 +5326,39 @@ impl Simulation {
         stable_id: u64,
         spawn: crate::sim::projectile::ProjectileSpawn,
     ) -> u64 {
+        self.projectiles.construct(
+            stable_id,
+            spawn.native_unique_id,
+            self.session.binary_frame(),
+            spawn.source_id,
+            spawn.target,
+            spawn.payload,
+        );
+        self.fire_constructed_projectile(stable_id, spawn)
+    }
+
+    /// Shared Fire/Unlimbo continuation. Ares child factories construct before
+    /// their heading RNG; ordinary delayed factories enter through admission.
+    pub(crate) fn fire_constructed_projectile(
+        &mut self,
+        stable_id: u64,
+        spawn: crate::sim::projectile::ProjectileSpawn,
+    ) -> u64 {
+        assert!(
+            !self
+                .projectiles
+                .get(stable_id)
+                .expect("constructed Bullet")
+                .in_logic_vector(),
+            "Fire requires an unfired Bullet"
+        );
         let location = crate::sim::projectile::bullet_unlimbo_coord(
             self.resolved_terrain.as_ref(),
             &self.effective_shared_cell_dummy(),
             spawn.origin,
         );
         self.projectiles
-            .spawn_at(stable_id, self.session.binary_frame(), spawn, location);
+            .fire_at(stable_id, self.session.binary_frame(), spawn, location);
         let registered = self.register_projectile(stable_id, spawn.flat);
         debug_assert!(registered);
         if let Some(style) = spawn.line_trail {

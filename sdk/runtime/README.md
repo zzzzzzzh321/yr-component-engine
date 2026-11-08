@@ -96,3 +96,11 @@ parse (including percentage scaling) is multiplied by 256 and truncated with
 the existing signed32 masked conversion; missing/invalid text retains the prior
 integer. It is also available through `weapon-effective:` with that retained
 Weapon body's authority and capability gate. It is not the stock `Range` reader.
+
+`projectile_resource` grants `$projectile-config` and `projectile-effective:`
+scalar access to the actual Projectile family's retained body. Weapon and
+Projectile services share one scalar adapter and remain independently gated;
+their retained input bytes are charged to configuration execution. Final
+binding never reopens physical sources. The hook appends ordinal29, leaving
+accepted manifest values unchanged. Raw binary64 policy inputs preserve the
+native reader's results without guest-side parsing or per-frame calls.

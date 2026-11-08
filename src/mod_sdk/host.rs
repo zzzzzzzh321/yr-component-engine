@@ -91,6 +91,7 @@ pub(super) struct NativeHost {
     superweapon_inputs: bool,
     superweapon_message: OnceLock<Result<Vec<u8>, String>>,
     weapon_inputs: bool,
+    projectile_inputs: bool,
 }
 
 impl NativeHost {
@@ -110,6 +111,7 @@ impl NativeHost {
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
             weapon_inputs: false,
+            projectile_inputs: false,
         }
     }
 
@@ -156,6 +158,11 @@ impl NativeHost {
         self
     }
 
+    pub(super) fn enable_projectile_inputs(mut self) -> Self {
+        self.projectile_inputs = true;
+        self
+    }
+
     pub(super) fn simulation() -> Self {
         Self {
             ini: None,
@@ -172,6 +179,7 @@ impl NativeHost {
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
             weapon_inputs: false,
+            projectile_inputs: false,
         }
     }
 
@@ -288,14 +296,22 @@ impl NativeHost {
         })
     }
 
-    fn weapon_source_bytes(&self) -> usize {
-        if !self.weapon_inputs || self.ini.is_none() {
+    fn retained_resource_source_bytes(&self) -> usize {
+        if self.ini.is_none() {
             return 0;
         }
-        self.registries.as_ref().map_or(0, |registry| {
-            registry
-                .weapon_effective_input_bytes()
-                .unwrap_or(usize::MAX)
+        [
+            (self.weapon_inputs, "$weapon-config"),
+            (self.projectile_inputs, "$projectile-config"),
+        ]
+        .into_iter()
+        .filter(|(enabled, _)| *enabled)
+        .fold(0usize, |size, (_, family)| {
+            size.saturating_add(self.registries.as_ref().map_or(0, |registry| {
+                registry
+                    .resource_effective_input_bytes(family)
+                    .unwrap_or(usize::MAX)
+            }))
         })
     }
 
@@ -325,7 +341,7 @@ impl HostServices for NativeHost {
             .saturating_add(self.cameo_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.superweapon_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.superweapon_source_bytes())
-            .saturating_add(self.weapon_source_bytes())
+            .saturating_add(self.retained_resource_source_bytes())
     }
 
     fn config(&self, section: &str, key: &str) -> Option<String> {
@@ -518,14 +534,20 @@ impl HostServices for NativeHost {
                 .ok_or("missing SuperWeapon read points")?
                 .superweapon_effective_section(input.read, owner)?;
             (section, reader, input.current)
-        } else if let Some(reader) = reader.strip_prefix("weapon-effective:") {
-            if !self.weapon_inputs {
-                return Err("component has no retained Weapon configuration capability".into());
+        } else if let Some((family, enabled, reader)) = reader
+            .strip_prefix("weapon-effective:")
+            .map(|reader| ("$weapon-config", self.weapon_inputs, reader))
+            .or_else(|| {
+                reader
+                    .strip_prefix("projectile-effective:")
+                    .map(|reader| ("$projectile-config", self.projectile_inputs, reader))
+            })
+        {
+            if !enabled {
+                return Err("component has no retained resource configuration capability".into());
             }
-            // Select the actual Weapon instance's reached body; the flat INI
-            // can have been replaced by a later same-ID Projectile. Delegate
-            // scalar conversion to the same native reader below, without a
-            // second parser or an external copy of interpreted gameplay.
+            // Select this native family's actual body, then delegate scalar
+            // conversion to the single canonical reader below.
             if !matches!(
                 reader,
                 "presence"
@@ -542,13 +564,13 @@ impl HostServices for NativeHost {
             ) && !reader.starts_with("name:")
                 && !reader.starts_with("string:")
             {
-                return Err("unsupported retained Weapon scalar reader".into());
+                return Err("unsupported retained resource scalar reader".into());
             }
             let section = self
                 .registries
                 .as_ref()
-                .ok_or("missing retained Weapon source")?
-                .weapon_effective_section(owner)?;
+                .ok_or("missing retained resource source")?
+                .resource_effective_section(family, owner)?;
             (
                 section,
                 reader,
@@ -764,8 +786,13 @@ impl HostServices for NativeHost {
     }
 
     fn registry(&self, name: &str) -> Vec<String> {
-        if name == "$weapon-config" {
-            return if self.weapon_inputs && self.ini.is_some() {
+        if matches!(name, "$weapon-config" | "$projectile-config") {
+            let enabled = if name == "$weapon-config" {
+                self.weapon_inputs
+            } else {
+                self.projectile_inputs
+            };
+            return if enabled && self.ini.is_some() {
                 self.registries
                     .as_ref()
                     .map_or_else(Vec::new, |r| r.names(name))

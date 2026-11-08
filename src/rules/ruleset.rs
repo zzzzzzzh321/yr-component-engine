@@ -5307,6 +5307,59 @@ impl RuleSet {
                 Ok((name, policy, firing))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let mut projectile_names: Vec<_> = self.projectiles.keys().cloned().collect();
+        projectile_names.sort_unstable();
+        let projectile_policies = projectile_names
+            .into_iter()
+            .map(|name| {
+                let policy = self
+                    .external_mod
+                    .as_ref()
+                    .map(|program| program.projectile_resource_policy(&name))
+                    .transpose()?
+                    .flatten();
+                Ok((name, policy))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let ares_fan = match_rules_policy.and_then(|p| p.airburst_tail)
+            == Some(vera_mod_api::AirburstTailPolicy::AresReplacement);
+        if !ares_fan
+            && projectile_policies
+                .iter()
+                .any(|(_, p)| p.is_some_and(|p| p.airburst.is_some()))
+            || ares_fan
+                && projectile_policies
+                    .iter()
+                    .any(|(_, p)| p.is_none_or(|p| p.airburst.is_none()))
+        {
+            return Err(
+                "Ares fan requires a complete, explicitly selected projectile resource domain"
+                    .into(),
+            );
+        }
+        if ares_fan && match_rules_policy.and_then(|p| p.projectile_fuel) != Some(true) {
+            return Err("Ares fan requires the shared projectile travel-budget owner".into());
+        }
+        if ares_fan && match_rules_policy.and_then(|p| p.warhead_house_filter) != Some(true) {
+            return Err("Ares fan requires retained Warhead relationship bindings".into());
+        }
+        if ares_fan {
+            for projectile in self.projectiles.values() {
+                if let Some(child) = projectile.airburst_weapon.as_deref() {
+                    let range_bound = policies
+                        .iter()
+                        .find(|(name, _, _)| name == child)
+                        .and_then(|(_, _, firing)| *firing)
+                        .and_then(|p| p.projectile_range)
+                        .is_some();
+                    if !range_bound {
+                        return Err(format!(
+                            "Ares child factory requires weapon range binding: {child}"
+                        ));
+                    }
+                }
+            }
+        }
         let type_policies = self
             .object_list
             .iter()
@@ -5377,6 +5430,12 @@ impl RuleSet {
                     .base_reservation_writer_eligible()
                     .then_some(self.ai_base_spacing);
             }
+        }
+        for (name, policy) in projectile_policies {
+            self.projectiles
+                .get_mut(&name)
+                .expect("retained Projectile")
+                .bind_resource_policy(policy);
         }
         self.match_rules_policy = match_rules_policy;
         self.external_factions = factions;
@@ -8949,8 +9008,29 @@ impl RuleSet {
             match policy {
                 vera_mod_api::AirburstTailPolicy::RetailFixedNine => 0u8,
                 vera_mod_api::AirburstTailPolicy::UnsupportedReplacement => 1u8,
+                vera_mod_api::AirburstTailPolicy::AresReplacement => 2u8,
             }
             .hash(&mut hasher);
+        }
+        let mut projectile_fans: Vec<_> = self
+            .projectiles
+            .iter()
+            .filter_map(|(name, kind)| kind.airburst_policy().map(|p| (name, p)))
+            .collect();
+        projectile_fans.sort_unstable_by_key(|(name, _)| *name);
+        if !projectile_fans.is_empty() {
+            b"projectile-fan-policies-v1".hash(&mut hasher);
+            for (name, p) in projectile_fans {
+                (
+                    name,
+                    p.splits,
+                    p.spread_bits,
+                    p.retarget_accuracy_bits,
+                    p.retarget_self,
+                    p.around_target,
+                )
+                    .hash(&mut hasher);
+            }
         }
         // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);

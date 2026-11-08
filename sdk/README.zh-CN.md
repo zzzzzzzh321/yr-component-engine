@@ -34,7 +34,7 @@
 
 0.19 增加独立的纯启动声明 `long_list_readers`，在冷启动读取前选定 House 的 `Allies` 与 Techno 的 `Prerequisite`／`PrerequisiteOverride` 容量。安装 Ares 组件即使用2048，不增加 INI 开关；显式 `Retail128` 覆盖旧内置模式，未声明则沿用原模式。General 六类前置仍为128，物理 INI 行仍受原511字节限制。实际组件、定向联盟、保存恢复、资源管理器重建、旧实现及真实资源加载检查通过。新增资源序列化字段沿现有保存格式识别，不承诺旧完整存档自动迁移。
 
-保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.30.0 开发候选**，配置版本 **20**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
+保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.31.0 开发候选**，配置版本 **21**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
 
 0.30 在既有不可变策略上增加 `match_rules.projectile_fuel` 和 `weapon_firing_resource.projectile_range`（有符号 lepton）。独立的 `weapons/projectile_range` 域通过 `weapon-effective:ares-leptons` 读取实际到达的物理 Weapon 节。普通 FireAt 使用武器预算；裸构造和原版碎片弹保留 INT_MAX。引擎唯一的 ProjectileStore 保存、扣除并校验剩余三维路程，耗尽进入原引爆尾，不逐帧调用 WASM。`Ranged=no`、无插件及旧组件保持原路径。Ares Airburst 替换扇面、Firestorm 与其它专门创建器仍是独立残余。旧完整存档请使用原配套引擎与组件，布局校验不绕过。
 
@@ -359,3 +359,5 @@ fuel 衡量客体指令执行量，不代表固定毫秒，也不限制任意宿
 建议先在统一参考组件的对应功能模块中修改玩法，保持宿主只提供通用能力。新增功能如果超出现有六种回调和数据边界，应先设计通用接口及其状态、存档、联机一致性规则，再接入引擎，避免把某一个作品的专用规则写回宿主。
 
 参考护盾代码迁自 VERA20K 已有 Rust 实现，保留对应来源引用及贡献历史，继续遵循仓库的 [GPL 授权](../LICENSE-GPL)。本示例不包含 Ares/Phobos C++ 源码或心灵终结素材；运行原版资源验收需要自行提供游戏文件。
+
+0.31 增加可选 `projectile_resource`（HookKind 29，旧编号不变），由 `features/projectiles/airburst` 冻结普通 Airburst／Splits 策略。字段沿用 Ares 的 `AirburstSpread`、`RetargetAccuracy`、`Splits`、`RetargetSelf`、`AroundTarget`，通过 `$projectile-config`／`projectile-effective:` 读取实际 Projectile 的物理历史；新旧 Weapon/Projectile 同名来源相互隔离。宿主选择 `AresReplacement` 后继续使用原有对象数组、Scenario RNG、弹体创建、飞行和引爆清理；无逐帧 WASM 和第二套弹体状态。历史非空缺域保持旧选择。原生不终止的圆枚举输入，以及会空 Weapon 解引用的 Inviso+FlakScatter 子弹组合，宿主会明确报错；不会用裁剪或传入工厂武器掩盖这些边界。其它专门爆炸入口和完整 Ares 兼容仍需继续验收。

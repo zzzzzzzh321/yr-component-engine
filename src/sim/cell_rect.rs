@@ -2417,3 +2417,128 @@ mod tests {
         }
     }
 }
+
+/// Ares CellRangeIterator1001A010/DetonateAt_Splits1001A211: a signed16
+/// cursor over inclusive signed32 ends, filtered by the shared PC53 circle.
+/// This iterator owns no map or Dummy state; callers choose TryGet vs GetCell.
+pub(crate) struct NativeCircularCells {
+    center: (i16, i16),
+    start_x: i16,
+    current: (i16, i16),
+    end: (i32, i32),
+    radius_squared: crate::util::native_x87::MaskedX87Value,
+    done: bool,
+}
+
+impl NativeCircularCells {
+    pub(crate) fn new(
+        center: (i16, i16),
+        radius: crate::util::native_x87::NativeF64Bits,
+    ) -> Result<Self, &'static str> {
+        use crate::util::native_x87::{MaskedX87Chop53 as X, NativeF64Bits};
+        let radius = X::load_f64(radius);
+        let extent = X::fistp_i32_masked(X::add(
+            radius,
+            X::load_f64(NativeF64Bits::from_bits(0x3fef_ae14_7ae1_47ae)),
+        ));
+        let width = extent.wrapping_mul(2).wrapping_add(1);
+        let half = width / 2;
+        let start = (
+            i32::from(center.0).wrapping_sub(half),
+            i32::from(center.1).wrapping_sub(half),
+        );
+        let end = (start.0.wrapping_add(width), start.1.wrapping_add(width));
+        let current = (start.0 as i16, start.1 as i16);
+        let done = i32::from(current.1) > end.1;
+        // Unlike finite NaN/Inf/negative-radius cases, this native cursor can
+        // never exceed its end after signed16 wrapping. Report the original
+        // nonterminating input explicitly instead of clipping or hanging.
+        if !done && (end.0 >= i32::from(i16::MAX) || end.1 >= i32::from(i16::MAX)) {
+            return Err("native circular-cell iterator would not terminate");
+        }
+        let squared = X::store_f64_masked_chop(X::mul(radius, radius));
+        Ok(Self {
+            center,
+            start_x: current.0,
+            current,
+            end,
+            radius_squared: X::load_f64(squared),
+            done,
+        })
+    }
+}
+
+impl Iterator for NativeCircularCells {
+    type Item = (i16, i16);
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::util::native_x87::{MaskedX87Chop53 as X, MaskedX87Ordering};
+        while !self.done {
+            let coord = self.current;
+            self.current.0 = self.current.0.wrapping_add(1);
+            if i32::from(self.current.0) > self.end.0 {
+                self.current.0 = self.start_x;
+                self.current.1 = self.current.1.wrapping_add(1);
+            }
+            self.done = i32::from(self.current.1) > self.end.1;
+            let dx = X::load_i32(i32::from(self.center.0) - i32::from(coord.0));
+            let dy = X::load_i32(i32::from(self.center.1) - i32::from(coord.1));
+            let squared = X::add(X::mul(dx, dx), X::mul(dy, dy));
+            // Native FCOMPI/JBE also accepts unordered, unlike Rust float <=.
+            if X::compare(squared, self.radius_squared) != MaskedX87Ordering::Greater {
+                return Some(coord);
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod native_circle_tests {
+    use super::NativeCircularCells;
+    use crate::util::native_x87::NativeF64Bits;
+
+    #[test]
+    fn ares_airburst_circle_matches_original_finite_and_nonterminating_controls() {
+        // Original1001A211/1001A010 controls; fixed table supplied null so
+        // these assert geometry only, not map allocation or child construction.
+        let default =
+            NativeCircularCells::new((256, 256), NativeF64Bits::from_bits(1.5f64.to_bits()))
+                .unwrap()
+                .collect::<Vec<_>>();
+        assert_eq!(
+            default,
+            vec![
+                (255, 255),
+                (256, 255),
+                (257, 255),
+                (255, 256),
+                (256, 256),
+                (257, 256),
+                (255, 257),
+                (256, 257),
+                (257, 257)
+            ]
+        );
+        for bits in [
+            (-1.5f64).to_bits(),
+            0x7ff8_0000_0000_0000,
+            0x7ff0_0000_0000_0000,
+        ] {
+            assert_eq!(
+                NativeCircularCells::new((256, 256), NativeF64Bits::from_bits(bits))
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+                vec![(256, 256), (257, 256), (256, 257), (257, 257)]
+            );
+        }
+        assert!(
+            NativeCircularCells::new((256, 256), NativeF64Bits::from_bits((-2.5f64).to_bits()))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(
+            NativeCircularCells::new((0, 0), NativeF64Bits::from_bits(32767f64.to_bits())).is_err()
+        );
+    }
+}

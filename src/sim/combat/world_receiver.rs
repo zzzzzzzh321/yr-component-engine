@@ -3882,11 +3882,10 @@ pub(crate) fn commit_projectile_detonations_inline(
             crate::sim::projectile::ProjectileDetonationReason::DeathWeapon
                 | crate::sim::projectile::ProjectileDetonationReason::AttachEffectShot
         );
-        // Phobos `BulletClass_Explodes_AirburstCheck1/2` make `Splits` take
-        // the airburst arm: one detonation and no outer cluster draws.
-        let phobos_splits = cfg!(feature = "phobos") && projectile_type.is_some_and(|p| p.splits());
+        // Ares1001A7E0/1001A810 at468EB9/468FFA and the existing
+        // Phobos gates share the type's one effective Airburst||Splits owner.
         let (clusters, cluster_draws) = match projectile_type {
-            Some(projectile) if !projectile.airburst && !phobos_splits && !single_detonation => {
+            Some(projectile) if !projectile.airburst_arm() && !single_detonation => {
                 (projectile.cluster.max(0), true)
             }
             _ => (1, false),

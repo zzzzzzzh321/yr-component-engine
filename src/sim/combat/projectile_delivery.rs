@@ -384,19 +384,37 @@ pub(crate) fn admit_fired_bullet(
         bullet.max_speed,
         rules,
     );
-    let spawn = delivery.spawn(&world.substrate.entities, rules, projectile_type, bullet);
-    world.admit_projectile(bullet_id, spawn);
-    Simulation::finish_projectile_construction(
-        &world.interner,
-        &world.substrate,
-        &world.houses,
-        &mut world.projectiles,
-        bullet_id,
-        rules,
-    );
+    // Construct4664C0 precedes Fire468670. Ares10019210 may already have
+    // constructed this identity before its heading draw; never reconstruct it.
+    if let Some(existing) = world.projectiles.get(bullet_id) {
+        assert_eq!(existing.native_unique_id(), bullet.native_unique_id);
+        assert!(
+            !existing.in_logic_vector(),
+            "duplicate fired Bullet identity"
+        );
+    } else {
+        world.projectiles.construct(
+            bullet_id,
+            bullet.native_unique_id,
+            world.session.binary_frame(),
+            bullet.source_id,
+            bullet.target,
+            bullet.payload,
+        );
+        Simulation::finish_projectile_construction(
+            &world.interner,
+            &world.substrate,
+            &world.houses,
+            &mut world.projectiles,
+            bullet_id,
+            rules,
+        );
+    }
     if let Some(range) = bullet.projectile_range {
         world.projectiles.set_weapon_fuel(bullet_id, range);
     }
+    let spawn = delivery.spawn(&world.substrate.entities, rules, projectile_type, bullet);
+    world.fire_constructed_projectile(bullet_id, spawn);
     #[cfg(test)]
     if let Some(fixture) = world.receiver_fixture.as_mut() {
         fixture
@@ -446,4 +464,36 @@ fn inviso_fire_placement(
         weapon.range_leptons,
         &mut *scenario_rng,
     )
+}
+
+/// `Target->GetCoords()` for the target held by a Bullet: delegate the
+/// Entity/Terrain/Cell arms to the shared navcom owner; the shared Dummy and
+/// a null target are this caller's own cases.
+pub(super) fn target_get_coords(
+    world: &Simulation,
+    target: ProjectileTarget,
+) -> Option<ProjectileCoord> {
+    let terrain = world.resolved_terrain.as_ref();
+    let cells = terrain.map(crate::map::resolved_terrain::NativeCellQuery::canonical);
+    let coord = match target {
+        ProjectileTarget::Entity(id) | ProjectileTarget::Terrain(id) => {
+            crate::sim::movement::ground_pose::target_get_coords(
+                crate::sim::combat::TargetKind::Entity(id),
+                world,
+                cells.as_ref(),
+            )?
+        }
+        ProjectileTarget::Cell { rx, ry } => crate::sim::movement::ground_pose::target_get_coords(
+            crate::sim::combat::TargetKind::Cell(rx, ry),
+            world,
+            cells.as_ref(),
+        )?,
+        ProjectileTarget::DummyCell => {
+            return Some(crate::sim::projectile::dummy_cell_ground_coord(
+                &world.effective_shared_cell_dummy(),
+            ));
+        }
+        ProjectileTarget::None => return None,
+    };
+    Some(ProjectileCoord::new(coord.x, coord.y, coord.z))
 }

@@ -579,17 +579,22 @@ pub fn distance_3d_leptons(lhs: [i32; 3], rhs: [i32; 3]) -> i32 {
 }
 
 /// Ares `BulletClass_Update_Ranged @ 1001ACBE..1001AD02`: wrapping coordinate
-/// deltas, PC53/chop `(dx²+dy²)+dz²`, true nearest-53 sqrt, then CRT100772B0's
-/// signed32 truncation. This does not use gamemd's f32 `Sqrt_Approx` distance.
-pub fn true_distance_3d_leptons(lhs: [i32; 3], rhs: [i32; 3]) -> i32 {
+/// deltas, PC53/chop `(dx²+dy²)+dz²`, then true nearest-53 sqrt. The Ares
+/// candidate gate1001A464 compares this value before any integer conversion.
+/// This does not use gamemd's f32 `Sqrt_Approx` distance.
+pub fn true_distance_3d(lhs: [i32; 3], rhs: [i32; 3]) -> X87Value {
     let squares = [0, 1, 2].map(|axis| {
         let delta = X87Chop53::load_i32(lhs[axis].wrapping_sub(rhs[axis]));
         X87Chop53::mul(delta, delta)
     });
     let squared = X87Chop53::add(X87Chop53::add(squares[0], squares[1]), squares[2]);
-    let root = X87Chop53::sqrt_nearest53(squared)
-        .expect("a sum of i32 squares is non-negative and finite");
-    MaskedX87Chop53::fistp_i32_masked(root.into())
+    X87Chop53::sqrt_nearest53(squared).expect("a sum of i32 squares is non-negative and finite")
+}
+
+/// CRT100772B0 conversion after the same distance kernel in Update_Ranged.
+/// Candidate gates at1001A464 compare the untruncated value above instead.
+pub fn true_distance_3d_leptons(lhs: [i32; 3], rhs: [i32; 3]) -> i32 {
+    MaskedX87Chop53::fistp_i32_masked(true_distance_3d(lhs, rhs).into())
 }
 
 /// The x87 length native distances take: each component `FILD`ed, squared and

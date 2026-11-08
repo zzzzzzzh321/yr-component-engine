@@ -9,7 +9,7 @@ use crate::sim::rng::SimRng;
 use crate::sim::world::{FrameEffects, UninitContext};
 use serde_json::Value;
 
-fn rules_ini() -> &'static str {
+pub(super) fn rules_ini() -> &'static str {
     // Secondary registers the child BEFORE the stock Weapon sweep. The
     // Airburst factory in the later Bullet sweep never recursively reads it.
     "[Clear]\nBuildable=yes\n[VehicleTypes]\n0=SOURCE\n1=VICTIM\n\
@@ -36,7 +36,16 @@ fn rules() -> RuleSet {
 #[cfg(not(feature = "phobos"))]
 fn scene(z: i32) -> (Simulation, RuleSet, u64, ProjectileDetonation) {
     let rules = rules();
+    scene_with_rules(z, rules)
+}
+
+#[cfg(not(feature = "phobos"))]
+pub(super) fn scene_with_rules(
+    z: i32,
+    rules: RuleSet,
+) -> (Simulation, RuleSet, u64, ProjectileDetonation) {
     let mut world = crate::sim::arena_fixture::rival_arena(&rules, 31);
+    world.external_mod = rules.external_mod.as_deref().cloned();
     world.intern_rule_type_ids(&rules);
     world.resolve_type_handles(&rules);
     world.session.set_binary_frame_for_test(100);
@@ -64,7 +73,7 @@ fn scene(z: i32) -> (Simulation, RuleSet, u64, ProjectileDetonation) {
     (world, rules, source, request)
 }
 
-fn detonate(world: &mut Simulation, rules: &RuleSet, request: ProjectileDetonation) {
+pub(super) fn detonate(world: &mut Simulation, rules: &RuleSet, request: ProjectileDetonation) {
     let mut run = crate::sim::combat::world_receiver::ReceiverRun::default();
     crate::sim::combat::world_receiver::commit_projectiles(
         world,

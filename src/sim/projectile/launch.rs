@@ -3,7 +3,8 @@
 //! Owners: 6FE663..6FE8E7 (launch scatter), 6FE8EE..6FF014, 48A8D0/48A9D0,
 //! 4CAE30/4CB3D0, 4CADB0 and 4CACB0/4CAD00, BulletClass::Fire's flak
 //! placement (46874E..4688A5) and SpawnShrapnel's child velocity
-//! (46A5D2..46A86D). This module does not resolve world receivers.
+//! (46A5D2..46A86D), and installed Ares Airburst1001A6C7..1001A76F.
+//! This module does not resolve world receivers.
 
 use crate::util::native_x87::{NativeF64Bits, X87Chop53 as X, X87Ordering, X87Value};
 use crate::util::retail_trig::{AcosTable, TrigTable};
@@ -452,27 +453,72 @@ pub(crate) fn missile_launch_velocity(scale: NativeF64Bits) -> ProjectileVelocit
     ])
 }
 
-/// Airburst469FA0..46A0D5 (center repeats46A172..28A): signed Speed/10,
-/// one Scenario RandomRanged(0,32), then the original sine/cosine table.
-/// Tiny horizontal components are retained: the literal pitch is near3π/2,
-/// not exactly a vertical vector. Native execution: projectile_oracle/airburst.
-pub(crate) fn airburst_launch_velocity(speed: i32, rng: &mut SimRng) -> ProjectileVelocity {
+/// Selects caller parameters for the one Airburst launch owner. The installed
+/// Ares replacement uses full Speed and a different DirStruct turn constant.
+#[derive(Clone, Copy)]
+pub(crate) enum AirburstLaunchProfile {
+    Retail,
+    Ares,
+}
+
+/// Airburst469FA0..46A0D5 (center repeats46A172..28A), or installed Ares
+/// DetonateAt_Splits1001A6C7..1001A76F. Each successfully constructed child
+/// draws one Scenario heading here; the caller owns construction/admission.
+/// Tiny horizontal components and signed zero remain part of the velocity.
+pub(crate) fn airburst_launch_velocity(
+    speed: i32,
+    rng: &mut SimRng,
+    profile: AirburstLaunchProfile,
+) -> ProjectileVelocity {
+    let last_heading = match profile {
+        AirburstLaunchProfile::Retail => 32,
+        AirburstLaunchProfile::Ares => 31,
+    };
+    let draw = rng.next_range_i32_inclusive(0, last_heading) as u8;
+    airburst_launch_with(speed, profile, draw)
+}
+
+fn airburst_launch_with(
+    speed: i32,
+    profile: AirburstLaunchProfile,
+    draw: u8,
+) -> ProjectileVelocity {
     const PITCH: NativeF64Bits = NativeF64Bits::from_bits(0x4012_d989_1049_ee22);
-    const TURN: NativeF64Bits = NativeF64Bits::from_bits(0xbf19_222d_989f_5e57);
-    let draw = rng.next_range_i32_inclusive(0, 32) as u8;
-    let angle = i32::from((u16::from(draw) << 8) as i16) - 0x3fff;
-    let heading = round(X::mul(X::load_i32(angle), d(TURN)));
+    const RETAIL_TURN: NativeF64Bits = NativeF64Bits::from_bits(0xbf19_222d_989f_5e57);
+    // Installed Ares10097DC8 and10097DC0, read from the original DLL.
+    const ARES_TURN: NativeF64Bits = NativeF64Bits::from_bits(0xbf19_2214_7658_a371);
+    const ARES_FLAT: NativeF64Bits = NativeF64Bits::from_bits(0xbcb1_a5ff_ffff_da55);
+    let (shift, turn, launch_speed) = match profile {
+        AirburstLaunchProfile::Retail => (8, RETAIL_TURN, speed / 10),
+        AirburstLaunchProfile::Ares => (11, ARES_TURN, speed),
+    };
+    let angle = i32::from((u16::from(draw) << shift) as i16) - 0x3fff;
+    let heading = round(X::mul(X::load_i32(angle), d(turn)));
     let trig = TrigTable::embedded();
     let sine = round(trig.sin_from_table(heading));
     let cosine = round(trig.cos_from_table(heading));
-    let speed = X::load_i32(speed / 10);
-    // 469FEC computes sin first, but 46A07D..46A092 copy the later cos
-    // product to Fire's vector X (+88), and the saved sin product to Y (+90).
-    ProjectileVelocity::from_native([
-        store(X::mul(X::mul(trig.cos_from_table(d(PITCH)), cosine), speed)),
-        store(X::mul(X::mul(trig.cos_from_table(d(PITCH)), sine), speed)),
-        store(X::mul(trig.sin_from_table(d(PITCH)), speed)),
-    ])
+    let scalar = X::load_i32(launch_speed);
+    let flat = match profile {
+        AirburstLaunchProfile::Retail => trig.cos_from_table(d(PITCH)),
+        // Ares1001A720..1001A72E multiplies the complete speed before
+        // the heading components, unlike the original pitch-first products.
+        AirburstLaunchProfile::Ares => X::mul(scalar, d(ARES_FLAT)),
+    };
+    let [x, y] = [cosine, sine].map(|direction| {
+        let product = X::mul(flat, direction);
+        match profile {
+            AirburstLaunchProfile::Retail => X::mul(product, scalar),
+            AirburstLaunchProfile::Ares => product,
+        }
+    });
+    let z = match profile {
+        AirburstLaunchProfile::Retail => X::mul(trig.sin_from_table(d(PITCH)), scalar),
+        // Ares1001A724 NEG is signed32, before FILD; INT_MIN wraps.
+        AirburstLaunchProfile::Ares => X::load_i32(speed.wrapping_neg()),
+    };
+    // Original469FEC/46A07D and Ares1001A74A..1001A768 both place the
+    // cosine product in X and the sine product in Y, with explicit stores.
+    ProjectileVelocity::from_native([x, y, z].map(store))
 }
 
 /// `BulletClass::SpawnShrapnel`'s child launch velocity. Both branches turn
@@ -787,6 +833,25 @@ pub fn fireat_launch(input: FireAtLaunch) -> Option<FireAtLaunchResult> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn ares_airburst_launch_matches_original_numeric_controls() {
+        // Original Ares1001A6D0..1001A76F with post-RandomRanged draw and
+        // child Speed supplied. The original table callees are executed;
+        // no object factory, RNG or Fire callback is part of these goldens.
+        for (draw, [x, y]) in [
+            (0, [0xb9c6_3447_70ff_d09a, 0xbd14_2157_ffff_d508]),
+            (8, [0xbd14_2157_ffff_d508, 0x8000_0000_0000_0000]),
+            (31, [0x3cef_6af0_7bb6_6cf0, 0xbd13_be52_d39f_25db]),
+        ] {
+            let velocity = airburst_launch_with(73, AirburstLaunchProfile::Ares, draw);
+            assert_eq!(
+                velocity.native().map(|axis| axis.bits()),
+                [x, y, 0xc052_4000_0000_0000],
+                "draw {draw}"
+            );
+        }
+    }
 
     #[test]
     fn radial_fire_matches_original_pre_and_post_fire() {

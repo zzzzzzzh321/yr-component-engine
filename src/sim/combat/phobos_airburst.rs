@@ -62,6 +62,7 @@ use crate::util::native_x87::{NativeF32Bits, NativeF64Bits, X87Chop53 as X};
 use crate::util::retail_trig::TrigTable;
 
 use super::{FiredBullet, admit_fired_bullet};
+use super::projectile_delivery::target_get_coords;
 
 /// `[-2.44921270764e-16]` in Phobos' drop-down arm (`cos(1.5 * Pi * 1.00001)`).
 const DROP_FLAT_SPEED_FACTOR: f64 = -2.44921270764e-16;
@@ -836,35 +837,6 @@ fn distance_squared(left: ProjectileCoord, right: ProjectileCoord) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
-/// `Target->GetCoords()` for the target held by a Bullet: delegate the
-/// Entity/Terrain/Cell arms to the shared navcom owner; the shared Dummy and
-/// a null target are this caller's own cases.
-fn target_get_coords(world: &Simulation, target: ProjectileTarget) -> Option<ProjectileCoord> {
-    let terrain = world.resolved_terrain.as_ref();
-    let cells = terrain.map(NativeCellQuery::canonical);
-    let coord = match target {
-        ProjectileTarget::Entity(id) | ProjectileTarget::Terrain(id) => {
-            crate::sim::movement::ground_pose::target_get_coords(
-                crate::sim::combat::TargetKind::Entity(id),
-                world,
-                cells.as_ref(),
-            )?
-        }
-        ProjectileTarget::Cell { rx, ry } => crate::sim::movement::ground_pose::target_get_coords(
-            crate::sim::combat::TargetKind::Cell(rx, ry),
-            world,
-            cells.as_ref(),
-        )?,
-        ProjectileTarget::DummyCell => {
-            return Some(crate::sim::projectile::dummy_cell_ground_coord(
-                &world.effective_shared_cell_dummy(),
-            ));
-        }
-        ProjectileTarget::None => return None,
-    };
-    Some(ProjectileCoord::new(coord.x, coord.y, coord.z))
-}
-
 /// The current coordinate of a child target, delegating the Cell/Entity/
 /// Terrain arms to the shared +0x58 owner.
 fn target_coord(world: &Simulation, target: ProjectileTarget) -> Option<ProjectileCoord> {
@@ -1010,8 +982,7 @@ fn allowed_splits_target(
         targeting.can_target,
         Some(techno_content),
         world.cell_has_bridge_head(cell),
-    )
-        || !super::crit::techno_eligible(entity.category(), targeting.can_target)
+    ) || !super::crit::techno_eligible(entity.category(), targeting.can_target)
         || !super::health_in_threshold(
             entity.health.current(),
             object.strength,

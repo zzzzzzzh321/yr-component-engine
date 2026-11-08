@@ -1146,3 +1146,62 @@ fn sdk_ini_selection_is_layered_frozen_and_restored_with_the_program() {
         "frozen selection enters the program checksum"
     );
 }
+
+#[test]
+#[ignore = "requires VERA_SDK_AIRBURST_WASM"]
+fn sdk_airburst_retained_projectile_source_excludes_later_same_id_weapon() {
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=Early\n[Early]\nPrimary=EarlyGun\n\
+         [EarlyGun]\nProjectile=Shared\n[Shared]\nSplits=yes\nAirburstSpread=250%\nAroundTarget=no\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str(
+            "[VehicleTypes]\n1=Late\n[Late]\nPrimary=Shared\n\
+         [Shared]\nProjectile=LateShot\n[LateShot]\nSplits=no\n",
+        ),
+    );
+    let processed = layers.process().unwrap();
+    let flat = processed.sdk_passes().last().unwrap();
+    let host = NativeHost::configuration(flat.clone(), vec![])
+        .with_registries(processed.sdk_registries().last().unwrap().clone())
+        .enable_projectile_inputs();
+    assert_eq!(
+        host.config_read(
+            "Shared",
+            "Splits",
+            "projectile-effective:ares-bool",
+            b"false"
+        )
+        .unwrap(),
+        b"true"
+    );
+    assert!(
+        host.config_read("Shared", "Splits", "weapon-effective:ares-bool", b"false")
+            .is_err(),
+        "another family requires its own capability"
+    );
+    let bytes = std::fs::read(std::env::var_os("VERA_SDK_AIRBURST_WASM").unwrap()).unwrap();
+    let mut rules = crate::rules::ruleset::RuleSet::from_processed_rules(&processed).unwrap();
+    let program = Program::load_with_registries(
+        bytes.clone(),
+        &crate::util::sha256::sha256_hex(&bytes),
+        processed.sdk_passes(),
+        &["Early".into(), "Late".into()],
+        &[],
+        &rules.weapon_names(),
+        processed.sdk_registries(),
+    )
+    .unwrap();
+    rules.external_mod = Some(Arc::new(program));
+    rules.bind_resource_policies().unwrap();
+    let policy = rules
+        .projectile("Shared")
+        .unwrap()
+        .airburst_policy()
+        .unwrap();
+    assert!(policy.splits);
+    assert!(!policy.around_target);
+    assert_eq!(policy.spread_bits, 2.5f64.to_bits());
+    assert!(!rules.projectile("LateShot").unwrap().splits());
+}

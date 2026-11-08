@@ -1990,6 +1990,18 @@ impl ProjectileStore {
             spawn.target,
             spawn.payload,
         );
+        self.fire_at(id, binary_frame, spawn, location)
+    }
+
+    /// Fire468670 of an already constructed Bullet. Constructor state (range,
+    /// identity, owner and palette) is retained; this owns only placement/motion.
+    pub(crate) fn fire_at(
+        &mut self,
+        id: u64,
+        binary_frame: u32,
+        spawn: ProjectileSpawn,
+        location: ProjectileCoord,
+    ) -> u64 {
         // Fire468670 owns placement, motion and proximity initialization;
         // direct detonations never execute this part of the lifetime.
         let projectile = self.get_mut(id).expect("constructed Bullet");

@@ -149,6 +149,8 @@ pub struct ProjectileType {
     pub shrapnel_weapon: Option<String>,
     /// Airburst child weapon (+2B0), retained by the ordered Rules reader.
     pub airburst_weapon: Option<String>,
+    /// Immutable component projection, rebuilt from its frozen configuration.
+    resource_policy: Option<vera_mod_api::ProjectileResourcePolicy>,
     /// Phobos `BulletTypeExt` airburst/splits settings. Absent keys keep the
     /// Phobos constructor defaults; only Phobos builds read or consume them.
     #[cfg(feature = "phobos")]
@@ -352,10 +354,27 @@ pub(crate) fn read_phobos_gravity(section: &IniSection) -> Option<NativeF64Bits>
 }
 
 impl ProjectileType {
+    pub(crate) const fn airburst_policy(&self) -> Option<vera_mod_api::AirburstPolicy> {
+        match self.resource_policy {
+            Some(policy) => policy.airburst,
+            None => None,
+        }
+    }
+
+    pub(crate) fn bind_resource_policy(
+        &mut self,
+        policy: Option<vera_mod_api::ProjectileResourcePolicy>,
+    ) {
+        self.resource_policy = policy;
+    }
+
     /// Phobos `Splits=`: the Phobos emitter replaces the native tail and the
     /// parent's outer cluster loop, exactly as `BulletClass::Explodes`'s
     /// airburst checks do with `Airburst || Splits`. False without the feature.
     pub const fn splits(&self) -> bool {
+        if let Some(policy) = self.airburst_policy() {
+            return policy.splits;
+        }
         #[cfg(feature = "phobos")]
         {
             self.phobos_airburst.splits
@@ -467,6 +486,7 @@ impl ProjectileType {
             phobos_airburst: crate::rules::phobos_airburst::PhobosAirburstType::from_section(
                 section,
             ),
+            resource_policy: None,
             image: None,
             image_loads: Vec::new(),
             voxel_image_load: None,

@@ -841,9 +841,9 @@ const PARADROP_INFANTRY_KEYS: [&str; 4] = [
 pub(crate) struct SdkRegistryPass {
     animations: Vec<String>,
     reads: Vec<SdkRegistryRead>,
-    // Immutable snapshots of the actual Weapon instances' reached Rules reads.
-    // A later Projectile with the same stored ID is a different native owner.
-    weapon_bodies: std::sync::Arc<Vec<IniSection>>,
+    // Retained physical sources are class-qualified: a same-ID resource in
+    // another family cannot replace the native object's reached body history.
+    resource_bodies: std::sync::Arc<HashMap<RulesTypeFamily, Vec<IniSection>>>,
     production: vera_mod_api::ProductionRegistryView,
     foundation: vera_mod_api::FoundationRegistryView,
     cameo: vera_mod_api::CameoRegistryView,
@@ -906,10 +906,13 @@ impl SdkRegistryPass {
         &self.production
     }
     pub(crate) fn names(&self, registry: &str) -> Vec<String> {
-        if registry == "$weapon-config" {
+        let family = Self::resource_family(registry);
+        if let Some(family) = family {
             return self
-                .weapon_bodies
-                .iter()
+                .resource_bodies
+                .get(&family)
+                .into_iter()
+                .flatten()
                 .map(|body| body.name.clone())
                 .collect();
         }
@@ -924,19 +927,39 @@ impl SdkRegistryPass {
             .collect()
     }
 
-    pub(crate) fn weapon_effective_section(&self, owner: &str) -> Result<&IniSection, String> {
-        self.weapon_bodies
-            .iter()
-            .find(|body| body.name == owner)
-            .ok_or_else(|| "retained Weapon reader requires its registered owner".into())
+    fn resource_family(namespace: &str) -> Option<RulesTypeFamily> {
+        match namespace {
+            "$weapon-config" => Some(RulesTypeFamily::Weapon),
+            "$projectile-config" => Some(RulesTypeFamily::Projectile),
+            _ => None,
+        }
     }
 
-    pub(crate) fn weapon_effective_input_bytes(&self) -> Result<usize, String> {
-        self.weapon_bodies.iter().try_fold(0usize, |size, body| {
-            serde_json::to_vec(body)
-                .map(|bytes| size.saturating_add(bytes.len()))
-                .map_err(|error| error.to_string())
-        })
+    pub(crate) fn resource_effective_section(
+        &self,
+        namespace: &str,
+        owner: &str,
+    ) -> Result<&IniSection, String> {
+        let family = Self::resource_family(namespace).ok_or("unknown retained resource family")?;
+        self.resource_bodies
+            .get(&family)
+            .into_iter()
+            .flatten()
+            .find(|body| body.name == owner)
+            .ok_or_else(|| "retained resource reader requires its registered family/owner".into())
+    }
+
+    pub(crate) fn resource_effective_input_bytes(&self, namespace: &str) -> Result<usize, String> {
+        let family = Self::resource_family(namespace).ok_or("unknown retained resource family")?;
+        self.resource_bodies
+            .get(&family)
+            .into_iter()
+            .flatten()
+            .try_fold(0usize, |size, body| {
+                serde_json::to_vec(body)
+                    .map(|bytes| size.saturating_add(bytes.len()))
+                    .map_err(|error| error.to_string())
+            })
     }
 
     pub(crate) fn read_animation_reference(
@@ -7118,17 +7141,25 @@ impl RulesPassProcessor {
         });
     }
 
-    fn sdk_registry_pass(&self, include_weapon_bodies: bool) -> SdkRegistryPass {
+    fn sdk_registry_pass(&self, include_resource_bodies: bool) -> SdkRegistryPass {
         SdkRegistryPass {
-            weapon_bodies: std::sync::Arc::new(if include_weapon_bodies {
-                self.families
-                    .get(&RulesTypeFamily::Weapon)
+            resource_bodies: std::sync::Arc::new(if include_resource_bodies {
+                [RulesTypeFamily::Weapon, RulesTypeFamily::Projectile]
                     .into_iter()
-                    .flatten()
-                    .map(|member| member.body.clone())
+                    .map(|family| {
+                        (
+                            family,
+                            self.families
+                                .get(&family)
+                                .into_iter()
+                                .flatten()
+                                .map(|member| member.body.clone())
+                                .collect(),
+                        )
+                    })
                     .collect()
             } else {
-                Vec::new()
+                HashMap::new()
             }),
             faction: vera_mod_api::FactionRegistryView {
                 sides: self
