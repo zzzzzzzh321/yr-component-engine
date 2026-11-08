@@ -44,6 +44,14 @@ not retroactively resolve an earlier unknown reference.
 `verse-token` takes a literal JSON string as its current argument and returns
 the existing armor numeric parser's binary64/independent-flag record. It does
 not perform another INI read or implement a second numeric algorithm.
+`weapon-registry-view` is an independently capability-gated bulk read of the
+physical Weapon array, retaining equal names with different ordinals. Its output
+uses the same 8 MiB message cap. `weapon-instance-effective:<scalar>` takes a
+`WeaponReadValue` and delegates to the same canonical scalar reader after the
+host checks the ordinal and exact stored name. Scalar input/output limits remain
+64 KiB. Legacy and instance capabilities charge the same retained Weapon source
+once, plus the bounded instance view. Simulation hosts expose neither source.
+
 `rules-registry-view` returns the typed catalogs and actual read-point prefixes
 for a physical Rules pass. Its bulk output uses the 8 MiB message cap; ordinary
 INI reader outputs and all reader current-value inputs retain their 64 KiB cap.

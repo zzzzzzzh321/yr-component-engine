@@ -67,6 +67,12 @@ pub(crate) struct WeaponRecord<'a> {
 }
 
 impl WeaponRecord<'_> {
+    /// The actual WeaponType array slot retained by this WeaponStruct.
+    #[inline]
+    pub(crate) fn handle(&self, rules: &RuleSet) -> Option<crate::rules::ruleset::WeaponHandle> {
+        rules.resolved_weapon_handle(self.weapon_id?, self.resolved)
+    }
+
     /// The record's WeaponType pointer: `rules.weapon(self.weapon_id?)`,
     /// read through the handle the type resolved when `rules` built it.
     #[inline]
@@ -79,6 +85,9 @@ impl WeaponRecord<'_> {
 pub struct SelectedWeapon<'a> {
     /// Section id of the selected weapon.
     pub weapon_id: &'a str,
+    /// The selected pointer's stable Weapon array identity. Stored IDs can
+    /// coincide after AbstractType410800's 24-byte truncation.
+    pub weapon_handle: crate::rules::ruleset::WeaponHandle,
     pub weapon: &'a WeaponType,
     pub warhead: &'a WarheadType,
     /// Legacy event label: index1 is Secondary, all other indices Primary.
@@ -569,7 +578,7 @@ pub(crate) fn open_topped_cargo_range(
     shortest
 }
 
-fn current_weapon_index(obj: &ObjectType, facts: AttackerFacts) -> i32 {
+pub(super) fn current_weapon_index(obj: &ObjectType, facts: AttackerFacts) -> i32 {
     // GetCurrentWeapon70E1A0 reads CurrentWeaponNumber only with HasTurrets.
     if obj.turret_count > 0 {
         facts.current_weapon_number
@@ -1010,9 +1019,12 @@ pub(crate) fn resolve_weapon_index<'a>(
     entities: &EntityStore,
     interner: &StringInterner,
 ) -> Option<SelectedWeapon<'a>> {
-    let weapon = get_weapon(entity, obj, index, entities, rules, interner)?;
+    let record = get_weapon_record(entity, obj, index, entities, rules, interner)?;
+    let weapon_handle = record.handle(rules)?;
+    let weapon = rules.weapon_by_handle(weapon_handle)?;
     Some(SelectedWeapon {
         weapon_id: &weapon.id,
+        weapon_handle,
         weapon,
         warhead: warhead_of(rules, weapon)?,
         slot: if index == 1 {

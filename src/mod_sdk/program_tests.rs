@@ -20,6 +20,10 @@ fn sdk_hook_binary_ordinals_preserve_accepted_component_saves() {
         crate::util::save_codec::serialize(&api::HookKind::ProjectileResource).unwrap(),
         29u32.to_le_bytes()
     );
+    assert_eq!(
+        crate::util::save_codec::serialize(&api::HookKind::WeaponInstanceResource).unwrap(),
+        30u32.to_le_bytes()
+    );
 }
 
 #[test]

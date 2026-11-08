@@ -4570,14 +4570,19 @@ mod armor_admission_tests {
     }
 }
 
-/// O(1) index into a `RuleSet`'s weapons, which [`RuleSet::weapon_handle`]
-/// resolves a name to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Stable allocation index in the processed native Weapon array. Names are
+/// descriptive: distinct native instances can have the same stored24-byte ID.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub struct WeaponHandle(u32);
 
-/// A weapon name as one `RuleSet` resolved it ([`RuleSet::weapon_handle`]).
-/// [`RuleSet::resolved_weapon`] reads the handle only in that set and looks
-/// the name up anywhere else.
+impl WeaponHandle {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A native weapon pointer projected by one `RuleSet`. A foreign set can
+/// resolve its descriptive name only when that name identifies one instance.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ResolvedWeapon {
     /// The resolving set's serial; 0, which no set has, when unresolved.
@@ -4585,10 +4590,11 @@ pub struct ResolvedWeapon {
     handle: Option<WeaponHandle>,
 }
 
-/// The weapons a type's records name — `Weapon[]`, `EliteWeapon[]`,
+/// The native pointers in a type's records — `Weapon[]`, `EliteWeapon[]`,
 /// `OccupyWeapon=` and `EliteOccupyWeapon=` — resolved once by the set that
 /// built the type ([`RuleSet::resolve_type_weapons`]), so per-object reads
-/// skip hashing the name. Derived: never hashed or serialized.
+/// preserve the actual instance. Allocation indices are stable gameplay
+/// identity; only the RuleSet serial is a transient cache guard.
 #[derive(Clone, Debug, Default)]
 pub struct TypeWeapons {
     /// The resolving set's serial; 0 for a type no set resolved.
@@ -4716,10 +4722,10 @@ pub struct RuleSet {
     /// Case-insensitive identity of each type in the four native TechnoType
     /// registries to its ordered array index (`+0xDF8`).
     type_array_indices: HashMap<(ObjectCategory, String), i32>,
-    /// All weapons' handles indexed by ID (e.g., "105mm" → its
-    /// `weapon_types` index). Built once with the set, never changed.
+    /// Case-insensitive stored ID to the first native allocation. Name
+    /// lookup is distinct from already-resolved pointer-bearing records.
     weapons: LookupMap<String, WeaponHandle>,
-    /// The weapons `weapons` indexes, one per key.
+    /// One record per native allocation, including equal stored IDs.
     weapon_types: Vec<WeaponType>,
     /// Derived from the one processed native Weapon family, in allocation
     /// order. The bool admits only slots whose Weapon/Warhead stored IDs map
@@ -5211,7 +5217,11 @@ impl RuleSet {
     }
 
     pub(crate) fn weapon_names(&self) -> Vec<String> {
-        let mut names = self.weapons.keys().cloned().collect::<Vec<_>>();
+        let mut names = self
+            .weapons
+            .values()
+            .map(|handle| self.weapon_types[handle.index()].id.clone())
+            .collect::<Vec<_>>();
         names.sort();
         names
     }
@@ -5277,19 +5287,19 @@ impl RuleSet {
                 }
             }
         }
-        let names = self.weapon_names();
-        let policies = names
-            .into_iter()
-            .map(|name| {
-                let policy = self
-                    .external_mod
-                    .as_ref()
-                    .map(|program| program.weapon_resource_policy(&name))
-                    .transpose()?
-                    .flatten();
-                let weapon = self.weapon(&name).expect("retained weapon");
+        let mut weapon_name_counts = HashMap::<String, usize>::new();
+        for weapon in &self.weapon_types {
+            *weapon_name_counts
+                .entry(weapon.id.to_ascii_uppercase())
+                .or_default() += 1;
+        }
+        let policies = self.weapon_types
+            .iter()
+            .enumerate()
+            .map(|(ordinal, weapon)| {
+                let handle = WeaponHandle(u32::try_from(ordinal).map_err(|_| "Weapon array exceeds SDK width")?);
                 let context = vera_mod_api::WeaponFiringResourceContext {
-                    weapon_name: name.clone(),
+                    weapon_name: weapon.id.clone(),
                     animation_count: weapon
                         .anim
                         .len()
@@ -5298,13 +5308,30 @@ impl RuleSet {
                     is_sonic: weapon.is_sonic,
                     use_fire_particles: weapon.use_fire_particles,
                 };
-                let firing = self
-                    .external_mod
-                    .as_ref()
-                    .map(|program| program.weapon_firing_resource_policy(context))
-                    .transpose()?
-                    .flatten();
-                Ok((name, policy, firing))
+                let Some(program) = self.external_mod.as_ref() else {
+                    return Ok((handle, None, None));
+                };
+                let instance = vera_mod_api::WeaponInstanceResourceContext {
+                    identity: vera_mod_api::WeaponTypeRef { ordinal: handle.0 },
+                    weapon_name: context.weapon_name.clone(),
+                    animation_count: context.animation_count,
+                    is_sonic: context.is_sonic,
+                    use_fire_particles: context.use_fire_particles,
+                };
+                if let Some(policy) = program.weapon_instance_resource_policy(instance)? {
+                    return Ok((handle, policy.resource, policy.firing));
+                }
+                // Older strict contexts have no instance identity. Keep their
+                // original wire shape for unique names; never copy a same-ID
+                // first/last instance's declarations onto a different pointer.
+                let legacy = program.manifest().hooks.iter().any(|hook| matches!(hook,
+                    vera_mod_api::HookKind::WeaponResource | vera_mod_api::HookKind::WeaponFiringResource));
+                if legacy && weapon_name_counts[&weapon.id.to_ascii_uppercase()] != 1 {
+                    return Err(format!("legacy weapon component cannot identify distinct native instances named {:?}; use a component supporting weapon_instance_resource", weapon.id));
+                }
+                let policy = program.weapon_resource_policy(&weapon.id)?;
+                let firing = program.weapon_firing_resource_policy(context)?;
+                Ok((handle, policy, firing))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut projectile_names: Vec<_> = self.projectiles.keys().cloned().collect();
@@ -5346,9 +5373,18 @@ impl RuleSet {
         if ares_fan {
             for projectile in self.projectiles.values() {
                 if let Some(child) = projectile.airburst_weapon.as_deref() {
+                    // BulletType's AirburstWeapon is still a legacy name
+                    // projection. This separate factory must not borrow an
+                    // arbitrary same-name instance's travel declaration.
+                    if weapon_name_counts.get(&child.to_ascii_uppercase()).copied() != Some(1) {
+                        return Err(format!(
+                            "Ares child factory requires an unambiguous Weapon pointer projection: {child}"
+                        ));
+                    }
+                    let child_handle = self.weapon_handle(child).expect("registered child Weapon");
                     let range_bound = policies
                         .iter()
-                        .find(|(name, _, _)| name == child)
+                        .find(|(handle, _, _)| *handle == child_handle)
                         .and_then(|(_, _, firing)| *firing)
                         .and_then(|p| p.projectile_range)
                         .is_some();
@@ -5460,8 +5496,7 @@ impl RuleSet {
         for (object, sounds) in self.object_list.iter_mut().zip(type_sounds) {
             object.bind_external_promotion_sounds(sounds);
         }
-        for (name, policy, firing) in policies {
-            let handle = self.weapon_handle(&name).expect("retained weapon");
+        for (handle, policy, firing) in policies {
             self.weapon_types[handle.0 as usize].bind_resource_policy(policy);
             self.weapon_types[handle.0 as usize].bind_firing_policy(firing);
         }
@@ -6332,14 +6367,13 @@ impl RuleSet {
                 .is_some_and(|p| p.reload.is_some())
                 || complete_users & user != 0
                 || object
-                    .weapon_list
+                    .resolved_weapons()
+                    .base
                     .iter()
-                    .chain(&object.elite_weapon_list)
-                    .filter_map(|slot| slot.as_deref())
-                    .chain(object.occupy_weapon.as_deref())
-                    .chain(object.elite_occupy_weapon.as_deref())
-                    .filter_map(|name| Self::lookup_ci(&self.weapons, name))
-                    .map(|handle| &self.weapon_types[handle.0 as usize])
+                    .chain(object.resolved_weapons().elite.iter())
+                    .chain(object.resolved_weapons().occupy.iter())
+                    .flatten()
+                    .filter_map(|handle| self.weapon_types.get(handle.index()))
                     .any(|weapon| weapon.resource_policy(user).is_some());
             object.project_resource_reload(enabled);
         }
@@ -6492,8 +6526,39 @@ impl RuleSet {
             {
                 object.turret_count = slots.turret_count();
                 object.weapon_count = slots.weapon_count();
-                object.weapon_list = slots.base();
-                object.elite_weapon_list = slots.elite();
+                // Techno ReadINI7129F2 stores the factory's actual pointer;
+                // Weapon772FA0 may allocate distinct equal stored IDs.
+                let base = slots.base();
+                let elite = slots.elite();
+                let name = |index: usize| rules.weapon_types[index].id.clone();
+                object.weapon_list = base.iter().map(|slot| slot.map(&name)).collect();
+                object.elite_weapon_list = elite.iter().map(|slot| slot.map(&name)).collect();
+                object.project_resolved_weapons(TypeWeapons {
+                    rules_serial: rules.serial,
+                    base: base
+                        .into_iter()
+                        .map(|slot| {
+                            slot.map(|index| {
+                                WeaponHandle(
+                                    u32::try_from(index)
+                                        .expect("native Weapon index exceeds dword"),
+                                )
+                            })
+                        })
+                        .collect(),
+                    elite: elite
+                        .into_iter()
+                        .map(|slot| {
+                            slot.map(|index| {
+                                WeaponHandle(
+                                    u32::try_from(index)
+                                        .expect("native Weapon index exceeds dword"),
+                                )
+                            })
+                        })
+                        .collect(),
+                    occupy: [None; 2],
+                });
                 object.bind_weapon_offsets(slots.offsets());
             }
         }
@@ -7883,19 +7948,17 @@ impl RuleSet {
             weapon.occupant_anim = state.occupant_anim.map(str::to_owned);
             weapon.open_topped_anim = state.open_topped_anim.map(str::to_owned);
             weapon.attached_particle_system = state.attached_particle_system.map(str::to_owned);
-            // A repeated ID replaces the earlier weapon under its key. The
-            // reserve is `insert`'s, so the keys iterate in the order they
-            // did when the map held the weapons themselves.
-            weapons.reserve(1);
-            match weapons.entry(state.id.to_owned()) {
-                std::collections::hash_map::Entry::Occupied(slot) => {
-                    weapon_types[slot.get().0 as usize] = weapon;
-                }
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(WeaponHandle(weapon_types.len() as u32));
-                    weapon_types.push(weapon);
-                }
-            }
+            // WeaponType FindOrAllocate772FA0 retains each allocation, even
+            // when Abstract410800 truncates its name to the same24 bytes.
+            // Genuine name lookups compare case-insensitively and take first.
+            assert_eq!(state.ordinal, weapon_types.len());
+            let handle = WeaponHandle(
+                u32::try_from(state.ordinal).expect("native Weapon array exceeds dword"),
+            );
+            weapons
+                .entry(state.id.to_ascii_uppercase())
+                .or_insert(handle);
+            weapon_types.push(weapon);
         }
         // Step 3: Parse warhead sections. The projected [Warheads] registry is
         // the processor's whole Warhead family: the [Warheads] values and
@@ -8348,7 +8411,13 @@ impl RuleSet {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_fresh_serial(mut self) -> Self {
         self.serial = next_rule_set_serial();
-        self.resolve_type_weapons();
+        // A clone retains the exact native array and pointers. Only the
+        // transient cache guard changes; a name relookup loses equal IDs.
+        for object in &mut self.object_list {
+            let mut weapons = object.resolved_weapons().clone();
+            weapons.rules_serial = self.serial;
+            object.project_resolved_weapons(weapons);
+        }
         self
     }
 
@@ -8665,38 +8734,58 @@ impl RuleSet {
     /// Look up a weapon by ID (case-insensitive, gamemd parity).
     pub fn weapon(&self, id: &str) -> Option<&WeaponType> {
         self.weapon_handle(id)
-            .map(|handle| self.weapon_by_handle(handle))
+            .and_then(|handle| self.weapon_by_handle(handle))
     }
 
     /// The handle of the weapon [`Self::weapon`] answers for `id`.
     pub fn weapon_handle(&self, id: &str) -> Option<WeaponHandle> {
-        Self::lookup_ci(&self.weapons, id).copied()
+        self.weapons.get(&id.to_ascii_uppercase()).copied()
     }
 
-    /// Dereference a handle this set resolved.
+    /// Read one allocation slot. Saved and external indices are checked
+    /// before simulation admission; a missing slot is never a name fallback.
     #[inline]
-    fn weapon_by_handle(&self, handle: WeaponHandle) -> &WeaponType {
-        &self.weapon_types[handle.0 as usize]
+    pub fn weapon_by_handle(&self, handle: WeaponHandle) -> Option<&WeaponType> {
+        self.weapon_types.get(handle.index())
     }
 
-    /// [`Self::weapon`] of `id`, through `resolved` when this set resolved
-    /// it from `id`; debug builds compare the handle with the name's.
+    /// Resolve a record's actual native pointer. Foreign-set records can
+    /// only fall back through a unique name; ambiguous names cannot preserve
+    /// another RuleSet's allocation identity.
+    pub(crate) fn resolved_weapon_handle(
+        &self,
+        id: &str,
+        resolved: ResolvedWeapon,
+    ) -> Option<WeaponHandle> {
+        if resolved.rules_serial == self.serial {
+            let handle = resolved.handle?;
+            let weapon = self.weapon_by_handle(handle)?;
+            debug_assert!(
+                !crate::util::debug_checks::live_read_check_enabled()
+                    || weapon.id.eq_ignore_ascii_case(id),
+                "native Weapon slot/name mismatch"
+            );
+            return Some(handle);
+        }
+        let handle = self.weapon_handle(id)?;
+        (self
+            .weapon_types
+            .iter()
+            .filter(|weapon| weapon.id.eq_ignore_ascii_case(id))
+            .count()
+            == 1)
+            .then_some(handle)
+    }
+
+    /// The same pointer resolution used by the selected-shot handle.
     #[inline]
     pub(crate) fn resolved_weapon(
         &self,
         id: &str,
         resolved: ResolvedWeapon,
     ) -> Option<&WeaponType> {
-        if resolved.rules_serial != self.serial {
-            return self.weapon(id);
-        }
-        debug_assert!(
-            !crate::util::debug_checks::live_read_check_enabled()
-                || resolved.handle == self.weapon_handle(id),
-            "weapon {id:?} resolved to {:?}, unlike its name",
-            resolved.handle
-        );
-        resolved.handle.map(|handle| self.weapon_by_handle(handle))
+        self.resolved_weapon_handle(id, resolved)
+            .and_then(|handle| self.weapon_by_handle(handle))
     }
 
     /// Resolve every type's weapon records against this set's weapons
@@ -8710,16 +8799,24 @@ impl RuleSet {
             .iter()
             .map(|object| TypeWeapons {
                 rules_serial: self.serial,
-                base: object
-                    .weapon_list
-                    .iter()
-                    .map(|slot| resolve(slot.as_deref()))
-                    .collect(),
-                elite: object
-                    .elite_weapon_list
-                    .iter()
-                    .map(|slot| resolve(slot.as_deref()))
-                    .collect(),
+                base: if object.resolved_weapons().rules_serial == self.serial {
+                    object.resolved_weapons().base.clone()
+                } else {
+                    object
+                        .weapon_list
+                        .iter()
+                        .map(|slot| resolve(slot.as_deref()))
+                        .collect()
+                },
+                elite: if object.resolved_weapons().rules_serial == self.serial {
+                    object.resolved_weapons().elite.clone()
+                } else {
+                    object
+                        .elite_weapon_list
+                        .iter()
+                        .map(|slot| resolve(slot.as_deref()))
+                        .collect()
+                },
                 occupy: [
                     resolve(object.occupy_weapon.as_deref()),
                     resolve(object.elite_occupy_weapon.as_deref()),
@@ -8953,7 +9050,9 @@ impl RuleSet {
         let mut entries: Vec<_> = entries
             .map(|(id, value)| (id.to_ascii_uppercase(), id, value))
             .collect();
-        entries.sort_unstable_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        // Exact equal keys can be distinct native Weapon instances. Preserve
+        // the authoritative allocation order inside that equal-name group.
+        entries.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
         entries
             .into_iter()
             .map(|(upper, _, value)| (upper, value))
@@ -8970,6 +9069,52 @@ impl RuleSet {
     /// [`StateHasher`](crate::util::state_hasher::StateHasher).
     pub fn simulation_config_hash(&self) -> u64 {
         let mut hasher = crate::util::state_hasher::StateHasher::new();
+        // Weapon772FA0 can allocate equal stored IDs. Native pointer slots
+        // and their order are gameplay identity; RuleSet serials are not.
+        b"native-weapon-instances-v1".hash(&mut hasher);
+        self.weapon_types.len().hash(&mut hasher);
+        for (ordinal, weapon) in self.weapon_types.iter().enumerate() {
+            (ordinal, &weapon.id, weapon.ambient_damage).hash(&mut hasher);
+            weapon
+                .firing_policy()
+                .map(|policy| {
+                    (
+                        policy.apply_damage,
+                        policy.muzzle_facings,
+                        policy.projectile_range,
+                    )
+                })
+                .hash(&mut hasher);
+            for user in [
+                vera_mod_api::WEAPON_USER_UNIT,
+                vera_mod_api::WEAPON_USER_INFANTRY,
+                vera_mod_api::WEAPON_USER_BUILDING,
+                vera_mod_api::WEAPON_USER_AIRCRAFT,
+            ] {
+                weapon
+                    .resource_policy(user)
+                    .map(|policy| {
+                        (
+                            policy.cost,
+                            policy.reload_after_use,
+                            policy.users,
+                            policy.use_weapon_rof,
+                        )
+                    })
+                    .hash(&mut hasher);
+            }
+        }
+        for object in &self.object_list {
+            let records = object.resolved_weapons();
+            (
+                object.category,
+                &object.id,
+                &records.base,
+                &records.elite,
+                records.occupy,
+            )
+                .hash(&mut hasher);
+        }
         if let Some(catalog) = &self.cameo_resources {
             b"cameo-resources-v1".hash(&mut hasher);
             catalog.hash(&mut hasher);
@@ -9249,7 +9394,7 @@ impl RuleSet {
                 .weapon_entries()
                 .map(|(id, weapon)| (id, &weapon.rad_type))
                 .collect();
-            rad_types.sort_unstable_by_key(|&(id, _)| id);
+            rad_types.sort_by_key(|&(id, _)| id);
             rad_types.hash(&mut hasher);
             if self.external_mod.is_none() {
                 b"phobos-shield-types-v1".hash(&mut hasher);
@@ -12294,7 +12439,7 @@ impl RuleSet {
     /// Total number of weapons.
     #[cfg(test)]
     pub fn weapon_count(&self) -> usize {
-        self.weapons.len()
+        self.weapon_types.len()
     }
 
     /// Total number of warheads.
@@ -12310,16 +12455,12 @@ impl RuleSet {
 
     /// Iterate all parsed weapon types.
     pub fn weapons_iter(&self) -> impl Iterator<Item = &WeaponType> {
-        self.weapons
-            .values()
-            .map(|&handle| self.weapon_by_handle(handle))
+        self.weapon_types.iter()
     }
 
-    /// Every weapon with its ID, in the ID map's order.
+    /// Every native Weapon allocation, in canonical array order.
     fn weapon_entries(&self) -> impl Iterator<Item = (&String, &WeaponType)> {
-        self.weapons
-            .iter()
-            .map(|(id, &handle)| (id, self.weapon_by_handle(handle)))
+        self.weapon_types.iter().map(|weapon| (&weapon.id, weapon))
     }
 
     /// Total number of projectiles.
@@ -16827,6 +16968,88 @@ Projectile=Invisible
         assert_ne!(
             first.simulation_config_hash(),
             second.simulation_config_hash()
+        );
+    }
+
+    #[test]
+    fn native_weapon_instance_primary_keeps_its_pointer_after_late_same_id_allocation() {
+        // Weapon FindOrAllocate772FA0 compares the full input against the
+        // stored24-byte ID. Techno ReadINI7129D5/7129F2 retains the returned
+        // pointer. Bullet ReadINI46C305 can allocate a second instance after
+        // Rules ReadTypeData679B10..679B54 has finished the Weapon sweep.
+        let processed = RulesLayerStack::new(IniFile::from_str(
+            "[VehicleTypes]\n0=SOURCE\n[SOURCE]\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+             [ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=100\nRange=6\nSpeed=40\nProjectile=SHOT\nWarhead=WH\n\
+             [SHOT]\nROT=1\nShrapnelWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\nShrapnelCount=0\n\
+             [Warheads]\n0=WH\n[WH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
+        ))
+        .process()
+        .unwrap();
+        assert_eq!(
+            processed
+                .weapon_states()
+                .map(|weapon| weapon.damage)
+                .collect::<Vec<_>>(),
+            [100, 0],
+            "late Weapon is constructed but has not reached ReadINI"
+        );
+        let rules = RuleSet::from_processed_rules(&processed).unwrap();
+        let source = rules.object("SOURCE").unwrap();
+        let primary = rules
+            .resolved_weapon(
+                source.weapon_at(0).unwrap(),
+                source.resolved_weapons().slot(0, false),
+            )
+            .unwrap();
+        assert_eq!(
+            primary.damage, 100,
+            "ordinary Primary keeps the early pointer"
+        );
+        assert_eq!(primary.range_leptons, 6 * 256);
+        assert_eq!(
+            rules.weapons_iter().count(),
+            2,
+            "both native instances survive"
+        );
+        let hash = rules.simulation_config_hash();
+        let mut changed = rules.clone();
+        changed.weapon_types[1].damage = 7;
+        assert_ne!(
+            changed.simulation_config_hash(),
+            hash,
+            "a non-first same-name instance is hashed"
+        );
+        let mut changed = rules.clone();
+        let source = changed
+            .object_list
+            .iter_mut()
+            .find(|object| object.id == "SOURCE")
+            .unwrap();
+        let mut records = source.resolved_weapons().clone();
+        records.base[0] = Some(WeaponHandle(1));
+        source.project_resolved_weapons(records);
+        assert_ne!(
+            changed.simulation_config_hash(),
+            hash,
+            "same name, different native pointer"
+        );
+        let cloned = rules.clone().with_fresh_serial();
+        assert_eq!(
+            cloned.simulation_config_hash(),
+            hash,
+            "transient cache serial is not gameplay identity"
+        );
+        let source = cloned.object("SOURCE").unwrap();
+        assert_eq!(
+            cloned
+                .resolved_weapon(
+                    source.weapon_at(0).unwrap(),
+                    source.resolved_weapons().slot(0, false)
+                )
+                .unwrap()
+                .damage,
+            100,
+            "refreshing derived handles must not re-resolve a native pointer by name"
         );
     }
 

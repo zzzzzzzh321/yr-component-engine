@@ -2593,7 +2593,7 @@ impl MapEffectObservation {
             .collect::<Vec<_>>();
         let projectiles = (profile.observe_projectiles == Some(true)).then(|| {
             sim.projectiles().iter().take(MAX_OBSERVATION_SAMPLES + 1).map(|(&id, bullet)| {
-                let weapon = bullet.payload().installed_weapon().map(|id| sim.interner().resolve(id));
+                let weapon = bullet.payload().installed_weapon().and_then(|id| rules.weapon_by_handle(id)).map(|weapon| weapon.id.as_str());
                 let type_id = bullet.payload().projectile_type().map(|id| sim.interner().resolve(id));
                 json!({"stable_id": id, "native_id": bullet.native_unique_id(),
                     "weapon": weapon, "type_id": type_id, "source_id": bullet.source_id(),

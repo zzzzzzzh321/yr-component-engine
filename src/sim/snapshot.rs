@@ -364,6 +364,11 @@ pub enum SnapshotRestoreError {
     InvalidVoxelTypeDamage,
     #[error("invalid saved VoxelAnim {object_id} type identity")]
     InvalidVoxelAnimType { object_id: u64 },
+    #[error("invalid saved Bullet {projectile_id} WeaponType slot {weapon_ordinal}")]
+    InvalidProjectileWeapon {
+        projectile_id: u64,
+        weapon_ordinal: u32,
+    },
     #[error("invalid saved TechnoType TechLevel state: {reason}")]
     InvalidTypeTechLevels { reason: String },
     #[error("invalid scalable Bullet runtime: {0}")]
@@ -2152,6 +2157,19 @@ impl Simulation {
         saved_land: Option<crate::map::resolved_terrain::SavedCellLandValues>,
     ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
         self.validate_type_tech_levels(rules)?;
+        // BulletClass Load46AE70 swizzles WeaponType+130 separately from
+        // BulletType+AC. A saved ordinal must resolve in the reconstructed
+        // frozen rules before this simulation can resume.
+        for (&projectile_id, projectile) in self.projectiles.iter() {
+            if let Some(handle) = projectile.payload().installed_weapon()
+                && rules.weapon_by_handle(handle).is_none()
+            {
+                return Err(SnapshotRestoreError::InvalidProjectileWeapon {
+                    projectile_id,
+                    weapon_ordinal: handle.index() as u32,
+                });
+            }
+        }
         for (id, name, _) in self.voxel_type_damage_identity_entries() {
             if rules.voxel_anim_type_id_by_name(name) != Some(id)
                 || rules.voxel_anim_type(id).name != name
@@ -7333,7 +7351,7 @@ mod tests {
                 .map(|name| sim.interner.intern(name)),
             rules.weapon("GUN").unwrap().bright,
         )
-        .with_installed_weapon(Some(sim.interner.intern("GUN")));
+        .with_installed_weapon(rules.weapon_handle("GUN"));
         sim.admit_projectile(projectile_id, spawn);
         (sim, rules, tree_id, projectile_id)
     }

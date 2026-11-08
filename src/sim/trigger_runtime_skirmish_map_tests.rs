@@ -734,9 +734,12 @@ fn high_explosive_revenge_runs_countdown_lab_entry_and_nukes_through_normal_poll
         let payload = projectile.payload();
         payload.base_damage == 350
             && payload.installed_weapon().is_some_and(|weapon| {
-                sim.interner
-                    .resolve(weapon)
-                    .eq_ignore_ascii_case("NukePayload")
+                scenario
+                    .runtime
+                    .resources
+                    .rules
+                    .weapon_by_handle(weapon)
+                    .is_some_and(|kind| kind.id.eq_ignore_ascii_case("NukePayload"))
             })
     }));
 }

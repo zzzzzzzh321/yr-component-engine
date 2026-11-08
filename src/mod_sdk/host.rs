@@ -91,6 +91,8 @@ pub(super) struct NativeHost {
     superweapon_inputs: bool,
     superweapon_message: OnceLock<Result<Vec<u8>, String>>,
     weapon_inputs: bool,
+    weapon_instance_inputs: bool,
+    weapon_instance_message: OnceLock<Result<Vec<u8>, String>>,
     projectile_inputs: bool,
 }
 
@@ -111,6 +113,8 @@ impl NativeHost {
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
             weapon_inputs: false,
+            weapon_instance_inputs: false,
+            weapon_instance_message: OnceLock::new(),
             projectile_inputs: false,
         }
     }
@@ -121,6 +125,7 @@ impl NativeHost {
     ) -> Self {
         self.registries = Some(Arc::new(registries));
         self.registry_message = OnceLock::new();
+        self.weapon_instance_message = OnceLock::new();
         self.fixed_art_message = OnceLock::new();
         self.cameo_message = OnceLock::new();
         self.faction_message = OnceLock::new();
@@ -158,6 +163,38 @@ impl NativeHost {
         self
     }
 
+    pub(super) fn enable_weapon_instance_inputs(mut self) -> Self {
+        self.weapon_instance_inputs = true;
+        self
+    }
+
+    fn weapon_instance_view_bytes(&self) -> Result<&[u8], String> {
+        if !self.weapon_instance_inputs || self.ini.is_none() {
+            return Err("WeaponType instance configuration is unavailable".into());
+        }
+        self.weapon_instance_message
+            .get_or_init(|| {
+                let view = self
+                    .registries
+                    .as_ref()
+                    .ok_or("missing WeaponType instance source")?
+                    .weapon_registry_view();
+                view.validate()?;
+                serde_json::to_vec(&view).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
+    }
+
+    fn weapon_instance_view_input_bytes(&self) -> usize {
+        if !self.weapon_instance_inputs || self.ini.is_none() {
+            return 0;
+        }
+        self.weapon_instance_view_bytes()
+            .map_or(usize::MAX, <[u8]>::len)
+    }
+
     pub(super) fn enable_projectile_inputs(mut self) -> Self {
         self.projectile_inputs = true;
         self
@@ -179,6 +216,8 @@ impl NativeHost {
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
             weapon_inputs: false,
+            weapon_instance_inputs: false,
+            weapon_instance_message: OnceLock::new(),
             projectile_inputs: false,
         }
     }
@@ -301,7 +340,10 @@ impl NativeHost {
             return 0;
         }
         [
-            (self.weapon_inputs, "$weapon-config"),
+            (
+                self.weapon_inputs || self.weapon_instance_inputs,
+                "$weapon-config",
+            ),
             (self.projectile_inputs, "$projectile-config"),
         ]
         .into_iter()
@@ -342,6 +384,7 @@ impl HostServices for NativeHost {
             .saturating_add(self.superweapon_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.superweapon_source_bytes())
             .saturating_add(self.retained_resource_source_bytes())
+            .saturating_add(self.weapon_instance_view_input_bytes())
     }
 
     fn config(&self, section: &str, key: &str) -> Option<String> {
@@ -397,6 +440,9 @@ impl HostServices for NativeHost {
                 Some(Some(name)) => api::NullableResourceName::Named(name),
             };
             return serde_json::to_vec(&value).map_err(|e| e.to_string());
+        }
+        if reader == "weapon-registry-view" {
+            return self.weapon_instance_view_bytes().map(<[u8]>::to_vec);
         }
         if reader == "rules-registry-view" {
             return self.registry_view_bytes().map(<[u8]>::to_vec);
@@ -534,13 +580,18 @@ impl HostServices for NativeHost {
                 .ok_or("missing SuperWeapon read points")?
                 .superweapon_effective_section(input.read, owner)?;
             (section, reader, input.current)
-        } else if let Some((family, enabled, reader)) = reader
+        } else if let Some((family, enabled, reader, instance)) = reader
             .strip_prefix("weapon-effective:")
-            .map(|reader| ("$weapon-config", self.weapon_inputs, reader))
+            .map(|reader| ("$weapon-config", self.weapon_inputs, reader, false))
             .or_else(|| {
                 reader
                     .strip_prefix("projectile-effective:")
-                    .map(|reader| ("$projectile-config", self.projectile_inputs, reader))
+                    .map(|reader| ("$projectile-config", self.projectile_inputs, reader, false))
+            })
+            .or_else(|| {
+                reader
+                    .strip_prefix("weapon-instance-effective:")
+                    .map(|reader| ("$weapon-config", self.weapon_instance_inputs, reader, true))
             })
         {
             if !enabled {
@@ -567,16 +618,24 @@ impl HostServices for NativeHost {
             {
                 return Err("unsupported retained resource scalar reader".into());
             }
-            let section = self
+            let registries = self
                 .registries
                 .as_ref()
-                .ok_or("missing retained resource source")?
-                .resource_effective_section(family, owner)?;
-            (
-                section,
-                reader,
-                serde_json::from_slice(current).map_err(|e| e.to_string())?,
-            )
+                .ok_or("missing retained resource source")?;
+            let (section, value) = if instance {
+                let input: api::WeaponReadValue<serde_json::Value> =
+                    serde_json::from_slice(current).map_err(|e| e.to_string())?;
+                (
+                    registries.weapon_instance_effective_section(input.identity, owner)?,
+                    input.current,
+                )
+            } else {
+                (
+                    registries.resource_effective_section(family, owner)?,
+                    serde_json::from_slice(current).map_err(|e| e.to_string())?,
+                )
+            };
+            (section, reader, value)
         } else {
             (
                 ini.section_or_empty(section),

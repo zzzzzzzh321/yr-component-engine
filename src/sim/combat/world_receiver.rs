@@ -3087,11 +3087,12 @@ fn nuke_maker(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDe
     let altitude = detonation
         .payload
         .installed_weapon()
-        .and_then(|weapon| rules.weapon(world.interner.resolve(weapon)))
+        .and_then(|weapon| rules.weapon_by_handle(weapon))
         .and_then(|weapon| weapon.projectile.as_deref())
         .and_then(|projectile| rules.projectile(projectile))
         .map_or(0, |projectile| projectile.detonation_altitude);
-    let weapon = rules.weapon(NUKE_PAYLOAD_WEAPON);
+    let weapon_handle = rules.weapon_handle(NUKE_PAYLOAD_WEAPON);
+    let weapon = weapon_handle.and_then(|handle| rules.weapon_by_handle(handle));
     let warhead = weapon
         .and_then(|weapon| weapon.warhead.as_deref())
         .and_then(|name| rules.warhead(name));
@@ -3117,7 +3118,7 @@ fn nuke_maker(world: &mut Simulation, rules: &RuleSet, detonation: &ProjectileDe
             .map(|name| world.interner.intern(name)),
         true,
     )
-    .with_installed_weapon(Some(world.interner.intern(&weapon.id)));
+    .with_installed_weapon(weapon_handle);
     if let Some(bullet) = super::FiredBullet::launched(
         world,
         rules,
@@ -3385,7 +3386,7 @@ fn emit_detonation_receivers<'r>(
     if let Some(weapon) = detonation
         .payload
         .installed_weapon()
-        .and_then(|weapon| rules.weapon(world.interner.resolve(weapon)))
+        .and_then(|weapon| rules.weapon_by_handle(weapon))
         && weapon.rad_level > 0
         && let Some(rad_warhead) = weapon
             .warhead

@@ -160,7 +160,7 @@ fn scene(row: &Value, terminal: bool, rules: &RuleSet) -> (Simulation, u64) {
             .map(|name| sim.interner.intern(name)),
         rules.weapon("SubTorpedo").unwrap().bright,
     )
-    .with_installed_weapon(Some(sim.interner.intern("SubTorpedo")));
+    .with_installed_weapon(rules.weapon_handle("SubTorpedo"));
     // Supplied header state, not a second launch implementation. A missing
     // target expires in the terminal control without unrelated damage effects.
     let spawn = ProjectileSpawn {

@@ -6,6 +6,151 @@ use vera_mod_api::{self as api, Context};
 use vera_mod_runtime::HostServices;
 
 #[test]
+fn sdk_weapon_instance_readers_preserve_unread_slots_and_source_authority() {
+    let processed = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=SOURCE\n[SOURCE]\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+         [ABCDEFGHIJKLMNOPQRSTUVWX]\nProjectile=SHOT\nAmmo=2\nApplyDamage=yes\nProjectileRange=2\n\
+         [SHOT]\nShrapnelWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\nShrapnelCount=0\n",
+    ))
+    .process()
+    .unwrap();
+    let make = || {
+        NativeHost::configuration(processed.sdk_passes().last().unwrap().clone(), vec![])
+            .with_registries(processed.sdk_registries().last().unwrap().clone())
+    };
+    let host = make().enable_weapon_instance_inputs();
+    let view: api::WeaponRegistryView = serde_json::from_slice(
+        &host
+            .config_read("", "", "weapon-registry-view", b"null")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        view.weapons
+            .iter()
+            .map(|entry| entry.identity.ordinal)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert!(
+        view.weapons
+            .iter()
+            .all(|entry| entry.name == "ABCDEFGHIJKLMNOPQRSTUVWX")
+    );
+    let read = |ordinal, key, reader: &str, current: serde_json::Value| {
+        let input = serde_json::to_vec(&api::WeaponReadValue {
+            identity: api::WeaponTypeRef { ordinal },
+            current,
+        })
+        .unwrap();
+        serde_json::from_slice::<serde_json::Value>(
+            &host
+                .config_read(
+                    "ABCDEFGHIJKLMNOPQRSTUVWX",
+                    key,
+                    &format!("weapon-instance-effective:{reader}"),
+                    &input,
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(read(0, "Ammo", "ares-int", serde_json::json!(1)), 2);
+    assert_eq!(read(1, "Ammo", "ares-int", serde_json::json!(1)), 1);
+    assert_eq!(
+        read(
+            0,
+            "ApplyDamage",
+            "ares-nullable-bool",
+            serde_json::Value::Null
+        ),
+        true
+    );
+    assert_eq!(
+        read(
+            1,
+            "ApplyDamage",
+            "ares-nullable-bool",
+            serde_json::Value::Null
+        ),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        read(
+            0,
+            "ProjectileRange",
+            "ares-leptons",
+            serde_json::json!(100000)
+        ),
+        512
+    );
+    assert_eq!(
+        read(
+            1,
+            "ProjectileRange",
+            "ares-leptons",
+            serde_json::json!(100000)
+        ),
+        100000
+    );
+    let input = serde_json::to_vec(&api::WeaponReadValue {
+        identity: api::WeaponTypeRef { ordinal: 0 },
+        current: 1,
+    })
+    .unwrap();
+    assert!(
+        host.config_read(
+            "WRONG",
+            "Ammo",
+            "weapon-instance-effective:ares-int",
+            &input
+        )
+        .is_err()
+    );
+    let invalid = serde_json::to_vec(&api::WeaponReadValue {
+        identity: api::WeaponTypeRef { ordinal: 2 },
+        current: 1,
+    })
+    .unwrap();
+    assert!(
+        host.config_read(
+            "ABCDEFGHIJKLMNOPQRSTUVWX",
+            "Ammo",
+            "weapon-instance-effective:ares-int",
+            &invalid
+        )
+        .is_err()
+    );
+    assert!(
+        host.config_read(
+            "ABCDEFGHIJKLMNOPQRSTUVWX",
+            "Ammo",
+            "weapon-instance-effective:weapon-registry-view",
+            &input
+        )
+        .is_err()
+    );
+    assert!(
+        make()
+            .config_read("", "", "weapon-registry-view", b"null")
+            .is_err()
+    );
+    assert!(
+        NativeHost::simulation()
+            .config_read("", "", "weapon-registry-view", b"null")
+            .is_err()
+    );
+    assert_eq!(
+        host.configuration_input_bytes(),
+        make()
+            .enable_weapon_inputs()
+            .enable_weapon_instance_inputs()
+            .configuration_input_bytes(),
+        "legacy and instance capabilities charge the same retained Weapon bodies once"
+    );
+}
+
+#[test]
 fn sdk_firing_nullable_projection_retains_reached_reads_and_excludes_preallocation_keys() {
     let mut layers = RulesLayerStack::new(IniFile::from_str(
         "[VehicleTypes]\n0=Early\n[Early]\nPrimary=EarlyGun\n\

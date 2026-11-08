@@ -535,7 +535,7 @@ fn magnetron_temporary_bullet_state_matches_original_construction() {
             assert_eq!(bullet.payload().bright(), state["bright"]);
             assert!(
                 bullet.payload().installed_weapon().is_none()
-                    && state["installed_weapon"].is_null()
+                    && state["installed_weapon_handle"].is_null()
             );
             assert_eq!(
                 i32::from(bullet.speed_leptons_per_frame()),
@@ -1363,7 +1363,7 @@ fn a_death_weapon_detonates_once_without_cluster_draws() {
             .map(|name| sim.interner.intern(name)),
         rules.weapon("CrashGun").unwrap().bright,
     )
-    .with_installed_weapon(Some(sim.interner.intern("CrashGun")));
+    .with_installed_weapon(rules.weapon_handle("CrashGun"));
     let detonation = |reason| ProjectileDetonation {
         projectile_id: 1,
         source_id: 1,

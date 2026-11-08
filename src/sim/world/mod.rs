@@ -2549,13 +2549,18 @@ impl Simulation {
                 let Some(object_type) = self.interner.object_type(firer.type_ref(), rules) else {
                     break;
                 };
-                let Some(weapon_name) = crate::sim::combat::combat_weapon::primary_for_tier(
+                // WaveClass::DamageArea75F330: push0 at75F38F, virtual
+                // GetWeapon(+3F8)75F395, then WeaponStruct's actual pointer
+                // at75F39B supplies WH+AC and AmbientDamage+98. Native
+                // instructions read this pointer, not its truncated ID.
+                let Some(weapon) = crate::sim::combat::combat_weapon::get_weapon(
+                    firer,
                     object_type,
-                    firer.veterancy.rank(),
+                    0,
+                    &self.substrate.entities,
+                    rules,
+                    &self.interner,
                 ) else {
-                    break;
-                };
-                let Some(weapon) = rules.weapon(weapon_name) else {
                     break;
                 };
                 let raw_ambient_damage = weapon.ambient_damage;

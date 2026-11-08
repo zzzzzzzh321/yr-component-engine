@@ -1055,10 +1055,11 @@ fn retail_computer_house_nukes_the_enemy_construction_yard() {
         let commands = sim.take_due_commands();
         sim.advance_tick(&commands, Some(&rules), None, None, 33);
         if sim.projectiles.iter().any(|(_, bullet)| {
-            bullet
-                .payload()
-                .installed_weapon()
-                .is_some_and(|id| sim.interner.resolve(id) == "NukeCarrier")
+            bullet.payload().installed_weapon().is_some_and(|id| {
+                rules
+                    .weapon_by_handle(id)
+                    .is_some_and(|weapon| weapon.id == "NukeCarrier")
+            })
         }) {
             carrier = true;
             break;

@@ -19,10 +19,20 @@ impl Scene {
     }
 
     fn with_component(patch: &str, component: Option<&[u8]>) -> Option<Self> {
-        let mut retail = crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch(
-            "Hills.mmx",
-            &IniFile::from_str(patch),
-        )?;
+        Self::with_component_passes("", patch, component)
+    }
+
+    fn with_component_passes(
+        mode_patch: &str,
+        map_patch: &str,
+        component: Option<&[u8]>,
+    ) -> Option<Self> {
+        let mut retail =
+            crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_mode_and_map_patch(
+                "Hills.mmx",
+                &IniFile::from_str(mode_patch),
+                &IniFile::from_str(map_patch),
+            )?;
         if let Some(bytes) = component {
             let digest = crate::util::sha256::sha256_hex(bytes);
             let names = retail
@@ -1792,3 +1802,6 @@ fn sdk_projectile_range_fireat_retains_flight_budget_across_actual_snapshot() {
 
 #[path = "projectile_scatter_tests.rs"]
 mod projectile_scatter_tests;
+
+#[path = "weapon_instance_tests.rs"]
+mod weapon_instance_tests;

@@ -79,32 +79,32 @@ pub(crate) fn death_arm_explodes(
 pub(super) fn fire_death_weapon_payload(
     rules: &RuleSet,
     obj: &ObjectType,
-    current_weapon: Option<&WeaponType>,
+    current_weapon: Option<crate::rules::ruleset::WeaponHandle>,
     interner: &mut StringInterner,
-) -> Option<(i32, InternedId, InternedId)> {
+) -> Option<(i32, InternedId, crate::rules::ruleset::WeaponHandle)> {
     let chosen = obj
         .death_weapon
         .as_deref()
-        .and_then(|weapon_id| rules.weapon(weapon_id))
+        .and_then(|weapon_id| rules.weapon_handle(weapon_id))
         .or(current_weapon);
-    if let Some(weapon) = chosen {
+    if let Some(handle) = chosen {
+        let weapon = rules.weapon_by_handle(handle)?;
         let damage =
             death_weapon_ftol_product_i32_f32(weapon.damage, obj.death_weapon_damage_modifier)?;
         let warhead_ref = interner.intern(weapon.warhead.as_ref()?);
-        let weapon_ref = interner.intern(&weapon.id);
-        return Some((damage, warhead_ref, weapon_ref));
+        return Some((damage, warhead_ref, handle));
     }
     let fallback = rules
         .combat_damage
         .death_weapon
         .as_deref()
-        .and_then(|weapon_id| rules.weapon(weapon_id))?;
-    let warhead_ref = interner.intern(fallback.warhead.as_ref()?);
-    let weapon_ref = interner.intern(&fallback.id);
+        .and_then(|weapon_id| rules.weapon_handle(weapon_id))?;
+    let weapon = rules.weapon_by_handle(fallback)?;
+    let warhead_ref = interner.intern(weapon.warhead.as_ref()?);
     Some((
         death_weapon_half_strength(obj.strength)?,
         warhead_ref,
-        weapon_ref,
+        fallback,
     ))
 }
 
@@ -122,13 +122,22 @@ pub(crate) fn death_weapon_detonation(
 ) -> Option<ProjectileDetonation> {
     let entity = substrate.entities.get(id)?;
     let object = interner.object_type(entity.type_ref(), rules)?;
-    let current_weapon =
-        combat_weapon::current_weapon(entity, object, &substrate.entities, rules, interner);
+    let current_index =
+        combat_weapon::current_weapon_index(object, combat_weapon::attacker_facts(entity, object));
+    let current_weapon = combat_weapon::get_weapon_record(
+        entity,
+        object,
+        current_index,
+        &substrate.entities,
+        rules,
+        interner,
+    )
+    .and_then(|record| record.handle(rules));
     let impact =
         crate::sim::movement::ground_pose::object_get_coords(entity, resolved_terrain.as_ref());
     let (damage, warhead, weapon) =
         fire_death_weapon_payload(rules, object, current_weapon, interner)?;
-    let kind = rules.weapon(interner.resolve(weapon))?;
+    let kind = rules.weapon_by_handle(weapon)?;
     Some(ProjectileDetonation {
         projectile_id: id,
         source_id: id,

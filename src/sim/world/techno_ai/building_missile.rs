@@ -34,9 +34,7 @@ use crate::sim::combat::{FiredBullet, admit_fired_bullet};
 use crate::sim::components::AnimClassSpawnDescriptor;
 use crate::sim::mission::authority::LiveReadyInputProvider;
 use crate::sim::mission::{MissionId, MissionType};
-use crate::sim::projectile::{
-    ProjectileCoord, ProjectilePayload, ProjectileTarget, cell_ground_coord,
-};
+use crate::sim::projectile::{ProjectileCoord, ProjectilePayload, ProjectileTarget, cell_ground_coord};
 use crate::sim::world::Simulation;
 use crate::util::native_x87::NativeF64Bits;
 
@@ -168,12 +166,13 @@ fn launch_missile(
         .mission_leaf
         .as_building()
         .map_or(-1, |leaf| leaf.firing_super_weapon());
-    let weapon = usize::try_from(firing)
+    let weapon_handle = usize::try_from(firing)
         .ok()
         .and_then(|index| rules.super_weapon_order.get(index))
         .and_then(|name| rules.super_weapon(name))
         .and_then(|sw| sw.weapon_type.as_deref())
-        .and_then(|name| rules.weapon(name));
+        .and_then(|name| rules.weapon_handle(name));
+    let weapon = weapon_handle.and_then(|handle| rules.weapon_by_handle(handle));
     let warhead = weapon
         .and_then(|weapon| weapon.warhead.as_deref())
         .and_then(|name| rules.warhead(name));
@@ -215,7 +214,7 @@ fn launch_missile(
             .map(|id| sim.interner.intern(id)),
         weapon.bright,
     )
-    .with_installed_weapon(Some(sim.interner.intern(&weapon.id)));
+    .with_installed_weapon(weapon_handle);
     if let Some(bullet) = FiredBullet::launched(
         sim,
         rules,

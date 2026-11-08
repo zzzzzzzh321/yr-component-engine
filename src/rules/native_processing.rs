@@ -949,6 +949,44 @@ impl SdkRegistryPass {
             .ok_or_else(|| "retained resource reader requires its registered family/owner".into())
     }
 
+    /// Weapon772FA0 can allocate distinct objects with the same stored ID.
+    /// The array slot, not a second name lookup, identifies each retained body.
+    pub(crate) fn weapon_registry_view(&self) -> vera_mod_api::WeaponRegistryView {
+        vera_mod_api::WeaponRegistryView {
+            weapons: self
+                .resource_bodies
+                .get(&RulesTypeFamily::Weapon)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(ordinal, body)| vera_mod_api::WeaponRegisteredType {
+                    identity: vera_mod_api::WeaponTypeRef {
+                        ordinal: u32::try_from(ordinal).expect("Weapon array exceeds u32 identity"),
+                    },
+                    name: body.name.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn weapon_instance_effective_section(
+        &self,
+        identity: vera_mod_api::WeaponTypeRef,
+        owner: &str,
+    ) -> Result<&IniSection, String> {
+        let index = usize::try_from(identity.ordinal)
+            .map_err(|_| "Weapon instance ordinal is not addressable")?;
+        let body = self
+            .resource_bodies
+            .get(&RulesTypeFamily::Weapon)
+            .and_then(|bodies| bodies.get(index))
+            .ok_or("Weapon instance reader requires a registered array slot")?;
+        if body.name != owner {
+            return Err("Weapon instance reader requires its stored owner name".into());
+        }
+        Ok(body)
+    }
+
     pub(crate) fn resource_effective_input_bytes(&self, namespace: &str) -> Result<usize, String> {
         let family = Self::resource_family(namespace).ok_or("unknown retained resource family")?;
         self.resource_bodies
@@ -1624,10 +1662,12 @@ impl ProcessedRulesLayers {
         let projectile_count = families
             .get(&RulesTypeFamily::Projectile)
             .map_or(0, Vec::len);
+        let weapon_count = families.get(&RulesTypeFamily::Weapon).map_or(0, Vec::len);
         let warhead_count = families.get(&RulesTypeFamily::Warhead).map_or(0, Vec::len);
         let particle_count = families.get(&RulesTypeFamily::Particle).map_or(0, Vec::len);
         if families.values().flatten().any(|member| {
             !member.building_foundation.valid()
+                || !member.weapon_slots.valid_saved_references(weapon_count)
                 || member
                     .weapon
                     .projectile
@@ -2190,11 +2230,13 @@ impl ProcessedRulesLayers {
             .get(&RulesTypeFamily::Weapon)
             .into_iter()
             .flatten()
-            .map(move |member| {
+            .enumerate()
+            .map(move |(ordinal, member)| {
                 let name = |family: RulesTypeFamily, index: usize| {
                     families[&family][index].native_stored_id.as_str()
                 };
                 WeaponState {
+                    ordinal,
                     id: member.native_stored_id.as_str(),
                     body: &member.body,
                     damage: member.weapon.damage,
@@ -5590,22 +5632,30 @@ pub(crate) struct WeaponSlots {
     turret_count: i32,
     weapon_count: i32,
     clear_all_weapons: bool,
-    /// Base (+898) and elite (+A94) arrays, as stored WeaponType IDs.
-    base: [Option<String>; WEAPON_SLOT_COUNT],
-    elite: [Option<String>; WEAPON_SLOT_COUNT],
+    /// Base (+898) and elite (+A94) pointers as Weapon array slots. ReadINI
+    /// 7129D5/7129F2 stores the factory result, even when stored IDs collide.
+    base: [Option<usize>; WEAPON_SLOT_COUNT],
+    elite: [Option<usize>; WEAPON_SLOT_COUNT],
     // Installed Ares loader10040020 and GetWeapon1003DBC0 retain the
     // original eighteen records and own separate resized extension vectors.
     #[cfg(feature = "ares")]
     #[serde(default)]
-    extra_base: Vec<Option<String>>,
+    extra_base: Vec<Option<usize>>,
     #[cfg(feature = "ares")]
     #[serde(default)]
-    extra_elite: Vec<Option<String>>,
+    extra_elite: Vec<Option<usize>>,
     #[serde(default)]
     offsets: crate::rules::weapon_offsets::WeaponOffsets,
 }
 
 impl WeaponSlots {
+    fn valid_saved_references(&self, weapon_count: usize) -> bool {
+        let references = self.base.iter().chain(&self.elite);
+        #[cfg(feature = "ares")]
+        let references = references.chain(&self.extra_base).chain(&self.extra_elite);
+        references.flatten().all(|&index| index < weapon_count)
+    }
+
     pub(crate) fn offsets(&self) -> &crate::rules::weapon_offsets::WeaponOffsets {
         &self.offsets
     }
@@ -5618,22 +5668,22 @@ impl WeaponSlots {
         self.weapon_count
     }
 
-    pub(crate) fn base(&self) -> Vec<Option<String>> {
+    pub(crate) fn base(&self) -> Vec<Option<usize>> {
         let records = self.base.to_vec();
         #[cfg(feature = "ares")]
         let records = records
             .into_iter()
-            .chain(self.extra_base.iter().cloned())
+            .chain(self.extra_base.iter().copied())
             .collect();
         records
     }
 
-    pub(crate) fn elite(&self) -> Vec<Option<String>> {
+    pub(crate) fn elite(&self) -> Vec<Option<usize>> {
         let records = self.elite.to_vec();
         #[cfg(feature = "ares")]
         let records = records
             .into_iter()
-            .chain(self.extra_elite.iter().cloned())
+            .chain(self.extra_elite.iter().copied())
             .collect();
         records
     }
@@ -5642,6 +5692,7 @@ impl WeaponSlots {
 /// One WeaponType's retained reads ([`WeaponReadState`]) with its references
 /// as stored IDs, for `RuleSet`.
 pub(crate) struct WeaponState<'a> {
+    pub(crate) ordinal: usize,
     pub(crate) id: &'a str,
     pub(crate) body: &'a IniSection,
     pub(crate) damage: i32,
@@ -6491,14 +6542,24 @@ impl RulesPassProcessor {
         family: RulesTypeFamily,
         capacity: usize,
     ) -> Option<Option<String>> {
+        self.resolve_scalar_index_from(section, key, family, capacity)
+            .map(|reference| reference.map(|index| self.resolved_type_key(family, index)))
+    }
+
+    /// The common ReadString/FindOrAllocate owner. Pointer-bearing consumers
+    /// retain its array slot; name-only compatibility projections map it later.
+    fn resolve_scalar_index_from(
+        &mut self,
+        section: &IniSection,
+        key: &str,
+        family: RulesTypeFamily,
+        capacity: usize,
+    ) -> Option<Option<usize>> {
         let incoming = section.read_string(key, "", capacity);
         if incoming.is_empty() {
             return None;
         }
-        Some(
-            self.find_or_allocate(family, &incoming)
-                .map(|index| self.resolved_type_key(family, index)),
-        )
+        Some(self.find_or_allocate(family, &incoming))
     }
 
     fn allocate_list_from(
@@ -8773,13 +8834,13 @@ impl RulesPassProcessor {
             for slot in 1..=slots.weapon_count {
                 // Ares1003C6B0 ->10010570 retains Find-or-Allocate semantics
                 // (constructor trampoline100103C0 -> WeaponType771C70).
-                let base = self.resolve_scalar_from(
+                let base = self.resolve_scalar_index_from(
                     raw,
                     &format!("Weapon{slot}"),
                     RulesTypeFamily::Weapon,
                     capacity,
                 );
-                let elite = self.resolve_scalar_from(
+                let elite = self.resolve_scalar_index_from(
                     raw,
                     &format!("EliteWeapon{slot}"),
                     RulesTypeFamily::Weapon,
@@ -8817,7 +8878,7 @@ impl RulesPassProcessor {
                 ("EliteSecondary", true, 1),
             ] {
                 if let Some(weapon) =
-                    self.resolve_scalar_from(raw, key, RulesTypeFamily::Weapon, 0x80)
+                    self.resolve_scalar_index_from(raw, key, RulesTypeFamily::Weapon, 0x80)
                 {
                     let array = if elite {
                         &mut slots.elite

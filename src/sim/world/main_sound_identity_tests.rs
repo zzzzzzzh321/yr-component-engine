@@ -241,8 +241,11 @@ fn presentation_main_service_cannot_change_later_projectile_identity() {
         );
         let (_, bullet) = sim.projectiles.iter().next().unwrap();
         assert_eq!(
-            sim.interner
-                .resolve(bullet.payload().installed_weapon().unwrap()),
+            rules
+                .weapon_by_handle(bullet.payload().installed_weapon().unwrap())
+                .unwrap()
+                .id
+                .as_str(),
             "LateGun"
         );
         assert_eq!(

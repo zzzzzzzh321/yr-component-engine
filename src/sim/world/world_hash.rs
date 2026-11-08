@@ -958,7 +958,7 @@ impl Simulation {
             projectile
                 .payload()
                 .installed_weapon()
-                .map(|id| id.index())
+                .map(|id| id.index() as u32)
                 .hash(hasher);
             if projectile.payload().damage_multiplier()
                 != crate::sim::projectile::ProjectilePayload::UNSCALED

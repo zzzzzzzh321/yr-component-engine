@@ -2580,7 +2580,8 @@ impl Simulation {
         target_id: u64,
         rules: &crate::rules::ruleset::RuleSet,
     ) -> Option<crate::sim::projectile::ProjectileDetonation> {
-        let weapon = rules.weapon(&shot.weapon)?;
+        let weapon_ref = rules.weapon_handle(&shot.weapon)?;
+        let weapon = rules.weapon_by_handle(weapon_ref)?;
         let warhead_name = weapon.warhead.as_deref()?;
         let impact = {
             let target = self.substrate.entities.get(target_id)?;
@@ -2590,7 +2591,6 @@ impl Simulation {
             )
         };
         let warhead_ref = self.interner.intern(warhead_name);
-        let weapon_ref = self.interner.intern(&weapon.id);
         let projectile = weapon
             .projectile
             .as_deref()

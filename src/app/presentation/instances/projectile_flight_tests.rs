@@ -143,7 +143,7 @@ fn original_cannon_launch_motion_and_live_bridge_draw_form_one_production_chain(
         cell.bridge_facts.raw_flags = initial["flags"].as_u64().unwrap() as u32;
     }
     sim.install_resolved_terrain_for_new_map(terrain);
-    let weapon_id = sim.intern(&weapon.id);
+    let weapon_handle = rules.weapon_handle(&weapon.id).unwrap();
     let warhead_id = sim.intern(weapon.warhead.as_deref().unwrap());
     let projectile_type = sim.intern(weapon.projectile.as_deref().unwrap());
     let id = sim.substrate_mut_for_test().allocate_stable_id();
@@ -163,7 +163,7 @@ fn original_cannon_launch_motion_and_live_bridge_draw_form_one_production_chain(
                 Some(projectile_type),
                 weapon.bright,
             )
-            .with_installed_weapon(Some(weapon_id)),
+            .with_installed_weapon(Some(weapon_handle)),
             speed_leptons_per_frame: launched.speed as u16,
             velocity: launched.velocity,
             trajectory: ProjectileTrajectory::Ballistic,
@@ -355,7 +355,7 @@ fn original_ifv_dragon_frame_getter_matches_retained_flights_and_all_directions(
     );
     assert!(!kind.rotates && !kind.shadow);
     let mut sim = Simulation::with_seed(31);
-    let weapon_id = sim.intern(&weapon.id);
+    let weapon_handle = rules.weapon_handle(&weapon.id).unwrap();
     let warhead = sim.intern(weapon.warhead.as_deref().unwrap());
     let id = sim.substrate_mut_for_test().allocate_stable_id();
     let rows = corpus["frames"].as_array().unwrap();
@@ -378,7 +378,7 @@ fn original_ifv_dragon_frame_getter_matches_retained_flights_and_all_directions(
                 Some(projectile_type),
                 weapon.bright,
             )
-            .with_installed_weapon(Some(weapon_id)),
+            .with_installed_weapon(Some(weapon_handle)),
             speed_leptons_per_frame: 0,
             velocity: crate::sim::projectile::ProjectileVelocity::new(0, 0, 0),
             trajectory: ProjectileTrajectory::Straight,

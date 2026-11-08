@@ -83,7 +83,7 @@ fn world(rules: &RuleSet, input: &Value) -> Simulation {
     sim
 }
 
-fn detonation(sim: &mut Simulation, input: &Value) -> ProjectileDetonation {
+fn detonation(sim: &mut Simulation, rules: &RuleSet, input: &Value) -> ProjectileDetonation {
     ProjectileDetonation {
         projectile_id: 1,
         source_id: RAD_NO_ATTACKER,
@@ -95,7 +95,7 @@ fn detonation(sim: &mut Simulation, input: &Value) -> ProjectileDetonation {
             Some(sim.interner.intern("SHELL")),
             false,
         )
-        .with_installed_weapon(Some(sim.interner.intern("SHOT"))),
+        .with_installed_weapon(rules.weapon_handle("SHOT")),
         reason: ProjectileDetonationReason::ReachedTarget,
     }
 }
@@ -107,7 +107,7 @@ fn ordinary_bridge_continuation_precedes_cluster_rng_like_native() {
         let name = input["name"].as_str().unwrap();
         let rules = rules(input);
         let mut sim = world(&rules, input);
-        let mut shot = detonation(&mut sim, input);
+        let mut shot = detonation(&mut sim, &rules, input);
         // This production seam starts at the resolved detonation coordinate.
         // Cell impact-ladder vectors separately cover the preceding 468D80 arm.
         if let Some(first) = row["events"]

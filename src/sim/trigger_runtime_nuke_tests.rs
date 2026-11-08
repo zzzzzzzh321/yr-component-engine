@@ -159,8 +159,11 @@ fn nuke_strike_dispatch_matches_original_launch_controls() {
             }
         );
         assert_eq!(
-            sim.interner
-                .resolve(bullet.payload().installed_weapon().unwrap()),
+            rules
+                .weapon_by_handle(bullet.payload().installed_weapon().unwrap())
+                .unwrap()
+                .id
+                .as_str(),
             "NukePayload"
         );
         assert_eq!(

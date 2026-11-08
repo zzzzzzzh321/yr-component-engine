@@ -2,6 +2,12 @@
 
 ## 当前开发状态
 
+当前候选为 **0.33／配置23／状态1／API v1**。新增可选 `weapon_instance_resource`：用 `WeaponTypeRef.ordinal` 标识真实 Weapon 数组槽，同一个24字节存储名可以对应不同实例。插件经 `weapon-registry-view` 取得有序目录，再通过 `weapon-instance-effective:<scalar>` 与 `WeaponReadValue { identity, current }` 读取该实例保留的物理历史；数值解析仍由同一宿主读取器完成。
+
+实例策略包含现有弹药与开火策略。外层 `Some` 明确拥有这两个投影，即使两项都为 `None`；外层 `None` 才允许按唯一名称回退旧严格接口。新组件的 Ammo、ApplyDamage、ProjectileRange 按实例冻结；旧组件保持原请求格式，在同名多实例域明确拒绝，避免借用第一项或最后一项配置。资源接纳时查询一次，实际开火、在飞弹体与恢复继续保留同一个 Weapon 槽，不逐发调用 Wasm。
+
+本版完整存档布局变化；旧完整存档保留原引擎与精确组件。Projectile／Warhead 和专门工厂的其它指针投影仍有独立限制，完整 Ares 兼容继续推进。下文早期版本段落描述对应历史接口；当前实例接口见[资源契约](api/src/resource.rs)。
+
 0.29 新增可选的 `weapon_firing_resource` 静态查询，参考组件实现位于独立插件工程的 `features/weapons/firing.rs`。宿主提供实际绑定武器的名称、`Anim` 数量、`IsSonic` 和 `UseFireParticles`；插件返回普通伤害开关与方向数量。资源接纳时一次查询，读档后从精确组件和冻结配置重建，开火时读取同一个 `WeaponType` 的不可变缓存，不逐发调用 Wasm。
 
 安装参考组件后直接使用 Ares `ApplyDamage=yes/no`，无需新增功能开关；未设置时普通武器保留直接伤害，声波或喷火粒子武器关闭直接伤害。缺失、空值、非法值沿用已有 nullable 布尔读取历史。`Anim` 按最大的完整二次幂方向数选择，不足八项取第一项；驻军覆盖和运输车回退仍走原所有者。`ApplyDamage` 仅选择 FireAt 的普通伤害入口，不改变独立的 AI 伤害估值或声波／粒子自身效果。

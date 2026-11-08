@@ -637,7 +637,7 @@ fn compare_native_smashing_tail(retired: bool, typed: bool) {
             Some(world.interner.intern("InvisibleLow")),
             false,
         )
-        .with_installed_weapon(Some(world.interner.intern("Smash")));
+        .with_installed_weapon(rules.weapon_handle("Smash"));
         let target = receiver.map_or(
             ProjectileTarget::Cell { rx: 10, ry: 20 },
             ProjectileTarget::Entity,

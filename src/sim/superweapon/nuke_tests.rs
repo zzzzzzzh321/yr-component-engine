@@ -69,8 +69,12 @@ fn nuke_spawn(
     interner: &mut StringInterner,
     warhead: &str,
     origin: ProjectileCoord,
-    weapon: Option<&crate::rules::weapon_type::WeaponType>,
+    weapon: Option<(&RuleSet, &str)>,
 ) -> ProjectileSpawn {
+    let weapon = weapon.and_then(|(rules, name)| {
+        let handle = rules.weapon_handle(name)?;
+        Some((handle, rules.weapon_by_handle(handle)?))
+    });
     let target = ProjectileCoord::new(origin.x + 10 * 256, origin.y, origin.z);
     ProjectileSpawn {
         native_unique_id: 0,
@@ -87,11 +91,11 @@ fn nuke_spawn(
             600,
             interner.intern(warhead),
             weapon
-                .and_then(|weapon| weapon.projectile.as_deref())
+                .and_then(|(_, weapon)| weapon.projectile.as_deref())
                 .map(|name| interner.intern(name)),
-            weapon.is_some_and(|weapon| weapon.bright),
+            weapon.is_some_and(|(_, weapon)| weapon.bright),
         )
-        .with_installed_weapon(weapon.map(|weapon| interner.intern(&weapon.id))),
+        .with_installed_weapon(weapon.map(|(handle, _)| handle)),
         speed_leptons_per_frame: 64,
         velocity: ProjectileVelocity::new(64, 0, 0),
         trajectory: ProjectileTrajectory::Straight,
@@ -217,7 +221,7 @@ fn impact_effects_match_native() {
             &mut sim.interner,
             "NUKE",
             location,
-            rules.weapon("NukePayload"),
+            Some((&rules, "NukePayload")),
         );
         sim.projectiles.spawn(id, spawn);
         sim.session.set_binary_frame_for_test(4000);
@@ -677,14 +681,19 @@ fn run_until(
     panic!("not reached in {frames} frames");
 }
 
-fn bullets_of<'a>(sim: &'a Simulation, weapon: &str) -> Vec<(u64, &'a Projectile)> {
+fn bullets_of<'a>(
+    sim: &'a Simulation,
+    rules: &RuleSet,
+    weapon: &str,
+) -> Vec<(u64, &'a Projectile)> {
     sim.projectiles
         .iter()
         .filter(|(_, bullet)| {
-            bullet
-                .payload()
-                .installed_weapon()
-                .is_some_and(|id| sim.interner.resolve(id) == weapon)
+            bullet.payload().installed_weapon().is_some_and(|id| {
+                rules
+                    .weapon_by_handle(id)
+                    .is_some_and(|kind| kind.id == weapon)
+            })
         })
         .map(|(&id, bullet)| (id, bullet))
         .collect()
@@ -810,7 +819,7 @@ fn retail_nuclear_missile_rises_falls_and_strikes_its_target() {
     ));
     let launch_frame = sim.session.binary_frame() as i32;
     run_until(&mut sim, &rules, 3, |sim| {
-        !bullets_of(sim, "NukeCarrier").is_empty()
+        !bullets_of(sim, &rules, "NukeCarrier").is_empty()
     });
     // ClickFire restarted the recharge; Launch aimed the silo and the house.
     let instance = &sim.super_weapons[&russians][&sw_type];
@@ -825,7 +834,7 @@ fn retail_nuclear_missile_rises_falls_and_strikes_its_target() {
     )));
     // The computer house near the target took up the defence of its base.
     assert_eq!(sim.houses[&americans].super_weapon_defense().0, (42, 42));
-    let (missile, _) = bullets_of(&sim, "NukeCarrier")[0];
+    let (missile, _) = bullets_of(&sim, &rules, "NukeCarrier")[0];
     assert_eq!(sim.projectiles.get(missile).unwrap().source_id(), silo);
     // `FirersPalette=yes` (GiantNukeUp): Construct kept the silo's House for
     // the draw's colour scheme (Bullet+0x114).
@@ -897,7 +906,7 @@ fn retail_nuclear_missile_rises_falls_and_strikes_its_target() {
         sim.projectiles.get(missile).is_none()
     });
     assert!(psi_warnings(&sim).is_empty());
-    let falling = bullets_of(&sim, "NukePayload");
+    let falling = bullets_of(&sim, &rules, "NukePayload");
     assert_eq!(falling.len(), 1);
     let (warhead, bullet) = falling[0];
     assert_eq!(
@@ -1030,7 +1039,7 @@ fn retail_nuclear_missile_rises_falls_and_strikes_its_target() {
 fn impact_waiting_nuke(sim: &mut Simulation, rules: &RuleSet) -> (u64, AnimId) {
     let at = ProjectileCoord::new(8 * 256 + 128, 8 * 256 + 128, 0);
     let id = sim.substrate.allocate_stable_id();
-    let mut spawn = nuke_spawn(&mut sim.interner, "NUKE", at, rules.weapon("NukePayload"));
+    let mut spawn = nuke_spawn(&mut sim.interner, "NUKE", at, Some((&rules, "NukePayload")));
     // The shared head fixture aims ten cells east. This local impact must
     // instead retain its own target/reference: the real post-wait ladder
     //468D80(impactFlag0) reads that reference before handing off damage.
@@ -1371,7 +1380,7 @@ fn nuke_awaited_anim_reference_restore_validates_without_wait_flag() {
     // A non-waiting Bullet holding +154 remains a strong native load reference.
     let id = sim.substrate.allocate_stable_id();
     let at = ProjectileCoord::new(8 * 256 + 128, 8 * 256 + 128, 0);
-    let spawn = nuke_spawn(&mut sim.interner, "NUKE", at, rules.weapon("NukePayload"));
+    let spawn = nuke_spawn(&mut sim.interner, "NUKE", at, Some((&rules, "NukePayload")));
     sim.admit_projectile(id, spawn);
     assert!(!sim.projectiles.get(id).unwrap().awaiting_anim());
     sim.projectiles.await_anim(id, Some(9999));
@@ -1489,7 +1498,7 @@ fn retail_nuke_wait_and_flash_survive_save_and_load() {
     crate::sim::arena_fixture::flat_ground(&mut sim, &rules);
     let at = ProjectileCoord::new(8 * 256 + 128, 8 * 256 + 128, 0);
     let id = sim.substrate.allocate_stable_id();
-    let spawn = nuke_spawn(&mut sim.interner, "NUKE", at, rules.weapon("NukePayload"));
+    let spawn = nuke_spawn(&mut sim.interner, "NUKE", at, Some((&rules, "NukePayload")));
     sim.admit_projectile(id, spawn);
     // The impact as `BulletClass::AI` takes it, then five frames of the wait.
     let context = NukeImpactContext::new(&sim.interner, &|| true);

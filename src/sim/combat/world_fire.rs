@@ -1879,7 +1879,7 @@ pub(super) fn emit_admitted_fire(
                 projectile_type.map(|kind| world.interner.intern(&kind.id)),
                 weapon.bright,
             )
-            .with_installed_weapon(Some(world.interner.intern(selected.weapon_id)))
+            .with_installed_weapon(Some(selected.weapon_handle))
             .with_damage_multiplier(damage_multiplier);
             #[cfg(feature = "phobos")]
             let payload =

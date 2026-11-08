@@ -128,7 +128,8 @@ impl Simulation {
         warning_house: Option<InternedId>,
     ) -> Option<DriveCoord> {
         let location = self.direct_strike_coord(cell)?;
-        let weapon = rules.weapon("NukePayload")?;
+        let weapon_handle = rules.weapon_handle("NukePayload")?;
+        let weapon = rules.weapon_by_handle(weapon_handle)?;
         let warhead = weapon.warhead.as_deref().and_then(|id| rules.warhead(id))?;
         // 6E34D3's Map565730 looks up world XY again. Preserve truncation
         // and the retained Dummy rather than assuming the packed waypoint
@@ -143,7 +144,7 @@ impl Simulation {
                 .map(|id| self.interner.intern(id)),
             false,
         )
-        .with_installed_weapon(Some(self.interner.intern(&weapon.id)));
+        .with_installed_weapon(Some(weapon_handle));
         let stable_id = self.substrate.allocate_stable_id();
         let native_id = self.next_native_runtime_id();
         if let Some(owner) = warning_house {

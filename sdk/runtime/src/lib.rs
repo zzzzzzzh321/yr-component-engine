@@ -192,6 +192,7 @@ impl bindings::vera::mod_sdk::host::Host for HostState {
         let output_limit = if matches!(
             reader.as_str(),
             "rules-registry-view"
+                | "weapon-registry-view"
                 | "fixed-art-view"
                 | "faction-registry-view"
                 | "cameo-registry-view"

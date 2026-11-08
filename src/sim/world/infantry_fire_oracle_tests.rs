@@ -660,6 +660,7 @@ fn assert_emission_boundary(
 }
 
 fn assert_fired_bullet(
+    rules: &RuleSet,
     fixture: &SuppliedFootFixture,
     event: &Value,
     ids: &BTreeMap<String, u64>,
@@ -696,10 +697,11 @@ fn assert_fired_bullet(
         "{name}: M60 raw damage"
     );
     assert_eq!(
-        fixture
-            .sim
-            .interner
-            .resolve(bullet.payload().installed_weapon().unwrap()),
+        rules
+            .weapon_by_handle(bullet.payload().installed_weapon().unwrap())
+            .unwrap()
+            .id
+            .as_str(),
         expected["weapon"]["name"].as_str().unwrap(),
         "{name}: weapon identity"
     );
@@ -1038,7 +1040,7 @@ fn original_whole_ai_shot_dynamic_logic_damage_and_deferred_lifetimes_match_nati
             );
             for event in &events[start..end] {
                 if event["kind"] == "bullet_fire" {
-                    assert_fired_bullet(&fixture, event, &ids, name);
+                    assert_fired_bullet(&rules, &fixture, event, &ids, name);
                     shots += 1;
                 }
             }

@@ -1113,7 +1113,11 @@ fn sdk_super_saved_resources_prepare_cold() {
         "\
 [SuperWeaponTypes]\nSDKRestore=SDKRestoreStrike\n\
 [SDKRestoreStrike]\nType=GenericWarhead\nSW.Warhead=SDKRestorePayload\nMoney.Amount=-333\n\
-[SDKRestorePayload]\nCellSpread=0.5\nPercentAtMax=1\n",
+[SDKRestorePayload]\nCellSpread=0.5\nPercentAtMax=1\n\
+[VehicleTypes]\nSDKRestoreSource=SDKRestoreSource\n\
+[SDKRestoreSource]\nImage=GTNK\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+[ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=100\nRange=6\nSpeed=40\nProjectile=SDKRestoreShot\nWarhead=SDKRestorePayload\nAmmo=2\nApplyDamage=yes\nProjectileRange=2\n\
+[SDKRestoreShot]\nImage=DRAGON\nROT=1\nShrapnelWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\nShrapnelCount=0\n",
     )
     .expect("actual component restore requires retail assets");
     assert!(
@@ -1168,6 +1172,32 @@ fn sdk_super_saved_resources_prepare_cold() {
         assert_eq!(
             rules.warhead("SDKRestorePayload").unwrap().cell_spread_f64,
             0.5
+        );
+        // Weapon772FA0/Techno7129F2: a later Bullet read may construct an
+        // equal-ID Weapon, but cold reconstruction keeps the original slot.
+        let source = crate::sim::game_entity::GameEntity::test_default(
+            100_000,
+            "SDKRestoreSource",
+            "Americans",
+            5,
+            5,
+        );
+        let primary = crate::sim::combat::combat_weapon::get_weapon(
+            &source,
+            rules.object("SDKRestoreSource").unwrap(),
+            0,
+            &crate::sim::entity_store::EntityStore::new(),
+            rules,
+            &crate::sim::intern::StringInterner::new(),
+        )
+        .unwrap();
+        assert_eq!((primary.damage, primary.range_leptons), (100, 6 * 256));
+        assert_eq!(
+            rules
+                .weapons_iter()
+                .filter(|weapon| weapon.id == "ABCDEFGHIJKLMNOPQRSTUVWX")
+                .count(),
+            2
         );
     }
     assert_eq!(frontend.logical_state(), frontend_before);

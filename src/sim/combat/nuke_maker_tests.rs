@@ -151,8 +151,11 @@ fn nuke_maker_matches_native() {
         );
         assert_eq!(bullet.payload().base_damage, int(&construct[1]), "{row}");
         assert_eq!(
-            sim.interner
-                .resolve(bullet.payload().installed_weapon().unwrap()),
+            rules
+                .weapon_by_handle(bullet.payload().installed_weapon().unwrap())
+                .unwrap()
+                .id
+                .as_str(),
             "NukePayload"
         );
         assert_eq!(sim.interner.resolve(bullet.payload().warhead), "NUKE");

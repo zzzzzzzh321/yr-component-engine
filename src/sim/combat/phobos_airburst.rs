@@ -89,7 +89,10 @@ pub(super) fn emit(world: &mut Simulation, rules: &RuleSet, detonation: &Project
     let Some(weapon_name) = parent_type.airburst_weapon.as_deref() else {
         return;
     };
-    let Some(weapon) = rules.weapon(weapon_name) else {
+    let Some(weapon_handle) = rules.weapon_handle(weapon_name) else {
+        return;
+    };
+    let Some(weapon) = rules.weapon_by_handle(weapon_handle) else {
         return;
     };
     let Some(child_type_name) = weapon.projectile.as_deref() else {
@@ -243,10 +246,9 @@ pub(super) fn emit(world: &mut Simulation, rules: &RuleSet, detonation: &Project
                 .expect("captured firepower multiplier is finite"),
         ));
     }
-    let weapon_id = world.interner.intern(&weapon.id);
     let context = ChildContext {
         weapon,
-        weapon_id,
+        weapon_handle,
         child_type,
         child_type_id,
         warhead_id,
@@ -335,7 +337,7 @@ pub(super) fn emit(world: &mut Simulation, rules: &RuleSet, detonation: &Project
 /// The data shared by every child of one detonation.
 struct ChildContext<'a> {
     weapon: &'a WeaponType,
-    weapon_id: InternedId,
+    weapon_handle: crate::rules::ruleset::WeaponHandle,
     child_type: &'a crate::rules::projectile_type::ProjectileType,
     child_type_id: InternedId,
     warhead_id: InternedId,
@@ -410,7 +412,7 @@ fn spawn_child(
         Some(context.child_type_id),
         context.weapon.bright,
     )
-    .with_installed_weapon(Some(context.weapon_id))
+    .with_installed_weapon(Some(context.weapon_handle))
     .with_firepower_multiplier(context.parent_firepower);
     // Phobos hands the vector to `BulletClass::MoveTo`, the virtual at
     // `0x00468670` (vtable `0x007E48D4`) that VERA ports as Fire: its

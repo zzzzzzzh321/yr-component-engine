@@ -959,7 +959,9 @@ pub struct ProjectilePayload {
     projectile_type: Option<InternedId>,
     /// Constructor466401 clears +130. Only SetWeaponType installs it;
     /// shrapnel and direct falling-damage bullets leave it null.
-    installed_weapon: Option<InternedId>,
+    // Weapon array identity, not the possibly shared 24-byte stored ID.
+    // Rename the saved field because an old InternedId has another meaning.
+    installed_weapon_handle: Option<crate::rules::ruleset::WeaponHandle>,
     /// Construct4664E6's byte argument, independent of installed Weapon.
     bright: bool,
     /// Phobos `BulletExt::FirepowerMult`, the firer's firepower multiplier at
@@ -1005,7 +1007,7 @@ impl ProjectilePayload {
             base_damage,
             warhead,
             projectile_type,
-            installed_weapon: None,
+            installed_weapon_handle: None,
             bright,
             damage_multiplier: Self::UNSCALED,
             #[cfg(feature = "phobos")]
@@ -1019,8 +1021,8 @@ impl ProjectilePayload {
         self.projectile_type
     }
 
-    pub fn installed_weapon(&self) -> Option<InternedId> {
-        self.installed_weapon
+    pub fn installed_weapon(&self) -> Option<crate::rules::ruleset::WeaponHandle> {
+        self.installed_weapon_handle
     }
 
     pub fn bright(&self) -> bool {
@@ -1029,8 +1031,11 @@ impl ProjectilePayload {
 
     /// The sole +130 mutation, corresponding to SetWeaponType46B260.
     /// Constructing another payload does not infer this reference from type.
-    pub fn with_installed_weapon(mut self, weapon: Option<InternedId>) -> Self {
-        self.installed_weapon = weapon;
+    pub fn with_installed_weapon(
+        mut self,
+        weapon: Option<crate::rules::ruleset::WeaponHandle>,
+    ) -> Self {
+        self.installed_weapon_handle = weapon;
         self
     }
 
@@ -3378,7 +3383,7 @@ mod tests {
                 ProjectileTarget::DummyCell => ProjectileCoord::new(0, 0, 0),
             },
             payload: ProjectilePayload::new(40, InternedId::from_index(3), None, false)
-                .with_installed_weapon(Some(InternedId::from_index(4))),
+                .with_installed_weapon(Some(serde_json::from_str("4").unwrap())),
             speed_leptons_per_frame: 64,
             velocity: ProjectileVelocity::new(64, 0, 0),
             trajectory: ProjectileTrajectory::Straight,

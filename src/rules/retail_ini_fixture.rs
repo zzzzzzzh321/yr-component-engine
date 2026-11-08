@@ -452,6 +452,18 @@ pub fn retail_battle_rules_for_map_with_patch(
     retail_mode_rules_for_map_impl(1, map_name, Some(patch))
 }
 
+/// Authored inputs at two distinct production read points. The first patch
+/// augments the selected Battle mode, the second the map; they are never
+/// flattened together before RulesClass processes them.
+#[cfg(any(test, feature = "test-support"))]
+pub fn retail_battle_rules_for_map_with_mode_and_map_patch(
+    map_name: &str,
+    mode_patch: &IniFile,
+    map_patch: &IniFile,
+) -> Option<RetailBattleRules> {
+    load_retail_mode_rules_for_map(1, map_name, Some(mode_patch), Some(map_patch))
+}
+
 /// An explicit authored override merged into Hills' map before the existing
 /// production pass. Keep startup, mode and map chronology intact: reparsing
 /// a projected merged INI loses the startup AudioVisual defaults/postpass.
@@ -476,10 +488,10 @@ fn retail_mode_rules_for_map_impl(
     // Patched loads are not kept: callers patch different keys, so a copy
     // would only hold memory. Tests that share one patch keep it themselves.
     if let Some(patch) = patch {
-        return load_retail_mode_rules_for_map(mode_id, map_name, Some(patch));
+        return load_retail_mode_rules_for_map(mode_id, map_name, None, Some(patch));
     }
     once_per_process((mode_id, map_name.to_owned()), || {
-        load_retail_mode_rules_for_map(mode_id, map_name, None)
+        load_retail_mode_rules_for_map(mode_id, map_name, None, None)
     })
     .map(RetailBattleRules::with_fresh_serial)
 }
@@ -488,6 +500,7 @@ fn retail_mode_rules_for_map_impl(
 fn load_retail_mode_rules_for_map(
     mode_id: i32,
     map_name: &str,
+    mode_patch: Option<&IniFile>,
     patch: Option<&IniFile>,
 ) -> Option<RetailBattleRules> {
     use crate::rules::retail_sources::select_ini;
@@ -518,7 +531,10 @@ fn load_retail_mode_rules_for_map(
     }
     crate::map::theater::load_theater(&mut assets, &map.map.header.theater)
         .expect("load fixture theater before mode selection");
-    let mode = select_ini(&assets, &mode.override_file).expect("select Battle override");
+    let mut mode = select_ini(&assets, &mode.override_file).expect("select Battle override");
+    if let Some(patch) = mode_patch {
+        mode.ini.merge(patch);
+    }
     eprintln!("retail mode {:?}; map {:?}", mode.source, map.source);
     let (mut rules, processed_rules, fixed_art, _) = owner
         .load_scenario(

@@ -15,7 +15,8 @@ pub(crate) fn payload_from_weapon(
     rules: &crate::rules::ruleset::RuleSet,
     interner: &mut crate::sim::intern::StringInterner,
 ) -> crate::sim::projectile::ProjectilePayload {
-    let kind = rules.weapon(interner.resolve(weapon));
+    let handle = rules.weapon_handle(interner.resolve(weapon));
+    let kind = handle.and_then(|handle| rules.weapon_by_handle(handle));
     let projectile = kind
         .and_then(|kind| kind.projectile.as_deref())
         .map(|id| interner.intern(id));
@@ -25,7 +26,7 @@ pub(crate) fn payload_from_weapon(
         projectile,
         kind.is_some_and(|kind| kind.bright),
     )
-    .with_installed_weapon(kind.map(|_| weapon))
+    .with_installed_weapon(handle)
 }
 use crate::map::entities::EntityCategory;
 use crate::map::houses::HouseAllianceMap;
@@ -4977,10 +4978,17 @@ fn death_arm_payload(
         super::combat_weapon::weapon_for_index(obj, veterancy, current_weapon_number)
             .and_then(|record| record.weapon_id)
             .and_then(|weapon_id| rules.weapon(weapon_id));
-    let current_weapon = current_weapon.and_then(|weapon_id| rules.weapon(weapon_id));
+    let current_weapon = current_weapon.and_then(|weapon_id| rules.weapon_handle(weapon_id));
     super::death_arm_explodes(obj, veterancy, numbered_weapon)
         .then(|| super::fire_death_weapon_payload(rules, obj, current_weapon, interner))
         .flatten()
+        .map(|(damage, warhead, handle)| {
+            (
+                damage,
+                warhead,
+                interner.intern(&rules.weapon_by_handle(handle).unwrap().id),
+            )
+        })
 }
 
 #[test]

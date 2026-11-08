@@ -159,7 +159,10 @@ pub(crate) fn launched_stock_submarine_torpedo(
             .iter()
             .find(|(_, bullet)| bullet.source_id() == source)
             .expect("real SubTorpedo FireAt admits a live Bullet before impact");
-        assert_eq!(bullet.payload().installed_weapon(), Some(shot.weapon_id));
+        assert_eq!(
+            bullet.payload().installed_weapon(),
+            rules.weapon_handle(sim.interner().resolve(shot.weapon_id))
+        );
         assert_eq!(
             sim.interner()
                 .resolve(bullet.payload().projectile_type().unwrap()),
@@ -479,7 +482,7 @@ pub(crate) fn admitted_kirov_bomb(
         Some(sim.intern(weapon.projectile.as_deref().unwrap())),
         weapon.bright,
     )
-    .with_installed_weapon(Some(sim.intern(weapon_name)));
+    .with_installed_weapon(rules.weapon_handle(weapon_name));
     let id = sim.substrate_mut_for_test().allocate_stable_id();
     let velocity = ProjectileVelocity::from_native(std::array::from_fn(|i| {
         crate::util::native_x87::NativeF64Bits::from_bits(

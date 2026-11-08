@@ -70,7 +70,7 @@ fn projectile_trailer_launch_placement_matches_original_bullet_fire() {
             Some(sim.interner.intern(&kind.id)),
             retail.rules.weapon("SubTorpedo").unwrap().bright,
         )
-        .with_installed_weapon(Some(sim.interner.intern("SubTorpedo")));
+        .with_installed_weapon(retail.rules.weapon_handle("SubTorpedo"));
         shot.flat = kind.flat;
         shot.arm_frames = kind.arm;
         // This test supplies the already-normalized Fire velocity, just as

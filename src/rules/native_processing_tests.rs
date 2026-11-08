@@ -2179,6 +2179,157 @@ fn native_type_registry_compares_full_input_but_stores_and_emits_24_bytes() {
 }
 
 #[test]
+fn weapon_pointer_slots_keep_colliding_instances_and_retained_read_history() {
+    use vera_mod_api::WeaponTypeRef;
+    const STORED: &str = "ABCDEFGHIJKLMNOPQRSTUVWX";
+    // Weapon772FA0 compares the full incoming spelling against each stored
+    // 24-byte ID. Bullet46C305 constructs a second object after679B26's sweep.
+    let first = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=SourceA\n[SourceA]\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+         [ABCDEFGHIJKLMNOPQRSTUVWX]\nDamage=100\nRange=6\nSpeed=40\n\
+         Projectile=Shot\nWarhead=WH\nAmmo=2\nApplyDamage=yes\nProjectileRange=2\n\
+         [Shot]\nROT=1\nShrapnelWeapon=ABCDEFGHIJKLMNOPQRSTUVWXY\nShrapnelCount=0\n\
+         [Warheads]\n0=WH\n[WH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
+    ))
+    .process()
+    .unwrap();
+    let weapons = first.weapon_states().collect::<Vec<_>>();
+    assert_eq!(weapons.len(), 2);
+    assert_eq!((weapons[0].ordinal, weapons[1].ordinal), (0, 1));
+    assert_eq!((weapons[0].id, weapons[1].id), (STORED, STORED));
+    assert_eq!((weapons[0].damage, weapons[1].damage), (100, 0));
+    assert!(weapons[1].projectile.is_none() && weapons[1].warhead.is_none());
+    assert_eq!(
+        first
+            .weapon_slot_states()
+            .find(|(_, id, _)| *id == "SourceA")
+            .unwrap()
+            .2
+            .base()[0],
+        Some(0),
+        "7129F2 retains the actual Primary pointer, not the later equal ID"
+    );
+    let registry = &first.sdk_registries()[0];
+    let view = registry.weapon_registry_view();
+    assert_eq!(view.weapons.len(), 2);
+    assert_eq!(view.weapons[0].name, view.weapons[1].name);
+    let early = registry
+        .weapon_instance_effective_section(view.weapons[0].identity, STORED)
+        .unwrap();
+    let late = registry
+        .weapon_instance_effective_section(view.weapons[1].identity, STORED)
+        .unwrap();
+    assert_eq!(early.read_ares_int("Ammo", 1), 2);
+    assert_eq!(
+        late.read_ares_int("Ammo", 1),
+        1,
+        "unread late Ext keeps its constructor cost"
+    );
+    assert!(
+        registry
+            .weapon_instance_effective_section(view.weapons[0].identity, "OTHER")
+            .is_err()
+    );
+    assert!(
+        registry
+            .weapon_instance_effective_section(WeaponTypeRef { ordinal: 2 }, STORED)
+            .is_err()
+    );
+
+    let (_, trace) = first.into_ini_and_native_type_construction_trace();
+    let saved = save_codec::serialize(&trace.into_registry_state_discarding_events()).unwrap();
+    let restored = save_codec::deserialize(&saved).unwrap();
+    // This pass creates a third same-ID object for a second real Primary.
+    // The short elite alias resolves the first instance; invalid extension
+    // values keep each object's own history (10055520/1005589E).
+    let second = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=SourceB\n[SourceB]\nPrimary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+         ElitePrimary=ABCDEFGHIJKLMNOPQRSTUVWX\n[ABCDEFGHIJKLMNOPQRSTUVWX]\n\
+         Damage=50\nRange=6\nSpeed=40\nProjectile=Shot\nWarhead=WH\n\
+         Ammo=invalid\nApplyDamage=invalid\nProjectileRange=invalid\n",
+    ))
+    .process_with_fixed_art_and_registry_state(&IniFile::empty(), restored)
+    .unwrap();
+    let weapons = second.weapon_states().collect::<Vec<_>>();
+    assert_eq!(
+        weapons
+            .iter()
+            .map(|weapon| (weapon.ordinal, weapon.damage))
+            .collect::<Vec<_>>(),
+        [(0, 50), (1, 50), (2, 50)]
+    );
+    let source_a = second
+        .weapon_slot_states()
+        .find(|(_, id, _)| *id == "SourceA")
+        .unwrap()
+        .2;
+    let source_b = second
+        .weapon_slot_states()
+        .find(|(_, id, _)| *id == "SourceB")
+        .unwrap()
+        .2;
+    assert_eq!(source_a.base()[0], Some(0));
+    assert_eq!(source_b.base()[0], Some(2));
+    assert_eq!(source_b.elite()[0], Some(0));
+    let registry = &second.sdk_registries()[0];
+    let early = registry
+        .weapon_instance_effective_section(WeaponTypeRef { ordinal: 0 }, STORED)
+        .unwrap();
+    let later = registry
+        .weapon_instance_effective_section(WeaponTypeRef { ordinal: 2 }, STORED)
+        .unwrap();
+    assert_eq!(early.read_ares_int("Ammo", 1), 2);
+    assert_eq!(later.read_ares_int("Ammo", 1), 1);
+    assert_eq!(
+        early.read_ares_nullable_bool("ApplyDamage", None),
+        Some(true)
+    );
+    assert_eq!(later.read_ares_nullable_bool("ApplyDamage", None), None);
+    assert_eq!(early.read_ares_leptons("ProjectileRange", 100_000), 512);
+    assert_eq!(later.read_ares_leptons("ProjectileRange", 100_000), 100_000);
+
+    let (_, trace) = second.into_ini_and_native_type_construction_trace();
+    let bytes = save_codec::serialize(&trace.into_registry_state_discarding_events()).unwrap();
+    let restored = save_codec::deserialize(&bytes).unwrap();
+    let resumed = RulesLayerStack::new(IniFile::empty())
+        .process_with_fixed_art_and_registry_state(&IniFile::empty(), restored)
+        .unwrap();
+    let source_b = resumed
+        .weapon_slot_states()
+        .find(|(_, id, _)| *id == "SourceB")
+        .unwrap()
+        .2;
+    assert_eq!(
+        (source_b.base()[0], source_b.elite()[0]),
+        (Some(2), Some(0))
+    );
+    assert_eq!(
+        resumed
+            .weapon_states()
+            .map(|weapon| weapon.ordinal)
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert!(resumed.validate_saved_state().is_ok());
+    let bytes = save_codec::serialize(&resumed).unwrap();
+    let mut tampered: ProcessedRulesLayers = save_codec::deserialize(&bytes).unwrap();
+    let families = &mut tampered
+        .native_type_construction_trace
+        .registry_state
+        .families;
+    let weapon_count = families[&RulesTypeFamily::Weapon].len();
+    families.get_mut(&RulesTypeFamily::Vehicle).unwrap()[1]
+        .weapon_slots
+        .elite[0] = Some(weapon_count);
+    assert!(matches!(
+        tampered.validate_saved_state(),
+        Err(RulesError::InvalidSavedState(
+            "type reference is outside its registry"
+        ))
+    ));
+}
+
+#[test]
 fn side_registry_and_house_side_lookup_do_not_apply_generic_none_sentinels() {
     let explicit = RulesLayerStack::new(IniFile::from_str(
         "[Sides]\nnone=Americans\n<NONE>=British\nNONE=French\n",

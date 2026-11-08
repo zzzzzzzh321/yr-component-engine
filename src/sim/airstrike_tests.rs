@@ -43,7 +43,7 @@ impl Fixture {
                 .map(|name| self.sim.interner.intern(name)),
             weapon.bright,
         )
-        .with_installed_weapon(Some(self.sim.interner.intern("Flare")));
+        .with_installed_weapon(self.rules.weapon_handle("Flare"));
         world_receiver::commit_projectiles(
             &mut self.sim,
             &mut world_receiver::ReceiverRun::default(),
