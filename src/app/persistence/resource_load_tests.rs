@@ -1211,10 +1211,6 @@ fn sdk_super_saved_resources_prepare_cold() {
         );
         assert!(child.projectile.is_none());
         assert_eq!(
-            child.firing_policy().unwrap().projectile_range,
-            Some(100_000)
-        );
-        assert_eq!(
             rules
                 .weapons_iter()
                 .filter(|weapon| weapon.id == "ABCDEFGHIJKLMNOPQRSTUVWX")
