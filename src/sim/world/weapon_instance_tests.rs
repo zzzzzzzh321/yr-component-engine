@@ -114,6 +114,20 @@ fn sdk_weapon_instance_primary_flight_restore_and_receiver_keep_actual_slots() {
     let target_b = scene.spawn("HTNK", "Russians", (12, 19));
     let source_a = scene.spawn("LTNK", "Americans", (6, 22));
     let source_b = scene.spawn("MTNK", "Americans", (12, 22));
+    // The passive-scan consumer must keep the same actual W1 as FireAt;
+    // equal names and core Damage cannot prove the selected instance.
+    let scan_weapon = crate::sim::world::techno_ai::target_scan::weapon_at_index(
+        &scene.0.simulation,
+        &scene.0.resources.rules,
+        source_b,
+        0,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(
+        scan_weapon,
+        scene.0.resources.rules.weapon_by_handle(second).unwrap()
+    ));
+    assert!(!scan_weapon.firing_policy().unwrap().apply_damage);
     scene.command(
         "Americans",
         Command::Attack {

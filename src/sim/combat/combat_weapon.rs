@@ -433,14 +433,19 @@ pub(crate) fn primary_for_tier(obj: &ObjectType, veterancy: u16) -> Option<&str>
 /// Building Mission_Attack44B2D0 asks the first installed upgrade's type,
 /// independently of the host's rank, selected index and actual GetWeapon.
 pub(crate) fn has_shared_or_bursting_weapons(obj: &ObjectType, rules: &RuleSet) -> bool {
-    let Some(primary) = obj.primary() else {
+    // TechnoType712130..712164 compares normal WeaponStruct pointers,
+    // then reads each actual WeaponType's signed Burst. Host rank and its
+    // selected index do not change these two normal records.
+    let Some(primary) = weapon_for_index(obj, 0, 0).and_then(|record| record.handle(rules)) else {
         return false;
     };
-    let secondary = obj.weapon_at(WEAPON_SLOT_SECONDARY);
+    let secondary = weapon_for_index(obj, 0, 1).and_then(|record| record.handle(rules));
     secondary == Some(primary)
-        || rules.weapon(primary).is_some_and(|weapon| weapon.burst > 1)
+        || rules
+            .weapon_by_handle(primary)
+            .is_some_and(|weapon| weapon.burst > 1)
         || secondary
-            .and_then(|id| rules.weapon(id))
+            .and_then(|handle| rules.weapon_by_handle(handle))
             .is_some_and(|weapon| weapon.burst > 1)
 }
 
@@ -1426,6 +1431,48 @@ pub(crate) fn get_weapon_record<'r>(
 mod tests {
     use super::*;
     use crate::rules::ini_parser::IniFile;
+
+    #[test]
+    fn shared_weapon_predicate_keeps_normal_pointer_identity_across_physical_reads() {
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[BuildingTypes]\n0=UP\n[UP]\nStrength=500\n\
+             Primary=ABCDEFGHIJKLMNOPQRSTUVWXY\nSecondary=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+             ElitePrimary=ABCDEFGHIJKLMNOPQRSTUVWX\n\
+             [ABCDEFGHIJKLMNOPQRSTUVWX]\nBurst=1\n",
+        ));
+        let first = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
+        let obj = first.object("UP").unwrap();
+        let primary = weapon_for_index(obj, 0, 0).unwrap().handle(&first).unwrap();
+        let secondary = weapon_for_index(obj, 0, 1).unwrap().handle(&first).unwrap();
+        assert_eq!(
+            first.weapon_by_handle(primary).unwrap().id,
+            first.weapon_by_handle(secondary).unwrap().id
+        );
+        assert_ne!(
+            primary, secondary,
+            "full25-byte inputs allocate distinct pointers"
+        );
+        assert!(
+            !has_shared_or_bursting_weapons(obj, &first),
+            "same stored ID does not mean a shared Weapon"
+        );
+        // A real later short-name Find returns the first existing allocation.
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[UP]\nSecondary=ABCDEFGHIJKLMNOPQRSTUVWX\n"),
+        );
+        let next = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
+        let obj = next.object("UP").unwrap();
+        assert_eq!(
+            weapon_for_index(obj, 0, 0).unwrap().handle(&next),
+            weapon_for_index(obj, 0, 1).unwrap().handle(&next)
+        );
+        assert!(
+            has_shared_or_bursting_weapons(obj, &next),
+            "short alias now binds both normal records to one pointer"
+        );
+    }
 
     #[test]
     fn installed_upgrade_records_select_per_index_and_follow_removal() {
