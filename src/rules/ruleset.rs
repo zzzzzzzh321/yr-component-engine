@@ -7188,7 +7188,9 @@ impl RuleSet {
                     .values_mut()
                     .find(|sw| sw.id.eq_ignore_ascii_case(name))
                 {
-                    let targeting = metadata.targeting();
+                    let targeting = metadata
+                        .targeting()
+                        .expect("native Super targeting projection");
                     sw.target_constraints = targeting.constraints();
                     sw.use_ai_targeting = targeting.use_ai_targeting();
                     if let Some(settings) = sw.generic_warhead.as_mut() {
@@ -8500,18 +8502,24 @@ impl RuleSet {
         self.super_weapon(id).is_some_and(|sw| sw.use_ai_targeting)
     }
 
-    /// The ordered SWTypeExt targeting fields of an Ares GenericWarhead or
-    /// UnitDelivery type. Stock types keep their retail dispatch owners.
-    #[cfg(feature = "ares")]
+    /// One immutable targeting owner. An explicit external declaration selects
+    /// it independently of stock Type; older guests retain their old adapter.
     pub(crate) fn super_weapon_target_policy(
         &self,
         id: &str,
     ) -> Option<crate::rules::superweapon_targeting::AresSuperWeaponTargetingState> {
-        if !self.super_weapon(id)?.kind.has_ares_handler() {
-            return None;
+        if self.external_superweapons.is_some() {
+            return self
+                .super_weapon_metadata(id)
+                .and_then(|metadata| metadata.targeting());
         }
-        self.super_weapon_metadata(id)
-            .map(|metadata| metadata.targeting())
+        #[cfg(feature = "ares")]
+        if self.super_weapon(id)?.kind.has_ares_handler() {
+            return self
+                .super_weapon_metadata(id)
+                .and_then(|metadata| metadata.targeting());
+        }
+        None
     }
 
     /// `Type == Rules+0x498` (`[General] PrismType=`, `0x0044B2F8`).

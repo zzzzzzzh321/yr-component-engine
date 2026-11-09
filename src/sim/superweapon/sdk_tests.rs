@@ -159,6 +159,9 @@ impl Scene {
         )
     }
     fn roundtrip(&mut self) {
+        self.roundtrip_with_reference_seed_check(true);
+    }
+    fn roundtrip_with_reference_seed_check(&mut self, requires_reference_seed: bool) {
         let exact =
             crate::util::save_codec::serialize(self.sim.external_mod.as_ref().unwrap()).unwrap();
         let mut retained: ProcessedRulesLayers = crate::util::save_codec::deserialize(
@@ -178,9 +181,10 @@ impl Scene {
         // map resources. Supply the same terrain, then use both restore owners.
         restored.resolved_terrain = self.sim.resolved_terrain.clone();
         restored.restore_after_snapshot_load().unwrap();
-        assert!(
+        assert_eq!(
             self.owner.project_saved_scenario_rules(&retained).is_err(),
-            "serialized Rules omit the transient SDK seed and cannot authorize retained custom slots"
+            requires_reference_seed,
+            "only retained custom references require a transient SDK seed for projection"
         );
         // This lightweight envelope has no SavedScenarioResources wrapper.
         // Follow its admit_configuration_program owner: validate the exact
@@ -430,6 +434,9 @@ fn sdk_super_read_chronology_provider_grant_and_stock_controls() {
 #[path = "sdk_nuclear_tests.rs"]
 mod nuclear;
 
+#[path = "sdk_common_targeting_tests.rs"]
+mod common_targeting;
+
 #[cfg(not(feature = "ares"))]
 #[test]
 #[ignore = "requires VERA20K_ARES_COMPONENT (.28)"]
@@ -445,10 +452,22 @@ fn sdk_super_generic_transaction_history_and_exact_saved_program() {
     let credits = scene.sim.houses[&owner].economy().credits();
     let hash = scene.sim.state_hash();
     assert!(
-        !scene.fire("Strike", (6, 6)),
-        "owner target fails the same target preflight before money"
+        scene
+            .sim
+            .super_weapon_target_check(&scene.rules, owner, strike, (6, 6), false)
+            .is_err(),
+        "the cursor rejects an owner target before queueing an event"
     );
     assert_eq!(scene.sim.state_hash(), hash);
+    let previous = component("VERA_SDK_COMMON_TARGETING_PREVIOUS_WASM");
+    let mut old = Scene::new("super-generic-old-preflight", Some(&previous), BASE, "");
+    old.launcher();
+    let old_hash = old.sim.state_hash();
+    assert!(
+        !old.fire("Strike", (6, 6)),
+        "historical Generic ABI retains its extra final-event preflight"
+    );
+    assert_eq!(old.sim.state_hash(), old_hash);
     assert_eq!(
         scene.sim.entities().get(launcher).unwrap().health.current(),
         200
@@ -498,6 +517,42 @@ fn sdk_super_generic_transaction_history_and_exact_saved_program() {
         scene.sim.super_weapons[&owner][&strike].is_ready(),
         "virtual recharge uses the retained original deadline"
     );
+
+    // Generic vtable100A8ECC inherits common CanFireAt1006CDA0: a null WH
+    // fails Activate10071689, after ClickFire, rather than cursor selection.
+    let mut refused = Scene::new(
+        "super-generic-null-wh",
+        Some(&current),
+        BASE,
+        "[Strike]\nSW.Warhead=none\n",
+    );
+    refused.launcher();
+    let target = refused
+        .sim
+        .spawn_object_at_height("TARGET", "Russians", 20, 20, 0, 0, &refused.rules)
+        .unwrap();
+    let (owner, strike) = (refused.id("Americans"), refused.id("Strike"));
+    let credits = refused.sim.houses[&owner].economy().credits();
+    assert_eq!(
+        refused
+            .sim
+            .super_weapon_target_check(&refused.rules, owner, strike, (20, 20), false),
+        Ok(())
+    );
+    assert!(refused.fire("Strike", (20, 20)));
+    assert!(!refused.sim.super_weapons[&owner][&strike].is_ready());
+    assert_eq!(
+        refused.sim.super_weapons[&owner][&strike].ares_launch_count,
+        0
+    );
+    assert_eq!(refused.sim.houses[&owner].economy().credits(), credits);
+    assert_eq!(
+        refused.sim.entities().get(target).unwrap().health.current(),
+        200
+    );
+    // This scene has no non-null custom WH/Weapon reference to reject during
+    // bare Rules projection; the exact saved Program still needs admission.
+    refused.roundtrip_with_reference_seed_check(false);
 }
 
 #[cfg(not(feature = "ares"))]

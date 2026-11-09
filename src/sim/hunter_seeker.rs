@@ -51,7 +51,7 @@ impl crate::sim::world::Simulation {
             .and_then(|sw| sw.hunter_seeker.as_ref());
         let policy = origin
             .and_then(|origin| rules.super_weapon_metadata(self.interner.resolve(origin.sw_type)))
-            .map(|metadata| metadata.targeting());
+            .and_then(|metadata| metadata.targeting());
         let multiplayer = self.session.game_mode_nonzero();
         let human = house.is_controlled_by_human(multiplayer);
         let favourite_only = multiplayer && !human && house.enemy_house().is_some();

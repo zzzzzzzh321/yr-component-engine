@@ -731,7 +731,6 @@ pub(super) fn dispatch_sim_sound_events(
                     type_override: None,
                 }
             }
-            #[cfg(feature = "ares")]
             SimSoundEvent::AresSuperWeaponRefused { .. } => continue,
             SimSoundEvent::SuperWeaponInsufficientFunds { owner, sw_type } => {
                 if !rules.superweapon_semantics().paid_launches

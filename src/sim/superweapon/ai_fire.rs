@@ -161,8 +161,7 @@ pub(crate) fn try_fire(
         return;
     };
     let human = house.is_controlled_by_human(sim.session.game_mode_nonzero());
-    #[cfg(not(feature = "ares"))]
-    if human {
+    if human && !rules.superweapon_semantics().custom_payloads {
         return;
     }
     for name in &rules.super_weapon_order {
@@ -172,12 +171,8 @@ pub(crate) fn try_fire(
         let Some(sw_type_id) = sim.interner.get(name) else {
             continue;
         };
-        #[cfg(feature = "ares")]
-        if human
-            && rules
-                .super_weapon_target_policy(name)
-                .is_none_or(|policy| !policy.auto_fire())
-        {
+        let targeting = rules.super_weapon_target_policy(name);
+        if human && targeting.is_none_or(|policy| !policy.auto_fire()) {
             continue;
         }
         if !super::is_charged(sim, owner, sw_type_id) {
@@ -211,8 +206,7 @@ pub(crate) fn try_fire(
         {
             continue;
         }
-        #[cfg(feature = "ares")]
-        if rules.external_mod.is_none() && rules.super_weapon_target_policy(name).is_some() {
+        if targeting.is_some() {
             // House AI hook10038E10 also excludes drain state2.
             if sim.super_weapons[&owner][&sw_type_id].charge_drain_state() != 2 {
                 fire_extension_automatic(
@@ -285,7 +279,6 @@ pub(crate) fn try_fire(
 /// of a SPECIAL_PLACE launch, through the one [`TargetConstraints`] owner.
 ///
 /// [`TargetConstraints`]: crate::rules::superweapon_targeting::TargetConstraints
-#[cfg(feature = "ares")]
 fn extension_constraints(
     sim: &Simulation,
     owner: InternedId,
@@ -320,7 +313,6 @@ fn extension_constraints(
 /// The constraint result is the view's `constraints_blocked`. The
 /// AutoFire-only refusal applies to the two extension types whose automatic
 /// launch VERA ports.
-#[cfg(feature = "ares")]
 pub(super) fn manual_cameo_refusal(
     rules: &RuleSet,
     sw: &crate::rules::superweapon_type::SuperWeaponType,
@@ -345,7 +337,6 @@ pub(super) fn manual_cameo_refusal(
 
 /// Shared automatic launch100382D0 for House AI and SPECIAL_PLACE. Target
 /// selection owns any RNG; Fire_SW remains the one charge/effect transaction.
-#[cfg(feature = "ares")]
 pub(super) fn fire_extension_automatic(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -361,10 +352,14 @@ pub(super) fn fire_extension_automatic(
     let Some(policy) = rules.super_weapon_target_policy(&sw.id) else {
         return false;
     };
-    if !super::money::can_afford(&sim.houses, owner, sw) {
+    if rules.superweapon_semantics().paid_launches
+        && !super::money::can_afford(&sim.houses, owner, sw)
+    {
         return false;
     }
-    if !super::super_weapon_available(sim, rules, owner, &sw.id) {
+    if rules.superweapon_semantics().extended_availability
+        && !super::super_weapon_available(sim, rules, owner, &sw.id)
+    {
         return false;
     }
     if !extension_constraints(sim, owner, policy, manual) {
@@ -390,7 +385,6 @@ pub(super) fn fire_extension_automatic(
     true
 }
 
-#[cfg(feature = "ares")]
 fn extension_target(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -641,7 +635,6 @@ fn offensive_target(
 /// density kernel with retail, but use forward potential registries, exclude
 /// cloak2, and require CanFireAt before changing the maximum. Ares iterates
 /// exactly37/9 cells, unlike the retail inclusive38/10 loops.
-#[cfg(feature = "ares")]
 fn ares_spread_target(
     sim: &Simulation,
     rules: &RuleSet,

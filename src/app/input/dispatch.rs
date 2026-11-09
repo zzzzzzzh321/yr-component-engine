@@ -2058,15 +2058,8 @@ fn press_super_weapon(state: &mut AppState, section: &str, right: bool, gui_soun
     match click {
         super::superweapon_cameo::SuperWeaponClick::Refused
             if selection.as_ref().is_some_and(|(view, _)| {
-                #[cfg(feature = "ares")]
-                {
-                    view.ares_refusal
-                        == Some(crate::sim::superweapon::AresCameoRefusal::InsufficientFunds)
-                }
-                #[cfg(not(feature = "ares"))]
-                {
-                    view.can_fire && !view.can_afford
-                }
+                view.ares_refusal
+                    == Some(crate::sim::superweapon::AresCameoRefusal::InsufficientFunds)
             }) =>
         {
             let cue = state

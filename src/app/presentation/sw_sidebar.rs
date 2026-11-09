@@ -336,7 +336,6 @@ mod tests {
                 can_fire: false,
                 can_afford: false,
                 constraints_blocked: false,
-                #[cfg(feature = "ares")]
                 ares_refusal: None,
             },
         }
@@ -388,7 +387,6 @@ mod tests {
                 can_fire: false,
                 can_afford: false,
                 constraints_blocked: false,
-                #[cfg(feature = "ares")]
                 ares_refusal: None,
             })
             .collect()

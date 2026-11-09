@@ -442,12 +442,15 @@ impl RuleSet {
                     &charge,
                     #[cfg(feature = "ares")]
                     &crate::rules::superweapon_influence::SuperWeaponInfluence::default(),
-                    #[cfg(feature = "ares")]
-                    crate::rules::superweapon_targeting::AresSuperWeaponTargetingState::from_external_config(
-                        candidate.target_constraints,
-                        candidate.use_ai_targeting,
-                        candidate.generic_warhead.as_ref(),
-                    ),
+                    definition.common_targeting.as_ref()
+                        .filter(|_| policy.semantics.custom_payloads)
+                        .map(|common| {
+                            crate::rules::superweapon_targeting::AresSuperWeaponTargetingState::from_external_config(
+                                candidate.target_constraints,
+                                candidate.use_ai_targeting,
+                                common,
+                            )
+                        }),
                 ),
             );
             definitions.insert(definition.ordinal, candidate);

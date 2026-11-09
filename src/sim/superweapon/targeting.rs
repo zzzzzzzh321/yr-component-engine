@@ -159,8 +159,9 @@ pub(super) fn on_map(sim: &Simulation, cell: (u16, u16)) -> bool {
 }
 
 impl Simulation {
-    /// Shared extension target gate, suitable for cursor preview and the final
-    /// command transaction. Stock types retain their existing dispatch gates.
+    /// Shared extension gate for cursor preview and candidate selection. Native
+    /// common handlers execute their event through Activate without repeating
+    /// this query; historical Generic declarations retain their old preflight.
     /// A preview uses an isolated native-cell query, so even a projected fog
     /// lookup outside the grid cannot mutate the authoritative Dummy cell.
     pub fn super_weapon_target_check(
@@ -224,14 +225,7 @@ pub(super) fn check_with_data(
         .generic_warhead
         .as_ref()
         .map(|settings| &settings.targeting);
-    #[cfg(feature = "ares")]
-    let native = rules
-        .external_mod
-        .is_none()
-        .then(|| rules.super_weapon_target_policy(&sw.id))
-        .flatten();
-    #[cfg(feature = "ares")]
-    let native = native.map(|policy| {
+    let retained = rules.super_weapon_target_policy(&sw.id).map(|policy| {
         (
             if automatic {
                 policy.automatic()
@@ -242,9 +236,7 @@ pub(super) fn check_with_data(
             policy.range(),
         )
     });
-    #[cfg(not(feature = "ares"))]
-    let native = None;
-    let (requirements, fire_into_shroud, range) = if let Some(policy) = native {
+    let (requirements, fire_into_shroud, range) = if let Some(policy) = retained {
         policy
     } else if let Some(policy) = component {
         (
@@ -259,7 +251,13 @@ pub(super) fn check_with_data(
     } else {
         return Ok(());
     };
-    if sw.generic_warhead.is_some() && !super::generic_warhead::can_launch(sim, rules, sw, cell) {
+    // Generic's installed vtable100A8ECC uses common CanFireAt1006CDA0;
+    // null-WH refusal belongs to Activate10071689, after ClickFire. Only the
+    // historical component ABI keeps its earlier payload preflight.
+    if retained.is_none()
+        && sw.generic_warhead.is_some()
+        && !super::generic_warhead::can_launch(sim, rules, sw, cell)
+    {
         return Err(
             if sim
                 .resolved_terrain
@@ -272,23 +270,26 @@ pub(super) fn check_with_data(
             },
         );
     }
-    let terrain = sim
-        .resolved_terrain
-        .as_ref()
-        .ok_or(TargetReject::TargetOutOfBounds)?;
-    let target = terrain
-        .cell(cell.0, cell.1)
-        .ok_or(TargetReject::TargetOutOfBounds)?;
-    let layer =
-        if target.bridge_facts.raw_flags & crate::map::bridge_facts::BRIDGE_FLAG_STRUCTURAL != 0 {
-            MovementLayer::Bridge
-        } else {
-            MovementLayer::Ground
-        };
-    let contents: Vec<_> = sim
-        .substrate
-        .occupancy
-        .get(cell.0, cell.1)
+    let terrain = sim.resolved_terrain.as_ref();
+    let target = terrain.and_then(|terrain| terrain.cell(cell.0, cell.1));
+    // The cell target check10032230 uses the isolated Dummy for a missing cell;
+    // masks0/house-only impose no surface requirement (10032DF5 ->10032E4B).
+    // In particular a native NoTarget selection must not acquire a new global
+    // map-cell refusal. Content/surface Dummy observations retain the existing
+    // out-of-grid residual; Generic WH still needs its actual impact cell.
+    let needs_cell = sw.generic_warhead.is_some()
+        || requirements.target.intersects(TargetMask::ALL_CELLS)
+        || requirements.target.intersects(TargetMask::ALL_CONTENTS)
+        || !automatic && !fire_into_shroud;
+    let layer = if target.is_some_and(|target| {
+        target.bridge_facts.raw_flags & crate::map::bridge_facts::BRIDGE_FLAG_STRUCTURAL != 0
+    }) {
+        MovementLayer::Bridge
+    } else {
+        MovementLayer::Ground
+    };
+    let contents: Vec<_> = target
+        .and_then(|_| sim.substrate.occupancy.get(cell.0, cell.1))
         .into_iter()
         .flat_map(|occupancy| occupancy.iter_layer(layer))
         .filter_map(|occupant| sim.substrate.entities.get(occupant.entity_id))
@@ -305,23 +306,27 @@ pub(super) fn check_with_data(
     // Ares tests `SW.FireIntoShroud=` only in the player's cursor,
     // `SWTypeExt::ExtData::WhatAction` (Ares.dll `0x10033EB0`), on the
     // client's own map; the AI's `CanFireAt` path has no shroud test.
-    let shrouded = (!automatic && !fire_into_shroud).then(|| {
-        crate::sim::vision::cell_is_shrouded(
-            &sim.fog,
-            &NativeCellQuery::isolated(terrain),
-            owner,
-            cell,
-        )
-    });
+    let shrouded = (!automatic && !fire_into_shroud)
+        .then(|| {
+            terrain.map(|terrain| {
+                crate::sim::vision::cell_is_shrouded(
+                    &sim.fog,
+                    &NativeCellQuery::isolated(terrain),
+                    owner,
+                    cell,
+                )
+            })
+        })
+        .flatten();
     evaluate_target(&TargetPreflightInput {
         target_cell: Some((i32::from(cell.0), i32::from(cell.1))),
         requires_target_cell: true,
         requirements: &requirements,
         contents: &contents,
-        target_in_bounds: true,
-        terrain_is_water: Some(
-            target.land_type == crate::rules::terrain_rules::LandType::Water.as_index(),
-        ),
+        target_in_bounds: target.is_some() || !needs_cell,
+        terrain_is_water: target.map(|target| {
+            target.land_type == crate::rules::terrain_rules::LandType::Water.as_index()
+        }),
         fire_into_shroud,
         shrouded,
         range,
@@ -329,6 +334,20 @@ pub(super) fn check_with_data(
         launch_sites: &data.sites,
     })?;
     data.check_influences(cell)
+}
+
+/// The same immutable source serves preview, selection and Activate. Older
+/// external components keep their historical Generic-only range projection.
+pub(super) fn launch_range(rules: &RuleSet, sw: &SuperWeaponType) -> (f64, f64) {
+    rules
+        .super_weapon_target_policy(&sw.id)
+        .map(|policy| policy.range())
+        .or_else(|| {
+            sw.generic_warhead
+                .as_ref()
+                .map(|settings| settings.targeting.range())
+        })
+        .unwrap_or((-1.0, -1.0))
 }
 
 /// ra2-mono ResolveSuperweaponLaunchSites adaptation: VERA's retained House
@@ -358,10 +377,19 @@ pub(super) fn launch_sites(
                 id,
                 LaunchSite {
                     center: (coord.x / 256, coord.y / 256),
+                    // Base IsLaunchSite1006D9D0 checks life, HP and power.
+                    // Nuclear100733E0 adds NukeSilo before that same base
+                    // predicate, in both prepared preview and activation.
                     eligible: entity.owner() == owner
                         && entity.is_object_alive()
+                        && entity.health.current() != 0
                         && !entity.lifecycle.in_limbo()
-                        && sim.building_operational_state(id, rules) == Some(true),
+                        && sim.building_operational_state(id, rules) == Some(true)
+                        && (sw.nuclear.is_none()
+                            || sim
+                                .interner
+                                .object_type(entity.type_ref(), rules)
+                                .is_some_and(|object| object.nuke_silo)),
                     range_minimum_override: None,
                     range_maximum_override: None,
                 },

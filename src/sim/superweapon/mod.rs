@@ -72,7 +72,6 @@ pub use two_stage::PaidSuperWeaponSelection;
 pub(crate) enum SuperWeaponTargetSource {
     Manual,
     Automatic,
-    #[cfg(feature = "ares")]
     SelectedAutomatic,
 }
 #[cfg(test)]
@@ -1376,7 +1375,6 @@ pub struct SuperWeaponDisplay {
 
 /// Why Ares's sidebar select hook (10034DA0) refuses a cameo press, in its
 /// test order. Ephemeral; gameplay state stays with the Super/House owners.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AresCameoRefusal {
     /// Prints `Message.InsufficientFunds`.
@@ -1409,10 +1407,9 @@ pub struct SuperWeaponView {
     /// A `SW.UseAITargeting` type whose Ares constraints fail for a manual
     /// launch (IsTargetConstraintsEligible10032110). Ares's sidebar hooks
     /// darken (10034F3F) and refuse (10034E75) it, as Phobos's
-    /// SWButtonClass does. Always false without Ares.
+    /// SWButtonClass does. Inactive without an admitted extension policy.
     pub constraints_blocked: bool,
     /// The select hook's refusal of a press, if any.
-    #[cfg(feature = "ares")]
     pub ares_refusal: Option<AresCameoRefusal>,
 }
 
@@ -1477,7 +1474,6 @@ pub fn superweapon_views_for_owner(
             can_fire: native_can_fire,
             can_afford,
             constraints_blocked,
-            #[cfg(feature = "ares")]
             ares_refusal: ai_fire::manual_cameo_refusal(
                 rules,
                 sw_type,

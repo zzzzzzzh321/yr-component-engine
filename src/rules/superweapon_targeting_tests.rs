@@ -240,16 +240,18 @@ fn mono_range_or_required_site_without_launcher_fails_closed() {
 }
 
 #[test]
-fn mono_invalid_range_and_missing_target_are_rejected() {
+fn native_range_gate_and_missing_target_follow_their_own_checks() {
     let requirements = requirements(TargetMask::NONE, HouseMask::NONE);
     let mut input = input(&requirements);
-    for range in [(8.0, 2.0), (f64::INFINITY, 5.0), (f64::NAN, -1.0)] {
+    for range in [(8.0, 2.0), (f64::INFINITY, 5.0)] {
         input.range = range;
         assert_eq!(
             evaluate_target(&input),
-            Err(TargetReject::InvalidRangeConfiguration)
+            Err(TargetReject::NoEligibleLaunchSite)
         );
     }
+    input.range = (f64::NAN, -1.0);
+    assert!(evaluate_target(&input).is_ok());
     input.range = (-1.0, -1.0);
     input.target_cell = None;
     assert!(evaluate_target(&input).is_ok());

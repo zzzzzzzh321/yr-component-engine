@@ -31,7 +31,7 @@ fn bullet_with(sim: &Simulation, handle: WeaponHandle) -> Option<u64> {
     })
 }
 
-fn advance_until(scene: &mut Scene, frames: u32, done: impl Fn(&Simulation) -> bool) {
+pub(super) fn advance_until(scene: &mut Scene, frames: u32, done: impl Fn(&Simulation) -> bool) {
     for _ in 0..frames {
         let commands = scene.sim.take_due_commands();
         scene

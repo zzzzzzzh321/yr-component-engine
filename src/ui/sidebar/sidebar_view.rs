@@ -571,7 +571,6 @@ mod tests {
                 can_fire: online,
                 can_afford: affordable,
                 constraints_blocked: false,
-                #[cfg(feature = "ares")]
                 ares_refusal: None,
             }];
             let entries = super::collect_build_entries(

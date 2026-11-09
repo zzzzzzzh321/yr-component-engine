@@ -1,11 +1,12 @@
 # Ares GenericWarhead
 
-Requires an explicit `--features ares` build. Default builds do not read or execute
-these extensions; see [build capability](ares.md).
+Ordinary builds execute the externally admitted subset when a compatible
+`vera20k-ares.wasm` is installed. The older built-in implementation requires
+`--features ares`; distinguish these routes when using [build capability](ares.md).
 
 VERA supports an initial, INI-selected `Type=GenericWarhead` implementation.
 It detonates an existing warhead at the selected cell without creating a
-projectile. Stock superweapon types keep their existing behavior.
+projectile. Without an admitted extension policy, stock dispatch stays unchanged.
 
 ```ini
 [SuperWeaponTypes]
@@ -46,8 +47,10 @@ Provide the normal art/cameo assets for your mod.
   pass to have allocated it. This key never allocates a missing warhead.
   Missing, empty and unknown values retain the old slot; `none` clears it.
 - `SW.Damage` is a signed integer, defaulting to zero. There is no implicit
-  weapon or default warhead. A missing/null warhead refuses launch without
-  consuming the charge.
+  weapon or default warhead. With component 0.37's common declaration, a
+  missing/null warhead fails Activate: ClickFire consumes readiness, but no
+  fee, launch history or damage is produced. Historical components retain
+  their earlier preflight refusal without consuming the charge.
 - Damage uses the existing area-damage owner, including verses, CellSpread,
   damage receivers, ownership attribution and destruction consequences.
   The impact is at the target cell centre, on the bridge deck when present.
@@ -107,15 +110,24 @@ consumers and the available official Ares sources.
 | `TryParseTargetMask`, `TryParseHouseMask` | Replaced by Ares's own readers (`0x10034430`, `0x100341D0`): `TargetMask::read_ares`, `HouseMask::read_ares` |
 | `Evaluate` and its input/result types | `evaluate_target`; same ordered terrain/content/house/shroud/range gates, typed rejection reasons |
 | `ResolveSuperweaponLaunchSites` | VERA's retained house building list and shared operational-state query; no OOP/ECS bridge copied |
-| `EvaluateSuperweaponTargetPreflight` | Read-only occupancy, alliance and fog observations; the same gate serves cursor, command and AI |
+| `EvaluateSuperweaponTargetPreflight` | Read-only occupancy, alliance and fog observations shared by cursor and AI; historical Generic ABI also uses a command preflight |
 | `TryQueueSupportWarheadSuperweapon` | Existing VERA synchronous area-damage owner, payload validation and source-house attribution |
 | GenericWarhead house-filter regression | Ordinary HP damage substitutes for ra2-mono's AttachEffect observation; target requirements never replace warhead filters |
 
 Intentional boundaries/adaptations:
 
-- The common policy is executed for GenericWarhead, UnitDelivery and HunterSeeker. Automatic
-  requirements remain independent of manual ones and take their defaults from
-  the selected native targeting mode; stock dispatch stays separate.
+- Component 0.37 adds optional common targeting for current supported custom
+  handlers and stock types with a retained first mapped handler, including
+  Nuclear. Automatic requirements remain independent of manual ones and take
+  defaults from the retained targeting mode. Older components without this
+  declaration keep their prior Generic targeting route. The legacy built-in
+  route retains its existing handler scope.
+- Native common `Launch` (`0x10032ED0`) enters `Activate` without repeating the
+  cursor query. A queued event may therefore still use Nuclear's direct-drop
+  fallback after every silo becomes ineligible. Generic's null-warhead check
+  belongs to Activate, after ClickFire; it does not make the cursor reject a
+  valid target. The existing impact-cell safety check and UnitDelivery
+  admission still have separate native-exactness boundaries.
 - `SW.RequiresTarget`, `SW.RequiresHouse`, `SW.AIRequiresTarget`,
   `SW.AIRequiresHouse`, `SW.FireIntoShroud`, `SW.RangeMinimum` and
   `SW.RangeMaximum` are supported. The four masks take Ares's comma-separated
@@ -126,7 +138,10 @@ Intentional boundaries/adaptations:
   are disabled. Missing/inactive launchers cannot satisfy a configured range.
 - SWType metadata uses the shared Ares value readers, retaining binary64
   ranges and earlier values after unsuccessful reads.
-  Non-finite or reversed ranges are rejected. A query uses isolated native-cell
+  The prepared range gate runs only when either bound is nonnegative. Negative
+  infinity disables a bound, positive infinity permits finite distances as an
+  upper bound, and NaN rejects a site only when the range gate actually runs.
+  There is no global finite-value or min/max-order clamp. A query uses isolated native-cell
   fallback state so hovering cannot change the authoritative shared Dummy.
 - The pure kernel retains per-launcher range overrides from the source, but
   GenericWarhead has no per-launcher override producer. EMPulse weapon-range

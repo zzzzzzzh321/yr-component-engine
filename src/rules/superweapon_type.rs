@@ -776,8 +776,9 @@ pub(crate) struct AresSuperWeaponMetadata {
     charge: AresSuperWeaponCharge,
     #[cfg(feature = "ares")]
     influence: crate::rules::superweapon_influence::SuperWeaponInfluence,
-    #[cfg(feature = "ares")]
-    targeting: crate::rules::superweapon_targeting::AresSuperWeaponTargetingState,
+    /// Present only for an admitted common declaration or the native profile.
+    /// Historical external components keep their payload-specific adapter.
+    targeting: Option<crate::rules::superweapon_targeting::AresSuperWeaponTargetingState>,
 }
 
 /// SWTypeExt+284/+285: constructor10031460 clears AX at10031471 and
@@ -805,8 +806,7 @@ impl AresSuperWeaponMetadata {
         charge: &AresSuperWeaponCharge,
         #[cfg(feature = "ares")]
         influence: &crate::rules::superweapon_influence::SuperWeaponInfluence,
-        #[cfg(feature = "ares")]
-        targeting: crate::rules::superweapon_targeting::AresSuperWeaponTargetingState,
+        targeting: Option<crate::rules::superweapon_targeting::AresSuperWeaponTargetingState>,
     ) -> Self {
         Self {
             availability: availability.clone(),
@@ -815,7 +815,6 @@ impl AresSuperWeaponMetadata {
             charge: charge.clone(),
             #[cfg(feature = "ares")]
             influence: influence.clone(),
-            #[cfg(feature = "ares")]
             targeting,
         }
     }
@@ -840,10 +839,9 @@ impl AresSuperWeaponMetadata {
     }
 
     /// The ordered SWTypeExt targeting fields.
-    #[cfg(feature = "ares")]
     pub(crate) fn targeting(
         &self,
-    ) -> crate::rules::superweapon_targeting::AresSuperWeaponTargetingState {
+    ) -> Option<crate::rules::superweapon_targeting::AresSuperWeaponTargetingState> {
         self.targeting
     }
 }

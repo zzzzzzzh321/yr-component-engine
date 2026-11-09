@@ -2433,7 +2433,7 @@ impl ProcessedRulesLayers {
                 member.super_weapon_building_requirements.as_ref(),
                 &member.super_weapon_charge,
                 &member.super_weapon_influence,
-                member.super_weapon_targeting,
+                Some(member.super_weapon_targeting),
             )
         })
     }

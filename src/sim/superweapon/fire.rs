@@ -57,8 +57,11 @@ impl Simulation {
         overlays: Option<&OverlayTypeRegistry>,
         effects: FrameEffects<'_>,
     ) -> bool {
-        #[cfg(feature = "ares")]
-        if rules.super_weapon_uses_ai_targeting(self.interner.resolve(sw_type_id)) {
+        if rules.super_weapon_uses_ai_targeting(self.interner.resolve(sw_type_id))
+            && rules
+                .super_weapon_target_policy(self.interner.resolve(sw_type_id))
+                .is_some()
+        {
             let launched = super::ai_fire::fire_extension_automatic(
                 self, rules, owner, sw_type_id, overlays, effects, true,
             );
@@ -79,8 +82,9 @@ impl Simulation {
     /// `HouseClass::Fire_SW @ 0x004FAE50` for `owner`'s Super of type
     /// `sw_type_id` at `cell`. Returns whether ClickFire called Launch, a
     /// VERA answer: native Fire_SW returns 1 either way.
-    /// Manual commands and AI share this transaction; `automatic` selects
-    /// the extension target requirements before any charge is consumed.
+    /// Manual commands and AI share this transaction. Historical Generic
+    /// declarations use `automatic` to select their extra preflight masks;
+    /// admitted common handlers already followed the cursor/selector path.
     pub(crate) fn fire_super_weapon(
         &mut self,
         rules: &RuleSet,
@@ -161,19 +165,21 @@ impl Simulation {
                 .expect("retained source")
                 .paid_sequence = request.sequence;
         }
-        // Optional extension preflight precedes paired-Super writes, effects,
-        // defense alerts and charge consumption. Stock-only commands retain
-        // their native behavior, including native refused-click side effects.
+        // Resource/instance admission precedes paired-Super writes. The old
+        // Generic ABI retains its extra target preflight. Common/native
+        // targeting belongs to WhatAction/AI, not event execution:
+        // SPECIAL_PLACE10038EEF calls Fire_SW directly, and common
+        // Launch10032ED0 calls Activate before any target query. Activation
+        // therefore keeps its own no-eligible-site fallback after a target was
+        // chosen, including when world facts changed since the cursor query.
         if (semantics.extended_availability || cfg!(feature = "phobos"))
             && !super::super_weapon_available(self, rules, owner, &sw.id)
         {
             return false;
         }
-        #[cfg(feature = "ares")]
         let selected_automatic = target_source == super::SuperWeaponTargetSource::SelectedAutomatic;
-        #[cfg(not(feature = "ares"))]
-        let selected_automatic = false;
         if !selected_automatic
+            && rules.super_weapon_target_policy(&sw.id).is_none()
             && super::targeting::check(self, rules, owner, sw, cell, automatic).is_err()
         {
             return false;
@@ -411,10 +417,14 @@ fn click_fire(
     }
     if sw.nuclear.is_none()
         && sw.kind == SuperWeaponKind::GenericWarhead
+        && rules.super_weapon_target_policy(&sw.id).is_none()
         && !super::generic_warhead::can_launch(sim, rules, sw, cell)
     {
         return false;
     }
+    // Common Launch10032ED0 invokes Generic Activate10071650 even with a
+    // null WH. Its failure skips money/history while ClickFire still finishes
+    // the charge. The guard above preserves the historical Generic ABI only.
     let extension_effect = rules.superweapon_semantics().custom_payloads
         && (sw.nuclear.is_some()
             || matches!(

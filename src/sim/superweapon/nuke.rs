@@ -154,21 +154,13 @@ pub(super) fn launch(
             .get(&owner)
             .and_then(|weapons| weapons.get(&sw_type_id))
             .is_some_and(|instance| instance.is_active && instance.one_time);
+        let range = super::targeting::launch_range(rules, sw);
         let silo = (!one_time && nuclear.silo_launch)
             .then(|| {
                 super::targeting::launch_sites(sim, rules, owner, sw)
                     .into_iter()
-                    .find_map(|(id, site)| {
-                        (site.eligible
-                            && sim.substrate.entities.get(id).is_some_and(|building| {
-                                building.health.current() != 0
-                                    && sim
-                                        .interner
-                                        .object_type(building.type_ref(), rules)
-                                        .is_some_and(|object| object.nuke_silo)
-                            }))
-                        .then_some(id)
-                    })
+                    .find(|(_, site)| site.admits((i32::from(cell.0), i32::from(cell.1)), range))
+                    .map(|(id, _)| id)
             })
             .flatten();
         let location = if let Some(silo) = silo {

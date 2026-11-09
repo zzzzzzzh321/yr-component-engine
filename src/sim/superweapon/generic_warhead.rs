@@ -50,7 +50,8 @@ pub(super) fn launch(
     if !can_launch(sim, rules, sw, cell) {
         return false;
     }
-    // ClickFire validates these before consuming readiness.
+    // Activate10071689 refuses a null WH; the common caller still finishes
+    // ClickFire's charge tail. Historical components also preflight this guard.
     let settings = sw
         .generic_warhead
         .as_ref()
@@ -58,14 +59,10 @@ pub(super) fn launch(
     let warhead = rules
         .warhead(settings.warhead.as_deref().expect("bound warhead"))
         .expect("resolved warhead");
+    let range = super::targeting::launch_range(rules, sw);
     let source = super::targeting::launch_sites(sim, rules, owner, sw)
         .into_iter()
-        .find(|(_, site)| {
-            site.admits(
-                (i32::from(cell.0), i32::from(cell.1)),
-                settings.targeting.range(),
-            )
-        })
+        .find(|(_, site)| site.admits((i32::from(cell.0), i32::from(cell.1)), range))
         .map(|(id, _)| id)
         .unwrap_or(RAD_NO_ATTACKER);
     let [x, y, z] = super::deck_coords(sim, cell);

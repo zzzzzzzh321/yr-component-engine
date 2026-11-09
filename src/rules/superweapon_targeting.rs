@@ -200,7 +200,6 @@ pub struct TargetRequirements {
 
 /// An Ares AITargeting mode, in the order of its names at 1009BAF8 (reader
 /// 10034350), which is SWTypeExt+0x210's value.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AiTargetingMode {
     None,
@@ -228,7 +227,6 @@ pub(crate) enum AiTargetingMode {
 
 /// `SW.AITargeting.Preference`: the names at 1009BAB4 in reader order
 /// (100343C0).
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AiTargetPreference {
     None,
@@ -236,7 +234,6 @@ pub(crate) enum AiTargetPreference {
     Defensive,
 }
 
-#[cfg(feature = "ares")]
 const AI_TARGET_PREFERENCES: [(&str, AiTargetPreference); 3] = [
     ("none", AiTargetPreference::None),
     ("offensive", AiTargetPreference::Offensive),
@@ -249,7 +246,6 @@ const AI_TARGET_PREFERENCES: [(&str, AiTargetPreference); 3] = [
 /// preference byte +4, used while SW.AITargeting.Preference is unset; and
 /// bytes +5/+6, the AI target and house masks used while
 /// SW.AIRequiresTarget/SW.AIRequiresHouse are unset.
-#[cfg(feature = "ares")]
 const AI_TARGETING_MODES: [(&str, AiTargetingMode, u16, u8, u8, u8); 21] = {
     use AiTargetingMode as M;
     [
@@ -321,7 +317,6 @@ fn handler_initial_mode(type_name: &str) -> u8 {
 /// `SW.RequiresHouse` (+0x241/+0x23D), the nullable
 /// `SW.AIRequiresTarget`/`SW.AIRequiresHouse` (+0x242/+0x23E) and
 /// SW.RangeMinimum/Maximum (+0x460/+0x468).
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AresSuperWeaponTargetingState {
     /// LoadFromINIFile10033250 has left state+4 = 0.
@@ -342,7 +337,6 @@ pub(crate) struct AresSuperWeaponTargetingState {
     range_maximum: NativeF64Bits,
 }
 
-#[cfg(feature = "ares")]
 impl Default for AresSuperWeaponTargetingState {
     fn default() -> Self {
         // SWTypeExt ctor10031460: the dword 0x01010007 at 10031733 leaves
@@ -374,36 +368,36 @@ impl Default for AresSuperWeaponTargetingState {
     }
 }
 
-#[cfg(feature = "ares")]
 impl AresSuperWeaponTargetingState {
     /// Derived adapter for the frozen external catalog. It performs no INI
     /// read and does not enable capabilities absent from the component ABI.
     pub(crate) fn from_external_config(
         constraints: TargetConstraints,
         use_ai_targeting: bool,
-        generic: Option<&crate::rules::superweapon_type::GenericWarheadSettings>,
+        common: &vera_mod_api::SuperWeaponCommonTargetingPolicy,
     ) -> Self {
-        let mut state = Self {
+        // The resource binder validates the closed declaration first. This is
+        // its immutable projection into the same selector owner, never a read
+        // of merged/current INI or a second gameplay-state store.
+        Self {
             initialized: true,
+            mode: common.mode,
             constraints: Some(constraints.0),
+            preference: Some(common.preference),
             use_ai_targeting,
+            auto_fire: common.auto_fire,
+            manual_fire: common.manual_fire,
+            fire_into_shroud: common.fire_into_shroud,
+            manual: TargetRequirements {
+                target: TargetMask(common.manual_target),
+                house: HouseMask(common.manual_house),
+            },
+            ai_target: Some(TargetMask(common.automatic_target)),
+            ai_house: Some(HouseMask(common.automatic_house)),
+            range_minimum: NativeF64Bits::from_bits(common.range_minimum),
+            range_maximum: NativeF64Bits::from_bits(common.range_maximum),
             ..Self::default()
-        };
-        if let Some(generic) = generic {
-            state.mode = match generic.ai_targeting {
-                crate::rules::superweapon_type::GenericWarheadAiTargeting::Offensive => {
-                    OFFENSIVE_MODE
-                }
-                crate::rules::superweapon_type::GenericWarheadAiTargeting::None => 0,
-            };
-            state.manual = generic.targeting.manual;
-            state.ai_target = Some(generic.targeting.automatic.target);
-            state.ai_house = Some(generic.targeting.automatic.house);
-            state.fire_into_shroud = generic.targeting.fire_into_shroud;
-            state.range_minimum = generic.targeting.range_minimum;
-            state.range_maximum = generic.targeting.range_maximum;
         }
-        state
     }
 
     /// LoadFromINIFile10033250 with this type's section. Only its first call
@@ -419,6 +413,7 @@ impl AresSuperWeaponTargetingState {
     /// (100343C0) readers need the whole value to `_strcmpi` a name; anything
     /// else keeps the prior value. The Nullable wrappers set their flag only
     /// on a successful read.
+    #[cfg(feature = "ares")]
     pub(crate) fn read_pass(&mut self, section: &IniSection, type_name: Option<&str>) -> bool {
         let initialize = !self.initialized;
         if initialize {
@@ -484,6 +479,7 @@ impl AresSuperWeaponTargetingState {
 
     /// A pass without this type's section still ends the first call
     /// (10033284 -> 10033347), so a later pass never runs Initialize.
+    #[cfg(feature = "ares")]
     pub(crate) fn skip_pass(&mut self) {
         self.initialized = true;
     }
@@ -633,23 +629,19 @@ impl LaunchSite {
     pub fn admits(self, target: (i32, i32), range: (f64, f64)) -> bool {
         let minimum = self.range_minimum_override.unwrap_or(range.0);
         let maximum = self.range_maximum_override.unwrap_or(range.1);
-        if !self.eligible || !valid_range((minimum, maximum)) {
+        if !self.eligible {
             return false;
         }
-        let dx = i64::from(target.0) - i64::from(self.center.0);
-        let dy = i64::from(target.1) - i64::from(self.center.1);
-        // Coordinates supplied by the world are 16-bit cells. f64 exactly
+        let dx = i64::from(target.0 as i16) - i64::from(self.center.0 as i16);
+        let dy = i64::from(target.1 as i16) - i64::from(self.center.1 as i16);
+        // IsLaunchSiteEligible1006DA94 uses signed-word cells. f64 exactly
         // represents their squared distance; no sqrt, FMA or RNG is involved.
+        // The existing squared comparison replaces native1006DAC5's sqrt;
+        // subcell binary64 boundary rounding remains a numerical residual.
         let distance_squared = (dx as f64) * (dx as f64) + (dy as f64) * (dy as f64);
         (minimum < 0.0 || distance_squared >= minimum * minimum)
             && (maximum < 0.0 || distance_squared <= maximum * maximum)
     }
-}
-
-fn valid_range((minimum, maximum): (f64, f64)) -> bool {
-    minimum.is_finite()
-        && maximum.is_finite()
-        && (minimum < 0.0 || maximum < 0.0 || minimum <= maximum)
 }
 
 /// The House fields `IsTargetConstraintsEligible`10032110 reads before its
@@ -685,12 +677,9 @@ pub fn evaluate_target(input: &TargetPreflightInput<'_>) -> Result<(), TargetRej
         target: target_mask,
         house: house_mask,
     } = *input.requirements;
-    let constrained_range = input.range.0 >= 0.0
-        || input.range.1 >= 0.0
-        || input.launch_sites.iter().any(|site| {
-            site.range_minimum_override.is_some_and(|v| v >= 0.0)
-                || site.range_maximum_override.is_some_and(|v| v >= 0.0)
-        });
+    // Prepare1006D1E0 decides NeedsLaunchSite from the global getter before
+    // collecting individual sites. A per-site override cannot enable that scan.
+    let constrained_range = input.range.0 >= 0.0 || input.range.1 >= 0.0;
     let Some(target) = input.target_cell else {
         return if input.requires_target_cell
             || target_mask != TargetMask::NONE
@@ -741,9 +730,6 @@ pub fn evaluate_target(input: &TargetPreflightInput<'_>) -> Result<(), TargetRej
     if !input.fire_into_shroud && input.shrouded == Some(true) {
         return Err(TargetReject::TargetShrouded);
     }
-    if !valid_range(input.range) {
-        return Err(TargetReject::InvalidRangeConfiguration);
-    }
     if input.requires_launch_site && !input.launch_sites.iter().any(|site| site.eligible) {
         return Err(TargetReject::NoEligibleLaunchSite);
     }
@@ -765,6 +751,63 @@ mod tests;
 #[cfg(test)]
 mod sdk_admission_tests {
     use super::*;
+
+    #[test]
+    fn common_range_matches_native_prepared_gate_and_site_comparisons() {
+        // Ares IsLaunchSiteEligible1006DA20 and CanFireAt1006CE19 use
+        // inclusive bounds without a finite-value clamp. Prepare1006D260
+        // enables the range gate only when either bound compares >= zero.
+        let site = LaunchSite {
+            center: (0, 0),
+            eligible: true,
+            range_minimum_override: None,
+            range_maximum_override: None,
+        };
+        assert!(site.admits((3, 4), (f64::NEG_INFINITY, f64::INFINITY)));
+        assert!(site.admits((3, 4), (5.0, 5.0)));
+        assert!(!site.admits((3, 4), (-1.0, f64::NAN)));
+        let requirements = TargetRequirements {
+            target: TargetMask::NONE,
+            house: HouseMask::NONE,
+        };
+        let mut input = TargetPreflightInput {
+            target_cell: Some((3, 4)),
+            requires_target_cell: true,
+            requirements: &requirements,
+            contents: &[],
+            target_in_bounds: true,
+            terrain_is_water: Some(false),
+            fire_into_shroud: true,
+            shrouded: Some(false),
+            range: (-1.0, f64::NAN),
+            requires_launch_site: false,
+            launch_sites: &[],
+        };
+        // Neither bound activates Prepare's site scan; the raw NaN slot
+        // alone must not create a global invalid-range refusal.
+        assert_eq!(evaluate_target(&input), Ok(()));
+        input.range = (0.0, f64::NAN);
+        input.launch_sites = std::slice::from_ref(&site);
+        assert_eq!(
+            evaluate_target(&input),
+            Err(TargetReject::NoEligibleLaunchSite)
+        );
+        let overridden = LaunchSite {
+            range_minimum_override: Some(0.0),
+            range_maximum_override: Some(10.0),
+            ..site
+        };
+        input.range = (8.0, 2.0);
+        input.launch_sites = std::slice::from_ref(&overridden);
+        assert_eq!(evaluate_target(&input), Ok(()));
+        let dormant = LaunchSite {
+            range_maximum_override: Some(1.0),
+            ..site
+        };
+        input.range = (-1.0, -1.0);
+        input.launch_sites = std::slice::from_ref(&dormant);
+        assert_eq!(evaluate_target(&input), Ok(()));
+    }
 
     #[test]
     fn admitted_masks_keep_high_constraint_bits_without_truncating_unknown_bits() {
