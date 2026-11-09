@@ -54,7 +54,7 @@
 
 0.19 增加独立的纯启动声明 `long_list_readers`，在冷启动读取前选定 House 的 `Allies` 与 Techno 的 `Prerequisite`／`PrerequisiteOverride` 容量。安装 Ares 组件即使用2048，不增加 INI 开关；显式 `Retail128` 覆盖旧内置模式，未声明则沿用原模式。General 六类前置仍为128，物理 INI 行仍受原511字节限制。实际组件、定向联盟、保存恢复、资源管理器重建、旧实现及真实资源加载检查通过。新增资源序列化字段沿现有保存格式识别，不承诺旧完整存档自动迁移。
 
-保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.32.0 开发候选**，配置版本 **22**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
+保留交付为 `plugin-dev/dist/sdk-feature-lab-0.7.0`。当前源码是 **0.39.0 开发候选**，配置版本 **28**、状态版本 **1**；下文的 0.7.0 说明对应保留交付，不能据此把开发候选当成已经交付的新版本。API v1 与 WIT 包名不变，但新能力仍要求配套宿主。
 
 0.32 在同一 `projectile_resource` 中增加可选散布上下界。插件独立领域通过 `projectile-effective:ares-nullable-leptons` 读取 `BallisticScatter.Min/Max`，只有原生解析成功才成为有效覆盖，0 与未配置严格区分。普通 FireAt 的 plain／flak 分别沿原调用点取全局缺省，随机流、距离／角度计算、飞行、爆炸和恢复继续归原有所有者。`Inviso + FlakScatter` 的额外放置仍用原全局值，不套入新字段；历史缺域保持旧行为，无新 Hook 或逐帧 WASM 调用。完整 Ares 兼容仍见插件兼容台账。
 

@@ -245,7 +245,11 @@ impl Simulation {
         // PostClick takes SOURCE settings (Ares SWTypeExt::Launch), even when
         // the destination has a different fee or grant. No second wallet exists.
         let payment = paid_final.unwrap_or((sw_type_id, sw));
+        // Installed ClickFire1003516D enters drain state/timer handling before
+        // the ordinary funds/ready gates10035294..10035317. Sidebar and AI
+        // retain their own earlier admission; common Launch never repeats it.
         let guarded = semantics.paid_launches
+            && !(sw.use_charge_drain && uses_ares_launch(rules, sw))
             && (paid_source.is_some() || paid_final.is_some() || sw.money_amount != 0);
         // Explicit extension only: all admission precedes paired-Super writes.
         // Stock zero-cost Fire_SW retains its native refused-click tail.
@@ -383,7 +387,9 @@ fn click_fire(
             return false;
         };
         let human = house.is_controlled_by_human(sim.session.game_mode_nonzero());
-        let called_launch = if human {
+        // Ares ClickFire10035173..10035280 uses the instance state for both
+        // human and AI houses. Keep retail's House+1FA branch without Ares.
+        let called_launch = if rules.superweapon_semantics().custom_payloads || human {
             let frame = sim.session.binary_frame();
             let Some(instance) = super_instance(sim, owner, sw_type_id) else {
                 return false;
@@ -405,6 +411,7 @@ fn click_fire(
                 cell,
                 overlay_registry,
                 frame_effects,
+                payment,
             );
         }
         return called_launch;
@@ -425,14 +432,7 @@ fn click_fire(
     // Common Launch10032ED0 invokes Generic Activate10071650 even with a
     // null WH. Its failure skips money/history while ClickFire still finishes
     // the charge. The guard above preserves the historical Generic ABI only.
-    let extension_effect = rules.superweapon_semantics().custom_payloads
-        && (sw.nuclear.is_some()
-            || matches!(
-                sw.kind,
-                crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
-                    | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
-                    | crate::rules::superweapon_type::SuperWeaponKind::HunterSeeker
-            ));
+    let extension_effect = uses_ares_launch(rules, sw);
     if let Some((money_type, money_sw)) = payment
         && !extension_effect
         && money_sw.money_amount != 0
@@ -446,7 +446,7 @@ fn click_fire(
     {
         return false;
     }
-    let effect_launched = launch(
+    launch(
         sim,
         rules,
         owner,
@@ -455,31 +455,8 @@ fn click_fire(
         cell,
         overlay_registry,
         frame_effects,
+        payment,
     );
-    // Installed Ares SWTypeExt::Launch10032ED0 calls Activate first and only
-    // reaches money10032FDF after success. In particular a HunterSeeker with
-    // no usable launch building still spends its charge, but never its fee.
-    // Keep one wallet/settlement owner shared with the other extension kinds.
-    if extension_effect && effect_launched {
-        if let Some((money_type, money_sw)) = payment
-            && money_sw.money_amount != 0
-        {
-            super::money::transact(
-                &mut sim.sound_events,
-                &mut sim.houses,
-                owner,
-                money_type,
-                money_sw,
-            );
-        }
-        // Common Launch10032FDF..10033242 settles first, then constructs
-        // animation/sound and finally removes the queued Ready announcement.
-        if rules.superweapon_semantics().launch_presentation {
-            super::ares_presentation::on_launch(sim, rules, owner, sw_type_id, cell);
-        }
-    }
-    #[cfg(not(feature = "ares"))]
-    let _ = effect_launched;
     // `0x006CBBDE..0x006CBC34`: a type that is neither pairs no anim.
     let one_time = super_instance(sim, owner, sw_type_id).is_some_and(|instance| instance.one_time);
     //6CBB1B returns before placement-Anim retirement/recharge for one-time.
@@ -551,16 +528,62 @@ fn launch(
     (rx, ry): (u16, u16),
     overlay_registry: Option<&OverlayTypeRegistry>,
     frame_effects: FrameEffects<'_>,
+    payment: Option<(InternedId, &SuperWeaponType)>,
+) -> bool {
+    let activated = activate(
+        sim,
+        rules,
+        owner,
+        sw_type_id,
+        sw,
+        (rx, ry),
+        overlay_registry,
+        frame_effects,
+    );
+    // Installed common SWTypeExt::Launch10032ED0: successful Activate, history
+    // and Activated, unconditional wallet settlement10032FDF, common sound,
+    // then Ready removal10033233. Ordinary and drain ClickFire share this
+    // owner; a refused Activate keeps its caller's earlier timer writes.
+    if activated && uses_ares_launch(rules, sw) {
+        super::finish_ares_launch(sim, rules, owner, sw_type_id, (rx, ry));
+        if let Some((_, money_sw)) = payment {
+            super::money::settle(&mut sim.houses, owner, money_sw);
+        }
+        if rules.superweapon_semantics().launch_presentation {
+            super::ares_presentation::on_launch(sim, rules, owner, sw_type_id, (rx, ry));
+        }
+    }
+    activated
+}
+
+fn uses_ares_launch(rules: &RuleSet, sw: &SuperWeaponType) -> bool {
+    rules.superweapon_semantics().custom_payloads
+        && (sw.nuclear.is_some()
+            || matches!(
+                sw.kind,
+                SuperWeaponKind::GenericWarhead
+                    | SuperWeaponKind::UnitDelivery
+                    | SuperWeaponKind::HunterSeeker
+            ))
+}
+
+/// Native stock Launch6CC390 cases and installed handler Activate methods.
+/// Successful common bookkeeping belongs exclusively to the Launch shell.
+fn activate(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    sw_type_id: InternedId,
+    sw: &SuperWeaponType,
+    (rx, ry): (u16, u16),
+    overlay_registry: Option<&OverlayTypeRegistry>,
+    frame_effects: FrameEffects<'_>,
 ) -> bool {
     use super::paradrop::ParaDropKind;
     // Ares SWTypeExt's initialized handler survives later stock Type reads.
     // Dispatch the admitted handler before interpreting the retained enum.
     if sw.nuclear.is_some() {
-        let activated = super::nuke::launch(sim, rules, owner, sw_type_id, sw, (rx, ry));
-        if activated {
-            super::finish_ares_launch(sim, rules, owner, sw_type_id, (rx, ry));
-        }
-        return activated;
+        return super::nuke::launch(sim, rules, owner, sw_type_id, sw, (rx, ry));
     }
     // Every native stock case except ChronoWarp begins with rawReady+6F
     // (ForceShield6CD072..6CD077; case4 starts6CC4B2 with radar production).
@@ -579,7 +602,7 @@ fn launch(
         SuperWeaponKind::NoEffect => {}
         #[cfg(feature = "ares")]
         SuperWeaponKind::HunterSeeker => {
-            let activated = super::hunter_seeker::launch(
+            return super::hunter_seeker::launch(
                 sim,
                 rules,
                 owner,
@@ -588,13 +611,9 @@ fn launch(
                 overlay_registry,
                 frame_effects,
             );
-            if activated {
-                super::finish_ares_launch(sim, rules, owner, sw_type_id, (rx, ry));
-            }
-            return activated;
         }
         SuperWeaponKind::UnitDelivery => {
-            let activated = super::unit_delivery::launch(
+            return super::unit_delivery::launch(
                 sim,
                 rules,
                 owner,
@@ -604,10 +623,6 @@ fn launch(
                 overlay_registry,
                 frame_effects,
             );
-            if activated {
-                super::finish_ares_launch(sim, rules, owner, sw_type_id, (rx, ry));
-            }
-            return activated;
         }
         #[cfg(not(feature = "ares"))]
         SuperWeaponKind::HunterSeeker => {}
@@ -692,7 +707,7 @@ fn launch(
             super::spy_plane::launch(sim, rules, owner, sw_type_id, (rx, ry), frame_effects);
         }
         SuperWeaponKind::GenericWarhead => {
-            let activated = super::generic_warhead::launch(
+            return super::generic_warhead::launch(
                 sim,
                 rules,
                 owner,
@@ -701,10 +716,6 @@ fn launch(
                 overlay_registry,
                 frame_effects,
             );
-            if activated {
-                super::finish_ares_launch(sim, rules, owner, sw_type_id, (rx, ry));
-            }
-            return activated;
         }
     }
     true

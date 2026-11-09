@@ -18,13 +18,14 @@ mod tests;
 /// selection owner in `two_stage`; malformed half-pairs remain rejected.
 /// https://github.com/Ares-Developers/Ares/blob/4f1d929920aca31924c6cd4d3dfa849daa65252a/src/Ext/SWType/Body.cpp#L469
 pub(super) fn configuration_supported(sw: &SuperWeaponType) -> bool {
-    sw.money_amount == 0
-        || (!sw.pre_click
-            && !sw.post_click
-            && !matches!(
-                sw.kind,
-                SuperWeaponKind::ChronoSphere | SuperWeaponKind::ChronoWarp
-            ))
+    sw.money_amount != i32::MIN
+        && (sw.money_amount == 0
+            || (!sw.pre_click
+                && !sw.post_click
+                && !matches!(
+                    sw.kind,
+                    SuperWeaponKind::ChronoSphere | SuperWeaponKind::ChronoWarp
+                )))
 }
 
 pub(super) fn can_afford(houses: &Houses, owner: InternedId, sw: &SuperWeaponType) -> bool {
@@ -52,7 +53,8 @@ pub(super) fn valid_target(sim: &Simulation, sw: &SuperWeaponType, cell: (u16, u
 }
 
 /// Read-only wallet decision, with an owner-scoped presentation fact on refusal.
-/// Called before paired-Super mutation, and checked again at settlement.
+/// Called before paired-Super mutation. Stock transactions also recheck it;
+/// installed common Launch settles only after successful Activate.
 pub(super) fn admit(
     sound_events: &mut FrameChannel<SimSoundEvent>,
     houses: &Houses,
@@ -79,13 +81,22 @@ pub(super) fn transact(
     if !admit(sound_events, houses, owner, sw_type, sw) {
         return false;
     }
-    if sw.money_amount < 0 {
-        // Affordability proves the positive cost fits a signed wallet, so the
-        // checked conversion cannot overflow even for an authored i32::MIN.
-        let cost = sw.money_amount.checked_neg().expect("admitted signed cost");
+    settle(houses, owner, sw);
+    true
+}
+
+/// Ares common Launch10032FDF..10032FF6 calls the existing House wallet
+/// without another affordability query or a debit-result branch. A queued
+/// drain activation can therefore consume the remaining balance after funds
+/// changed. Signed-min costs remain outside configuration_supported's domain.
+pub(super) fn settle(houses: &mut Houses, owner: InternedId, sw: &SuperWeaponType) {
+    if sw.money_amount <= 0 {
+        let cost = sw
+            .money_amount
+            .checked_neg()
+            .expect("supported signed cost");
         crate::sim::credit_income::spend_money(houses, owner, cost);
     } else if sw.money_amount > 0 {
         crate::sim::credit_income::add_credits(houses, owner, sw.money_amount);
     }
-    true
 }

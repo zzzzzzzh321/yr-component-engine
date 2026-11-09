@@ -39,20 +39,26 @@ sole owner of balances, spending and score:
   A positive reward can be selected while the balance is negative.
   Queued ordinary zero-cost launches retain their native event handling.
 - Negative amounts use the existing Spend_Money owner. The full fee must be
-  available; no partial payment is accepted. The minimum signed i32 amount is
+  available for ordinary admission. Common installed-handler settlement does
+  not query affordability again: a queued charge-drain event can take the
+  remaining liquid balance, through the same wallet. Nonempty silo draining
+  remains outside the represented wallet domain. The minimum signed i32 amount is
   safely unaffordable by a signed wallet, never negated into an overflow.
 - Positive amounts use Add_Credits and its existing wrapping i32 semantics.
   Rewards do not increment spending or score.
 - Readiness, supported configuration, required buildings and target/payload
   admission precede settlement. AI checks affordability before target search,
   and the final command rechecks the current wallet after any input delay.
-- GenericWarhead, UnitDelivery and HunterSeeker settle once after successful
+- Nuclear, GenericWarhead, UnitDelivery and HunterSeeker settle once after successful
   Activate, following Ares `SWTypeExt::Launch` (`0x10032EEF..0x10032FF6`).
   A declined effect does not pay a fee; ordinary readiness consumption still
   follows ClickFire. UnitDelivery accepts by enqueueing: later provider loss,
   blocked landing or save/reload cannot repeat settlement.
 - Stock redirected powers retain the existing before-Launch settlement path;
-  their activation-success boundaries still need separate ports.
+  their activation-success boundaries still need separate ports. Admitted
+  handlers share one common Launch success shell for ordinary and charge-drain
+  activation: history/Activated, wallet, common animation/sound, Ready cleanup
+  (`0x10032ED0..0x10033242`). A drain stop or failed Activate has no success tail.
 - The owner-local refusal cue defaults to the fixed EVA catalog's
   `EVA_InsufficientFunds`, can be replaced by a registered cue, and can be
   silenced. Unknown later names retain the previously resolved cue. The

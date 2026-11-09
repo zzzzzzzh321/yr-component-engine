@@ -118,3 +118,84 @@ fn sdk_eva_additional_provider_detection_repeats_on_real_capture_opening() {
         .collect();
     assert_eq!(detected, [(enemy, strike)]);
 }
+
+#[test]
+#[ignore = "requires VERA_SDK_EVA_WASM (.39)"]
+fn sdk_eva_drain_ai_toggle_and_reset_refusal_keep_common_success_boundary() {
+    let module = component("VERA_SDK_EVA_WASM");
+    let root = BASE
+        .replace("SuperWeapon=Strike\n", "SuperWeapon=Atomic\n")
+        .replace("4=Warp\n", "4=Warp\n5=Atomic\n");
+    let root = format!(
+        "{root}\n[WeaponTypes]\n0=Carrier\n1=Drop\n[Carrier]\nDamage=0\nProjectile=Fall\nWarhead=Payload\n[Drop]\nDamage=1\nProjectile=Fall\nWarhead=Payload\n[Fall]\nVertical=yes\nArm=2\n[Atomic]\nType=MultiMissile\nAction=Nuke\nWeaponType=Carrier\nNuke.Payload=Drop\nNuke.SiloLaunch=no\nUseChargeDrain=yes\nIsPowered=no\nRechargeTime=1\nMoney.Amount=-500\n"
+    );
+    let mut scene = Scene::new("sdk-eva-drain-ai", Some(&module), &root, "");
+    scene.launcher();
+    scene
+        .sim
+        .advance_tick(&[], Some(&scene.rules), None, None, 33);
+    scene.sim.session.set_binary_frame_for_test(1001);
+    scene
+        .sim
+        .advance_tick(&[], Some(&scene.rules), None, None, 33);
+    let owner = scene.id("Americans");
+    let atomic = scene.id("Atomic");
+    assert!(is_charged(&scene.sim, owner, atomic));
+    let house = scene.sim.houses.get_mut(&owner).unwrap();
+    house.set_is_human_for_test(false);
+    house.set_player_control_for_test(false);
+    let previous = house.economy().available_money();
+    crate::sim::credit_income::add_credits(&mut scene.sim.houses, owner, 100 - previous);
+    scene.sim.take_sound_events_for_test();
+    // Installed ClickFire10035173 has no human/AI split. A queued event
+    // bypasses ordinary funds admission, then common Launch settles once.
+    assert!(scene.fire("Atomic", (16, 16)));
+    assert_eq!(
+        scene.sim.super_weapons[&owner][&atomic].charge_drain_state(),
+        2
+    );
+    assert_eq!(scene.sim.houses[&owner].economy().available_money(), 0);
+    assert_eq!(
+        scene
+            .sim
+            .sound_events
+            .iter()
+            .filter(|event| matches!(event,
+        SimSoundEvent::AresSuperWeaponFinished { sw_type, .. } if *sw_type == atomic))
+            .count(),
+        1
+    );
+    scene.sim.take_sound_events_for_test();
+    assert!(!scene.fire("Atomic", (16, 16)));
+    assert_eq!(
+        scene.sim.super_weapons[&owner][&atomic].charge_drain_state(),
+        1
+    );
+    assert!(scene.sim.sound_events.is_empty());
+    // Real Reset6CE0B0 preserves drain state1 but clears rawReady. Nuclear
+    // Activate10072FFD refuses after ClickFire's state/timer writes; neither
+    // the fee nor common success presentation belongs to this refusal.
+    reset_super(
+        &scene.sim.interner,
+        &scene.sim.session,
+        &mut scene.sim.substrate,
+        &mut scene.sim.sound_events,
+        &mut scene.sim.super_weapons,
+        &scene.rules,
+        owner,
+        "Atomic",
+    );
+    assert!(!is_charged(&scene.sim, owner, atomic));
+    crate::sim::credit_income::add_credits(&mut scene.sim.houses, owner, 100);
+    scene.sim.take_sound_events_for_test();
+    assert!(
+        scene.fire("Atomic", (16, 16)),
+        "called Launch, refused Activate"
+    );
+    assert_eq!(
+        scene.sim.super_weapons[&owner][&atomic].charge_drain_state(),
+        2
+    );
+    assert_eq!(scene.sim.houses[&owner].economy().available_money(), 100);
+    assert!(scene.sim.sound_events.is_empty());
+}

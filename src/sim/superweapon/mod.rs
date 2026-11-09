@@ -1002,7 +1002,8 @@ impl SuperWeaponInstance {
         self.store_charge_timer(timer);
     }
 
-    /// ClickFire6CB954/6CB9D9: human stop/start. The timer/state writes
+    /// ClickFire6CB954/6CB9D9: retail human stop/start; installed Ares
+    /// ClickFire10035173..10035280 shares these transitions with AI. The timer/state writes
     /// precede Launch and bypass the ordinary ready/one-time finish. The
     /// Boolean reports whether to call Launch, not native AL (always zero).
     fn click_charge_drain(
