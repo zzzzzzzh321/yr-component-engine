@@ -41,23 +41,7 @@ impl Simulation {
         entity: &GameEntity,
         rules: &'r RuleSet,
     ) -> Option<&'r ObjectType> {
-        let category = entity.category().into();
-        let index = entity.type_facts.native_type_index();
-        if index >= 0 {
-            return rules.type_array_at(category, index).filter(|object| {
-                self.interner
-                    .try_resolve(entity.type_ref())
-                    .is_some_and(|name| object.id.eq_ignore_ascii_case(name))
-            });
-        }
-        // Only name-only fixtures lack a constructor stamp. A live engine
-        // must never silently repair an absent/invalid saved pointer by name.
-        #[cfg(any(test, feature = "test-support"))]
-        return self
-            .interner
-            .object_type_in_category(entity.type_ref(), category, rules);
-        #[cfg(not(any(test, feature = "test-support")))]
-        None
+        self.interner.entity_object_type(entity, rules)
     }
 
     pub(crate) fn validate_entity_type_bindings(

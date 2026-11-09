@@ -2,6 +2,8 @@
 
 0.37／配置26／状态1新增可选 `SuperWeaponDeclaration.common_targeting`。插件按物理规则层保留射程、目标模式／偏好、手动／自动掩码及 AutoFire／ManualFire／FireIntoShroud；宿主将其投影到已有目标与 AI 所有者，普通构建也可使用。核弹的预览、选点与发射井资格共用配置，已提交事件保留 Activate 的直接投放分支。Generic 空弹头在 Activate 失败时消耗充能，但不扣费、不计成功发射；旧组件保留先前的弹头提前检查路径。不新增逐帧 WASM 调用；完整 Ares 兼容仍在推进。
 
+当前宿主还补齐了原生 Techno 类别＋数组序号在逐槽规则、构造、付费生产、计数、电力与同 build 恢复中的保留，覆盖跨类同名及同类存储名截断重名。原生类型首项查找与保留的指针身份分别处理。此为共用宿主前置修正；组件0.37／配置26、API和WIT均未改变。其它名称寻址资源与保留侧栏链接仍需分别迁移，本轮不启用外置 Designators/Inhibitors。新完整存档使用新的宿主布局；旧完整存档保留原引擎与精确组件。生产回归见[typed_identity_tests.rs](../src/sim/production/typed_identity_tests.rs)。
+
 0.36／配置25／状态1新增外置 Nuclear 核弹引用与发射子链。纯启动声明 `master_type_lists` 在各层类型数据读取前启用原有 `[WeaponTypes]` 注册器；实际 Weapon 引用和发射它的超武定义贯通发射井、直接投放、NukeMaker、保存与恢复。`SW.Warhead` 按原始时点查找已有弹头，经过中间自定义 Type 的物理节仍保留通用读取，不从最终合并名称补查。裸弹航程保持 INT_MAX，不复制武器的 ProjectileRange。插件继续提供冻结配置，充能、费用、飞行、伤害和退场复用宿主所有者，不新增逐帧 Wasm 调用。完整 Ares／AR315 仍未完成。
 
 0.35／配置24／状态1新增可选 `MatchRulesPolicy.shrapnel_weapon_assignment`。新对局及真实重建边界默认声明启用；历史非空配置缺字段时保持原行为。`ShrapnelWeapon` 保留实际 Weapon 数组引用，安装引用后的碎片弹通过共享 Fire 读取该实例的 Range，并在引爆时读取 RadLevel。其裸构造航程仍为 INT_MAX，不复制 Weapon 的 ProjectileRange；这与 Airburst 工厂不同。字段为资源接纳时的静态声明，需配套宿主，不新增逐帧Wasm调用。验证范围包括实际组件开火、碎片飞行、保存恢复和伤害接收，完整Ares兼容仍在推进。

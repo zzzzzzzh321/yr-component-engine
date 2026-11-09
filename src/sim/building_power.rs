@@ -60,7 +60,7 @@ impl Simulation {
         if entity.category() != EntityCategory::Structure || !entity.building_online() {
             return false;
         }
-        let Some(object) = self.object_type(entity.type_ref(), rules) else {
+        let Some(object) = self.entity_object_type(entity, rules) else {
             return false;
         };
         if crate::sim::power_system::native_building_power_drain(object.power) <= 0
@@ -112,7 +112,7 @@ impl Simulation {
         }
         let owner = entity.owner();
         let factory = self
-            .object_type(entity.type_ref(), rules)
+            .entity_object_type(entity, rules)
             .and_then(crate::sim::production::factory_category_for_building);
         self.substrate
             .entities

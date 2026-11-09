@@ -48,12 +48,14 @@ fn factory_fixture(
         )
         .expect("construct actual held graph");
     let type_id = saved.interner().get(type_name).unwrap();
-    let cost = rules.object(type_name).unwrap().cost;
+    let object = rules.object(type_name).unwrap();
+    let native_type = (object.category, object.native_type_index());
+    let cost = object.cost;
     assert!(
         saved
             .production_mut_for_test()
             .factories_mut_for_test()
-            .test_enqueue_kernel(owner, category, type_id, 1, cost,)
+            .test_enqueue_resolved_kernel(owner, category, type_id, native_type, 1, cost)
     );
     saved
         .production_mut_for_test()
@@ -338,11 +340,20 @@ fn factory_restore_preserves_supported_held_states_and_constructor_graphs() {
         match label {
             "active-tail" => {
                 let type_id = saved.interner().get(type_name).unwrap();
+                let object = rules.object(type_name).unwrap();
+                let native_type = (object.category, object.native_type_index());
                 assert!(
                     !saved
                         .production_mut_for_test()
                         .factories_mut_for_test()
-                        .test_enqueue_kernel(owner, category, type_id, 2, 1000)
+                        .test_enqueue_resolved_kernel(
+                            owner,
+                            category,
+                            type_id,
+                            native_type,
+                            2,
+                            1000
+                        )
                 );
                 saved
                     .production_mut_for_test()
@@ -526,6 +537,8 @@ fn factory_restore_rejects_inconsistent_roots() {
             factory_fixture("PARENT", ProductionCategory::Building);
         let category = ProductionCategory::Building;
         let parent_type = saved.interner().get("PARENT").unwrap();
+        let parent_object = rules.object("PARENT").unwrap();
+        let parent_native = (parent_object.category, parent_object.native_type_index());
         let other = saved.interner().get("OTHER").unwrap();
         let foreign = saved.intern("Russians");
         let missing = saved.intern("REMOVED_TYPE");
@@ -535,7 +548,14 @@ fn factory_restore_rejects_inconsistent_roots() {
                 saved
                     .production_mut_for_test()
                     .factories_mut_for_test()
-                    .test_enqueue_kernel(invalid_owner, category, parent_type, 3, 1000);
+                    .test_enqueue_resolved_kernel(
+                        invalid_owner,
+                        category,
+                        parent_type,
+                        parent_native,
+                        3,
+                        1000,
+                    );
                 saved
                     .production_mut_for_test()
                     .factories_mut_for_test()
@@ -549,11 +569,24 @@ fn factory_restore_rejects_inconsistent_roots() {
                     "tail-type-index" => InternedId::from_index(u32::MAX),
                     _ => saved.interner().get("E1").unwrap(),
                 };
+                let queued_native = if label == "tail-category" {
+                    let infantry = rules.object("E1").unwrap();
+                    (infantry.category, infantry.native_type_index())
+                } else {
+                    parent_native
+                };
                 assert!(
                     !saved
                         .production_mut_for_test()
                         .factories_mut_for_test()
-                        .test_enqueue_kernel(owner, category, queued_type, 2, 200)
+                        .test_enqueue_resolved_kernel(
+                            owner,
+                            category,
+                            queued_type,
+                            queued_native,
+                            2,
+                            200
+                        )
                 );
             }
             "active-category" => {
@@ -571,7 +604,14 @@ fn factory_restore_rejects_inconsistent_roots() {
                 saved
                     .production_mut_for_test()
                     .factories_mut_for_test()
-                    .test_enqueue_kernel(foreign, category, parent_type, 3, 1000);
+                    .test_enqueue_resolved_kernel(
+                        foreign,
+                        category,
+                        parent_type,
+                        parent_native,
+                        3,
+                        1000,
+                    );
                 saved
                     .production_mut_for_test()
                     .factories_mut_for_test()
@@ -676,7 +716,14 @@ fn factory_restore_rejects_inconsistent_roots() {
                 saved
                     .production_mut_for_test()
                     .factories_mut_for_test()
-                    .test_enqueue_kernel(owner, category, parent_type, 2, 1000);
+                    .test_enqueue_resolved_kernel(
+                        owner,
+                        category,
+                        parent_type,
+                        parent_native,
+                        2,
+                        1000,
+                    );
                 saved
                     .production_mut_for_test()
                     .factories_mut_for_test()

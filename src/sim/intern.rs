@@ -14,6 +14,7 @@ use std::fmt;
 
 use crate::rules::object_type::ObjectType;
 use crate::rules::ruleset::{RuleSet, TypeHandle};
+use crate::sim::game_entity::GameEntity;
 use crate::sim::type_handle_table::TypeHandleTable;
 
 /// Interned string handle — `Copy`, `Eq`, `Ord`, `Hash`. Zero-cost clones.
@@ -118,6 +119,32 @@ impl StringInterner {
         rules: &'r RuleSet,
     ) -> Option<&'r ObjectType> {
         self.types.object_in_category(self, id, category, rules)
+    }
+
+    /// Resolve an actual receiver's retained Type pointer. Infantry517A6E,
+    /// Unit7353E6, Aircraft413D3A and Building43B756 copy the selected native
+    /// slot; GetPowerOutput44E7B5/GetPowerDrain44E899 read Building+520.
+    /// The interner checks only the label, never supplies the pointer identity.
+    #[inline]
+    pub fn entity_object_type<'r>(
+        &self,
+        entity: &GameEntity,
+        rules: &'r RuleSet,
+    ) -> Option<&'r ObjectType> {
+        let category = entity.category().into();
+        let index = entity.type_facts.native_type_index();
+        if index >= 0 {
+            return rules.type_array_at(category, index).filter(|object| {
+                self.try_resolve(entity.type_ref())
+                    .is_some_and(|name| object.id.eq_ignore_ascii_case(name))
+            });
+        }
+        // Only name-only fixtures lack a constructor stamp. A live engine
+        // must never repair an absent/invalid saved pointer through an alias.
+        #[cfg(any(test, feature = "test-support"))]
+        return self.object_type_in_category(entity.type_ref(), category, rules);
+        #[cfg(not(any(test, feature = "test-support")))]
+        None
     }
 
     /// The handle of the object type `id` names in `rules`, as

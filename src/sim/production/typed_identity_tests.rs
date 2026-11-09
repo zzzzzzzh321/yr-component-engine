@@ -393,6 +393,126 @@ fn same_class_stored_id_aliases_keep_selected_pointer_through_paid_queue_exit_an
 }
 
 #[test]
+fn rejected_later_type_slot_cancels_its_paid_head_and_preserves_the_first_alias() {
+    let rules = rules_with_same_class_aliases(false, true);
+    let slots: Vec<_> = rules
+        .type_array_ids(ObjectCategory::Infantry)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| (name == SAME_CLASS_ID).then_some(index as i32))
+        .collect();
+    assert_eq!(slots.len(), 2);
+    let (mut runtime, owner) = world_with_rules(rules, false);
+    let commands: Vec<_> = [slots[1], slots[0]]
+        .into_iter()
+        .map(|index| {
+            let rules = &runtime.resources.rules;
+            let selection = ProductionSelection::for_type(
+                rules,
+                rules
+                    .type_array_at(ObjectCategory::Infantry, index)
+                    .unwrap(),
+            )
+            .unwrap();
+            CommandEnvelope::synchronized(
+                runtime
+                    .simulation
+                    .encode_selected_production_record(owner, ProductionEvent::Produce, selection)
+                    .unwrap(),
+                runtime.simulation.session.tick() + 1,
+            )
+        })
+        .collect();
+    frame(&mut runtime, owner, &commands);
+    for _ in 0..12 {
+        frame(&mut runtime, owner, &[]);
+    }
+    let rejected = held(&runtime.simulation, owner, ProductionCategory::Infantry).unwrap();
+    assert!(runtime.simulation.houses[&owner].economy().spent_credits() > 0);
+    let factory = runtime
+        .simulation
+        .production
+        .factories()
+        .view(owner, ProductionCategory::Infantry)
+        .unwrap();
+    assert!(factory.progress > 0 && factory.progress < PRODUCTION_STEPS);
+    assert_eq!(
+        factory.queue[0].native_type,
+        (ObjectCategory::Infantry, slots[0])
+    );
+
+    // The actual Action106 leaf dirties House+1FC; dispatcher/save/retirement
+    // behavior has its own native trigger regression. Here the ordinary House
+    // visit must carry that last exact Type pointer into both ABANDON records.
+    runtime
+        .simulation
+        .set_object_type_tech_level(SAME_CLASS_ID, -1, &runtime.resources.rules);
+    assert_eq!(
+        runtime.simulation.object_tech_level(
+            runtime
+                .resources
+                .rules
+                .type_array_at(ObjectCategory::Infantry, slots[0])
+                .unwrap()
+        ),
+        1
+    );
+    let admitted = frame(&mut runtime, owner, &[]);
+    let cancellations: Vec<_> = admitted
+        .iter()
+        .filter_map(|event| {
+            let Command::SynchronizedRecord { record } = &event.payload else {
+                return None;
+            };
+            ProductionRecord::decode(record).filter(|record| {
+                matches!(
+                    record.event,
+                    ProductionEvent::Abandon | ProductionEvent::AbandonAll
+                )
+            })
+        })
+        .collect();
+    assert_eq!(cancellations.len(), 2);
+    assert_eq!(
+        (cancellations[0].event, cancellations[1].event),
+        (ProductionEvent::Abandon, ProductionEvent::AbandonAll)
+    );
+    assert!(
+        cancellations
+            .iter()
+            .all(|record| record.type_index == slots[1])
+    );
+    assert!(!runtime.simulation.entities().contains(rejected));
+    let successor = held(&runtime.simulation, owner, ProductionCategory::Infantry).unwrap();
+    assert_ne!(rejected, successor);
+    let actor = runtime.simulation.entities().get(successor).unwrap();
+    assert_eq!(actor.type_facts.native_type_index(), slots[0]);
+    assert_eq!(
+        runtime.simulation.houses[&owner]
+            .tracking()
+            .owned_count_native(EntityCategory::Infantry, slots[1]),
+        0
+    );
+    assert_eq!(
+        runtime.simulation.houses[&owner]
+            .tracking()
+            .owned_count_native(EntityCategory::Infantry, slots[0]),
+        1
+    );
+    assert!(
+        runtime
+            .simulation
+            .production
+            .factories()
+            .view(owner, ProductionCategory::Infantry)
+            .unwrap()
+            .queue
+            .is_empty()
+    );
+    validate_restored_factory_state(&runtime.simulation, &runtime.resources.rules).unwrap();
+}
+
+#[test]
 fn typed_duplicate_paid_start_place_and_promotion_preserve_constructor_type() {
     for collision in [false, true] {
         let (mut runtime, owner) = world(collision, false);

@@ -423,7 +423,7 @@ pub(crate) fn building_power_drain(
     if entity.is_warped_out() || !entity.building_online() {
         return 0;
     }
-    let Some(object) = interner.object_type(entity.type_ref(), rules) else {
+    let Some(object) = interner.entity_object_type(entity, rules) else {
         return 0;
     };
     let mut drain = native_building_power_drain(object.power);
@@ -625,7 +625,7 @@ fn recalculate_power_for_owner(
             {
                 return None;
             }
-            let object = interner.object_type(entity.type_ref(), rules)?;
+            let object = interner.entity_object_type(entity, rules)?;
             object.is_power_plant_enhancer().then_some((entity, object))
         })
         .collect();
@@ -644,7 +644,7 @@ fn recalculate_power_for_owner(
         {
             continue;
         }
-        let Some(obj) = interner.object_type(entity.type_ref(), rules) else {
+        let Some(obj) = interner.entity_object_type(entity, rules) else {
             continue;
         };
 
@@ -889,7 +889,7 @@ fn radar_provider_available(
             || entity.mission.current().known() == Some(crate::sim::mission::MissionType::Selling)
             || entity.mission.queued().known() == Some(crate::sim::mission::MissionType::Selling)
             || !interner
-                .object_type(entity.type_ref(), rules)
+                .entity_object_type(entity, rules)
                 .is_some_and(|obj| obj.radar)
         {
             continue;
@@ -949,7 +949,7 @@ pub fn is_building_powered(
     if entity.category() != EntityCategory::Structure {
         return true;
     }
-    let Some(obj) = interner.object_type(entity.type_ref(), rules) else {
+    let Some(obj) = interner.entity_object_type(entity, rules) else {
         return true;
     };
     //4555D0 gates the ratio read on strictly positive native Type+EE4.
@@ -974,6 +974,10 @@ pub fn has_active_radar(
         .get(&owner_id)
         .is_some_and(|state| state.radar_available)
 }
+
+#[cfg(test)]
+#[path = "native_power_identity_tests.rs"]
+mod native_power_identity_tests;
 
 #[cfg(test)]
 mod tests {

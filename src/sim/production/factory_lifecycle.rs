@@ -1339,10 +1339,12 @@ pub(in crate::sim) fn step_factories(sim: &mut Simulation) {
 /// Reuse the ordinary production encoder; the shared OutList owns admission
 /// and network retiming. Source: original gamemd.exe instructions.
 ///
-/// Residual: native sidebar entry order remains separate from the retained
-/// Factory build-type order used here. TAction106 requests this same House
-/// recheck. Other unported trigger writers and unpowered-factory cameo
-/// admission remain separate existing gaps.
+/// Residual: native sidebar order and retained per-cameo Factory links
+/// (6AA7B6) remain separate from this Factory build-type view. The current
+/// active-Type match below is its existing link approximation, not native's
+/// link predicate; rearmed old/new cameos may both retain the same link.
+/// TAction106 requests this same House recheck. Other trigger writers and
+/// unpowered-factory cameo admission remain separate existing gaps.
 pub(in crate::sim) fn recalculate_strips(
     sim: &Simulation,
     rules: &RuleSet,
@@ -1353,35 +1355,31 @@ pub(in crate::sim) fn recalculate_strips(
         return Vec::new();
     }
     let mut abandons = Vec::new();
-    for (factory_owner, category, types) in sim.production.factories().house_build_types() {
-        if factory_owner != owner {
+    for build in sim.production.factories().house_build_types(sim, rules) {
+        if build.owner != owner {
             continue;
         }
-        let active = sim
-            .production
-            .factories()
-            .active_object(owner, category)
-            .map(|(type_id, ..)| type_id);
-        let kind = match category {
-            ProductionCategory::Defense => ProductionCategory::Building,
-            other => other,
-        };
-        let kind_factory = sim.production.factories().view(owner, kind).is_some();
-        for type_id in types {
-            let object =
-                sim.interner
-                    .object_type_in_category(type_id, category.object_category(), rules);
+        for native_type in build.types {
+            let object = rules.type_array_at(native_type.0, native_type.1);
             if let Some(object) = object
                 && !strip_keeps(sim, rules, owner, object)
                 && let Some(selection) = super::ProductionSelection::for_type(rules, object)
+                && let Some(kind) = selection.category(rules)
             {
-                abandons.push((type_id, selection, active == Some(type_id), kind_factory));
+                // 6AA884..6AA89A uses the actual Type's RTTI/Naval, with
+                // literal BuildCat0. A defense therefore asks Buildings.
+                let kind = match kind {
+                    ProductionCategory::Defense => ProductionCategory::Building,
+                    other => other,
+                };
+                let kind_factory = sim.production.factories().view(owner, kind).is_some();
+                abandons.push((selection, build.active == Some(native_type), kind_factory));
             }
         }
     }
     let mut events = Vec::new();
     let execute_tick = sim.session.tick().saturating_add(1);
-    for (_, selection, own_factory, kind_factory) in abandons {
+    for (selection, own_factory, kind_factory) in abandons {
         for event in [
             own_factory.then_some(ProductionEvent::Abandon),
             kind_factory.then_some(ProductionEvent::AbandonAll),
@@ -1482,9 +1480,11 @@ pub fn validate_restored_factory_state(
             // HouseBegin4FA4AA/4FA573 select Unit's slot from packet Naval,
             // independently of type Naval. HouseLoad5032A5/5032C7 and
             // FactoryLoad4CA270 retain that relation. The typed lookup above
-            // validates family; only Building's BuildCat further splits it.
-            if object.category == ObjectCategory::Building
-                && production_category_for_object(object) != category
+            // validates the pointer; its family must still match the House
+            // slot. Only Building's BuildCat further splits that family.
+            if object.category != category.object_category()
+                || (object.category == ObjectCategory::Building
+                    && production_category_for_object(object) != category)
             {
                 return Err(fail(owner, "queued type disagrees with factory category"));
             }

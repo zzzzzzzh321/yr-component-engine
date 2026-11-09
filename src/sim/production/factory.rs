@@ -89,6 +89,14 @@ pub struct QueueEntry {
     pub enqueue_order: u64,
 }
 
+/// Ephemeral revalidation view of the one Factory owner. The active Type
+/// comes from its actual entity; queued Type pointers are already retained.
+pub(super) struct HouseBuildTypes {
+    pub owner: InternedId,
+    pub active: Option<(ObjectCategory, i32)>,
+    pub types: Vec<(ObjectCategory, i32)>,
+}
+
 /// One authoritative production state machine per (house, category), owned by
 /// `FactoryRegistry`. The factory retains its unpaid obligation; Economy owns cash.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -967,21 +975,37 @@ impl FactoryRegistry {
             .map(|(_, f)| f)
     }
 
-    /// Each House factory's owner and category with its types: the object's,
-    /// then each queued one not yet listed, in construction order.
+    /// Each House factory's actual Type identities in construction order:
+    /// active receiver first, then queued pointers not yet listed. Recalculate
+    /// 6AA74C..6AA788 resolves the retained kind/index, never a label alias.
     pub(super) fn house_build_types(
         &self,
-    ) -> Vec<(InternedId, ProductionCategory, Vec<InternedId>)> {
+        sim: &crate::sim::world::Simulation,
+        rules: &RuleSet,
+    ) -> Vec<HouseBuildTypes> {
         self.house_factories_insertion_ordered()
             .map(|f| {
-                let mut types: Vec<InternedId> = Vec::new();
-                let held = f.object.iter().map(|o| o.type_id);
-                for type_id in held.chain(f.queue.iter().map(|e| e.type_id)) {
-                    if !types.contains(&type_id) {
-                        types.push(type_id);
+                let active = f
+                    .object
+                    .as_ref()
+                    .and_then(|object| object.entity_id)
+                    .and_then(|id| sim.substrate.entities.get(id))
+                    .and_then(|entity| sim.entity_object_type(entity, rules))
+                    .map(|object| (object.category, object.native_type_index()));
+                let mut types = Vec::new();
+                for native_type in active
+                    .into_iter()
+                    .chain(f.queue.iter().map(|e| e.native_type))
+                {
+                    if !types.contains(&native_type) {
+                        types.push(native_type);
                     }
                 }
-                (f.owner, f.category, types)
+                HouseBuildTypes {
+                    owner: f.owner,
+                    active,
+                    types,
+                }
             })
             .collect()
     }
@@ -1273,18 +1297,6 @@ impl FactoryRegistry {
         self.factories
             .get(&FactoryHolder::House(owner, category))
             .is_some_and(|factory| factory.suspended && !factory.auto_resume_blocked)
-    }
-
-    /// The type and +70 suspension of the category's held object. Completion
-    /// and user hold take the same native Begin_Production branch.
-    pub(super) fn active_object(
-        &self,
-        owner: InternedId,
-        category: ProductionCategory,
-    ) -> Option<(InternedId, bool)> {
-        let f = self.factories.get(&FactoryHolder::House(owner, category))?;
-        let object = f.object.as_ref()?;
-        Some((object.type_id, f.suspended))
     }
 
     /// CompletedProduction4CA1A0 releases a stage54 product without
