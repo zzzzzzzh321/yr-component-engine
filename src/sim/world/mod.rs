@@ -7729,7 +7729,8 @@ impl Simulation {
     /// building whose type names a `[SuperWeaponTypes]` section
     /// (`Type+0x16F0 != -1`) reports itself. Only the owner-independent half
     /// lives here; the listener gates (local player, `IsAlliedWith(PlayerPtr)`,
-    /// `[0xA8B538]`, `GameMode`, `AuxBuilding` ownership) are the app's.
+    /// `[0xA8B538]`, `GameMode`) are the app's. Installed GetSuperWeapon's
+    /// availability is decided here; the stock AuxBuilding gate stays in app.
     pub(crate) fn announce_super_weapon_building_complete(
         &mut self,
         stable_id: u64,

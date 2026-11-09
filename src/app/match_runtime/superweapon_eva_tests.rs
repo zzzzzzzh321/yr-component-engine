@@ -21,10 +21,10 @@ fn sdk_eva_live_charge_sidebar_nuclear_success_and_vox_cleanup() {
         |name: &str, contents: &[u8]| std::fs::write(dir.path().join(name), contents).unwrap();
     write("gameplay.wasm", &module);
     write("vera-mod.json", &serde_json::to_vec(&serde_json::json!({"api_version":1,"program":"gameplay.wasm","sha256":crate::util::sha256::sha256_hex(&module)})).unwrap());
-    write("rulesmd.ini", b"[Clear]\nBuildable=yes\n[Countries]\n0=Americans\n[Americans]\nParentCountry=Americans\n[Sides]\nGDI=Americans\n[BuildingTypes]\n0=PROVIDER\n1=KEEP\n[PROVIDER]\nStrength=1000\nSuperWeapon=Atomic\n[KEEP]\nStrength=1000\n[WeaponTypes]\n0=Carrier\n1=Payload\n[Warheads]\n0=WH\n[WH]\nCellSpread=0\n[Carrier]\nDamage=0\nRange=30\nSpeed=100\nProjectile=Fall\nWarhead=WH\n[Payload]\nDamage=1\nRange=30\nSpeed=100\nProjectile=Fall\nWarhead=WH\n[Fall]\nVertical=yes\nArm=2\n[SuperWeaponTypes]\n0=Atomic\n[Atomic]\nType=MultiMissile\nAction=Nuke\nWeaponType=Carrier\nNuke.Payload=Payload\nNuke.SiloLaunch=no\nIsPowered=no\nRechargeTime=1\nSW.AITargeting.Constraints=none\nEVA.Ready=CustomReady\nEVA.Activated=CustomLaunch\nEVA.Detected=CustomDetected\nEVA.Impatient=CustomWait\nEVA.SelectTarget=CustomTarget\n");
+    write("rulesmd.ini", b"[Clear]\nBuildable=yes\n[Countries]\n0=Americans\n[Americans]\nParentCountry=Americans\n[Sides]\nGDI=Americans\n[BuildingTypes]\n0=PROVIDER\n1=KEEP\n2=BLOCKER\n[PROVIDER]\nStrength=1000\nSuperWeapon=Atomic\n[KEEP]\nStrength=1000\n[BLOCKER]\nStrength=1000\n[WeaponTypes]\n0=Carrier\n1=Payload\n[Warheads]\n0=WH\n[WH]\nCellSpread=0\n[Carrier]\nDamage=0\nRange=30\nSpeed=100\nProjectile=Fall\nWarhead=WH\n[Payload]\nDamage=1\nRange=30\nSpeed=100\nProjectile=Fall\nWarhead=WH\n[Fall]\nVertical=yes\nArm=2\n[SuperWeaponTypes]\n0=Atomic\n[Atomic]\nType=MultiMissile\nAction=Nuke\nWeaponType=Carrier\nNuke.Payload=Payload\nNuke.SiloLaunch=no\nSW.NegBuildings=BLOCKER\nIsPowered=no\nRechargeTime=1\nSW.AITargeting.Constraints=none\nEVA.Ready=CustomReady\nEVA.Activated=CustomLaunch\nEVA.Detected=CustomDetected\nEVA.Impatient=CustomWait\nEVA.SelectTarget=CustomTarget\n");
     write(
         "artmd.ini",
-        b"[PROVIDER]\nFoundation=1x1\n[KEEP]\nFoundation=1x1\n",
+        b"[PROVIDER]\nFoundation=1x1\n[KEEP]\nFoundation=1x1\n[BLOCKER]\nFoundation=1x1\n",
     );
     write("evamd.ini", b"[DialogList]\n0=CustomReady\n1=CustomLaunch\n2=CustomDetected\n3=CustomWait\n4=CustomTarget\n5=EVA_NuclearMissileReady\n[CustomReady]\nType=Queue\n[CustomLaunch]\nType=Queue\n");
     let assets =
@@ -75,6 +75,16 @@ fn sdk_eva_live_charge_sidebar_nuclear_success_and_vox_cleanup() {
     sim.session_mut_for_test().set_binary_frame_for_test(100);
     sim.spawn_object_at_height("PROVIDER", "Computer1", 20, 20, 0, 0, &rules)
         .unwrap();
+    // Native already queued detection at the provider's GrandOpening. A
+    // later same-frame negative building cannot undo that admitted request.
+    sim.spawn_object_at_height("BLOCKER", "Computer1", 22, 22, 0, 0, &rules)
+        .unwrap();
+    assert!(!crate::sim::superweapon::super_weapon_available(
+        &sim,
+        &rules,
+        sim.interner().get("Computer1").unwrap(),
+        "Atomic",
+    ));
     sim.spawn_object_at_height("PROVIDER", &local_name, 8, 8, 0, 0, &rules)
         .unwrap();
     let hear = |sim: &mut Simulation| {

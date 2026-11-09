@@ -945,7 +945,14 @@ pub(super) fn dispatch_sim_sound_events(
                 // the building's own house owns one
                 // (`CountOwnedInstances` on `Owner+0x5550`).
                 // Optional Ares lists use the same grant availability owner.
-                let aux_satisfied = if rules.superweapon_semantics().extended_availability {
+                let aux_satisfied = if rules.superweapon_eva_providers_enabled() {
+                    // AnnounceSW100349D0 already called GetSuperWeapon1000D610
+                    // at GrandOpening. Rechecking at client dispatch can erase
+                    // its admitted request after a later same-frame ownership,
+                    // negative-building or shot-limit change. Availability is
+                    // the producer's decision; listener gates stay below.
+                    true
+                } else if rules.superweapon_semantics().extended_availability {
                     crate::sim::superweapon::super_weapon_available(sim, rules, owner, &type_name)
                 } else {
                     rules.super_weapon(&type_name).is_none_or(|sw| {

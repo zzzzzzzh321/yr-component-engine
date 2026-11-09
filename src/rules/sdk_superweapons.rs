@@ -134,7 +134,7 @@ impl RuleSet {
 
     /// Detection100349D0 uses GetSuperWeapon1000D610 for the new cohort.
     /// Old external components preserve their original primary-only producer.
-    pub(crate) fn superweapon_eva_providers_enabled(&self) -> bool {
+    pub fn superweapon_eva_providers_enabled(&self) -> bool {
         self.external_superweapons
             .as_ref()
             .map_or(cfg!(feature = "ares"), |catalog| {
