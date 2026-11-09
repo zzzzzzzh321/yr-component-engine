@@ -2454,6 +2454,7 @@ impl ProcessedRulesLayers {
                 &member.super_weapon_charge,
                 &member.super_weapon_influence,
                 Some(member.super_weapon_targeting),
+                None,
             )
         })
     }

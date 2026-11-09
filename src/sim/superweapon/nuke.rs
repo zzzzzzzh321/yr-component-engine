@@ -195,13 +195,10 @@ pub(super) fn launch(
                 Some((nuclear.source_ordinal, nuclear)),
             )
         };
-        if let Some(location) = location {
-            sim.sound_events.emit(SimSoundEvent::SuperWeaponLaunched {
-                owner,
-                sw_type: sw_type_id,
-                world: location.into(),
-            });
-        }
+        // Nuclear10073058..10073090 retains target GetCoords plus the bridge
+        // deck for ActivationSound100732BA, not the raised Bullet Fire origin.
+        // The caller's successful common finish owns the one launch fact at
+        // those coordinates, after recording history. Do not emit it twice.
         return location.is_some();
     }
     if sim

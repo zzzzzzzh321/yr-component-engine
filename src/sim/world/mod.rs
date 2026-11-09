@@ -7731,28 +7731,40 @@ impl Simulation {
     /// lives here; the listener gates (local player, `IsAlliedWith(PlayerPtr)`,
     /// `[0xA8B538]`, `GameMode`, `AuxBuilding` ownership) are the app's.
     pub(crate) fn announce_super_weapon_building_complete(
-        interner: &mut StringInterner,
-        substrate: &ObjectSubstrate,
-        sound_events: &mut FrameChannel<SimSoundEvent>,
+        &mut self,
         stable_id: u64,
         rules: &RuleSet,
     ) {
-        let Some((owner, type_ref)) = substrate
+        let Some(building) = self
+            .substrate
             .entities
             .get(stable_id)
             .filter(|e| e.category() == EntityCategory::Structure && !e.death.is_dying())
-            .map(|e| (e.owner(), e.type_ref()))
         else {
             return;
         };
-        let Some(section) = interner
-            .object_type(type_ref, rules)
-            .and_then(|obj| obj.super_weapon.clone())
-        else {
-            return;
+        let owner = building.owner();
+        let sw_type = if rules.superweapon_eva_providers_enabled() {
+            // Installed AnnounceSW100349D0 calls the same first-available
+            // provider owner as the silo path, including capture's opening.
+            let Some(instance) =
+                crate::sim::superweapon::first_available_building_super(self, rules, building)
+            else {
+                return;
+            };
+            instance.type_id()
+        } else {
+            let Some(section) = self
+                .interner
+                .object_type(building.type_ref(), rules)
+                .and_then(|obj| obj.super_weapon.clone())
+            else {
+                return;
+            };
+            self.interner.intern(&section)
         };
-        let sw_type = interner.intern(&section);
-        sound_events.emit(SimSoundEvent::SuperWeaponDetected { owner, sw_type });
+        self.sound_events
+            .emit(SimSoundEvent::SuperWeaponDetected { owner, sw_type });
     }
 
     /// The Selling mission's visit in the building's own LogicVector slot

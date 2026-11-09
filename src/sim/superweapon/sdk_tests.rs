@@ -78,7 +78,20 @@ impl Scene {
         mode: Option<&str>,
         map: &str,
     ) -> Self {
+        Self::with_eva(label, module, root, mode, map, None)
+    }
+    fn with_eva(
+        label: &str,
+        module: Option<&[u8]>,
+        root: &str,
+        mode: Option<&str>,
+        map: &str,
+        eva: Option<&str>,
+    ) -> Self {
         let dir = audio_test_install(label);
+        if let Some(eva) = eva {
+            std::fs::write(dir.path().join("evamd.ini"), eva).unwrap();
+        }
         std::fs::write(dir.path().join("rulesmd.ini"), root).unwrap();
         std::fs::write(dir.path().join("artmd.ini"), ART).unwrap();
         if let Some(module) = module {
@@ -439,6 +452,9 @@ mod common_targeting;
 
 #[path = "sdk_influence_tests.rs"]
 mod influence;
+
+#[path = "sdk_eva_tests.rs"]
+mod eva;
 
 #[cfg(not(feature = "ares"))]
 #[test]

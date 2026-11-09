@@ -428,6 +428,7 @@ pub(super) fn dispatch_sim_sound_events(
                 // side, not the launcher's: `VoxClass::PlayEVA` takes
                 // only the event name; the consumer resolves the side.
                 let eva_event = eva_producers::resolved_superweapon_eva(
+                    rules,
                     sw,
                     eva_producers::SuperWeaponEvaStage::Activated,
                     cue.eva_event,
@@ -444,6 +445,10 @@ pub(super) fn dispatch_sim_sound_events(
                 // The player's tail ([`launch_drops_ready_line`]): after
                 // the case's line, the queued Ready line is dropped.
                 if let Some(ready) = launch_drops_ready_line(cue_kind)
+                    // Admitted common Launch removes the configured Ready
+                    // at its Finished fact, after SW.Sound; never both tails.
+                    && !((sw.nuclear.is_some() || sw.kind.has_ares_handler())
+                        && rules.super_weapon_eva(sw).is_some())
                     && owner_is_local(sim.interner(), owner, local_owner_name)
                 {
                     if let Some(activated) = activated {
@@ -883,6 +888,7 @@ pub(super) fn dispatch_sim_sound_events(
                 let type_name = sim.interner().resolve(sw_type);
                 let Some(event) = rules.super_weapon(type_name).and_then(|sw| {
                     eva_producers::resolved_superweapon_eva(
+                        rules,
                         sw,
                         eva_producers::SuperWeaponEvaStage::Ready,
                         eva_producers::super_weapon_ready_event(sw.kind),
@@ -910,6 +916,7 @@ pub(super) fn dispatch_sim_sound_events(
                     .super_weapon(sim.interner().resolve(sw_type))
                     .and_then(|sw| {
                         eva_producers::resolved_superweapon_eva(
+                            rules,
                             sw,
                             eva_producers::SuperWeaponEvaStage::Ready,
                             None,
@@ -962,6 +969,7 @@ pub(super) fn dispatch_sim_sound_events(
                     .and_then(|index| {
                         let sw = rules.super_weapon(&type_name)?;
                         eva_producers::resolved_superweapon_eva(
+                            rules,
                             sw,
                             eva_producers::SuperWeaponEvaStage::Detected,
                             eva_producers::super_weapon_detected_event(sw.kind, index),
@@ -1312,6 +1320,10 @@ fn cloak_sound_for_app(
         source: Some(SoundSource::new((sx, sy), (rx, ry))),
     }
 }
+
+#[cfg(test)]
+#[path = "superweapon_eva_tests.rs"]
+mod superweapon_eva_tests;
 
 #[cfg(test)]
 mod tests {

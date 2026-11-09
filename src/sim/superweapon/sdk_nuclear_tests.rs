@@ -420,6 +420,14 @@ fn sdk_nuclear_direct_overrides_restore_receiver_and_refused_payload() {
     assert!(refused.sim.projectiles.iter().next().is_none());
     assert_eq!(refused.sim.houses[&owner].economy().credits(), credits);
     assert_eq!(refused.sim.super_weapons[&owner][&sw].ares_launch_count, 0);
+    assert!(
+        !refused.sim.sound_events.iter().any(|event| matches!(
+            event,
+            SimSoundEvent::SuperWeaponLaunched { .. }
+                | SimSoundEvent::AresSuperWeaponFinished { .. }
+        )),
+        "failed Activate queues neither Activated nor Ready cancellation"
+    );
 }
 
 #[test]

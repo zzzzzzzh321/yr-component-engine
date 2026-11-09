@@ -68,6 +68,41 @@ pub(crate) fn press(
     SuperWeaponClick::Target
 }
 
+/// Installed Select10034DA0 and SelectTarget10034D60 feedback, after the same
+/// click decision. CanFire refusal precedes funds/constraints, except the
+/// AutoFire-only bypass already projected by manual_cameo_refusal. No second
+/// readiness or wallet query, and no speech for right-click/immediate launch.
+pub(crate) fn eva<'a>(
+    rules: &'a crate::rules::ruleset::RuleSet,
+    section: &str,
+    view: Option<&SuperWeaponView>,
+    click: SuperWeaponClick,
+) -> Option<&'a str> {
+    let sw = rules.super_weapon(section)?;
+    match click {
+        SuperWeaponClick::Refused => {
+            let view = view?;
+            if !view.can_fire && view.ares_refusal.is_none() {
+                rules.super_weapon_eva(sw)?.impatient()
+            } else if view.ares_refusal
+                == Some(crate::sim::superweapon::AresCameoRefusal::InsufficientFunds)
+            {
+                crate::sim::superweapon::financial_type(rules, sw)
+                    .insufficient_funds_eva
+                    .as_deref()
+            } else {
+                None
+            }
+        }
+        SuperWeaponClick::Target => rules
+            .super_weapon_eva(sw)
+            .map_or(Some(super::sidebar_eva::EVA_SELECT_TARGET), |eva| {
+                eva.select_target()
+            }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[path = "superweapon_cameo_tests.rs"]
 mod tests;

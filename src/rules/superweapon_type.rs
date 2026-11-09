@@ -83,9 +83,8 @@ pub enum SuperWeaponKind {
 }
 
 impl SuperWeaponKind {
-    /// The three implemented NewSWType Activate owners, absent from retail builds.
-    #[cfg(feature = "ares")]
-    pub(crate) const fn has_ares_handler(self) -> bool {
+    /// The three implemented custom NewSWType Activate owners.
+    pub const fn has_ares_handler(self) -> bool {
         matches!(
             self,
             Self::GenericWarhead | Self::UnitDelivery | Self::HunterSeeker
@@ -220,10 +219,26 @@ pub struct AresSuperWeaponEva {
     ready: Option<String>,
     activated: Option<String>,
     detected: Option<String>,
+    #[serde(default)]
+    impatient: Option<String>,
+    #[serde(default)]
+    select_target: Option<String>,
 }
 
-#[cfg(feature = "ares")]
 impl AresSuperWeaponEva {
+    pub(super) fn from_external(policy: &vera_mod_api::SuperWeaponEvaPolicy) -> Self {
+        let name = |reference: &vera_mod_api::NullableResourceName| match reference {
+            vera_mod_api::NullableResourceName::Named(name) => Some(name.clone()),
+            _ => None,
+        };
+        Self {
+            ready: name(&policy.ready),
+            activated: name(&policy.activated),
+            detected: name(&policy.detected),
+            impatient: name(&policy.impatient),
+            select_target: name(&policy.select_target),
+        }
+    }
     pub fn ready(&self) -> Option<&str> {
         self.ready.as_deref()
     }
@@ -233,7 +248,14 @@ impl AresSuperWeaponEva {
     pub fn detected(&self) -> Option<&str> {
         self.detected.as_deref()
     }
+    pub fn impatient(&self) -> Option<&str> {
+        self.impatient.as_deref()
+    }
+    pub fn select_target(&self) -> Option<&str> {
+        self.select_target.as_deref()
+    }
 
+    #[cfg(feature = "ares")]
     pub(crate) fn initialize_for_kind(
         &mut self,
         kind: Option<&str>,
@@ -255,6 +277,7 @@ impl AresSuperWeaponEva {
         }
     }
 
+    #[cfg(feature = "ares")]
     pub(crate) fn read_pass(
         &mut self,
         section: &IniSection,
@@ -778,6 +801,8 @@ pub(crate) struct AresSuperWeaponMetadata {
     /// Present only for an admitted common declaration or the native profile.
     /// Historical external components keep their payload-specific adapter.
     targeting: Option<crate::rules::superweapon_targeting::AresSuperWeaponTargetingState>,
+    /// External admitted immutable references, absent in historical cohorts.
+    eva: Option<AresSuperWeaponEva>,
 }
 
 /// SWTypeExt+284/+285: constructor10031460 clears AX at10031471 and
@@ -805,6 +830,7 @@ impl AresSuperWeaponMetadata {
         charge: &AresSuperWeaponCharge,
         influence: &crate::rules::superweapon_influence::SuperWeaponInfluence,
         targeting: Option<crate::rules::superweapon_targeting::AresSuperWeaponTargetingState>,
+        eva: Option<AresSuperWeaponEva>,
     ) -> Self {
         Self {
             availability: availability.clone(),
@@ -813,6 +839,7 @@ impl AresSuperWeaponMetadata {
             charge: charge.clone(),
             influence: influence.clone(),
             targeting,
+            eva,
         }
     }
 
@@ -828,6 +855,10 @@ impl AresSuperWeaponMetadata {
 
     pub(crate) fn charge(&self) -> &AresSuperWeaponCharge {
         &self.charge
+    }
+
+    pub(crate) fn eva(&self) -> Option<&AresSuperWeaponEva> {
+        self.eva.as_ref()
     }
 
     pub(crate) fn influence(&self) -> &crate::rules::superweapon_influence::SuperWeaponInfluence {

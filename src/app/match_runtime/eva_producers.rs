@@ -132,10 +132,22 @@ pub(crate) enum SuperWeaponEvaStage {
 /// Launch10032FC3 select the retained EVA ordinal. New handlers suppress
 /// stock fallbacks even for -1; unported stock redirects keep their old owner.
 pub(crate) fn resolved_superweapon_eva<'a>(
+    rules: &'a crate::rules::ruleset::RuleSet,
     sw: &'a crate::rules::superweapon_type::SuperWeaponType,
     stage: SuperWeaponEvaStage,
     stock: Option<&'static str>,
 ) -> Option<&'a str> {
+    // Stock redirects with handler-owned flags/source substitution retain
+    // their own consumers until ported (Chronosphere FD, ChronoWarp105).
+    if (sw.nuclear.is_some() || sw.kind.has_ares_handler())
+        && let Some(eva) = rules.super_weapon_eva(sw)
+    {
+        return match stage {
+            SuperWeaponEvaStage::Ready => eva.ready(),
+            SuperWeaponEvaStage::Activated => eva.activated(),
+            SuperWeaponEvaStage::Detected => eva.detected(),
+        };
+    }
     #[cfg(feature = "ares")]
     if let Some(eva) = sw.ares_eva() {
         return match stage {
@@ -144,7 +156,6 @@ pub(crate) fn resolved_superweapon_eva<'a>(
             SuperWeaponEvaStage::Detected => eva.detected(),
         };
     }
-    let _ = (sw, stage);
     stock
 }
 

@@ -8,10 +8,10 @@ use crate::rules::superweapon_targeting::{
     HouseMask, SuperWeaponTargeting, TargetConstraints, TargetMask, TargetRequirements,
 };
 use crate::rules::superweapon_type::{
-    AresSuperWeaponAvailability, AresSuperWeaponCharge, AresSuperWeaponMetadata,
-    AresSuperWeaponPresentation, DeliveryOwner, DeliveryType, GenericWarheadAiTargeting,
-    GenericWarheadSettings, NuclearSettings, SuperWeaponBuildingRequirements, SuperWeaponKind,
-    SuperWeaponType, UnitDeliveryRules,
+    AresSuperWeaponAvailability, AresSuperWeaponCharge, AresSuperWeaponEva,
+    AresSuperWeaponMetadata, AresSuperWeaponPresentation, DeliveryOwner, DeliveryType,
+    GenericWarheadAiTargeting, GenericWarheadSettings, NuclearSettings,
+    SuperWeaponBuildingRequirements, SuperWeaponKind, SuperWeaponType, UnitDeliveryRules,
 };
 use crate::util::native_x87::NativeF64Bits;
 use std::collections::{BTreeMap, HashMap};
@@ -123,6 +123,27 @@ impl RuleSet {
             crate::rules::superweapon_type::profile_semantics,
             |catalog| catalog.policy.semantics,
         )
+    }
+
+    /// Admitted external EVA references. An absent domain keeps historical
+    /// producers; legacy profile readers and their three consumers stay separate.
+    pub fn super_weapon_eva(&self, sw: &SuperWeaponType) -> Option<&AresSuperWeaponEva> {
+        self.external_superweapons.as_ref()?;
+        self.super_weapon_metadata(&sw.id)?.eva()
+    }
+
+    /// Detection100349D0 uses GetSuperWeapon1000D610 for the new cohort.
+    /// Old external components preserve their original primary-only producer.
+    pub(crate) fn superweapon_eva_providers_enabled(&self) -> bool {
+        self.external_superweapons
+            .as_ref()
+            .map_or(cfg!(feature = "ares"), |catalog| {
+                catalog
+                    .policy
+                    .definitions
+                    .iter()
+                    .any(|definition| definition.eva.is_some())
+            })
     }
 
     /// Historical external configurations never inherit the compiled profile's
@@ -296,6 +317,17 @@ impl RuleSet {
                 .ok_or("SuperWeapon declaration does not match its native ordinal and stored ID")?;
             resolve_sound(&mut definition.presentation.sound)?;
             resolve_eva(&mut definition.insufficient_funds_eva)?;
+            if let Some(eva) = &mut definition.eva {
+                for reference in [
+                    &mut eva.ready,
+                    &mut eva.activated,
+                    &mut eva.detected,
+                    &mut eva.impatient,
+                    &mut eva.select_target,
+                ] {
+                    resolve_eva(reference)?;
+                }
+            }
             if let NullableResourceName::Named(name) = &mut definition.presentation.animation {
                 *name = self
                     .sdk_animation_names
@@ -514,6 +546,7 @@ impl RuleSet {
                                 common,
                             )
                         }),
+                    definition.eva.as_ref().map(AresSuperWeaponEva::from_external),
                 ),
             );
             definitions.insert(definition.ordinal, candidate);

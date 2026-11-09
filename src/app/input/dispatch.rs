@@ -2055,28 +2055,23 @@ fn press_super_weapon(state: &mut AppState, section: &str, right: bool, gui_soun
             .and_then(|rules| rules.general.gui_build_sound.clone());
         crate::app::App::play_shell_ui_sound_by_id(state, sound.as_deref());
     }
+    let cue = state
+        .rules()
+        .and_then(|rules| {
+            super::superweapon_cameo::eva(
+                rules,
+                section,
+                selection.as_ref().map(|(view, _)| view),
+                click,
+            )
+        })
+        .map(str::to_owned);
+    if let Some(cue) = cue {
+        push_local_eva(state, &cue);
+    }
     match click {
-        super::superweapon_cameo::SuperWeaponClick::Refused
-            if selection.as_ref().is_some_and(|(view, _)| {
-                view.ares_refusal
-                    == Some(crate::sim::superweapon::AresCameoRefusal::InsufficientFunds)
-            }) =>
-        {
-            let cue = state
-                .rules()
-                .and_then(|rules| {
-                    rules
-                        .super_weapon(section)
-                        .map(|sw| crate::sim::superweapon::financial_type(rules, sw))
-                })
-                .and_then(|sw| sw.insufficient_funds_eva.clone());
-            if let Some(cue) = cue {
-                push_local_eva(state, &cue);
-            }
-        }
         super::superweapon_cameo::SuperWeaponClick::Target => {
             queue_selection_snapshot_command(state, Vec::new(), false);
-            push_local_eva(state, sidebar_eva::EVA_SELECT_TARGET);
         }
         super::superweapon_cameo::SuperWeaponClick::Launch(sw_type_id) => {
             let owner = preferred_local_owner_name(state).unwrap_or_default();

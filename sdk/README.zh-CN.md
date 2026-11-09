@@ -1,5 +1,7 @@
 # VERA Mod SDK：外置功能原型
 
+0.39／配置28／状态1新增外置超武 EVA 配置：保留六个 `EVA.*` 字段的原生读取顺序和首次初始化。核弹及已支持自定义处理器的就绪、发射、发现提示复用现有事件与 Vox 队列，侧栏接入 Impatient／SelectTarget；成功发射后只清除该超武配置的 Ready。旧非空配置保持新增域缺失，新对局或真实重置才启用。需要本批配套引擎；其他原版超武的专用处理器和完整 Ares 仍未完成。
+
 0.38／配置27／状态1新增指定器与抑制器。`SuperWeaponDeclaration.influence` 以实际类别＋原生序号保存两个名单和 Any 标志，`SuperWeaponResourcePolicy.techno_influence` 提供各实际类型的 nullable 范围。宿主在原有原子资源绑定入口验证，复用共同目标查询、生命周期、有向盟友和建筑电力；不新增 WIT hook 或逐帧调用。未设置范围使用当前类型原始 Sight，显式零或负数不贡献范围。旧非空配置保持域缺失，只有新对局或真实重置才启用。需要本批配套引擎，完整 Ares 仍未完成。
 
 0.37／配置26／状态1新增可选 `SuperWeaponDeclaration.common_targeting`。插件按物理规则层保留射程、目标模式／偏好、手动／自动掩码及 AutoFire／ManualFire／FireIntoShroud；宿主将其投影到已有目标与 AI 所有者，普通构建也可使用。核弹的预览、选点与发射井资格共用配置，已提交事件保留 Activate 的直接投放分支。Generic 空弹头在 Activate 失败时消耗充能，但不扣费、不计成功发射；旧组件保留先前的弹头提前检查路径。不新增逐帧 WASM 调用；完整 Ares 兼容仍在推进。
@@ -12,7 +14,7 @@
 
 ## 当前开发状态
 
-当前候选为 **0.38／配置27／状态1／API v1**。0.33起支持可选 `weapon_instance_resource`：用 `WeaponTypeRef.ordinal` 标识真实 Weapon 数组槽，同一个24字节存储名可以对应不同实例。插件经 `weapon-registry-view` 取得有序目录，再通过 `weapon-instance-effective:<scalar>` 与 `WeaponReadValue { identity, current }` 读取该实例保留的物理历史；数值解析仍由同一宿主读取器完成。
+当前候选为 **0.39／配置28／状态1／API v1**。0.33起支持可选 `weapon_instance_resource`：用 `WeaponTypeRef.ordinal` 标识真实 Weapon 数组槽，同一个24字节存储名可以对应不同实例。插件经 `weapon-registry-view` 取得有序目录，再通过 `weapon-instance-effective:<scalar>` 与 `WeaponReadValue { identity, current }` 读取该实例保留的物理历史；数值解析仍由同一宿主读取器完成。
 
 实例策略包含现有弹药与开火策略。外层 `Some` 明确拥有这两个投影，即使两项都为 `None`；外层 `None` 才允许按唯一名称回退旧严格接口。新组件的 Ammo、ApplyDamage、ProjectileRange 按实例冻结；旧组件保持原请求格式，在同名多实例域明确拒绝，避免借用第一项或最后一项配置。资源接纳时查询一次，实际开火、在飞弹体与恢复继续保留同一个 Weapon 槽，不逐发调用 Wasm。
 
