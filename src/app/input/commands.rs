@@ -594,6 +594,18 @@ fn super_weapon_click_command(
     sw_type_id: InternedId,
     cell: (u16, u16),
 ) -> Option<Command> {
+    // WhatAction10033EB0 returns refusal126 rather than action127; the local
+    // BandBox_LeftUp4AC20C producer then emits no SPECIAL_PLACE. Recompute
+    // from the clicked cell for both tactical and radar paths. UseAI's cameo
+    // queues a selector request, so its placeholder is not a manual target.
+    // Already queued/script events retain their native Activate bypass.
+    if !rules.super_weapon_uses_ai_targeting(sim.interner().resolve(sw_type_id))
+        && sim
+            .super_weapon_target_check(rules, owner_id, sw_type_id, cell, false)
+            .is_err()
+    {
+        return None;
+    }
     let ticket = sim
         .paid_super_weapon_selection(owner_id)
         .filter(|ticket| ticket.destination == sw_type_id);
@@ -1074,9 +1086,7 @@ pub(super) fn queue_house_cheer_in_sim(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        schedule_command_in_sim, schedule_stress_attack_moves, sell_wall_command_for_cell,
-    };
+    use super::{schedule_command_in_sim, schedule_stress_attack_moves, sell_wall_command_for_cell};
 
     use crate::map::entities::EntityCategory;
     use crate::rules::ini_parser::IniFile;
@@ -2135,3 +2145,7 @@ mod paid_superweapon_tests;
 #[cfg(test)]
 #[path = "force_shield_target_tests.rs"]
 mod force_shield_target_tests;
+
+#[cfg(test)]
+#[path = "common_superweapon_target_tests.rs"]
+mod common_superweapon_target_tests;

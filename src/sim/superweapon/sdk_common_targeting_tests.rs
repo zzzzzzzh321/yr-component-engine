@@ -246,8 +246,12 @@ fn sdk_common_targeting_selected_ai_bypasses_preview_and_uses_direct_fallback() 
         view.ares_refusal,
         Some(AresCameoRefusal::ManualFireDisabled)
     );
-    // The actual House AI entry also admits a human AutoFire-only type.
-    ai_fire::try_fire(
+    // Enter through House Update's strategy scheduler, including the human
+    // early-return branch10034CD0. Calling try_fire directly misses that gate.
+    let timer = automatic.sim.houses[&owner].strategy_timer();
+    let deadline = (timer.start_frame(), timer.duration());
+    let rng = automatic.sim.scenario_rng.logical_state();
+    crate::sim::house_strategy::update_strategy(
         &mut automatic.sim,
         &automatic.rules,
         owner,
@@ -259,6 +263,9 @@ fn sdk_common_targeting_selected_ai_bypasses_preview_and_uses_direct_fallback() 
         1
     );
     assert!(!automatic.sim.super_weapons[&owner][&sw].is_ready());
+    let timer = automatic.sim.houses[&owner].strategy_timer();
+    assert_eq!((timer.start_frame(), timer.duration()), deadline);
+    assert_eq!(automatic.sim.scenario_rng.logical_state(), rng);
     automatic.roundtrip();
 
     let mut event = Scene::new(
