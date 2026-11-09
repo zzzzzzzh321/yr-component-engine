@@ -6872,21 +6872,13 @@ impl RulesPassProcessor {
     /// Installed Ares Find10007EA0 resolves a nullable TechnoType pointer.
     /// The common construction array decides equal names across categories.
     #[cfg(feature = "ares")]
-    fn find_existing_techno_type(
-        &self,
-        name: &str,
-    ) -> Option<crate::rules::superweapon_type::DeliveryType> {
-        let index = ares_type_index_of_name(
+    fn find_existing_techno_type(&self, name: &str) -> Option<usize> {
+        ares_type_index_of_name(
             name,
             self.techno_type_order
                 .iter()
                 .map(|&(family, index)| self.families[&family][index].native_stored_id.as_str()),
-        )?;
-        let (family, member) = self.techno_type_order[index];
-        Some(crate::rules::superweapon_type::DeliveryType {
-            category: family.object_category().expect("TechnoType array category"),
-            id: self.families[&family][member].native_stored_id.clone(),
-        })
+        )
     }
 
     /// Ares pointer reader1003C650: ReadString2048, Find10007EA0, then
@@ -6921,13 +6913,17 @@ impl RulesPassProcessor {
         &self,
         section: &IniSection,
         key: &str,
-    ) -> Option<Vec<crate::rules::superweapon_type::TechnoTypeReference>> {
+    ) -> Option<Vec<vera_mod_api::ProductionTypeRef>> {
         Some(
-            section
-                .read_list(key, 2048)?
-                .into_iter()
-                .filter_map(|token| self.find_existing_techno_type(token))
-                .collect(),
+            read_registered_index_list(section, key, 2048, |token| {
+                self.find_existing_techno_type(token)
+            })?
+            .into_iter()
+            .map(|index| {
+                let (family, member) = self.techno_type_order[index];
+                self.sdk_production_identity(family, member)
+            })
+            .collect(),
         )
     }
 
@@ -8739,7 +8735,28 @@ impl RulesPassProcessor {
                             if types.is_empty() {
                                 OperatorRequirement::None
                             } else {
-                                OperatorRequirement::Types(types)
+                                // Operator still exposes its existing named
+                                // adapter; influence keeps the exact Find slot.
+                                OperatorRequirement::Types(
+                                    types
+                                        .into_iter()
+                                        .map(|identity| {
+                                            let category =
+                                                crate::rules::prerequisite::production_category(
+                                                    identity.category,
+                                                );
+                                            let family =
+                                                RulesTypeFamily::from_object_category(category);
+                                            crate::rules::superweapon_type::TechnoTypeReference {
+                                                category,
+                                                id: self.families[&family]
+                                                    [identity.ordinal as usize]
+                                                    .native_stored_id
+                                                    .clone(),
+                                            }
+                                        })
+                                        .collect(),
+                                )
                             }
                         }
                     });

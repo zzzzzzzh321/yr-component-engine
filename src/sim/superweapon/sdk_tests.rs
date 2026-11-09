@@ -437,6 +437,9 @@ mod nuclear;
 #[path = "sdk_common_targeting_tests.rs"]
 mod common_targeting;
 
+#[path = "sdk_influence_tests.rs"]
+mod influence;
+
 #[cfg(not(feature = "ares"))]
 #[test]
 #[ignore = "requires VERA20K_ARES_COMPONENT (.28)"]

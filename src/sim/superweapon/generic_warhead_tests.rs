@@ -466,10 +466,10 @@ fn designation_rules_retain_nullable_ranges_across_invalid_later_reads() {
     );
     let influence = rules.super_weapon_metadata("Strike").unwrap().influence();
     assert_eq!(influence.designators.len(), 1);
-    assert_eq!(influence.designators[0].id, "SCOUT");
+    assert_eq!(influence.designators[0].ordinal, 0);
     assert_eq!(
         influence.designators[0].category,
-        crate::rules::object_type::ObjectCategory::Vehicle
+        vera_mod_api::ProductionObjectKind::Unit
     );
     assert!(influence.any_inhibitor);
 }

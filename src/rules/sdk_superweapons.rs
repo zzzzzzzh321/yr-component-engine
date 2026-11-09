@@ -16,7 +16,7 @@ use crate::rules::superweapon_type::{
 use crate::util::native_x87::NativeF64Bits;
 use std::collections::{BTreeMap, HashMap};
 use vera_mod_api::{
-    NullableResourceName, SuperWeaponDeliveryOwner, SuperWeaponPayloadPolicy,
+    NullableResourceName, ProductionTypeRef, SuperWeaponDeliveryOwner, SuperWeaponPayloadPolicy,
     SuperWeaponResourcePolicy, SuperWeaponSemantics,
 };
 
@@ -48,6 +48,7 @@ pub(super) struct FrozenSuperWeaponBindings {
 pub(super) struct SuperWeaponResourceBindings {
     frozen: Option<FrozenSuperWeaponBindings>,
     types: Option<HashMap<String, SuperWeaponType>>,
+    ranges: Vec<Option<(Option<i32>, Option<i32>)>>,
 }
 
 impl SuperWeaponResourceBindings {
@@ -124,6 +125,18 @@ impl RuleSet {
         )
     }
 
+    /// Historical external configurations never inherit the compiled profile's
+    /// influence rules. Domain presence is admitted with the immutable batch.
+    pub(crate) fn superweapon_influence_enabled(&self) -> bool {
+        if self.external_mod.is_none() {
+            cfg!(feature = "ares")
+        } else {
+            self.external_superweapons
+                .as_ref()
+                .is_some_and(|catalog| catalog.policy.techno_influence.is_some())
+        }
+    }
+
     /// Some(empty) suppresses the old profile vector for this Building. None
     /// leaves the existing object-owned legacy vector and its original order.
     pub(crate) fn additional_super_weapon_indices(&self, building: usize) -> Option<&[u32]> {
@@ -179,9 +192,45 @@ impl RuleSet {
             return Ok(SuperWeaponResourceBindings {
                 frozen: None,
                 types,
+                ranges: vec![None; self.object_list.len()],
             });
         };
         policy.validate()?;
+        let exact_type = |identity: ProductionTypeRef| {
+            i32::try_from(identity.ordinal)
+                .ok()
+                .and_then(|index| {
+                    self.type_array_at(
+                        crate::rules::prerequisite::production_category(identity.category),
+                        index,
+                    )
+                })
+                .ok_or_else(|| {
+                    "SuperWeapon Techno reference is outside its native array".to_owned()
+                })
+        };
+        // TechnoTypeExt nullable10008CC0: the external domain has an explicit
+        // unset base. Validate everything before publishing any ObjectType.
+        let mut ranges = vec![None; self.object_list.len()];
+        if let Some(declarations) = &mut policy.techno_influence {
+            declarations.sort_by_key(|entry| entry.object);
+            let mut declared = BTreeMap::new();
+            for entry in declarations {
+                exact_type(entry.object)?;
+                declared.insert(
+                    entry.object,
+                    (entry.designator_range, entry.inhibitor_range),
+                );
+            }
+            for (object, destination) in self.object_list.iter().zip(&mut ranges) {
+                let identity = ProductionTypeRef {
+                    category: crate::rules::prerequisite::production_kind(object.category),
+                    ordinal: u32::try_from(object.native_type_index())
+                        .map_err(|_| "invalid native Techno ordinal")?,
+                };
+                *destination = Some(declared.get(&identity).copied().unwrap_or((None, None)));
+            }
+        }
         // This existing native construction-order projection is reconstructed
         // from retained members on fresh and saved loads. Readpoint logs are
         // skipped by save and must never be used as the final type directory.
@@ -433,6 +482,21 @@ impl RuleSet {
                 initial_ready: definition.charge.initial_ready,
                 virtual_charge: definition.charge.virtual_charge,
             };
+            let mut influence =
+                crate::rules::superweapon_influence::SuperWeaponInfluence::default();
+            if let Some(declaration) = &definition.influence {
+                for &identity in declaration
+                    .designators
+                    .iter()
+                    .chain(&declaration.inhibitors)
+                {
+                    exact_type(identity)?;
+                }
+                influence.designators = declaration.designators.clone();
+                influence.any_designator = declaration.any_designator;
+                influence.inhibitors = declaration.inhibitors.clone();
+                influence.any_inhibitor = declaration.any_inhibitor;
+            }
             metadata_by_ordinal.insert(
                 definition.ordinal,
                 AresSuperWeaponMetadata::project(
@@ -440,8 +504,7 @@ impl RuleSet {
                     candidate.aux_building.as_deref(),
                     Some(&buildings),
                     &charge,
-                    #[cfg(feature = "ares")]
-                    &crate::rules::superweapon_influence::SuperWeaponInfluence::default(),
+                    &influence,
                     definition.common_targeting.as_ref()
                         .filter(|_| policy.semantics.custom_payloads)
                         .map(|common| {
@@ -457,7 +520,7 @@ impl RuleSet {
         }
         let mut provider_declarations = BTreeMap::new();
         for provider in &policy.providers {
-            building_name(provider.object.ordinal)?;
+            exact_type(provider.object)?;
             let mut indices = Vec::new();
             for &index in &provider.additional {
                 let source = self
@@ -475,25 +538,13 @@ impl RuleSet {
             provider_declarations.insert(provider.object.ordinal, indices);
         }
         let mut providers = vec![Vec::new(); self.building_ids.len()];
-        for (ordinal, (_, building, _)) in self
-            .native_techno_type_order
-            .iter()
-            .filter(|(category, _, _)| {
-                *category == crate::rules::object_type::ObjectCategory::Building
-            })
-            .enumerate()
-        {
-            let projected = self
-                .building_type_index(building)
-                .and_then(|index| usize::try_from(index).ok())
-                .ok_or("registered SuperWeapon provider has no Building projection")?;
-            // Preserve the old name-keyed owner's last member overwrite,
-            // including an omitted later duplicate's explicit stock vector.
+        for (ordinal, indices) in provider_declarations {
+            // BuildingTypeExt::GetSuperWeapon1000D610 reads the actual Type's
+            // own vector+178/+17C, reached via Building+520 at10034A6A.
+            // Re-Find by stored ID would merge distinct native allocations.
             *providers
-                .get_mut(projected)
-                .ok_or("invalid projected Building ordinal")? = provider_declarations
-                .remove(&(ordinal as u32))
-                .unwrap_or_default();
+                .get_mut(ordinal as usize)
+                .ok_or("invalid native Building ordinal")? = indices;
         }
         let mut types = HashMap::new();
         let mut metadata = BTreeMap::new();
@@ -536,6 +587,7 @@ impl RuleSet {
                 dispatch,
             }),
             types: Some(types),
+            ranges,
         })
     }
 
@@ -545,6 +597,9 @@ impl RuleSet {
     ) {
         if let Some(types) = bindings.types {
             self.super_weapons = types;
+        }
+        for (object, ranges) in self.object_list.iter_mut().zip(bindings.ranges) {
+            object.bind_external_superweapon_ranges(ranges);
         }
         self.external_superweapons = bindings.frozen;
     }

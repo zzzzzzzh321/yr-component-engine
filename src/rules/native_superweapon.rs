@@ -274,6 +274,27 @@ impl SdkRegistryPass {
                         .collect::<Vec<_>>()
                 }),
             ),
+            "super-techno-list" => {
+                // Ares SWTypeExt::ReadINI10033979/100339A5 uses vector1000EDD0:
+                // ReadString2048/comma tokens, then common Techno Find10007EA0
+                // (none10003950 first). Keep its first constructed Type pointer,
+                // not UnitDelivery's per-family ambiguity policy or a name rebind.
+                let technos = &self.production.technos[..point.technos];
+                encode(
+                    &read_registered_index_list(section, key, 2048, |name| {
+                        ares_type_index_of_name(
+                            name,
+                            technos.iter().map(|entry| entry.name.as_str()),
+                        )
+                    })
+                    .map(|indices| {
+                        indices
+                            .into_iter()
+                            .map(|index| technos[index].identity)
+                            .collect::<Vec<ProductionTypeRef>>()
+                    }),
+                )
+            }
             "super-provider-list" => encode(
                 &read_registered_index_list(section, key, 2048, |name| {
                     super_weapon_index_of_name(
@@ -358,5 +379,158 @@ impl SdkRegistryPass {
             }
             _ => Err(format!("unknown scoped SuperWeapon reader: {reader}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn techno_list(
+        registry: &SdkRegistryPass,
+        pass: &IniFile,
+        key: &str,
+    ) -> Option<Vec<ProductionTypeRef>> {
+        let read = registry
+            .superweapon_view()
+            .reads
+            .iter()
+            .position(|point| {
+                matches!(&point.site, SuperWeaponReadSite::Type {
+                section: Some(section), ..
+            } if section == "POWER")
+            })
+            .unwrap();
+        let input = encode(&SuperReadValue {
+            read: u32::try_from(read).unwrap(),
+            current: (),
+        })
+        .unwrap();
+        decode(
+            &registry
+                .read_superweapon_value(
+                    "super-techno-list",
+                    "POWER",
+                    pass.section("POWER").unwrap(),
+                    key,
+                    &input,
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn techno_list_keeps_physical_pass_history_and_constructor_prefix() {
+        let root = IniFile::from_str(
+            "[SuperWeaponTypes]\n0=POWER\n[POWER]\nDesignators=KEEP,FUTURE\n\
+             [BuildingTypes]\n0=KEEP\n[KEEP]\nFreeUnit=FUTURE\n",
+        );
+        let mode = IniFile::from_str("[POWER]\nDesignators=\nInhibitors=FUTURE\n");
+        let map = IniFile::from_str("[POWER]\nDesignators= \t \nInhibitors=UNKNOWN\n");
+        let mut layers = RulesLayerStack::new(root.clone());
+        layers.push(RulesLayerKind::GameMode, mode.clone());
+        layers.push(RulesLayerKind::Scenario, map.clone());
+        let processed = layers.process().unwrap();
+        let registries = processed.sdk_registries();
+        let building = ProductionTypeRef {
+            category: ProductionObjectKind::Building,
+            ordinal: 0,
+        };
+        let future = ProductionTypeRef {
+            category: ProductionObjectKind::Unit,
+            ordinal: 0,
+        };
+        assert!(
+            registries[0]
+                .production_view()
+                .technos
+                .iter()
+                .any(|entry| { entry.identity == future && entry.name == "FUTURE" })
+        );
+        assert_eq!(
+            techno_list(&registries[0], &root, "Designators"),
+            Some(vec![building])
+        );
+        assert_eq!(techno_list(&registries[0], &root, "Inhibitors"), None);
+        assert_eq!(techno_list(&registries[1], &mode, "Designators"), None);
+        assert_eq!(
+            techno_list(&registries[1], &mode, "Inhibitors"),
+            Some(vec![future])
+        );
+        assert_eq!(techno_list(&registries[2], &map, "Designators"), None);
+        assert_eq!(
+            techno_list(&registries[2], &map, "Inhibitors"),
+            Some(vec![])
+        );
+        // Reading the old physical point again still cannot see FUTURE's
+        // later FreeUnit allocation or the later layer's authored value.
+        assert_eq!(
+            techno_list(&registries[0], &root, "Designators"),
+            Some(vec![building])
+        );
+    }
+
+    #[test]
+    fn techno_list_finds_first_common_slot_without_alias_or_operand_truncation() {
+        let pass = IniFile::from_str(
+            "[BuildingTypes]\n0=SAME\n[SAME]\nName=ALIAS\n\
+             [InfantryTypes]\n0=SAME\n[VehicleTypes]\n\
+             0=ABCDEFGHIJKLMNOPQRSTUVWXY\n1=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+             [SuperWeaponTypes]\n0=POWER\n[POWER]\n\
+             Designators=same,ALIAS,ABCDEFGHIJKLMNOPQRSTUVWXY,ABCDEFGHIJKLMNOPQRSTUVWX, Same,ABCDEFGHIJKLMNOPQRSTUVWX\n",
+        );
+        let processed = RulesLayerStack::new(pass.clone()).process().unwrap();
+        let registry = &processed.sdk_registries()[0];
+        assert_eq!(
+            registry
+                .production_view()
+                .technos
+                .iter()
+                .filter(|entry| { entry.name == "ABCDEFGHIJKLMNOPQRSTUVWX" })
+                .count(),
+            2,
+            "full long registry operands construct distinct equal stored IDs"
+        );
+        let first_unit = ProductionTypeRef {
+            category: ProductionObjectKind::Unit,
+            ordinal: 0,
+        };
+        assert_eq!(
+            techno_list(registry, &pass, "Designators"),
+            Some(vec![
+                ProductionTypeRef {
+                    category: ProductionObjectKind::Building,
+                    ordinal: 0
+                },
+                first_unit,
+                first_unit,
+            ]),
+            "common constructor order wins; Name aliases, full25-byte operands and spaced tokens do not match"
+        );
+    }
+
+    #[test]
+    fn techno_list_clears_nonempty_sentinels_and_bounds_the_whole_read() {
+        let mut pass = IniFile::from_str(
+            "[BuildingTypes]\n0=KEEP\n[SuperWeaponTypes]\n0=POWER\n[POWER]\n\
+             Designators=NoNe,<NoNe>\nInhibitors=,,,\n",
+        );
+        // A stored PutString value can exceed the physical line loader's511
+        // bytes. Exercise the2048-byte reader boundary through that same store.
+        pass.projection_section_mut("POWER")
+            .set("Bounded", &format!("{}KEEP,KEEP", " ".repeat(2043)));
+        let processed = RulesLayerStack::new(pass.clone()).process().unwrap();
+        let registry = &processed.sdk_registries()[0];
+        assert_eq!(techno_list(registry, &pass, "Designators"), Some(vec![]));
+        assert_eq!(techno_list(registry, &pass, "Inhibitors"), Some(vec![]));
+        assert_eq!(
+            techno_list(registry, &pass, "Bounded"),
+            Some(vec![ProductionTypeRef {
+                category: ProductionObjectKind::Building,
+                ordinal: 0,
+            }]),
+            "ReadString copies2047 bytes before trimming; the second KEEP is outside its buffer"
+        );
     }
 }

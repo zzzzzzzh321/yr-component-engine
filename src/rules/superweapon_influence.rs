@@ -1,7 +1,7 @@
 //! Immutable SW designation/inhibition configuration, read by the ordered
 //! ProcessedType owner and projected with its other SWTypeExt metadata.
 
-use crate::rules::superweapon_type::TechnoTypeReference;
+use vera_mod_api::ProductionTypeRef;
 
 /// Ares3.0 SWTypeExt constructor1003191B..10031945 clears vectors and flags;
 /// ReadINI10033979..100339C1 reads Designators/AnyDesignator then
@@ -9,15 +9,16 @@ use crate::rules::superweapon_type::TechnoTypeReference;
 /// registry, never by allocating missing TechnoTypes here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SuperWeaponInfluence {
-    pub(crate) designators: Vec<TechnoTypeReference>,
+    pub(crate) designators: Vec<ProductionTypeRef>,
     pub(crate) any_designator: bool,
-    pub(crate) inhibitors: Vec<TechnoTypeReference>,
+    pub(crate) inhibitors: Vec<ProductionTypeRef>,
     pub(crate) any_inhibitor: bool,
 }
 
 /// TechnoTypeExt's nullable ranges are retained across reached INI passes:
 /// an invalid later value must not erase an earlier explicit range.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg(feature = "ares")]
 pub(crate) struct TechnoSuperWeaponRules {
     /// TechnoTypeExt constructor: EAX=0 at1003CB80, byte store1003CC79.
     pub(crate) hunter_seeker_ignore: bool,
@@ -25,6 +26,7 @@ pub(crate) struct TechnoSuperWeaponRules {
     pub(crate) inhibitor_range: Option<i32>,
 }
 
+#[cfg(feature = "ares")]
 impl TechnoSuperWeaponRules {
     pub(crate) fn read_pass(&mut self, section: &crate::rules::ini_parser::IniSection) {
         // Ares TechnoTypeExt::LoadFromINI1003DEC0: Ignore1003ED8F,

@@ -1,8 +1,20 @@
 # VERA Mod SDK — external gameplay reference
 
+Version 0.38/config27 adds optional exact `SuperWeaponDeclaration.influence` and
+`SuperWeaponResourcePolicy.techno_influence` declarations. The scoped
+`super-techno-list` reader resolves the private physical common Type prefix;
+the existing atomic SW binder validates category/native ordinals and publishes
+nullable ranges through ObjectType. The existing prepared cursor/AI collector
+uses actual Type membership, owner/alliance/lifecycle and Building4555D0 power
+observations. Unset ranges use raw Type.Sight; explicit zero/negative disable a
+site. No new WIT hook, live guest state or per-frame call is added. Historical
+nonempty config keeps domain absence until a real reset. Use a paired new host;
+old full saves retain their original engine/component pair. Handler overrides,
+all target modes and complete Ares remain open.
+
 Version 0.37 adds optional `SuperWeaponDeclaration.common_targeting`: a frozen declaration of resolved targeting mode/preference, flags, masks and binary64 range bits. The paired host projects it into the existing read-only targeting metadata and ordinary AI/cursor/activation consumers. It adds no WIT import, hook ordinal or per-frame call. Absence preserves the historical component configuration and extra-preflight route; shared host predicate fixes still apply. Retain the original engine/component pair when exact old behavior is required. Native common event execution reaches Activate without repeating cursor admission; a failed Generic null-warhead activation consumes readiness but does not settle money/history. Full selector, influence and presentation compatibility remains open.
 
-The current host also retains each native Techno class/ordinal through per-slot rules, construction, paid production, tracking, power and same-build restoration, including equal stored IDs. Native first-match type lookup remains separate from retained pointer identity. This is a shared host prerequisite: the 0.37 guest, config26, API and WIT are unchanged. Other name-addressed resources and the retained sidebar-link model remain separate work; external Designators/Inhibitors are not enabled by this change. New full saves use the new host layout; retain original engine/component pairs for older full saves. See the production regressions in [typed_identity_tests.rs](../src/sim/production/typed_identity_tests.rs).
+The current host also retains each native Techno class/ordinal through per-slot rules, construction, paid production, tracking, power and same-build restoration, including equal stored IDs. Native first-match type lookup remains separate from retained pointer identity. This is a shared host prerequisite: the 0.37 guest, config26, API and WIT are unchanged. Other name-addressed resources and the retained sidebar-link model remain separate work; the following 0.38 influence declarations use these same native identities. New full saves use the new host layout; retain original engine/component pairs for older full saves. See the production regressions in [typed_identity_tests.rs](../src/sim/production/typed_identity_tests.rs).
 
 Version 0.36 / config25 adds the pure `MasterTypeLists` declaration and external Nuclear launch/payload references. Actual Weapon and SuperWeapon identities survive direct and silo launch, NukeMaker, flight and same-build restoration. Common `SW.Warhead` follows each physical body with existing-reference lookup; an intermediate custom Type cannot suppress that read. Full Nuclear/Ares compatibility remains open; Light, EVA and shared range semantics remain separate chains.
 
@@ -11,7 +23,7 @@ Version 0.35 / config24 adds optional `MatchRulesPolicy.shrapnel_weapon_assignme
 ## Development status
 
 The retained delivery is `plugin-dev/dist/sdk-feature-lab-0.7.0`. Current source
-is the **0.37.0 development candidate**, config version **26**, state version **1**;
+is the **0.38.0 development candidate**, config version **27**, state version **1**;
 the 0.7.0 descriptions below document the retained package, not a new delivery.
 API v1 and `vera:mod-sdk@0.1.0` stay unchanged. New optional messages still require
 a matching host; an older host sharing API v1 is not automatically compatible.

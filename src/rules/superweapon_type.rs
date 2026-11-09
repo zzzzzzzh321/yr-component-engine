@@ -774,7 +774,6 @@ pub(crate) struct AresSuperWeaponMetadata {
     native_auxiliary: Option<String>,
     buildings: Option<SuperWeaponBuildingRequirements>,
     charge: AresSuperWeaponCharge,
-    #[cfg(feature = "ares")]
     influence: crate::rules::superweapon_influence::SuperWeaponInfluence,
     /// Present only for an admitted common declaration or the native profile.
     /// Historical external components keep their payload-specific adapter.
@@ -804,7 +803,6 @@ impl AresSuperWeaponMetadata {
         native_auxiliary: Option<&str>,
         buildings: Option<&SuperWeaponBuildingRequirements>,
         charge: &AresSuperWeaponCharge,
-        #[cfg(feature = "ares")]
         influence: &crate::rules::superweapon_influence::SuperWeaponInfluence,
         targeting: Option<crate::rules::superweapon_targeting::AresSuperWeaponTargetingState>,
     ) -> Self {
@@ -813,7 +811,6 @@ impl AresSuperWeaponMetadata {
             native_auxiliary: native_auxiliary.map(str::to_owned),
             buildings: buildings.cloned(),
             charge: charge.clone(),
-            #[cfg(feature = "ares")]
             influence: influence.clone(),
             targeting,
         }
@@ -833,7 +830,6 @@ impl AresSuperWeaponMetadata {
         &self.charge
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn influence(&self) -> &crate::rules::superweapon_influence::SuperWeaponInfluence {
         &self.influence
     }

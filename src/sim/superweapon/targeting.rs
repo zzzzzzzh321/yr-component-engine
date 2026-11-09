@@ -69,79 +69,78 @@ pub(super) fn prepare(
         designators: Vec::new(),
         inhibitors: Vec::new(),
     };
-    #[cfg(not(feature = "ares"))]
-    return data;
-    #[cfg(feature = "ares")]
+    if !rules.superweapon_influence_enabled() || rules.super_weapon_target_policy(&sw.id).is_none()
     {
-        if rules.external_mod.is_some() || rules.super_weapon_target_policy(&sw.id).is_none() {
-            return data;
-        }
-        let Some(influence) = rules
-            .super_weapon_metadata(&sw.id)
-            .map(|metadata| metadata.influence())
-        else {
-            return data;
-        };
-        data.needs_designator = influence.any_designator || !influence.designators.is_empty();
-        if !data.needs_designator && !influence.any_inhibitor && influence.inhibitors.is_empty() {
-            return data;
-        }
-        // Predicates1006D880/1006D900: exact owner for designation, hostile
-        // owner for inhibition, alive/nonzero HP/nonlimbo/not deactivated for
-        // both, plus Building IsPowerOnline4555D0 for inhibitors only.
-        // Query XY is pure; coalescing the two scans draws no RNG and writes no
-        // timer, detach, fog or cell state.
-        for entity in sim.substrate.entities.values() {
-            if !entity.is_object_alive()
-                || entity.health.current() == 0
-                || entity.lifecycle.in_limbo()
-                || entity.deactivated.is_offline()
-            {
-                continue;
-            }
-            let Some(ty) = sim.entity_object_type(entity, rules) else {
-                continue;
-            };
-            let matches = |types: &[crate::rules::superweapon_type::TechnoTypeReference]| {
-                types
-                    .iter()
-                    .any(|reference| reference.category == ty.category && reference.id == ty.id)
-            };
-            let designator = entity.owner() == owner
-                && (influence.any_designator || matches(&influence.designators));
-            let inhibitor = entity.owner() != owner
-                && !sim
-                    .house_alliances
-                    .is_allied(&sim.interner, owner, entity.owner())
-                && (influence.any_inhibitor || matches(&influence.inhibitors))
-                && (entity.category() != EntityCategory::Structure
-                    || sim.building_operational_state(entity.stable_id(), rules) == Some(true));
-            if !designator && !inhibitor {
-                continue;
-            }
-            let [x, y] = crate::sim::movement::ground_pose::object_center_xy(entity);
-            let center = ((x / 256) as i16, (y / 256) as i16);
-            if designator {
-                let range = ty.designator_range().unwrap_or(ty.sight);
-                if range > 0 {
-                    data.designators.push(RangedSite {
-                        center,
-                        range_squared: range.wrapping_mul(range),
-                    });
-                }
-            }
-            if inhibitor {
-                let range = ty.inhibitor_range().unwrap_or(ty.sight);
-                if range > 0 {
-                    data.inhibitors.push(RangedSite {
-                        center,
-                        range_squared: range.wrapping_mul(range),
-                    });
-                }
-            }
-        }
-        data
+        return data;
     }
+    let Some(influence) = rules
+        .super_weapon_metadata(&sw.id)
+        .map(|metadata| metadata.influence())
+    else {
+        return data;
+    };
+    data.needs_designator = influence.any_designator || !influence.designators.is_empty();
+    if !data.needs_designator && !influence.any_inhibitor && influence.inhibitors.is_empty() {
+        return data;
+    }
+    // Predicates1006D880/1006D900: exact owner for designation, hostile
+    // owner for inhibition, alive/nonzero HP/nonlimbo/not deactivated for
+    // both, plus Building IsPowerOnline4555D0 for inhibitors only.
+    // Query XY is pure; coalescing the two scans draws no RNG and writes no
+    // timer, detach, fog or cell state.
+    for entity in sim.substrate.entities.values() {
+        if !entity.is_object_alive()
+            || entity.health.current() == 0
+            || entity.lifecycle.in_limbo()
+            || entity.deactivated.is_offline()
+        {
+            continue;
+        }
+        let Some(ty) = sim.entity_object_type(entity, rules) else {
+            continue;
+        };
+        // GetTechnoType1006CB30 compares the actual Type pointer. Category
+        // plus native array ordinal keeps equal stored IDs independent.
+        let matches = |types: &[vera_mod_api::ProductionTypeRef]| {
+            types.iter().any(|reference| {
+                crate::rules::prerequisite::production_category(reference.category) == ty.category
+                    && i32::try_from(reference.ordinal).ok() == Some(ty.native_type_index())
+            })
+        };
+        let designator = entity.owner() == owner
+            && (influence.any_designator || matches(&influence.designators));
+        let inhibitor = entity.owner() != owner
+            && !sim
+                .house_alliances
+                .is_allied(&sim.interner, owner, entity.owner())
+            && (influence.any_inhibitor || matches(&influence.inhibitors))
+            && (entity.category() != EntityCategory::Structure
+                || sim.building_operational_state(entity.stable_id(), rules) == Some(true));
+        if !designator && !inhibitor {
+            continue;
+        }
+        let [x, y] = crate::sim::movement::ground_pose::object_center_xy(entity);
+        let center = ((x / 256) as i16, (y / 256) as i16);
+        if designator {
+            let range = ty.designator_range().unwrap_or(ty.sight);
+            if range > 0 {
+                data.designators.push(RangedSite {
+                    center,
+                    range_squared: range.wrapping_mul(range),
+                });
+            }
+        }
+        if inhibitor {
+            let range = ty.inhibitor_range().unwrap_or(ty.sight);
+            if range > 0 {
+                data.inhibitors.push(RangedSite {
+                    center,
+                    range_squared: range.wrapping_mul(range),
+                });
+            }
+        }
+    }
+    data
 }
 
 /// Shared optional-SW target/placement bound, using the terrain owner.

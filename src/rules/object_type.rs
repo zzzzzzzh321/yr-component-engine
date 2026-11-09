@@ -2162,10 +2162,11 @@ pub struct ObjectType {
     pub hunter_seeker: bool,
     /// Ares TechnoTypeExt+3E0/+3E8 Nullable<int>, read1003EE23/1003EE39.
     /// An unset value uses native Sight; zero/negative overrides remain set.
-    #[cfg(feature = "ares")]
     designator_range: Option<i32>,
-    #[cfg(feature = "ares")]
     inhibitor_range: Option<i32>,
+    /// An admitted external domain overrides the profile pair, including an
+    /// explicit all-unset pair. Clearing the domain restores the profile.
+    external_superweapon_ranges: Option<(Option<i32>, Option<i32>)>,
     /// Ares TechnoTypeExt+3DC; AcquireHunterSeekerTarget10042E40 checks1004306C.
     #[cfg(feature = "ares")]
     hunter_seeker_ignore: bool,
@@ -2986,14 +2987,21 @@ impl ObjectType {
         self.hunter_seeker_ignore
     }
 
-    #[cfg(feature = "ares")]
-    pub(crate) fn designator_range(&self) -> Option<i32> {
-        self.designator_range
+    pub(crate) fn bind_external_superweapon_ranges(
+        &mut self,
+        ranges: Option<(Option<i32>, Option<i32>)>,
+    ) {
+        self.external_superweapon_ranges = ranges;
     }
 
-    #[cfg(feature = "ares")]
+    pub(crate) fn designator_range(&self) -> Option<i32> {
+        self.external_superweapon_ranges
+            .map_or(self.designator_range, |ranges| ranges.0)
+    }
+
     pub(crate) fn inhibitor_range(&self) -> Option<i32> {
-        self.inhibitor_range
+        self.external_superweapon_ranges
+            .map_or(self.inhibitor_range, |ranges| ranges.1)
     }
 
     #[cfg(feature = "ares")]
@@ -5060,10 +5068,9 @@ impl ObjectType {
             berserk_friendly: section.read_bool("BerserkFriendly", false),
             mobile_fire: section.read_bool("MobileFire", true),
             hunter_seeker: section.read_bool("HunterSeeker", false),
-            #[cfg(feature = "ares")]
             designator_range: None,
-            #[cfg(feature = "ares")]
             inhibitor_range: None,
+            external_superweapon_ranges: None,
             #[cfg(feature = "ares")]
             hunter_seeker_ignore: false,
             non_vehicle: category == ObjectCategory::Vehicle
