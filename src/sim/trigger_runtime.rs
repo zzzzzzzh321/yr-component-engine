@@ -2184,19 +2184,14 @@ impl Simulation {
                 let Some(owner) = incoming_house else {
                     return true;
                 };
-                let Some(type_name) = usize::try_from(condition.value).ok().and_then(|index| {
-                    rules
-                        .type_array_ids(crate::rules::object_type::ObjectCategory::Building)
-                        .get(index)
-                }) else {
+                let Some(building) = rules.building_type_at(condition.value) else {
                     return false;
                 };
                 let count = self.houses.get(&owner).map_or(0, |house| {
-                    self.interner.get(type_name).map_or(0, |id| {
-                        house
-                            .tracking()
-                            .active_count(crate::map::entities::EntityCategory::Structure, id)
-                    })
+                    house.tracking().active_count_native(
+                        crate::map::entities::EntityCategory::Structure,
+                        building.native_type_index(),
+                    )
                 });
                 let result = (count != 0) == (condition.kind == 32);
                 if result {

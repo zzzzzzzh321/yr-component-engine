@@ -188,31 +188,47 @@ fn record_and_both_lifetime_limit_queries_match_original_retained_histories() {
                     if let Some(index) = step["held_index"].as_i64() {
                         let name = type_name(family, i32::try_from(index).unwrap());
                         let type_id = sim.interner.get(&name).unwrap();
-                        assert!(
-                            sim.production
-                                .factories_mut()
-                                .test_enqueue_kernel(owner, strip, type_id, 0, 0,)
-                        );
+                        let object_type =
+                            rules.object_in_category(category(family), &name).unwrap();
+                        assert!(sim.production.factories_mut().test_enqueue_resolved_kernel(
+                            owner,
+                            strip,
+                            type_id,
+                            (object_type.category, object_type.native_type_index()),
+                            0,
+                            0,
+                        ));
                         construct_active_factory_fixture(&mut sim, &rules, owner, strip, type_id)
                             .expect("declared held Factory prior");
                         for index in queued {
                             let name = type_name(family, int(index));
                             let type_id = sim.interner.get(&name).unwrap();
-                            sim.production
-                                .factories_mut()
-                                .test_enqueue_kernel(owner, strip, type_id, 0, 0);
+                            let object_type =
+                                rules.object_in_category(category(family), &name).unwrap();
+                            sim.production.factories_mut().test_enqueue_resolved_kernel(
+                                owner,
+                                strip,
+                                type_id,
+                                (object_type.category, object_type.native_type_index()),
+                                0,
+                                0,
+                            );
                         }
                     } else {
                         assert!(queued.is_empty(), "profile's NULL-held phase is empty");
                     }
                     let query = sim.interner.get(&type_name(family, initial_index)).unwrap();
+                    let object_type = rules
+                        .object_in_category(category(family), sim.interner.resolve(query))
+                        .unwrap();
                     sim.houses
                         .get_mut(&owner)
                         .unwrap()
                         .tracking_mut()
-                        .set_owned_for_test(
+                        .set_owned_native_for_test(
                             EntityCategory::from(category(family)),
                             query,
+                            object_type.native_type_index(),
                             int(&step["owned"]),
                         );
                 }

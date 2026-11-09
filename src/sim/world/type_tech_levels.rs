@@ -21,12 +21,12 @@ const CATEGORIES: [ObjectCategory; 4] = [
 ];
 
 /// Sparse current values over the immutable, scenario-bound reader output.
-/// Keys retain category and exact constructor spelling, rather than the broad
-/// case-insensitive name lookup. Maps give canonical save/hash order and allow
+/// Keys retain the native category-local Type ordinal, independently of name
+/// aliases (TechnoType71181D / Execute1066DF5D1). Maps give save/hash order and allow
 /// allocation-free reads; only the trigger and retirement owners mutate them.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TypeTechLevels {
-    changed: [BTreeMap<String, i32>; 4],
+    changed: [BTreeMap<i32, i32>; 4],
 }
 
 impl TypeTechLevels {
@@ -41,7 +41,7 @@ impl TypeTechLevels {
 
     pub(crate) fn get(&self, object: &ObjectType) -> i32 {
         self.changed[Self::category_index(object.category)]
-            .get(object.id.as_str())
+            .get(&object.native_type_index())
             .copied()
             .unwrap_or(object.tech_level)
     }
@@ -51,9 +51,9 @@ impl TypeTechLevels {
         // TechLevel is a value, not Super's inherit sentinel: writing the
         // reader value leaves no distinguishable runtime state to retain.
         if value == object.tech_level {
-            values.remove(object.id.as_str());
+            values.remove(&object.native_type_index());
         } else {
-            values.insert(object.id.clone(), value);
+            values.insert(object.native_type_index(), value);
         }
     }
 }
@@ -90,14 +90,14 @@ impl Simulation {
     /// owner before the pre-reset prefix read. Full_Init's existing destructive
     /// reset subsequently deletes these types; names are not transplanted into
     /// the new scene. An active scene must not call this retirement operation.
-    pub fn retire_object_type_tech_levels(&mut self) -> Vec<(ObjectCategory, String, i32)> {
+    pub fn retire_object_type_tech_levels(&mut self) -> Vec<(ObjectCategory, i32, i32)> {
         std::mem::take(&mut self.type_tech_levels.changed)
             .into_iter()
             .zip(CATEGORIES)
             .flat_map(|(values, category)| {
                 values
                     .into_iter()
-                    .map(move |(id, value)| (category, id, value))
+                    .map(move |(ordinal, value)| (category, ordinal, value))
             })
             .collect()
     }
@@ -109,7 +109,7 @@ impl Simulation {
             .iter()
             .any(|values| !values.is_empty())
         {
-            b"type-tech-levels-v1".hash(hasher);
+            b"type-tech-levels-v2".hash(hasher);
             self.type_tech_levels.changed.hash(hasher);
         }
     }
@@ -119,13 +119,10 @@ impl Simulation {
         rules: &RuleSet,
     ) -> Result<(), SnapshotRestoreError> {
         for (values, category) in self.type_tech_levels.changed.iter().zip(CATEGORIES) {
-            for id in values.keys() {
-                if !rules
-                    .object_in_category(category, id)
-                    .is_some_and(|object| object.id == *id)
-                {
+            for &ordinal in values.keys() {
+                if rules.type_array_at(category, ordinal).is_none() {
                     return Err(SnapshotRestoreError::InvalidTypeTechLevels {
-                        reason: format!("unresolved {category:?} constructor identity {id:?}"),
+                        reason: format!("unresolved {category:?} native Type index {ordinal}"),
                     });
                 }
             }

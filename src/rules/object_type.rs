@@ -450,7 +450,8 @@ pub struct BarrelVoxelOffsets {
 #[derive(Debug, Clone)]
 pub struct ObjectType {
     /// Section name in rules.ini (e.g., "MTNK", "E1", "GAWEAP").
-    /// This is the unique identifier used throughout the engine.
+    /// The native stored ID. Distinct allocations can share these 24 bytes;
+    /// resolved Type handles and the category-local array index retain identity.
     pub id: String,
     /// Inherited `ObjectTypeClass::ReadINI @ 0x005F92D0` AlphaImage buffer
     /// (`+0x213`, `char[25]`); the constructor starts empty and later empty
@@ -1625,8 +1626,8 @@ pub struct ObjectType {
     /// `0x00672B14..0x00672C01`). `RuleSet` stamps this after all type
     /// registries exist.
     pub build_const_eligible: bool,
-    /// Native BuildingType registry index used by ordered House BasePlan nodes.
-    /// Non-building types retain `-1`.
+    /// Native category-local Type array index. Building BasePlan nodes use
+    /// this same index; standalone unbound definitions retain `-1`.
     pub base_plan_type_index: i32,
     /// BuildingType `IsBaseDefense=` immutable lifecycle input at
     /// `BuildingType+0x1706`. The BuildingType constructor store at
@@ -2617,6 +2618,12 @@ fn native_minutes_to_ticks(value: f64) -> u32 {
 }
 
 impl ObjectType {
+    /// TechnoType constructor71181D/711ABD and each subclass array retain
+    /// actual allocation identity independently of the stored-name Find alias.
+    pub const fn native_type_index(&self) -> i32 {
+        self.base_plan_type_index
+    }
+
     pub(crate) fn threat_coefficients(&self) -> super::threat_coefficients::ThreatCoefficients {
         self.threat_coefficients
     }

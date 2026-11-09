@@ -137,7 +137,7 @@ pub(crate) fn type_refund(
 /// the object, its type or its house is gone.
 pub fn techno_refund(sim: &Simulation, rules: &RuleSet, id: u64) -> Option<i32> {
     let entity = sim.substrate.entities.get(id)?;
-    let object = sim.object_type(entity.type_ref(), rules)?;
+    let object = sim.entity_object_type(entity, rules)?;
     let owner = entity.owner();
     Some(type_refund(
         rules,
@@ -389,7 +389,7 @@ pub fn can_sell_building(sim: &Simulation, rules: &RuleSet, id: u64) -> bool {
     let Some(entity) = sim.substrate.entities.get(id) else {
         return false;
     };
-    let Some(object) = sim.object_type(entity.type_ref(), rules) else {
+    let Some(object) = sim.entity_object_type(entity, rules) else {
         return false;
     };
     let buildup_sale = rules.has_buildup(&object.id)
@@ -443,7 +443,7 @@ fn qualifying_undeploy(sim: &Simulation, rules: &RuleSet, id: u64) -> bool {
     let Some(entity) = sim.substrate.entities.get(id) else {
         return false;
     };
-    let Some(object) = sim.object_type(entity.type_ref(), rules) else {
+    let Some(object) = sim.entity_object_type(entity, rules) else {
         return false;
     };
     if !undeploys(rules, object) {
@@ -660,7 +660,7 @@ fn sale_survivors(
     frame_effects: FrameEffects<'_>,
 ) -> bool {
     let Some((skip, cells)) = sim.substrate.entities.get(id).and_then(|entity| {
-        let object = sim.object_type(entity.type_ref(), rules)?;
+        let object = sim.entity_object_type(entity, rules)?;
         Some((
             sale_archive(entity) && undeploys(rules, object),
             crate::sim::crew_survival::foundation_cells(
@@ -701,7 +701,7 @@ fn sale_survivors(
 fn sale_sounds(sim: &mut Simulation, rules: &RuleSet, id: u64) {
     let Some((owner, position, one_cell_undeploy, packup)) =
         sim.substrate.entities.get(id).and_then(|entity| {
-            let object = sim.object_type(entity.type_ref(), rules)?;
+            let object = sim.entity_object_type(entity, rules)?;
             Some((
                 entity.owner(),
                 entity.position,
@@ -745,7 +745,7 @@ pub(crate) fn sell_complete(
     frame_effects: FrameEffects<'_>,
 ) -> bool {
     let Some((owner, undeploys)) = sim.substrate.entities.get(id).and_then(|entity| {
-        let object = sim.object_type(entity.type_ref(), rules)?;
+        let object = sim.entity_object_type(entity, rules)?;
         Some((entity.owner(), undeploys(rules, object)))
     }) else {
         return false;

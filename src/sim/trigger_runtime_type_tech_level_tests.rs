@@ -194,17 +194,55 @@ fn current_type_values_roundtrip_hash_by_value_and_transfer_only_at_retirement()
     let changes = restored.retire_object_type_tech_levels();
     let expected = &data["lifecycle"]["stages"][1]["types"];
     assert_eq!(changes.len(), expected.as_array().unwrap().len());
-    for (category, id, value) in changes {
-        let original = expected
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|ty| ty["id"] == id)
-            .unwrap();
+    for (category, ordinal, value) in changes {
+        let original = &expected[ordinal as usize];
         assert_eq!(category, ObjectCategory::Aircraft);
         assert_eq!(value, number(&original["tech_level"]));
     }
     assert_eq!(restored.state_hash(), constructor_hash);
+}
+
+#[test]
+fn current_type_values_keep_same_family_slots_through_action_save_and_retirement() {
+    const STORED: &str = "ABCDEFGHIJKLMNOPQRSTUVWX";
+    let rules = RuleSet::from_ini(&IniFile::from_str(
+        "[AircraftTypes]\n0=ABCDEFGHIJKLMNOPQRSTUVWXY\n1=ABCDEFGHIJKLMNOPQRSTUVWXY\n\
+         [ABCDEFGHIJKLMNOPQRSTUVWX]\nTechLevel=4\n",
+    ))
+    .unwrap();
+    let first = rules.type_array_at(ObjectCategory::Aircraft, 0).unwrap();
+    let second = rules.type_array_at(ObjectCategory::Aircraft, 1).unwrap();
+    assert_eq!((first.id.as_str(), second.id.as_str()), (STORED, STORED));
+    let mut sim = Simulation::with_seed(0);
+    // Execute1066DF5D1 selects the last exact stored-ID pointer, while the
+    // sparse current-value owner must leave the first equal-name slot alone.
+    assert!(apply(
+        &mut sim,
+        &rules,
+        &format!("106,9,{STORED},0,0,0,0,1")
+    ));
+    assert_eq!(
+        (sim.object_tech_level(first), sim.object_tech_level(second)),
+        (4, 1)
+    );
+    let saved = crate::sim::snapshot::GameSnapshot::save(&sim, 0, 0, "TechLevel slots", 0);
+    let mut restored = crate::sim::snapshot::GameSnapshot::load(&saved)
+        .unwrap()
+        .sim;
+    restored.validate_type_tech_levels(&rules).unwrap();
+    assert_eq!(restored.state_hash(), sim.state_hash());
+    assert_eq!(
+        (
+            restored.object_tech_level(first),
+            restored.object_tech_level(second)
+        ),
+        (4, 1)
+    );
+    assert_eq!(
+        restored.retire_object_type_tech_levels(),
+        [(ObjectCategory::Aircraft, 1, 1)]
+    );
+    assert_eq!(restored.object_tech_level(second), second.tech_level);
 }
 
 #[test]

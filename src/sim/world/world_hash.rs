@@ -1954,7 +1954,7 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         b"naval-build-const-entity-v1".hash(hasher);
         entity.type_facts.build_const_eligible().hash(hasher);
     }
-    entity.type_facts.base_plan_type_index().hash(hasher);
+    entity.type_facts.native_type_index().hash(hasher);
     entity.type_facts.base_plan_is_defense().hash(hasher);
     entity
         .type_facts

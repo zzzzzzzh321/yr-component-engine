@@ -240,11 +240,13 @@ pub(in crate::sim) fn exit_produced_object(
     };
     // Exit443C81 sets Techno+3D5 before RTTI, admission or Unlimbo.
     entity.in_playfield.enter();
-    let product_type_id = entity.type_ref();
-    let product_category = entity.category();
-    let Some(product_type) =
-        sim.interner
-            .object_type_in_category(product_type_id, product_category.into(), rules)
+    // PLACE4FB563 hands Exit443C60 this same held receiver. Resolve its
+    // retained Type slot after ending the mutable in-playfield write above.
+    let Some(product_type) = sim
+        .substrate
+        .entities
+        .get(stable_id)
+        .and_then(|entity| sim.entity_object_type(entity, rules))
     else {
         return BuildingExit::Failed;
     };
@@ -497,7 +499,7 @@ fn exit_land(
     let Some(producer) = sim.substrate.entities.get(producer_id) else {
         return BuildingExit::Failed;
     };
-    let producer_type = producer.type_ref();
+    let producer_type = sim.entity_object_type(producer, rules);
     let producer_owner = producer.owner();
     let archive = producer.archive_target();
     //444492/70C610 publishes Techno+218 before the busy test and Unlimbo.
@@ -532,8 +534,10 @@ fn exit_land(
             .copied()
             .find(|&id| {
                 sim.substrate.entities.get(id).is_some_and(|candidate| {
-                    candidate.type_ref() == producer_type
-                        && id != producer_id
+                    producer_type.is_some_and(|object| {
+                        sim.entity_object_type(candidate, rules)
+                            .is_some_and(|candidate_type| std::ptr::eq(candidate_type, object))
+                    }) && id != producer_id
                         && candidate.mission.effective().known()
                             == Some(crate::sim::mission::MissionType::Guard)
                         && sim.production.factories().building_factory(id).is_none()
@@ -585,8 +589,7 @@ fn exit_land(
         .expect("the producer remains live");
     let coord = crate::sim::movement::building_exit_coordinate(
         crate::sim::movement::ground_pose::position_world_coord(&producer.position),
-        sim.interner
-            .object_type_in_category(producer.type_ref(), producer.category().into(), rules)
+        sim.entity_object_type(producer, rules)
             .expect("the producer has a type"),
         || {
             crate::sim::movement::ground_pose::object_get_coords(

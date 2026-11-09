@@ -230,12 +230,7 @@ impl Simulation {
         let actor_type = self
             .entity_object_type(actor, rules)
             .ok_or("capture actor has no InfantryType")?;
-        let captor_index = rules
-            .type_array_index(
-                crate::rules::object_type::ObjectCategory::Infantry,
-                &actor_type.id,
-            )
-            .ok_or("capture actor has no InfantryType array index")?;
+        let captor_index = actor_type.native_type_index();
         let enter_sound = actor_type.vehicle_thief_sound(false).map(str::to_owned);
         let context = UninitContext::new(rules, registry).with_effects(effects);
         let Some(mode) = self.ares_vehicle_capture_mode(actor_id, target_id, rules) else {

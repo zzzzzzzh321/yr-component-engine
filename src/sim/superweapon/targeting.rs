@@ -99,7 +99,7 @@ pub(super) fn prepare(
             {
                 continue;
             }
-            let Some(ty) = sim.interner.object_type(entity.type_ref(), rules) else {
+            let Some(ty) = sim.entity_object_type(entity, rules) else {
                 continue;
             };
             let matches = |types: &[crate::rules::superweapon_type::TechnoTypeReference]| {
@@ -387,8 +387,7 @@ pub(super) fn launch_sites(
                         && sim.building_operational_state(id, rules) == Some(true)
                         && (sw.nuclear.is_none()
                             || sim
-                                .interner
-                                .object_type(entity.type_ref(), rules)
+                                .entity_object_type(entity, rules)
                                 .is_some_and(|object| object.nuke_silo)),
                     range_minimum_override: None,
                     range_maximum_override: None,

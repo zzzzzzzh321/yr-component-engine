@@ -568,9 +568,8 @@ pub(super) fn spawn_structure(
     ge.set_in_playfield(true);
     ge.finish_building_construction_for_test();
     ge.building_art.set_actually_placed_for_test(true);
-    ge.tracking_facts = crate::sim::house_tracking::TrackingFacts::of(
-        crate::map::entities::EntityCategory::Structure,
-        rules.object(type_id),
+    ge.refresh_type_projection(
+        rules.object_in_category(crate::rules::object_type::ObjectCategory::Building, type_id),
         rules,
     );
     sim.substrate.entities.insert(ge);
@@ -641,10 +640,18 @@ pub(super) fn arm_build_via(
     let oid = sim.interner.intern(owner);
     let tid = sim.interner.intern(type_id);
     let cost = sim.object_type(tid, rules).map_or(0, |o| o.cost.max(0));
-    let started =
-        sim.production
-            .factories_mut()
-            .test_enqueue_kernel(oid, queue_category, tid, order, cost);
+    let native_type_index = sim
+        .interner
+        .object_type_in_category(tid, queue_category.object_category(), rules)
+        .map_or(-1, |object| object.native_type_index());
+    let started = sim.production.factories_mut().test_enqueue_resolved_kernel(
+        oid,
+        queue_category,
+        tid,
+        (queue_category.object_category(), native_type_index),
+        order,
+        cost,
+    );
     if started {
         super::construct_active_factory_fixture(sim, rules, oid, queue_category, tid)
             .expect("test production type must construct at StartProduction");

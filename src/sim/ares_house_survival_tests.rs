@@ -3,6 +3,8 @@
 //! or downstream Blowup_All parity.
 
 use super::HouseTracking;
+#[cfg(feature = "ares")]
+use crate::map::entities::EntityCategory;
 use crate::rules::ARES_ENABLED;
 use crate::rules::ini_parser::IniFile;
 use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
@@ -154,9 +156,11 @@ fn short_game_gate_matches_executed_full_vector_and_nonzero_controls() {
         for (index, count) in input["counts"].as_object().unwrap() {
             let index: usize = index.parse().unwrap();
             if index < capacity {
-                tracking
-                    .unit_types
-                    .insert(ids[index], count.as_i64().unwrap() as i32);
+                tracking.set_owned_for_test(
+                    EntityCategory::Unit,
+                    ids[index],
+                    count.as_i64().unwrap() as i32,
+                );
             }
         }
         let base: Vec<_> = input["base_indices"]

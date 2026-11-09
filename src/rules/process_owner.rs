@@ -1061,7 +1061,7 @@ impl NativeRulesProcessOwner {
     /// Consume the outgoing Simulation's runtime Rules writes once that
     /// scenario has retired. While a match is live Simulation owns changes;
     /// this process owner receives them only for the next pre-reset Process.
-    /// Each update identifies one exact-category, exact-case native stored ID.
+    /// Each update identifies one native class-array slot, never a name alias.
     /// All identities/slots are validated before any current field is changed.
     /// Ambient inputs survive Type reset; reached AudioVisual reads replace them.
     ///
@@ -1071,7 +1071,7 @@ impl NativeRulesProcessOwner {
     /// The retired envelope is no longer available to `saved_scenario_rules`.
     pub fn consume_outgoing_scenario_rules(
         &mut self,
-        updates: impl IntoIterator<Item = (ObjectCategory, String, i32)>,
+        updates: impl IntoIterator<Item = (ObjectCategory, i32, i32)>,
         ambient_change: [Option<crate::util::native_x87::NativeF64Bits>; 2],
         upgrade_art_names: impl IntoIterator<Item = (String, u8, String)>,
         voxel_damage: impl IntoIterator<Item = (String, i32)>,

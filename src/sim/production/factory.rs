@@ -81,6 +81,10 @@ pub struct PendingObject {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueEntry {
     pub type_id: InternedId,
+    /// Factory+40 holds Type pointers. Equal stored IDs or equal indices in
+    /// different class arrays do not merge them. StartNext4CA5EE..4CA60A
+    /// reissues this actual class and ordinal, independently of the holder.
+    pub native_type: (ObjectCategory, i32),
     /// The monotonic temporal stamp minted at enqueue (`next_enqueue_order`).
     pub enqueue_order: u64,
 }
@@ -285,6 +289,7 @@ impl Factory {
         (self.queue.len() as u64).hash(hasher);
         for entry in &self.queue {
             entry.type_id.hash(hasher);
+            entry.native_type.hash(hasher);
             entry.enqueue_order.hash(hasher);
         }
     }
@@ -462,11 +467,11 @@ impl Factory {
     /// popped type through HouseBeginProduction(force=1) before constructing
     /// anything (4CA60A). Rejection consumes the entry without a new object,
     /// timer, balance, identity or RNG draw. StartNext never deletes Factory.
-    pub(crate) fn start_next_queued(&mut self) -> Option<InternedId> {
+    pub(crate) fn start_next_queued(&mut self) -> Option<QueueEntry> {
         if self.object.is_some() || (self.step_rate_frames != 0 && !self.suspended) {
             return None;
         }
-        self.queue.pop_front().map(|entry| entry.type_id)
+        self.queue.pop_front()
     }
 }
 
@@ -844,6 +849,30 @@ impl FactoryRegistry {
             owner,
             category,
             type_id,
+            (category.object_category(), -1),
+            enqueue_order,
+            cost,
+            i32::MAX,
+            false,
+        ) == EnqueueOutcome::Started
+    }
+
+    /// Rules-backed fixtures retain the same selected array slot as PRODUCE.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_enqueue_resolved_kernel(
+        &mut self,
+        owner: InternedId,
+        category: ProductionCategory,
+        type_id: InternedId,
+        native_type: (ObjectCategory, i32),
+        enqueue_order: u64,
+        cost: i32,
+    ) -> bool {
+        self.enqueue(
+            owner,
+            category,
+            type_id,
+            native_type,
             enqueue_order,
             cost,
             i32::MAX,
@@ -875,19 +904,25 @@ impl FactoryRegistry {
     }
 
     /// `FactoryClass::CountTotal @ 0x004CA670` on `owner`'s factory for
-    /// `category`: one for its object if that is `type_id`, finished or not,
-    /// and one per queued copy; zero without that factory.
+    /// `category`: one for a matching held Type, finished or not, and one per
+    /// queued Type pointer; zero without that factory. Original CountTotal
+    /// 4CA670 compares GetTechnoType at4CA68A, then queued pointers at4CA69D.
     pub(crate) fn count_total(
         &self,
         owner: InternedId,
         category: ProductionCategory,
-        type_id: InternedId,
+        native_type: (ObjectCategory, i32),
+        active_type: Option<(ObjectCategory, i32)>,
     ) -> i32 {
         self.factories
             .get(&FactoryHolder::House(owner, category))
             .map_or(0, |f| {
-                let object = f.object.as_ref().is_some_and(|o| o.type_id == type_id);
-                let queued = f.queue.iter().filter(|e| e.type_id == type_id).count();
+                let object = f.object.is_some() && active_type == Some(native_type);
+                let queued = f
+                    .queue
+                    .iter()
+                    .filter(|e| e.native_type == native_type)
+                    .count();
                 i32::from(object).wrapping_add(queued as i32)
             })
     }
@@ -1134,6 +1169,7 @@ impl FactoryRegistry {
         owner: InternedId,
         category: ProductionCategory,
         type_id: InternedId,
+        native_type: (ObjectCategory, i32),
         enqueue_order: u64,
         cost: i32,
         max_queued: i32,
@@ -1148,6 +1184,7 @@ impl FactoryRegistry {
                 }
                 f.queue.push_back(QueueEntry {
                     type_id,
+                    native_type,
                     enqueue_order,
                 });
                 return EnqueueOutcome::Queued;
@@ -1282,7 +1319,7 @@ impl FactoryRegistry {
         &mut self,
         owner: InternedId,
         category: ProductionCategory,
-    ) -> Option<InternedId> {
+    ) -> Option<QueueEntry> {
         self.factories
             .get_mut(&FactoryHolder::House(owner, category))?
             .start_next_queued()
@@ -1538,7 +1575,8 @@ impl FactoryRegistry {
         &mut self,
         owner: InternedId,
         category: ProductionCategory,
-        type_id: Option<InternedId>,
+        native_type: Option<(ObjectCategory, i32)>,
+        active_type: Option<(ObjectCategory, i32)>,
         all: bool,
         build_cat: Option<BuildCategory>,
     ) -> CancelOutcome {
@@ -1576,13 +1614,17 @@ impl FactoryRegistry {
             && build_cat.is_some()
             && all
             && f.object.is_none()
-            && type_id.is_some()
+            && native_type.is_some()
             && !f.queue.is_empty();
         let mut removed = false;
-        if let Some(type_id) = type_id
+        if let Some(native_type) = native_type
             && removes_queued_copies
         {
-            while let Some(index) = f.queue.iter().position(|entry| entry.type_id == type_id) {
+            while let Some(index) = f
+                .queue
+                .iter()
+                .position(|entry| entry.native_type == native_type)
+            {
                 f.queue.remove(index);
                 removed = true;
                 if !all {
@@ -1590,16 +1632,19 @@ impl FactoryRegistry {
                 }
             }
         }
-        if f.object
-            .as_ref()
-            .is_some_and(|object| type_id.is_none_or(|type_id| object.type_id == type_id))
-        {
+        // HouseAbandon4FAB59 calls the held Type's ArrayIndex virtual;
+        // 4FAB5C compares that ordinal alone. Its queued arm above instead
+        // compares Type pointers (4CA620 ->4CAB33). Preserve both predicates,
+        // including native's foreign-class held-object boundary.
+        let active_index_matches = native_type
+            .is_none_or(|(_, requested)| active_type.map(|(_, index)| index) == Some(requested));
+        if f.object.is_some() && active_index_matches {
             return CancelOutcome::AbandonedActive(f.pending_abandonment().unwrap());
         }
         //4FAB45 NULL-held indexed BuildCat0 refuses. Wildcard and nonzero
         //BuildCat proceed to the ordinary prefix and queue-count policy.
         if f.object.is_none()
-            && (type_id.is_none() || build_cat.is_some())
+            && (native_type.is_none() || build_cat.is_some())
             && !rewrite_returns_null_held
         {
             return CancelOutcome::AdmittedEmpty;
@@ -1689,6 +1734,51 @@ mod system_hold_tests;
 
 #[cfg(test)]
 mod tests {
+
+    impl FactoryRegistry {
+        fn enqueue_fixture(
+            &mut self,
+            owner: InternedId,
+            category: ProductionCategory,
+            type_id: InternedId,
+            order: u64,
+            cost: i32,
+            max_queued: i32,
+            at_limit: bool,
+        ) -> EnqueueOutcome {
+            self.enqueue(
+                owner,
+                category,
+                type_id,
+                (category.object_category(), type_id.index() as i32),
+                order,
+                cost,
+                max_queued,
+                at_limit,
+            )
+        }
+        fn cancel_fixture(
+            &mut self,
+            owner: InternedId,
+            category: ProductionCategory,
+            type_id: Option<InternedId>,
+            all: bool,
+            build_cat: Option<BuildCategory>,
+        ) -> CancelOutcome {
+            let active = self
+                .view(owner, category)
+                .and_then(|view| view.object)
+                .map(|object| (category.object_category(), object.type_id.index() as i32));
+            self.cancel_one(
+                owner,
+                category,
+                type_id.map(|id| (category.object_category(), id.index() as i32)),
+                active,
+                all,
+                build_cat,
+            )
+        }
+    }
     use super::*;
 
     #[test]
@@ -1758,6 +1848,7 @@ mod tests {
                 changed: initial["changed"].as_bool().unwrap(),
                 queue: VecDeque::from([QueueEntry {
                     type_id,
+                    native_type: (category.object_category(), type_id.index() as i32),
                     enqueue_order: 1,
                 }]),
                 ..Default::default()
@@ -2139,6 +2230,7 @@ mod tests {
                             assert_eq!(name, "E2");
                             QueueEntry {
                                 type_id,
+                                native_type: (category.object_category(), type_id.index() as i32),
                                 enqueue_order: 1,
                             }
                         })
@@ -2418,11 +2510,80 @@ mod tests {
     }
 
     /// Test queue entry of `ty` (stamp/ETA irrelevant to these direct-call unit tests).
-    fn qe(ty: InternedId) -> QueueEntry {
+    fn qe(ty: InternedId, category: ObjectCategory) -> QueueEntry {
         QueueEntry {
             type_id: ty,
+            native_type: (category, ty.index() as i32),
             enqueue_order: 0,
         }
+    }
+
+    #[test]
+    fn native_count_and_queued_cancel_compare_types_while_held_cancel_compares_index() {
+        // Original CountTotal4CA68A/4CA69D and HouseAbandon4FAB5C use
+        // different comparisons. These are the leaf's declared receiver
+        // facts, including an Infantry held in the House's Ship slot.
+        let owner = InternedId::from_index(1);
+        let label = InternedId::from_index(2);
+        let held_type = (ObjectCategory::Infantry, 3);
+        let other_type = (ObjectCategory::Vehicle, 3);
+        let factory = Factory {
+            object: Some(PendingObject {
+                type_id: label,
+                entity_id: Some(44),
+                completion_accounted: false,
+            }),
+            queue: VecDeque::from([QueueEntry {
+                type_id: label,
+                native_type: held_type,
+                enqueue_order: 1,
+            }]),
+            ..Factory::default()
+        };
+        let mut registry = reg_with(owner, ProductionCategory::Ship, factory.clone());
+        assert_eq!(
+            registry.count_total(owner, ProductionCategory::Ship, other_type, Some(held_type)),
+            0
+        );
+        assert_eq!(
+            registry.count_total(owner, ProductionCategory::Ship, held_type, Some(held_type)),
+            2
+        );
+        let outcome = registry.cancel_one(
+            owner,
+            ProductionCategory::Ship,
+            Some(other_type),
+            Some(held_type),
+            false,
+            None,
+        );
+        assert!(
+            matches!(outcome, CancelOutcome::AbandonedActive(object) if object.entity_id == Some(44))
+        );
+        assert_eq!(
+            registry
+                .view(owner, ProductionCategory::Ship)
+                .unwrap()
+                .queue
+                .len(),
+            1
+        );
+
+        let mut registry = reg_with(owner, ProductionCategory::Ship, factory);
+        assert_eq!(
+            registry.cancel_one(
+                owner,
+                ProductionCategory::Ship,
+                Some(held_type),
+                Some(held_type),
+                false,
+                None
+            ),
+            CancelOutcome::QueuedRemoved
+        );
+        let view = registry.view(owner, ProductionCategory::Ship).unwrap();
+        assert!(view.queue.is_empty());
+        assert_eq!(view.object.unwrap().entity_id, Some(44));
     }
 
     /// Original whole BuildingLimbo reaches this reset with the held pointer
@@ -2528,12 +2689,17 @@ mod tests {
         let f = Factory {
             owner,
             category: ProductionCategory::Vehicle,
-            queue: std::collections::VecDeque::from(vec![qe(a), qe(b), qe(a), qe(c)]),
+            queue: std::collections::VecDeque::from(vec![
+                qe(a, ObjectCategory::Vehicle),
+                qe(b, ObjectCategory::Vehicle),
+                qe(a, ObjectCategory::Vehicle),
+                qe(c, ObjectCategory::Vehicle),
+            ]),
             object: None,
             ..Factory::default()
         };
         let mut reg = reg_with(owner, ProductionCategory::Vehicle, f);
-        let outcome = reg.cancel_one(owner, ProductionCategory::Vehicle, Some(a), false, None);
+        let outcome = reg.cancel_fixture(owner, ProductionCategory::Vehicle, Some(a), false, None);
         assert_eq!(outcome, CancelOutcome::QueuedRemoved);
         let q: Vec<InternedId> = reg
             .view(owner, ProductionCategory::Vehicle)
@@ -2561,11 +2727,11 @@ mod tests {
             }),
             balance: 300,
             progress: 20,
-            queue: std::collections::VecDeque::from(vec![qe(a)]),
+            queue: std::collections::VecDeque::from(vec![qe(a, ObjectCategory::Vehicle)]),
             ..Factory::default()
         };
         let mut reg = reg_with(owner, ProductionCategory::Vehicle, f);
-        let outcome = reg.cancel_one(owner, ProductionCategory::Vehicle, Some(a), false, None);
+        let outcome = reg.cancel_fixture(owner, ProductionCategory::Vehicle, Some(a), false, None);
         assert_eq!(
             outcome,
             CancelOutcome::QueuedRemoved,
@@ -2598,11 +2764,11 @@ mod tests {
             }),
             balance: 600,
             progress: 20,
-            queue: std::collections::VecDeque::from(vec![qe(a)]),
+            queue: std::collections::VecDeque::from(vec![qe(a, ObjectCategory::Building)]),
             ..Factory::default()
         };
         let mut reg = reg_with(owner, ProductionCategory::Building, f);
-        let outcome = reg.cancel_one(
+        let outcome = reg.cancel_fixture(
             owner,
             ProductionCategory::Building,
             Some(a),
@@ -2645,11 +2811,11 @@ mod tests {
             let f = Factory {
                 owner,
                 category: ProductionCategory::Building,
-                queue: std::collections::VecDeque::from(vec![qe(a)]),
+                queue: std::collections::VecDeque::from(vec![qe(a, ObjectCategory::Building)]),
                 ..Factory::default()
             };
             let mut reg = reg_with(owner, ProductionCategory::Building, f);
-            let outcome = reg.cancel_one(
+            let outcome = reg.cancel_fixture(
                 owner,
                 ProductionCategory::Building,
                 Some(a),
@@ -2693,11 +2859,15 @@ mod tests {
             }),
             balance: 600,
             progress: 20,
-            queue: std::collections::VecDeque::from(vec![qe(a), qe(b), qe(a)]),
+            queue: std::collections::VecDeque::from(vec![
+                qe(a, ObjectCategory::Building),
+                qe(b, ObjectCategory::Building),
+                qe(a, ObjectCategory::Building),
+            ]),
             ..Factory::default()
         };
         let mut reg = reg_with(owner, ProductionCategory::Building, f);
-        let outcome = reg.cancel_one(
+        let outcome = reg.cancel_fixture(
             owner,
             ProductionCategory::Building,
             Some(a),
@@ -2738,7 +2908,11 @@ mod tests {
             }),
             balance: 150,
             progress: 12,
-            queue: std::collections::VecDeque::from(vec![qe(a), qe(b), qe(a)]),
+            queue: std::collections::VecDeque::from(vec![
+                qe(a, ObjectCategory::Infantry),
+                qe(b, ObjectCategory::Infantry),
+                qe(a, ObjectCategory::Infantry),
+            ]),
             ..Factory::default()
         };
         let queued = |reg: &FactoryRegistry| -> Vec<InternedId> {
@@ -2752,7 +2926,7 @@ mod tests {
 
         let mut reg = reg_with(owner, ProductionCategory::Infantry, factory(a));
         assert_eq!(
-            reg.cancel_one(owner, ProductionCategory::Infantry, Some(a), true, None),
+            reg.cancel_fixture(owner, ProductionCategory::Infantry, Some(a), true, None),
             CancelOutcome::AbandonedActive(AbandonedObject {
                 type_id: a,
                 balance: 150,
@@ -2769,7 +2943,7 @@ mod tests {
 
         let mut reg = reg_with(owner, ProductionCategory::Infantry, factory(b));
         assert_eq!(
-            reg.cancel_one(owner, ProductionCategory::Infantry, Some(a), true, None),
+            reg.cancel_fixture(owner, ProductionCategory::Infantry, Some(a), true, None),
             CancelOutcome::QueuedRemoved,
             "another type's active build stays"
         );
@@ -2791,6 +2965,7 @@ mod tests {
             object: None,
             queue: std::collections::VecDeque::from(vec![QueueEntry {
                 type_id: x,
+                native_type: (ObjectCategory::Building, x.index() as i32),
                 enqueue_order: 42,
             }]),
             insertion_seq: 7,
@@ -2801,7 +2976,7 @@ mod tests {
         assert_eq!(f.queue.len(), 1);
         f.suspended = true;
         let prior = f.clone();
-        assert_eq!(f.start_next_queued(), Some(x));
+        assert_eq!(f.start_next_queued().map(|entry| entry.type_id), Some(x));
         assert_eq!(f.insertion_seq, prior.insertion_seq);
         assert_eq!(f.balance, prior.balance);
         assert_eq!(f.progress, prior.progress);
@@ -2825,22 +3000,26 @@ mod tests {
         let (vehicle, infantry) = (ProductionCategory::Vehicle, ProductionCategory::Infantry);
         let mut reg = FactoryRegistry::default();
         assert_eq!(
-            reg.enqueue(owner, vehicle, tank, 0, 700, 5, false),
+            reg.enqueue_fixture(owner, vehicle, tank, 0, 700, 5, false),
             EnqueueOutcome::Started
         );
         assert_eq!(
-            reg.enqueue(owner, infantry, soldier, 1, 200, 5, false),
+            reg.enqueue_fixture(owner, infantry, soldier, 1, 200, 5, false),
             EnqueueOutcome::Started
         );
         assert_eq!(
-            reg.enqueue(owner, vehicle, tank, 2, 700, 5, false),
+            reg.enqueue_fixture(owner, vehicle, tank, 2, 700, 5, false),
             EnqueueOutcome::Queued
         );
         reg.reset_for_abandon(FactoryHolder::House(owner, vehicle), 0);
         reg.finish_abandon(FactoryHolder::House(owner, vehicle));
-        assert_eq!(reg.start_next_queued(owner, vehicle), Some(tank));
         assert_eq!(
-            reg.enqueue(owner, vehicle, tank, 2, 700, 5, false),
+            reg.start_next_queued(owner, vehicle)
+                .map(|entry| entry.type_id),
+            Some(tank)
+        );
+        assert_eq!(
+            reg.enqueue_fixture(owner, vehicle, tank, 2, 700, 5, false),
             EnqueueOutcome::Started
         );
         reg.resume(FactoryHolder::House(owner, vehicle), 540, 100, false, 13);

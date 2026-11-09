@@ -13,9 +13,7 @@ use crate::sim::movement::locomotor::MovementLayer;
 use crate::sim::world::FrameEffects;
 use crate::sim::world::Simulation;
 
-use super::production_tech::{
-    producer_candidates_for_owner_category, production_category_for_object,
-};
+use super::production_tech::{producer_candidates_for_owner_category, production_category_for_object};
 use super::production_types::*;
 use super::wall_placement;
 
@@ -391,17 +389,19 @@ pub(crate) fn place_production_with_overlays(
         }
         ProductionPlacement::Selected { .. } => unreachable!("normalized the selector above"),
     };
-    let Some(obj) = rules.object_in_category(category.object_category(), type_id) else {
-        return false;
-    };
-    if obj.category != ObjectCategory::Building {
-        return false;
-    }
-
     let owner_id = sim.interner.intern(owner);
     let type_interned = sim.interner.intern(type_id);
     // Retain the selected Factory even if its held type's own category differs.
     let Some(held) = super::factory_lifecycle::ready_object(sim, owner_id, category, type_interned)
+    else {
+        return false;
+    };
+    let Some(obj) = sim
+        .substrate
+        .entities
+        .get(held.entity_id())
+        .and_then(|entity| sim.entity_object_type(entity, rules))
+        .filter(|object| object.category == ObjectCategory::Building)
     else {
         return false;
     };

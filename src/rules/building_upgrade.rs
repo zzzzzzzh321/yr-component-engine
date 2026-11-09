@@ -172,7 +172,7 @@ mod tests {
             .into_registry_state_discarding_events();
         state
             .consume_outgoing_type_runtime_fields(
-                [(ObjectCategory::Building, "HOST".to_owned(), 7)],
+                [(ObjectCategory::Building, 0, 7)],
                 [
                     ("HOST".to_owned(), 0, "RUNTIME".to_owned()),
                     ("HOST".to_owned(), 2, "THIRD".to_owned()),
@@ -183,7 +183,7 @@ mod tests {
         assert!(
             state
                 .consume_outgoing_type_runtime_fields(
-                    [(ObjectCategory::Building, "HOST".to_owned(), 99)],
+                    [(ObjectCategory::Building, 0, 99)],
                     [
                         ("HOST".to_owned(), 0, "INVALID".to_owned()),
                         ("HOST".to_owned(), 3, "INVALID".to_owned())

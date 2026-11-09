@@ -83,10 +83,11 @@ fn native_tech_level_lifecycle_retains_prefix_values_then_retires_the_generation
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|ty| {
+                .enumerate()
+                .map(|(ordinal, ty)| {
                     (
                         ObjectCategory::Aircraft,
-                        ty["id"].as_str().unwrap().to_owned(),
+                        ordinal as i32,
                         number(&ty["tech_level"]),
                     )
                 }),
@@ -183,7 +184,7 @@ fn native_techno_lookup_uses_exact_case_and_global_allocation_chronology() {
 }
 
 #[test]
-fn native_techno_lookup_does_not_alias_unrepresentable_truncated_duplicates() {
+fn native_techno_lookup_retains_truncated_duplicate_slots() {
     let long = "ABCDEFGHIJKLMNOPQRSTUVWX_suffix";
     let stored = abstract_type_stored_id(long);
     let processed = RulesLayerStack::new(IniFile::from_str(&format!(
@@ -194,7 +195,7 @@ fn native_techno_lookup_does_not_alias_unrepresentable_truncated_duplicates() {
     .unwrap();
     let rules = RuleSet::from_processed_rules(&processed).unwrap();
     // Within this first Process the Infantry allocation occurs after both
-    // ambiguous Aircraft slots, so the native winner is representable.
+    // same-named Aircraft slots, so it is the reverse global-array winner.
     assert_eq!(
         rules.native_techno_type_exact(&stored).unwrap().category,
         ObjectCategory::Infantry
@@ -207,16 +208,17 @@ fn native_techno_lookup_does_not_alias_unrepresentable_truncated_duplicates() {
         rules.object(&stored).is_some(),
         "legacy projection still parses"
     );
-    assert!(
-        rules.native_techno_type_exact(&stored).is_none(),
-        "the last native match is ambiguous; do not fall back to the earlier Infantry"
-    );
+    let actual = rules.native_techno_type_exact(&stored).unwrap();
+    assert_eq!(actual.category, ObjectCategory::Aircraft);
+    assert_eq!(actual.native_type_index(), 2);
     let mut state = registry(tail);
-    assert!(
-        state
-            .consume_outgoing_type_tech_levels([(ObjectCategory::Aircraft, stored, 1,)])
-            .is_err(),
-        "retirement cannot transfer a runtime value onto ambiguous native stored IDs"
+    state
+        .consume_outgoing_type_tech_levels([(ObjectCategory::Aircraft, 2, 1)])
+        .unwrap();
+    let aircraft = &state.families[&RulesTypeFamily::Aircraft];
+    assert_eq!(
+        aircraft.iter().map(|ty| ty.tech_level).collect::<Vec<_>>(),
+        [4, 4, 1]
     );
 }
 
@@ -252,10 +254,10 @@ fn outgoing_tech_level_transfer_is_exact_and_atomic() {
     .process()
     .unwrap();
     let mut state = registry(processed);
-    for (category, bad_id) in [
-        (ObjectCategory::Aircraft, "orca"),
-        (ObjectCategory::Aircraft, "MISSING"),
-        (ObjectCategory::Vehicle, "BEAG"),
+    for (category, bad_ordinal) in [
+        (ObjectCategory::Aircraft, -1),
+        (ObjectCategory::Aircraft, 2),
+        (ObjectCategory::Vehicle, 1),
     ] {
         let before: Vec<_> = state
             .techno_type_states()
@@ -264,8 +266,8 @@ fn outgoing_tech_level_transfer_is_exact_and_atomic() {
         assert!(
             state
                 .consume_outgoing_type_tech_levels([
-                    (ObjectCategory::Aircraft, "ORCA".to_owned(), 99),
-                    (category, bad_id.to_owned(), 1),
+                    (ObjectCategory::Aircraft, 0, 99),
+                    (category, bad_ordinal, 1),
                 ])
                 .is_err()
         );
@@ -290,11 +292,7 @@ fn rules_hash_and_saved_projection_cover_retained_values_and_global_type_order()
         .unwrap();
         let mut state = registry(initial);
         state
-            .consume_outgoing_type_tech_levels([(
-                ObjectCategory::Aircraft,
-                "ORCA".to_owned(),
-                value,
-            )])
+            .consume_outgoing_type_tech_levels([(ObjectCategory::Aircraft, 0, value)])
             .unwrap();
         RulesLayerStack::new(IniFile::from_str("[ORCA]\nName=Harrier\n"))
             .process_with_fixed_art_and_registry_state(&IniFile::empty(), state)
@@ -382,10 +380,11 @@ fn process_owner_accepts_retired_values_before_its_existing_full_init_reset() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|ty| {
+                .enumerate()
+                .map(|(ordinal, ty)| {
                     (
                         ObjectCategory::Aircraft,
-                        ty["id"].as_str().unwrap().to_owned(),
+                        ordinal as i32,
                         number(&ty["tech_level"]),
                     )
                 }),

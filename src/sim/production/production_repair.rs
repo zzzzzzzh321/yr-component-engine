@@ -194,7 +194,7 @@ pub fn toggle_repair(
     control: RepairControl,
 ) -> bool {
     let Some((strength, owner_is_player)) = sim.substrate.entities.get(id).and_then(|entity| {
-        sim.object_type(entity.type_ref(), rules)
+        sim.entity_object_type(entity, rules)
             .map(|object| (object.strength, sim.house_is_human_player(entity.owner())))
     }) else {
         return false;
@@ -254,7 +254,7 @@ pub(crate) fn engineer_repair(sim: &mut Simulation, rules: &RuleSet, id: u64) ->
         .substrate
         .entities
         .get(id)
-        .and_then(|entity| sim.object_type(entity.type_ref(), rules))
+        .and_then(|entity| sim.entity_object_type(entity, rules))
         .map(|object| object.strength)
     else {
         return false;
@@ -298,7 +298,7 @@ pub fn can_repair_building(sim: &Simulation, rules: &RuleSet, id: u64) -> bool {
     if entity.category() != EntityCategory::Structure || entity.health.current() == 0 {
         return false;
     }
-    let Some(object) = sim.object_type(entity.type_ref(), rules) else {
+    let Some(object) = sim.entity_object_type(entity, rules) else {
         return false;
     };
     object.click_repairable
@@ -399,7 +399,7 @@ fn low_credit_sale(
         return;
     }
     let tech_level = house.tech_level();
-    let Some(object) = sim.object_type(entity.type_ref(), rules) else {
+    let Some(object) = sim.entity_object_type(entity, rules) else {
         return;
     };
     let yard = object.factory_type() == Some(FactoryType::BuildingType);
@@ -491,7 +491,7 @@ fn repair_step(sim: &mut Simulation, rules: &RuleSet, id: u64) {
     if remainder != 0 {
         return;
     }
-    let Some(object) = sim.object_type(entity.type_ref(), rules) else {
+    let Some(object) = sim.entity_object_type(entity, rules) else {
         return;
     };
     let (strength, cost) = (object.strength, repair_step_cost(rules, object));

@@ -137,12 +137,18 @@ fn ares_build_limit_matches_executed_signed_capacity_and_held_object_controls() 
                 "TARGET"
             };
             let type_id = sim.interner.get(held).unwrap();
+            let object_type = rules
+                .object_in_category(ObjectCategory::Infantry, held)
+                .unwrap();
             let category = crate::sim::production::ProductionCategory::Infantry;
-            assert!(
-                sim.production
-                    .factories_mut()
-                    .test_enqueue_kernel(owner, category, type_id, 0, 0)
-            );
+            assert!(sim.production.factories_mut().test_enqueue_resolved_kernel(
+                owner,
+                category,
+                type_id,
+                (object_type.category, object_type.native_type_index()),
+                0,
+                0,
+            ));
             crate::sim::production::construct_active_factory_fixture(
                 &mut sim, &rules, owner, category, type_id,
             )
@@ -151,9 +157,10 @@ fn ares_build_limit_matches_executed_signed_capacity_and_held_object_controls() 
         // The original arithmetic/control slices receive these exact counter
         //priors. Factory/production history generation is not this corpus's claim.
         let mut tracking = HouseTracking::default();
-        tracking.set_owned_for_test(
+        tracking.set_owned_native_for_test(
             EntityCategory::Infantry,
             target_id,
+            target.native_type_index(),
             i32::try_from(input["owned"].as_i64().unwrap()).unwrap(),
         );
         let house = sim.houses.get_mut(&owner).unwrap();
@@ -208,14 +215,22 @@ fn ares_owned_count_matches_executed_conversion_and_installed_slot_controls() {
         let mut tracking = HouseTracking::default();
         let target = match row["name"].as_str().unwrap() {
             "building_undeploy_counter_wrap" => {
-                tracking.set_owned_for_test(
+                tracking.set_owned_native_for_test(
                     EntityCategory::Structure,
                     sim.interner.get("BASE").unwrap(),
+                    rules
+                        .object_in_category(ObjectCategory::Building, "BASE")
+                        .unwrap()
+                        .native_type_index(),
                     i32::try_from(input["building_tracked"].as_i64().unwrap()).unwrap(),
                 );
-                tracking.set_owned_for_test(
+                tracking.set_owned_native_for_test(
                     EntityCategory::Unit,
                     sim.interner.get("MCV").unwrap(),
+                    rules
+                        .object_in_category(ObjectCategory::Vehicle, "MCV")
+                        .unwrap()
+                        .native_type_index(),
                     i32::try_from(input["unit_tracked"].as_i64().unwrap()).unwrap(),
                 );
                 "BASE"
@@ -233,9 +248,13 @@ fn ares_owned_count_matches_executed_conversion_and_installed_slot_controls() {
                         .unwrap()
                         .set_building_upgrades_for_test(0, slots);
                 }
-                tracking.set_owned_for_test(
+                tracking.set_owned_native_for_test(
                     EntityCategory::Structure,
                     sim.interner.get("UPGRADE").unwrap(),
+                    rules
+                        .object_in_category(ObjectCategory::Building, "UPGRADE")
+                        .unwrap()
+                        .native_type_index(),
                     i32::try_from(input["upgrade_tracked_same_index"].as_i64().unwrap()).unwrap(),
                 );
                 "UPGRADE"

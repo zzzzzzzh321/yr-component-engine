@@ -143,6 +143,40 @@ use crate::sim::intern::InternedId;
 use crate::sim::world::ObjectSubstrate;
 use crate::sim::world::Simulation;
 
+/// One native class-array slot, with its interned label retained for legacy
+/// name-only observations. Add_Tracking4FF79B..4FF7B1 gets the receiver's
+/// actual Type and calls its ArrayIndex virtual+40 before CounterClass49FA00;
+/// equal stored IDs are not one counter. Negative indices belong only to
+/// unstamped fixtures and never answer an exact native lookup.
+/// Index comes first so exact gameplay reads visit only that native slot.
+type TypeCounts = BTreeMap<(i32, InternedId), i32>;
+
+/// Keep the single counter owner while allowing tuple identities in diagnostic
+/// JSON as well as binary saves. JSON object keys cannot hold native tuples.
+mod type_counts_serde {
+    use super::*;
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        counts: &TypeCounts,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(counts.iter())
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<TypeCounts, D::Error> {
+        let entries = Vec::<((i32, InternedId), i32)>::deserialize(deserializer)?;
+        let mut counts = TypeCounts::new();
+        for (key, count) in entries {
+            if counts.insert(key, count).is_some() {
+                return Err(serde::de::Error::custom("duplicate native Type counter"));
+            }
+        }
+        Ok(counts)
+    }
+}
+
 #[cfg(feature = "phobos")]
 mod phobos;
 #[cfg(feature = "phobos")]
@@ -453,25 +487,33 @@ pub struct HouseTracking {
     #[serde(default)]
     infantry: i32,
     /// `HouseClass+0x5514`, the tracked count of each UnitType.
-    unit_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    unit_types: TypeCounts,
     /// `HouseClass+0x5500`, the tracked count of each BuildingType.
     #[serde(default)]
-    building_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    building_types: TypeCounts,
     /// `HouseClass+0x5528`, the tracked count of each InfantryType.
     #[serde(default)]
-    infantry_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    infantry_types: TypeCounts,
     /// `HouseClass+0x553C`, the tracked count of each AircraftType.
     #[serde(default)]
-    aircraft_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    aircraft_types: TypeCounts,
     /// `HouseClass+0x5564`, the on-map count of each UnitType; its total is
     /// the sum.
-    active_unit_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    active_unit_types: TypeCounts,
     /// `HouseClass+0x5578`, the on-map count of each InfantryType.
-    active_infantry_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    active_infantry_types: TypeCounts,
     /// `HouseClass+0x558C`, the on-map count of each AircraftType.
-    active_aircraft_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    active_aircraft_types: TypeCounts,
     /// `HouseClass+0x5550`, the on-map count of each BuildingType.
-    active_building_types: BTreeMap<InternedId, i32>,
+    #[serde(with = "type_counts_serde")]
+    active_building_types: TypeCounts,
     /// `HouseClass+0x158`, the on-map objects whose type is a
     /// `ResourceGatherer=`.
     #[serde(default)]
@@ -557,7 +599,7 @@ impl HouseTracking {
             EntityCategory::Infantry => &mut self.infantry_types,
             EntityCategory::Aircraft => &mut self.aircraft_types,
         };
-        let count = counts.entry(entity.type_ref()).or_default();
+        let count = counts.entry(counted_type(entity)).or_default();
         *count = count.wrapping_add(delta);
     }
 
@@ -661,14 +703,36 @@ impl HouseTracking {
         self.factories
     }
 
+    /// Compatibility aggregate for name-only observations and old fixtures.
+    /// A resolved production or prerequisite Type must use owned_count_native.
     pub(crate) fn owned_count(&self, category: EntityCategory, type_id: InternedId) -> i32 {
-        let counts = match category {
+        named_count(self.owned_types(category), type_id)
+    }
+
+    /// CounterClass49FAE0 on the original class-local Type array index;
+    /// Add4FF7A5/4FF7AA and Remove4FF5F3/4FF5F7 use that same index.
+    pub(crate) fn owned_count_native(&self, category: EntityCategory, index: i32) -> i32 {
+        native_count(self.owned_types(category), index)
+    }
+
+    /// Ares CountOwnedNow100032F0 includes constructed limbo objects through
+    /// the original tracking owner. Phobos's separate name-based limbo count
+    /// is not reinterpreted as an exact native Type counter here.
+    pub(crate) fn count_owned_present_and_limboed_native(
+        &self,
+        category: EntityCategory,
+        index: i32,
+    ) -> i32 {
+        self.owned_count_native(category, index)
+    }
+
+    fn owned_types(&self, category: EntityCategory) -> &TypeCounts {
+        match category {
             EntityCategory::Unit => &self.unit_types,
             EntityCategory::Structure => &self.building_types,
             EntityCategory::Infantry => &self.infantry_types,
             EntityCategory::Aircraft => &self.aircraft_types,
-        };
-        counts.get(&type_id).copied().unwrap_or(0)
+        }
     }
 
     /// Fold the counters schema v238 (`AiTeams`) added, tagged, once any is
@@ -688,7 +752,7 @@ impl HouseTracking {
         {
             return;
         }
-        b"house-type-counts-v1".hash(hasher);
+        b"house-type-counts-v2".hash(hasher);
         self.building_types.hash(hasher);
         self.infantry_types.hash(hasher);
         self.aircraft_types.hash(hasher);
@@ -769,16 +833,25 @@ impl HouseTracking {
         self.force_values
     }
 
-    /// The on-map count of one type of `category` (`0x0049FAE0` on
-    /// `+0x5564`, `+0x5578`, `+0x558C` or `+0x5550`).
+    /// Name-only compatibility aggregate of the on-map counters. Resolved
+    /// native Types use active_count_native instead.
     pub(crate) fn active_count(&self, category: EntityCategory, type_id: InternedId) -> i32 {
-        let counts = match category {
+        named_count(self.active_types(category), type_id)
+    }
+
+    /// The same original class-local identity as owned_count_native, for the
+    /// Added502A80 / Removed5025F0 on-map CounterClass arrays.
+    pub(crate) fn active_count_native(&self, category: EntityCategory, index: i32) -> i32 {
+        native_count(self.active_types(category), index)
+    }
+
+    fn active_types(&self, category: EntityCategory) -> &TypeCounts {
+        match category {
             EntityCategory::Unit => &self.active_unit_types,
             EntityCategory::Infantry => &self.active_infantry_types,
             EntityCategory::Aircraft => &self.active_aircraft_types,
             EntityCategory::Structure => &self.active_building_types,
-        };
-        counts.get(&type_id).copied().unwrap_or(0)
+        }
     }
 
     /// The sum of the four on-map counters' totals (`CounterClass+0x10` of
@@ -840,7 +913,7 @@ impl HouseTracking {
             }
             _ => return,
         };
-        let count = counts.entry(entity.type_ref()).or_default();
+        let count = counts.entry(counted_type(entity)).or_default();
         *count = count.wrapping_add(1);
     }
 
@@ -883,7 +956,7 @@ impl HouseTracking {
             EntityCategory::Structure => &mut self.active_building_types,
             EntityCategory::Infantry => &mut self.active_infantry_types,
         };
-        let count = counts.entry(entity.type_ref()).or_default();
+        let count = counts.entry(counted_type(entity)).or_default();
         *count = count.wrapping_sub(1);
     }
 
@@ -909,7 +982,7 @@ impl HouseTracking {
                 return base_units
                     .into_iter()
                     .flatten()
-                    .any(|unit| self.unit_types.get(&unit).copied().unwrap_or(0) != 0);
+                    .any(|unit| self.owned_count(EntityCategory::Unit, unit) != 0);
             }
             return [
                 (EntityCategory::Unit, self.active_units()),
@@ -926,7 +999,7 @@ impl HouseTracking {
                     units
                         .next()
                         .flatten()
-                        .map_or(0, |unit| self.unit_types.get(&unit).copied().unwrap_or(0))
+                        .map_or(0, |unit| self.owned_count(EntityCategory::Unit, unit))
                 };
                 let first = tracked();
                 let second = tracked();
@@ -935,10 +1008,7 @@ impl HouseTracking {
                 self.buildings > 0 || base > 0
             } else {
                 let refinery = _build_refinery_2.map_or(0, |refinery| {
-                    self.active_building_types
-                        .get(&refinery)
-                        .copied()
-                        .unwrap_or(0)
+                    self.active_count(EntityCategory::Structure, refinery)
                 });
                 self.buildings
                     .wrapping_add(self.active_units())
@@ -1041,8 +1111,29 @@ impl crate::sim::world::ObjectSubstrate {
     }
 }
 
+fn counted_type(entity: &GameEntity) -> (i32, InternedId) {
+    (entity.type_facts.native_type_index(), entity.type_ref())
+}
+
+fn named_count(counts: &TypeCounts, type_id: InternedId) -> i32 {
+    counts
+        .iter()
+        .filter(|((_, name), _)| *name == type_id)
+        .fold(0i32, |total, (_, &count)| total.wrapping_add(count))
+}
+
+fn native_count(counts: &TypeCounts, index: i32) -> i32 {
+    if index < 0 {
+        return 0;
+    }
+    counts
+        .range((index, InternedId::default())..)
+        .take_while(|((native_index, _), _)| *native_index == index)
+        .fold(0i32, |total, (_, &count)| total.wrapping_add(count))
+}
+
 /// A CounterClass total: the wrapping sum of its per-type counts.
-fn wrapping_total(counts: &BTreeMap<InternedId, i32>) -> i32 {
+fn wrapping_total(counts: &TypeCounts) -> i32 {
     counts
         .values()
         .fold(0, |total, &count| total.wrapping_add(count))
@@ -1089,7 +1180,7 @@ impl HouseTracking {
     /// Stand in for on-map units a fixture places without the lifecycle,
     /// counted under no type.
     pub(crate) fn set_active_units_for_test(&mut self, units: i32) {
-        self.active_unit_types = BTreeMap::from([(InternedId::default(), units)]);
+        self.active_unit_types = BTreeMap::from([((-1, InternedId::default()), units)]);
     }
 
     /// The on-map unit, infantry and aircraft totals.
@@ -1101,7 +1192,7 @@ impl HouseTracking {
         )
     }
 
-    /// Set one type's tracked count (`+0x5500..`).
+    /// Replace a legacy fixture's name aggregate without a resolved native Type.
     pub(crate) fn set_owned_for_test(
         &mut self,
         category: EntityCategory,
@@ -1114,10 +1205,28 @@ impl HouseTracking {
             EntityCategory::Infantry => &mut self.infantry_types,
             EntityCategory::Aircraft => &mut self.aircraft_types,
         };
-        counts.insert(type_id, count);
+        counts.retain(|(_, name), _| *name != type_id);
+        self.set_owned_native_for_test(category, type_id, -1, count);
     }
 
-    /// Set one type's on-map count (`+0x5550..`).
+    /// Set one original native class-array counter (`+0x5500..`).
+    pub(crate) fn set_owned_native_for_test(
+        &mut self,
+        category: EntityCategory,
+        type_id: InternedId,
+        index: i32,
+        count: i32,
+    ) {
+        let counts = match category {
+            EntityCategory::Unit => &mut self.unit_types,
+            EntityCategory::Structure => &mut self.building_types,
+            EntityCategory::Infantry => &mut self.infantry_types,
+            EntityCategory::Aircraft => &mut self.aircraft_types,
+        };
+        counts.insert((index, type_id), count);
+    }
+
+    /// Replace a legacy fixture's name aggregate without a resolved native Type.
     pub(crate) fn set_active_for_test(
         &mut self,
         category: EntityCategory,
@@ -1130,7 +1239,25 @@ impl HouseTracking {
             EntityCategory::Aircraft => &mut self.active_aircraft_types,
             EntityCategory::Structure => &mut self.active_building_types,
         };
-        counts.insert(type_id, count);
+        counts.retain(|(_, name), _| *name != type_id);
+        self.set_active_native_for_test(category, type_id, -1, count);
+    }
+
+    /// Set one original on-map native class-array counter (`+0x5550..`).
+    pub(crate) fn set_active_native_for_test(
+        &mut self,
+        category: EntityCategory,
+        type_id: InternedId,
+        index: i32,
+        count: i32,
+    ) {
+        let counts = match category {
+            EntityCategory::Unit => &mut self.active_unit_types,
+            EntityCategory::Infantry => &mut self.active_infantry_types,
+            EntityCategory::Aircraft => &mut self.active_aircraft_types,
+            EntityCategory::Structure => &mut self.active_building_types,
+        };
+        counts.insert((index, type_id), count);
     }
 
     /// Set every counter the gate reads.
@@ -1142,13 +1269,19 @@ impl HouseTracking {
         active_building_types: &[(InternedId, i32)],
     ) {
         self.set_buildings_for_test(buildings);
-        self.unit_types = unit_types.iter().copied().collect();
+        self.unit_types = unit_types
+            .iter()
+            .map(|&(type_id, count)| ((-1, type_id), count))
+            .collect();
         // The fixture's totals, counted under no type.
-        let untyped = |total: i32| BTreeMap::from([(InternedId::default(), total)]);
+        let untyped = |total: i32| BTreeMap::from([((-1, InternedId::default()), total)]);
         self.active_unit_types = untyped(active.0);
         self.active_infantry_types = untyped(active.1);
         self.active_aircraft_types = untyped(active.2);
-        self.active_building_types = active_building_types.iter().copied().collect();
+        self.active_building_types = active_building_types
+            .iter()
+            .map(|&(type_id, count)| ((-1, type_id), count))
+            .collect();
     }
 }
 

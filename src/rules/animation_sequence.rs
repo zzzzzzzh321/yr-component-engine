@@ -419,7 +419,7 @@ pub(crate) fn build_animation_sequence_catalog(
                 if object.category == crate::rules::object_type::ObjectCategory::Vehicle {
                     Some(
                         rules
-                            .unit_shp_read_state(&object.id)
+                            .unit_shp_read_state_for_type(object)
                             .expect("registered UnitType retains its constructor/ART read state"),
                     )
                 } else {

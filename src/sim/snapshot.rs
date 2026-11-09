@@ -376,6 +376,8 @@ pub enum SnapshotRestoreError {
     },
     #[error("invalid saved TechnoType TechLevel state: {reason}")]
     InvalidTypeTechLevels { reason: String },
+    #[error("invalid saved Techno {object_id} Type identity")]
+    InvalidTechnoTypeIdentity { object_id: u64 },
     #[error("invalid scalable Bullet runtime: {0}")]
     InvalidScalableProjectileRuntime(&'static str),
     #[error("invalid radiation site order: {0}")]
@@ -2162,6 +2164,7 @@ impl Simulation {
         saved_land: Option<crate::map::resolved_terrain::SavedCellLandValues>,
     ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
         self.validate_type_tech_levels(rules)?;
+        self.validate_entity_type_bindings(rules)?;
         // BulletClass Load46AE70 swizzles WeaponType+130 separately from
         // BulletType+AC. A saved ordinal must resolve in the reconstructed
         // frozen rules before this simulation can resume.

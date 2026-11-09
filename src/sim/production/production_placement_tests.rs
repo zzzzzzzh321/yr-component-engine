@@ -481,7 +481,16 @@ fn ground_occupant_placement_rules_with_art(extra_art: &IniFile) -> RuleSet {
 }
 
 fn gsi_04_07_wall_placement_contract() -> (RuleSet, OverlayTypeRegistry) {
-    let ini = IniFile::from_str(
+    gsi_04_07_wall_placement_contract_with_create_sound(None)
+}
+
+fn gsi_04_07_wall_placement_contract_with_create_sound(
+    create_sound: Option<&str>,
+) -> (RuleSet, OverlayTypeRegistry) {
+    let create_sound = create_sound
+        .map(|name| format!("CreateSound={name}\n"))
+        .unwrap_or_default();
+    let ini = IniFile::from_str(&format!(
         "[Countries]\n0=Americans\n1=Alliance\n2=Russians\n3=Soviet\n[InfantryTypes]\n\
          [VehicleTypes]\n\
          [AircraftTypes]\n\
@@ -505,6 +514,7 @@ fn gsi_04_07_wall_placement_contract() -> (RuleSet, OverlayTypeRegistry) {
          Strength=100\n\
          [CYCL]\n\
          [GAWALL]\n\
+         {create_sound}\
          Owner=Americans,Alliance,Russians,Soviet\n\
          Wall=yes\n\
          Armor=concrete\n\
@@ -522,7 +532,7 @@ fn gsi_04_07_wall_placement_contract() -> (RuleSet, OverlayTypeRegistry) {
          Foundation=1x1\n\
          Adjacent=8\n\
          GuardRange=5\n[Clear]\nBuildable=yes\n",
-    );
+    ));
     let art_ini = IniFile::from_str(
         "[GACNST]\nFoundation=2x2\n[GAWALL]\nToOverlay=GAWALL\n\
          [WALLKIT]\nToOverlay=GAWALL\n",
@@ -2139,15 +2149,15 @@ fn empty_cell_wall_placement_still_works_but_wall_on_overlay_rejects() {
 
 #[test]
 fn gsi_04_07_command_places_authoritative_owned_wall_without_entity() {
-    let (mut rules, registry) = gsi_04_07_wall_placement_contract();
+    let (mut rules, registry) =
+        gsi_04_07_wall_placement_contract_with_create_sound(Some("FixtureWallCreated"));
     // A registered custom cue exercises RecordLastBuilt after Rust consumes
     // the temporary wall. Original440774 ->UnInit5F65F0 defers deletion;
     // Record4FB7DC reads its retained constructor Location, never the cell
-    // being stamped. Only this test's sound input extends the wall fixture.
-    let sound_ini = IniFile::from_str(
-        "[SoundList]\n0=FixtureWallCreated\n[FixtureWallCreated]\nSounds=wall\n\
-         [GAWALL]\nCreateSound=FixtureWallCreated\n",
-    );
+    // being stamped. Author the cue in the real Rules read; the fixed sound
+    // catalog resolves it without changing the retained Type's configuration.
+    let sound_ini =
+        IniFile::from_str("[SoundList]\n0=FixtureWallCreated\n[FixtureWallCreated]\nSounds=wall\n");
     let sounds = crate::rules::sound_ini::SoundRegistry::from_ini(&sound_ini);
     rules.bind_type_sound_references(&sound_ini, &sounds);
     let path_grid = PathGrid::new(64, 64);
@@ -2172,9 +2182,17 @@ fn gsi_04_07_command_places_authoritative_owned_wall_without_entity() {
     // queued-copy removal.
     let cost = rules.object("GAWALL").unwrap().cost.max(0);
     assert!(
-        !sim.production
-            .factories_mut()
-            .test_enqueue_kernel(owner, category, type_id, 1, cost)
+        !sim.production.factories_mut().test_enqueue_resolved_kernel(
+            owner,
+            category,
+            type_id,
+            (
+                crate::rules::object_type::ObjectCategory::Building,
+                rules.object("GAWALL").unwrap().native_type_index()
+            ),
+            1,
+            cost
+        )
     );
     // This fixture deliberately leaves BuildCat at native default0. After
     // Completed clears held, HouseAbandon removes the matching queued copy

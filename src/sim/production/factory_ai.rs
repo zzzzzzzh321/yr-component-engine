@@ -334,7 +334,7 @@ fn start_factory(
         sim,
         rules,
         FactoryHolder::Building(building),
-        type_id,
+        object,
         effects,
         false,
     )
@@ -442,29 +442,23 @@ fn placement_wait_over(sim: &Simulation, building: u64) -> bool {
 /// without the stock CheckBuildLimit50B370 factory/pad adjustments.
 fn ai_build_limit_blocks(
     sim: &Simulation,
-    rules: &RuleSet,
+    _rules: &RuleSet,
     owner: InternedId,
     object: &ObjectType,
     limit: i32,
 ) -> bool {
-    let owned = sim
-        .interner
-        .get(&object.id)
-        .zip(sim.houses.get(&owner))
-        .map_or(0, |(type_id, house)| {
-            house
-                .tracking()
-                .owned_count(EntityCategory::from(object.category), type_id)
-        });
+    let owned = sim.houses.get(&owner).map_or(0, |house| {
+        house.tracking().owned_count_native(
+            EntityCategory::from(object.category),
+            object.native_type_index(),
+        )
+    });
     if limit > 0 {
         return owned >= limit;
     }
-    let produced = rules
-        .type_array_index(object.category, &object.id)
-        .zip(sim.houses.get(&owner))
-        .map_or(0, |(index, house)| {
-            house.produced_count(object.category, index)
-        });
+    let produced = sim.houses.get(&owner).map_or(0, |house| {
+        house.produced_count(object.category, object.native_type_index())
+    });
     produced.wrapping_neg() <= limit || owned.wrapping_neg() <= limit
 }
 

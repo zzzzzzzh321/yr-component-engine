@@ -357,15 +357,12 @@ fn specific_prerequisite_on_map(
 }
 
 /// The house's on-map count of BuildingType `index` (`HouseClass+0x5550`).
-fn buildings_on_map(sim: &Simulation, rules: &RuleSet, house: &HouseState, index: i32) -> i32 {
-    rules
-        .building_type_at(index)
-        .and_then(|building| sim.interner.get(&building.id))
-        .map_or(0, |type_id| {
-            house
-                .tracking()
-                .active_count(EntityCategory::Structure, type_id)
-        })
+fn buildings_on_map(_sim: &Simulation, rules: &RuleSet, house: &HouseState, index: i32) -> i32 {
+    rules.building_type_at(index).map_or(0, |building| {
+        house
+            .tracking()
+            .active_count_native(EntityCategory::Structure, building.native_type_index())
+    })
 }
 
 /// The shared installed-slot traversal: Specific100082B0 owns its active-host
@@ -394,10 +391,11 @@ fn ares_owned_build_limit_count(
     house: &HouseState,
     obj: &ObjectType,
 ) -> i32 {
-    let tracked = |category, id: &str| {
-        sim.interner
-            .get(id)
-            .map_or(0, |id| house.tracking().owned_count(category, id))
+    let tracked = |object: &ObjectType| {
+        house.tracking().owned_count_native(
+            EntityCategory::from(object.category),
+            object.native_type_index(),
+        )
     };
     if obj.category == ObjectCategory::Building
         && let Some(host) = obj.building_upgrade().host()
@@ -415,8 +413,8 @@ fn ares_owned_build_limit_count(
     }
     // Ares CountOwned10020C23..10020C81 keeps the original Infantry
     // VehicleThief census. The existing Unit+338 owner supplies this count.
-    let own = tracked(EntityCategory::from(obj.category), &obj.id)
-        .wrapping_add(captured_vehicle_thief_count(sim, rules, house.name(), obj));
+    let own =
+        tracked(obj).wrapping_add(captured_vehicle_thief_count(sim, rules, house.name(), obj));
     let converted = match obj.category {
         ObjectCategory::Building => obj
             .undeploys_into
@@ -428,9 +426,7 @@ fn ares_owned_build_limit_count(
             .and_then(|id| rules.object_in_category(ObjectCategory::Building, id)),
         ObjectCategory::Infantry | ObjectCategory::Aircraft => None,
     };
-    own.wrapping_add(converted.map_or(0, |converted| {
-        tracked(EntityCategory::from(converted.category), &converted.id)
-    }))
+    own.wrapping_add(converted.map_or(0, tracked))
 }
 
 /// CanBuild's build limit (`0x004F7F9E..0x004F8357`): a type at or over
@@ -456,24 +452,22 @@ fn build_limit(
         return CanBuild::Yes;
     }
     let type_id = sim.interner.get(&obj.id);
-    let owned = type_id
-        .zip(sim.houses.get(&owner))
-        .map_or(0, |(type_id, house)| {
+    let owned = sim
+        .houses
+        .get(&owner)
+        .map_or(0, |house| {
             house
                 .tracking()
-                .owned_count(EntityCategory::from(obj.category), type_id)
+                .owned_count_native(EntityCategory::from(obj.category), obj.native_type_index())
         })
         .wrapping_add(captured_vehicle_thief_count(sim, rules, owner, obj));
     let produced = || {
-        rules
-            .type_array_index(obj.category, &obj.id)
-            .zip(sim.houses.get(&owner))
-            .map_or(0, |(index, house)| {
-                house.produced_count(obj.category, index)
-            })
+        sim.houses.get(&owner).map_or(0, |house| {
+            house.produced_count(obj.category, obj.native_type_index())
+        })
     };
     let held_in_factory = || {
-        type_id.is_some_and(|type_id| {
+        type_id.is_some_and(|_| {
             sim.production
                 .factories()
                 .iter_insertion_ordered()
@@ -481,7 +475,17 @@ fn build_limit(
                 .any(|factory| {
                     factory.owner() == owner
                         && factory.object().is_some_and(|object| {
-                            object.type_id == type_id && object.entity_id.is_some()
+                            object
+                                .entity_id
+                                .and_then(|id| sim.substrate.entities.get(id))
+                                .and_then(|entity| sim.entity_object_type(entity, rules))
+                                // CanBuild callers may hold a cloned type
+                                // projection. CanBuild4F8327 compares the Type
+                                // identity, not the Rust view's address.
+                                .is_some_and(|held| {
+                                    held.category == obj.category
+                                        && held.native_type_index() == obj.native_type_index()
+                                })
                         })
                 })
         })
@@ -564,12 +568,21 @@ pub(crate) fn check_build_limit(
         _ => super::production_tech::production_category_for_object(obj),
     };
     let tracking = sim.houses.get(&owner).map(HouseState::tracking);
-    let in_factory = |type_id: Option<InternedId>| {
-        type_id.map_or(0, |type_id| {
-            sim.production
-                .factories()
-                .count_total(owner, strip, type_id)
-        })
+    let in_factory = |object: &ObjectType| {
+        let active = sim
+            .production
+            .factories()
+            .view(owner, strip)
+            .and_then(|factory| factory.object?.entity_id)
+            .and_then(|id| sim.substrate.entities.get(id))
+            .and_then(|entity| sim.entity_object_type(entity, rules))
+            .map(|held| (held.category, held.native_type_index()));
+        sim.production.factories().count_total(
+            owner,
+            strip,
+            (object.category, object.native_type_index()),
+            active,
+        )
     };
     if obj.category == ObjectCategory::Aircraft && obj.airport_bound {
         let pads = rules
@@ -578,31 +591,26 @@ pub(crate) fn check_build_limit(
             .iter()
             .filter_map(|name| rules.object_in_category(ObjectCategory::Aircraft, name))
             .map(|pad| {
-                let type_id = sim.interner.get(&pad.id);
-                let on_map = type_id.zip(tracking).map_or(0, |(type_id, tracking)| {
-                    tracking.active_count(EntityCategory::Aircraft, type_id)
+                let on_map = tracking.map_or(0, |tracking| {
+                    tracking.active_count_native(EntityCategory::Aircraft, pad.native_type_index())
                 });
-                on_map.wrapping_add(in_factory(type_id))
+                on_map.wrapping_add(in_factory(pad))
             })
             .fold(0, i32::wrapping_add);
         return pads >= tracking.map_or(0, HouseTracking::airport_docks);
     }
     let limit = obj.build_limit;
-    let type_id = sim.interner.get(&obj.id);
-    let queued = in_factory(type_id);
+    let queued = in_factory(obj);
     if limit < 1 {
         // 50B405/48B/537/60B use the same retained produced item as
         // CanBuild, add Factory CountTotal with ADD32, then compare signed.
-        let produced = rules
-            .type_array_index(obj.category, &obj.id)
-            .zip(sim.houses.get(&owner))
-            .map_or(0, |(index, house)| {
-                house.produced_count(obj.category, index)
-            });
+        let produced = sim.houses.get(&owner).map_or(0, |house| {
+            house.produced_count(obj.category, obj.native_type_index())
+        });
         return produced.wrapping_add(queued) >= limit.wrapping_abs();
     }
-    let owned = type_id.zip(tracking).map_or(0, |(type_id, tracking)| {
-        tracking.owned_count(EntityCategory::from(obj.category), type_id)
+    let owned = tracking.map_or(0, |tracking| {
+        tracking.owned_count_native(EntityCategory::from(obj.category), obj.native_type_index())
     });
     owned
         .wrapping_add(captured_vehicle_thief_count(sim, rules, owner, obj))
@@ -616,23 +624,21 @@ pub(crate) fn check_build_limit(
 /// tested. The entity store owns membership; no second counter is needed.
 fn captured_vehicle_thief_count(
     sim: &Simulation,
-    rules: &RuleSet,
+    _rules: &RuleSet,
     owner: InternedId,
     obj: &ObjectType,
 ) -> i32 {
-    if obj.category == ObjectCategory::Infantry && obj.vehicle_thief {
-        rules
-            .type_array_index(ObjectCategory::Infantry, &obj.id)
-            .map_or(0, |index| {
-                sim.entities()
-                    .values()
-                    .filter(|entity| {
-                        entity.category() == EntityCategory::Unit
-                            && entity.owner() == owner
-                            && entity.capture_infantry_type_index.get() == index
-                    })
-                    .fold(0i32, |count, _| count.wrapping_add(1))
+    if obj.category == ObjectCategory::Infantry && obj.vehicle_thief && obj.native_type_index() >= 0
+    {
+        let index = obj.native_type_index();
+        sim.entities()
+            .values()
+            .filter(|entity| {
+                entity.category() == EntityCategory::Unit
+                    && entity.owner() == owner
+                    && entity.capture_infantry_type_index.get() == index
             })
+            .fold(0i32, |count, _| count.wrapping_add(1))
     } else {
         0
     }
@@ -780,11 +786,7 @@ fn query_factory(
                 //10020E65 ->1003D9A0: an explicit BuiltAt list overrides the
                 // candidate Type's ExplicitOnly default; no country aliases.
                 if !obj.built_at().is_empty() {
-                    let Some(index) =
-                        rules.type_array_index(ObjectCategory::Building, &building_type.id)
-                    else {
-                        continue;
-                    };
+                    let index = building_type.native_type_index();
                     if !obj.built_at().contains(&index) {
                         continue;
                     }

@@ -1760,6 +1760,9 @@ impl GameEntity {
     }
 
     pub fn set_type_ref_for_test(&mut self, type_ref: InternedId) {
+        if self.type_ref != type_ref {
+            self.type_facts.clear_native_type_index_for_test();
+        }
         self.type_ref = type_ref;
     }
 

@@ -136,7 +136,7 @@ fn busy_factory_exit_product(
         sim,
         rules,
         super::factory::FactoryHolder::Building(1),
-        type_id,
+        rules.object("MTNK").unwrap(),
         crate::sim::world::FrameEffects::default(),
         false,
     )

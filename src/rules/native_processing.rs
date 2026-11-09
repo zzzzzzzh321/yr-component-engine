@@ -1743,6 +1743,26 @@ impl ProcessedRulesLayers {
             .techno_type_states()
     }
 
+    /// Each actual TechnoType allocation, in the shared constructor order
+    /// (TechnoType71181D/711ABD), independently of stored-ID Find aliases.
+    pub(crate) fn techno_states(&self) -> impl Iterator<Item = TechnoState<'_>> {
+        let registry = self.native_type_construction_trace.registry_state();
+        registry
+            .techno_type_order
+            .iter()
+            .map(move |&(family, ordinal)| {
+                let member = &registry.families[&family][ordinal];
+                TechnoState {
+                    category: family.object_category().expect("TechnoType family"),
+                    ordinal,
+                    id: &member.native_stored_id,
+                    body: &member.body,
+                    member,
+                    families: &registry.families,
+                }
+            })
+    }
+
     /// Allocated AnimTypes and whether their fixed-ART body has actually been
     /// read, in native registry order. A present ART section alone is not
     /// evidence of a read: later Type readers can allocate after the Anim sweep.
@@ -4708,19 +4728,24 @@ impl NativeRulesRegistryState {
     /// Transfer runtime values back to the process registry only after the
     /// outgoing Simulation has retired. Prefix Process714570 reads the same
     /// current field before Reset6686C0 deletes the old Type generation.
-    /// Validate the complete transfer before changing any field. A category
-    /// with duplicate exact stored IDs cannot represent a unique live object.
+    /// Validate the complete transfer before changing any field. The outgoing
+    /// Type pointer is its category-local native ordinal, including equal IDs.
     pub(crate) fn consume_outgoing_type_tech_levels(
         &mut self,
-        updates: impl IntoIterator<Item = (ObjectCategory, String, i32)>,
+        updates: impl IntoIterator<Item = (ObjectCategory, i32, i32)>,
     ) -> Result<(), RulesError> {
         let mut resolved = Vec::new();
-        for (category, id, value) in updates {
+        for (category, ordinal, value) in updates {
             let family = RulesTypeFamily::from_object_category(category);
-            let index = self
-                .exact_type_index(family, &id)
+            let index = usize::try_from(ordinal)
+                .ok()
+                .filter(|&index| {
+                    self.families
+                        .get(&family)
+                        .is_some_and(|members| index < members.len())
+                })
                 .ok_or(RulesError::InvalidSavedState(
-                    "outgoing TechLevel does not identify one exact live TechnoType",
+                    "outgoing TechLevel is outside its native TechnoType array",
                 ))?;
             resolved.push((family, index, value));
         }
@@ -4746,7 +4771,7 @@ impl NativeRulesRegistryState {
     /// neither family of writes commits when either transfer is invalid.
     pub(crate) fn consume_outgoing_type_runtime_fields(
         &mut self,
-        tech_levels: impl IntoIterator<Item = (ObjectCategory, String, i32)>,
+        tech_levels: impl IntoIterator<Item = (ObjectCategory, i32, i32)>,
         upgrade_art_names: impl IntoIterator<Item = (String, u8, String)>,
         voxel_damage: impl IntoIterator<Item = (String, i32)>,
     ) -> Result<(), RulesError> {
@@ -5777,6 +5802,144 @@ pub(crate) struct WeaponState<'a> {
     pub(crate) occupant_anim: Option<&'a str>,
     pub(crate) open_topped_anim: Option<&'a str>,
     pub(crate) attached_particle_system: Option<&'a str>,
+}
+
+/// A read-only view of one retained native slot, like WeaponState. The
+/// ProcessedType remains the sole owner; this projection never reparses a
+/// sibling's equal-name flattened section.
+pub(crate) struct TechnoState<'a> {
+    pub(crate) category: ObjectCategory,
+    pub(crate) ordinal: usize,
+    pub(crate) id: &'a str,
+    pub(crate) body: &'a IniSection,
+    member: &'a ProcessedType,
+    families: &'a HashMap<RulesTypeFamily, Vec<ProcessedType>>,
+}
+
+impl TechnoState<'_> {
+    pub(crate) fn project(&self, rules_serial: u64) -> crate::rules::object_type::ObjectType {
+        use crate::rules::object_type::ObjectType;
+        use crate::rules::ruleset::TypeWeapons;
+        // Abstract41088D stores24 bytes; Abstract410A60, Object5F92D0 and
+        // Techno712170 read this instance's body or leave its constructor
+        // state alone. Equal stored IDs do not merge the allocated objects.
+        let member = self.member;
+        let mut object = ObjectType::from_ini_section(self.id, self.body, self.category);
+        object.base_plan_type_index = i32::try_from(self.ordinal)
+            .expect("native TechnoType array exceeds signed index space");
+        object.tech_level = member.tech_level;
+        object.project_threat_coefficients(member.threat_coefficients);
+        object.project_image_state(&member.object_image);
+        member.techno_references.apply_to(&mut object);
+        object.bind_armor(member.armor_id);
+        object.set_voxel_shadow_index(member.voxel_shadow_index);
+        object.airstrike = member.airstrike.clone();
+        object.recoil = member.recoil;
+        object.radial_fire_segments = member.radial_fire_segments;
+        object.lepton_mind_control_offset = member.lepton_mind_control_offset;
+        object.prerequisite.clone_from(&member.prerequisite);
+        object
+            .prerequisite_override
+            .clone_from(&member.prerequisite_override);
+        object.gunner = member.gunner_turrets.is_gunner();
+        object.gunner_turrets.clone_from(&member.gunner_turrets);
+        object.is_gattling = member.is_gattling;
+        object.gattling_stages = member.gattling_stages;
+        let slots = &member.weapon_slots;
+        let base = slots.base();
+        let elite = slots.elite();
+        let name = |index: usize| {
+            self.families[&RulesTypeFamily::Weapon][index]
+                .native_stored_id
+                .clone()
+        };
+        object.turret_count = slots.turret_count();
+        object.weapon_count = slots.weapon_count();
+        object.weapon_list = base.iter().map(|slot| slot.map(&name)).collect();
+        object.elite_weapon_list = elite.iter().map(|slot| slot.map(&name)).collect();
+        object.project_resolved_weapons(TypeWeapons::from_native_slots(rules_serial, base, elite));
+        object.bind_weapon_offsets(slots.offsets());
+        object.bind_ares_techno_rules(
+            member.emp_type.as_ref(),
+            #[cfg(feature = "ares")]
+            member.promotion_abilities.as_ref(),
+            #[cfg(not(feature = "ares"))]
+            None,
+            member.self_attach_effect.as_ref(),
+            member.cloak_allowed,
+            #[cfg(feature = "ares")]
+            member.turret_rot_override,
+            #[cfg(not(feature = "ares"))]
+            None,
+            #[cfg(feature = "ares")]
+            member.aircraft_crashable,
+            #[cfg(not(feature = "ares"))]
+            None,
+        );
+        #[cfg(feature = "ares")]
+        {
+            object.bind_ares_spotlight(member.building_has_spotlight, member.spotlight);
+            object.bind_super_weapon_techno_rules(
+                member.super_weapon_techno.designator_range,
+                member.super_weapon_techno.inhibitor_range,
+                member.super_weapon_techno.hunter_seeker_ignore,
+            );
+            object.bind_selection_group(&member.selection_group);
+            object.bind_driver_rules(&member.driver);
+            object.bind_bounty_rules(&member.bounty);
+            object.bind_crew_rules(&member.crew);
+            object.project_factory_owners(
+                member
+                    .factory_owners
+                    .as_ref()
+                    .expect("TechnoType extension"),
+            );
+        }
+        #[cfg(feature = "phobos")]
+        {
+            object.phobos_insignia = member.phobos_insignia.clone();
+        }
+        match self.category {
+            ObjectCategory::Infantry => {
+                object.project_infantry_pips(member.infantry_pips);
+                object.project_infantry_art(member.infantry_art);
+                if let Some(bank) = &member.infantry_sequence_bank {
+                    object.project_infantry_sequence_bank(bank);
+                }
+                object.project_infantry_infiltration(member.infantry_infiltration);
+            }
+            ObjectCategory::Vehicle => {
+                object.speed_type = member.unit_speed_type;
+                #[cfg(feature = "phobos")]
+                object.project_ore_gathering(&member.ore_gathering);
+            }
+            ObjectCategory::Building => {
+                object.set_secret_lab(member.secret_lab.clone());
+                object.foundation = member.building_foundation.clone();
+                object.has_spotlight = member.building_has_spotlight;
+                object.project_building_light(member.building_light);
+                object.project_building_upgrade(member.building_upgrade.clone());
+                object.extra_power = member.building_extra_power;
+                object.set_target_coord_offset(member.building_target_coord_offset);
+                object.set_half_damage_smoke_locations(
+                    member.building_half_damage_smoke_location1,
+                    member.building_half_damage_smoke_location2,
+                );
+                #[cfg(feature = "ares")]
+                {
+                    object.project_explicit_factory(
+                        member
+                            .explicit_factory
+                            .as_ref()
+                            .expect("BuildingType extension"),
+                    );
+                    object.project_additional_super_weapons(&member.additional_super_weapons);
+                }
+            }
+            ObjectCategory::Aircraft => {}
+        }
+        object
+    }
 }
 
 /// Fields needed by Weapon7729F0, retained on the same live Weapon object.

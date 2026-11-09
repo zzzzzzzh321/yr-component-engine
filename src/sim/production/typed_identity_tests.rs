@@ -4,28 +4,38 @@
 use super::*;
 use crate::map::entities::EntityCategory;
 use crate::rules::{ini_parser::IniFile, object_type::ObjectCategory, ruleset::RuleSet};
-use crate::sim::command::{
-    Command, CommandEnvelope, PlaceRecord, ProductionEvent, ProductionRecord,
-};
+use crate::sim::command::{Command, CommandEnvelope, PlaceRecord, ProductionEvent, ProductionRecord};
 use crate::sim::intern::InternedId;
 use crate::sim::runtime::{SimResources, SimRuntime};
 use crate::sim::world::{FrameEffects, Simulation, TickLane};
 
 fn rules(collision: bool) -> RuleSet {
+    rules_with_same_class_aliases(collision, false)
+}
+
+const SAME_CLASS_ID: &str = "ABCDEFGHIJKLMNOPQRSTUVWX";
+
+fn rules_with_same_class_aliases(collision: bool, aliases: bool) -> RuleSet {
     let vehicles = if collision {
         "0=E1\n1=HOST\n2=SLAV\n3=HORN"
     } else {
         "0=HOST"
     };
     let building_collision = if collision { "3=HORN" } else { "" };
+    let infantry_aliases = if aliases {
+        "2=ABCDEFGHIJKLMNOPQRSTUVWX_FIRST\n3=ABCDEFGHIJKLMNOPQRSTUVWX_SECOND"
+    } else {
+        ""
+    };
     let ini = crate::sim::arena_fixture::clear_ground_ini(&format!(
         "[General]\nBuildSpeed=.1\nAnimToInfantry=E1\n\
          [Countries]\n0=Americans\n1=Russians\n\
-         [InfantryTypes]\n0=E1\n1=SLAV\n[VehicleTypes]\n{vehicles}\n\
+         [InfantryTypes]\n0=E1\n1=SLAV\n{infantry_aliases}\n[VehicleTypes]\n{vehicles}\n\
          [AircraftTypes]\n0=HORN\n[BuildingTypes]\n0=GAPILE\n1=GAWEAP\n2=VAT\n{building_collision}\n\
          [Animations]\n0=CHANGE\n\
          [E1]\nLocomotor={{4A582744-9839-11d1-B709-00A024DDAFD1}}\nStrength=125\nCost=200\nSpeed=4\nSight=5\nTechLevel=1\nOwner=Americans\nAmmo=3\n\
          [SLAV]\nLocomotor={{4A582744-9839-11d1-B709-00A024DDAFD1}}\nStrength=80\nSpeed=4\nStorage=4\n\
+         [ABCDEFGHIJKLMNOPQRSTUVWX]\nLocomotor={{4A582744-9839-11d1-B709-00A024DDAFD1}}\nStrength=125\nCost=200\nSpeed=4\nSight=5\nTechLevel=1\nOwner=Americans\nAmmo=3\n\
          [HORN]\nLocomotor={{4A582746-9839-11d1-B709-00A024DDAFD1}}\nStrength=75\nSpeed=14\nAmmo=1\nSpawned=yes\n\
          [HOST]\nLocomotor={{4A582741-9839-11d1-B709-00A024DDAFD1}}\nStrength=500\nCost=600\nSpeed=4\nTechLevel=1\nOwner=Americans\n\
          Enslaves=SLAV\nSlavesNumber=1\nSpawns=HORN\nSpawnsNumber=1\n\
@@ -35,7 +45,7 @@ fn rules(collision: bool) -> RuleSet {
          [VAT]\nStrength=1000\nCloning=yes\nOwner=Americans\n"
     ));
     let art = IniFile::from_str(
-        "[E1]\nSequence=GI\n[SLAV]\nSequence=GI\n\
+        "[E1]\nSequence=GI\n[SLAV]\nSequence=GI\n[ABCDEFGHIJKLMNOPQRSTUVWX]\nSequence=GI\n\
          [GI]\nReady=0,1,0\nWalk=1,1,1\n\
          [GAPILE]\nFoundation=1x1\n[GAWEAP]\nFoundation=1x1\n[VAT]\nFoundation=1x1\n\
          [CHANGE]\nStart=0\nEnd=1\nLoopEnd=1\nRate=900\nMakeInfantry=0\n",
@@ -58,7 +68,10 @@ fn rules(collision: bool) -> RuleSet {
 }
 
 fn world(collision: bool, vat: bool) -> (SimRuntime, InternedId) {
-    let rules = rules(collision);
+    world_with_rules(rules(collision), vat)
+}
+
+fn world_with_rules(rules: RuleSet, vat: bool) -> (SimRuntime, InternedId) {
     let mut sim = Simulation::with_seed(0x4c9c_7000);
     sim.intern_rule_type_ids(&rules);
     tests::install_infantry_delivery_fixture_map(&mut sim);
@@ -168,6 +181,215 @@ fn assert_type(runtime: &SimRuntime, id: u64, family: ObjectCategory, name: &str
     if family == ObjectCategory::Vehicle {
         assert!(entity.mission_leaf.as_unit().is_some());
     }
+}
+
+#[test]
+fn same_class_stored_id_aliases_keep_selected_pointer_through_paid_queue_exit_and_save() {
+    use crate::sim::snapshot::GameSnapshot;
+    use crate::sim::world::SnapshotProcessState;
+
+    let rules = rules_with_same_class_aliases(false, true);
+    let slots: Vec<_> = rules
+        .type_array_ids(ObjectCategory::Infantry)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| (name == SAME_CLASS_ID).then_some(index as i32))
+        .collect();
+    assert_eq!(
+        slots.len(),
+        2,
+        "native constructors retain both long-name slots"
+    );
+    let (mut live, owner) = world_with_rules(rules, false);
+    let commands: Vec<_> = [slots[1], slots[0]]
+        .into_iter()
+        .map(|type_index| {
+            let object = live
+                .resources
+                .rules
+                .type_array_at(ObjectCategory::Infantry, type_index)
+                .unwrap();
+            let selection = ProductionSelection::for_type(&live.resources.rules, object).unwrap();
+            let record = live
+                .simulation
+                .encode_selected_production_record(owner, ProductionEvent::Produce, selection)
+                .unwrap();
+            CommandEnvelope::synchronized(record, live.simulation.session.tick() + 1)
+        })
+        .collect();
+    frame(&mut live, owner, &commands);
+    for _ in 0..12 {
+        frame(&mut live, owner, &[]);
+    }
+    let second = held(&live.simulation, owner, ProductionCategory::Infantry).unwrap();
+    let rules = &live.resources.rules;
+    assert_eq!(
+        live.simulation
+            .entities()
+            .get(second)
+            .unwrap()
+            .type_facts
+            .native_type_index(),
+        slots[1]
+    );
+    assert_eq!(
+        live.simulation.houses[&owner]
+            .tracking()
+            .owned_count_native(EntityCategory::Infantry, slots[1]),
+        1
+    );
+    assert_eq!(
+        live.simulation.houses[&owner]
+            .tracking()
+            .owned_count_native(EntityCategory::Infantry, slots[0]),
+        0
+    );
+    assert_eq!(
+        live.simulation
+            .production
+            .factories()
+            .view(owner, ProductionCategory::Infantry)
+            .unwrap()
+            .queue[0]
+            .native_type,
+        (ObjectCategory::Infantry, slots[0])
+    );
+
+    live.simulation.scenario_rng = crate::sim::rng::SimRng::new(0);
+    live.simulation.reset_planning_after_player_load();
+    let bytes = GameSnapshot::save_validated(
+        &live.simulation,
+        0,
+        rules.simulation_config_hash(),
+        "native-slot",
+        0,
+    );
+    let mut restored = GameSnapshot::load_validated(
+        &bytes,
+        0,
+        rules.simulation_config_hash(),
+        live.simulation.session.map_name(),
+    )
+    .unwrap()
+    .sim;
+    restored.retain_process_state_for_load(SnapshotProcessState::Live(&live.simulation));
+    restored.restore_after_snapshot_load().unwrap();
+    restored.resolve_type_handles(rules);
+    restored.validate_entity_type_bindings(rules).unwrap();
+    restored.rebuild_caches_after_load(
+        live.simulation.resolved_terrain.as_ref().unwrap().clone(),
+        live.simulation.terrain_speed_config().clone(),
+        rules,
+    );
+    assert!(restored.rebuild_dynamic_navigation(rules));
+    validate_restored_factory_state(&restored, rules).unwrap();
+    let mut resumed = SimRuntime {
+        simulation: restored,
+        resources: SimResources::new(rules.clone()),
+    };
+    assert_eq!(
+        live.simulation.state_hash(),
+        resumed.simulation.state_hash()
+    );
+
+    let mut first = None;
+    for _ in 0..2048 {
+        frame(&mut live, owner, &[]);
+        frame(&mut resumed, owner, &[]);
+        assert_eq!(
+            live.simulation.state_hash(),
+            resumed.simulation.state_hash()
+        );
+        if let Some(id) = held(&live.simulation, owner, ProductionCategory::Infantry) {
+            if id != second {
+                first = Some(id);
+            }
+        }
+        if let Some(first) = first {
+            let done = [second, first].into_iter().all(|id| {
+                !live
+                    .simulation
+                    .entities()
+                    .get(id)
+                    .unwrap()
+                    .lifecycle
+                    .in_limbo()
+            });
+            if done {
+                break;
+            }
+        }
+    }
+    let first = first.expect("ordinary StartNext promoted the first native slot");
+    for (id, slot) in [(second, slots[1]), (first, slots[0])] {
+        let actor = live.simulation.entities().get(id).unwrap();
+        assert!(
+            !actor.lifecycle.in_limbo(),
+            "paid object exited its producer"
+        );
+        assert!(std::ptr::eq(
+            live.simulation
+                .entity_object_type(actor, &live.resources.rules)
+                .unwrap(),
+            live.resources
+                .rules
+                .type_array_at(ObjectCategory::Infantry, slot)
+                .unwrap()
+        ));
+        assert_eq!(
+            live.simulation.houses[&owner]
+                .tracking()
+                .owned_count_native(EntityCategory::Infantry, slot),
+            1
+        );
+        assert_eq!(
+            live.simulation.houses[&owner].produced_count(ObjectCategory::Infantry, slot),
+            1
+        );
+    }
+    let name = live.simulation.interner.get(SAME_CLASS_ID).unwrap();
+    assert_eq!(
+        live.simulation.houses[&owner]
+            .tracking()
+            .owned_count(EntityCategory::Infantry, name),
+        2
+    );
+    // The app's AI diagnostics serialize House state as JSON too.
+    let tracking = live.simulation.houses[&owner].tracking();
+    let diagnostic = serde_json::to_string(tracking).unwrap();
+    let decoded: crate::sim::house_tracking::HouseTracking =
+        serde_json::from_str(&diagnostic).unwrap();
+    assert_eq!(&decoded, tracking);
+
+    // Ordinary disposal decrements only that receiver's native slot.
+    live.simulation.uninit_with_context(
+        first,
+        crate::sim::world::UninitContext::with_rules(&live.resources.rules),
+    );
+    frame(&mut live, owner, &[]);
+    assert_eq!(
+        live.simulation.houses[&owner]
+            .tracking()
+            .owned_count_native(EntityCategory::Infantry, slots[0]),
+        0
+    );
+    assert_eq!(
+        live.simulation.houses[&owner]
+            .tracking()
+            .owned_count_native(EntityCategory::Infantry, slots[1]),
+        1
+    );
+    live.simulation.uninit_with_context(
+        second,
+        crate::sim::world::UninitContext::with_rules(&live.resources.rules),
+    );
+    frame(&mut live, owner, &[]);
+    assert_eq!(
+        live.simulation.houses[&owner]
+            .tracking()
+            .owned_count(EntityCategory::Infantry, name),
+        0
+    );
 }
 
 #[test]

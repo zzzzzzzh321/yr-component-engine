@@ -227,18 +227,21 @@ fn sim_for(row: &Value, rules: &RuleSet) -> (Simulation, InternedId) {
             .interner
             .get(factory["object"].as_str().unwrap())
             .unwrap();
-        assert!(
-            sim.production
-                .factories_mut()
-                .test_enqueue_kernel(holder, kind, object, 0, 0)
-        );
+        let object_type = rules
+            .object(sim.interner.resolve(object))
+            .expect("the row's unique declared object type");
+        assert!(sim.production.factories_mut().test_enqueue_resolved_kernel(
+            holder,
+            kind,
+            object,
+            (object_type.category, object_type.native_type_index()),
+            0,
+            0,
+        ));
         // The native oracle supplies +58 independently of the House slot,
         // including Infantry/Aircraft/Building held in the Ship factory.
         // Construct that declared object without claiming StartProduction
         // admits these synthetic cross-family holders.
-        let object_type = rules
-            .object(sim.interner.resolve(object))
-            .expect("the row's unique declared object type");
         let owner_name = sim.interner.resolve(holder).to_owned();
         let entity = sim
             .construct_resolved_object_limbo_at_height(
@@ -260,11 +263,17 @@ fn sim_for(row: &Value, rules: &RuleSet) -> (Simulation, InternedId) {
             ),
             Some(entity)
         );
-        for queued in names(&factory["queued"]) {
-            let queued = sim.interner.get(queued).unwrap();
-            sim.production
-                .factories_mut()
-                .test_enqueue_kernel(holder, kind, queued, 0, 0);
+        for name in names(&factory["queued"]) {
+            let queued = sim.interner.get(name).unwrap();
+            let object_type = rules.object(name).expect("the row's unique queued type");
+            sim.production.factories_mut().test_enqueue_resolved_kernel(
+                holder,
+                kind,
+                queued,
+                (object_type.category, object_type.native_type_index()),
+                0,
+                0,
+            );
         }
     }
     for (index, lab) in row["secret_labs"]
@@ -300,11 +309,24 @@ fn sim_for(row: &Value, rules: &RuleSet) -> (Simulation, InternedId) {
         for counter in row[key].as_array().into_iter().flatten() {
             let type_id = sim.interner.get(counter[1].as_str().unwrap()).unwrap();
             let category = category(counter[0].as_str().unwrap());
+            let object_type = rules
+                .object_in_category(category.into(), counter[1].as_str().unwrap())
+                .expect("the row's declared counter type");
             let count = int(&counter[2]);
             if active {
-                tracking.set_active_for_test(category, type_id, count);
+                tracking.set_active_native_for_test(
+                    category,
+                    type_id,
+                    object_type.native_type_index(),
+                    count,
+                );
             } else {
-                tracking.set_owned_for_test(category, type_id, count);
+                tracking.set_owned_native_for_test(
+                    category,
+                    type_id,
+                    object_type.native_type_index(),
+                    count,
+                );
             }
         }
     }
@@ -606,11 +628,22 @@ fn retail_slave_miner_meets_proc_and_docks_limit_harriers() {
     sim.resolve_type_handles(rules);
     sim.session
         .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::from_legacy_nonzero(true));
-    let on_map = |sim: &mut Simulation, house, category, name: &str, count| {
+    let on_map = |sim: &mut Simulation, house, category: EntityCategory, name: &str, count| {
         let type_id = sim.interner.get(name).unwrap();
+        let object_type = rules.object_in_category(category.into(), name).unwrap();
         let tracking = sim.houses.get_mut(&house).unwrap().tracking_mut();
-        tracking.set_active_for_test(category, type_id, count);
-        tracking.set_owned_for_test(category, type_id, count);
+        tracking.set_active_native_for_test(
+            category,
+            type_id,
+            object_type.native_type_index(),
+            count,
+        );
+        tracking.set_owned_native_for_test(
+            category,
+            type_id,
+            object_type.native_type_index(),
+            count,
+        );
     };
 
     let yuri = sim.interner.intern("YuriCountry");

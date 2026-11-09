@@ -1672,12 +1672,11 @@ fn owned_building_present(sim: &Simulation, rules: &RuleSet, owner: InternedId, 
     use crate::rules::object_type::ObjectCategory;
     rules
         .object_in_category(ObjectCategory::Building, id)
-        .and_then(|building| sim.interner.get(&building.id))
         .zip(sim.houses.get(&owner))
         .is_some_and(|(building, house)| {
             house
                 .tracking()
-                .active_count(EntityCategory::Structure, building)
+                .active_count_native(EntityCategory::Structure, building.native_type_index())
                 > 0
         })
 }
@@ -1802,15 +1801,12 @@ fn owned_techno_present(sim: &Simulation, rules: &RuleSet, owner: InternedId, id
         {
             return count > 0;
         }
-        sim.interner
-            .get(&object.id)
-            .zip(sim.houses.get(&owner))
-            .is_some_and(|(type_id, house)| {
-                house
-                    .tracking()
-                    .count_owned_present_and_limboed(entity_category, type_id)
-                    > 0
-            })
+        sim.houses.get(&owner).is_some_and(|house| {
+            house
+                .tracking()
+                .count_owned_present_and_limboed_native(entity_category, object.native_type_index())
+                > 0
+        })
     })
 }
 
@@ -1830,7 +1826,7 @@ pub(crate) fn provided_supers<'r>(
     building: &crate::sim::game_entity::GameEntity,
 ) -> impl Iterator<Item = &'r str> + use<'r> {
     let owner = building.owner();
-    building_super_weapon_slots(rules, sim.object_type(building.type_ref(), rules))
+    building_super_weapon_slots(rules, sim.entity_object_type(building, rules))
         .flatten()
         .filter(move |name| super_weapon_available(sim, rules, owner, name))
 }
@@ -1857,7 +1853,7 @@ pub(crate) fn building_super_weapon_slots<'r>(
     let sdk = additional
         .then(|| {
             object
-                .and_then(|object| rules.building_type_index(&object.id))
+                .map(|object| object.native_type_index())
                 .and_then(|index| usize::try_from(index).ok())
                 .and_then(|index| rules.additional_super_weapon_indices(index))
         })

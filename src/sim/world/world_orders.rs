@@ -215,12 +215,7 @@ impl Simulation {
                     .entities
                     .get(actor_id)
                     .and_then(|actor| self.entity_object_type(actor, rules))
-                    .and_then(|ty| {
-                        rules.type_array_index(
-                            crate::rules::object_type::ObjectCategory::Infantry,
-                            &ty.id,
-                        )
-                    });
+                    .map(|ty| ty.native_type_index());
                 if let Some(index) = captor_type
                     && let Some(target) = self.substrate.entities.get_mut(target_id)
                 {

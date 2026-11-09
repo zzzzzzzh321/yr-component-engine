@@ -54,7 +54,7 @@ pub(crate) fn spawn_building_free_unit(
             if entity.category() != EntityCategory::Structure || entity.death.is_dying() {
                 return None;
             }
-            let object = sim.object_type(entity.type_ref(), rules)?;
+            let object = sim.entity_object_type(entity, rules)?;
             let human = sim
                 .houses
                 .get(&entity.owner())

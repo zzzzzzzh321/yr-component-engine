@@ -33,15 +33,55 @@ pub(super) enum ComponentOrigin {
 }
 
 impl Simulation {
-    /// Actual receiver's constructor type; unlike the name-only convenience
-    /// lookup, this preserves GetTechnoType's class registry (Infantry51FAF0).
+    /// Actual receiver's Type pointer, including equal stored IDs within one
+    /// class array. Infantry517A6E, Unit7353E6, Aircraft413D3A and
+    /// Building43B756 store the selected constructor argument unchanged.
     pub fn entity_object_type<'r>(
         &self,
         entity: &GameEntity,
         rules: &'r RuleSet,
     ) -> Option<&'r ObjectType> {
-        self.interner
-            .object_type_in_category(entity.type_ref(), entity.category().into(), rules)
+        let category = entity.category().into();
+        let index = entity.type_facts.native_type_index();
+        if index >= 0 {
+            return rules.type_array_at(category, index).filter(|object| {
+                self.interner
+                    .try_resolve(entity.type_ref())
+                    .is_some_and(|name| object.id.eq_ignore_ascii_case(name))
+            });
+        }
+        // Only name-only fixtures lack a constructor stamp. A live engine
+        // must never silently repair an absent/invalid saved pointer by name.
+        #[cfg(any(test, feature = "test-support"))]
+        return self
+            .interner
+            .object_type_in_category(entity.type_ref(), category, rules);
+        #[cfg(not(any(test, feature = "test-support")))]
+        None
+    }
+
+    pub(crate) fn validate_entity_type_bindings(
+        &self,
+        rules: &RuleSet,
+    ) -> Result<(), crate::sim::snapshot::SnapshotRestoreError> {
+        // Original subclass Load521AB7/7445C7/41B591/453F34 swizzles the
+        // retained Type FIELD before gameplay. Validate against that same
+        // reconstructed Rules generation, including limbo/Factory objects.
+        for (object_id, entity) in self.substrate.entities.iter_sorted() {
+            if entity.type_facts.native_type_index() < 0
+                && cfg!(any(test, feature = "test-support"))
+            {
+                continue;
+            }
+            if self.entity_object_type(entity, rules).is_none() {
+                return Err(
+                    crate::sim::snapshot::SnapshotRestoreError::InvalidTechnoTypeIdentity {
+                        object_id,
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn construct_runtime_techno(
@@ -651,10 +691,11 @@ pub struct TypeFacts {
     /// (`RulesClass__ReadAI @ 0x00672AE0`, `0x00672B14..0x00672C01`).
     #[serde(default)]
     build_const_eligible: bool,
-    /// The BuildingType registry index ordered House BasePlan nodes use;
-    /// `-1` for any other type.
-    #[serde(default = "default_base_plan_type_index")]
-    base_plan_type_index: i32,
+    /// The concrete native class-array slot, retained through held production,
+    /// placement and conversion. Building BasePlans read this same index.
+    /// Renaming the old Building-only field also changes the save layout.
+    #[serde(default = "default_native_type_index")]
+    native_type_index: i32,
     /// `IsBaseDefense=` (`BuildingType+0x1706`).
     #[serde(default)]
     base_plan_is_defense: bool,
@@ -668,7 +709,7 @@ fn default_foundation() -> crate::rules::foundation::Foundation {
     crate::rules::foundation::Foundation::default()
 }
 
-fn default_base_plan_type_index() -> i32 {
+fn default_native_type_index() -> i32 {
     -1
 }
 
@@ -683,7 +724,7 @@ impl TypeFacts {
                 .then(crate::rules::object_type::BuildingHiddenOccupancyProfile::default),
             base_reservation_spacing: None,
             build_const_eligible: false,
-            base_plan_type_index: default_base_plan_type_index(),
+            native_type_index: default_native_type_index(),
             base_plan_is_defense: false,
             base_plan_has_undeploy_target: false,
         }
@@ -695,11 +736,11 @@ impl TypeFacts {
         self.spawned_non_missile_aircraft =
             category == EntityCategory::Aircraft && obj.spawned && !obj.missile_spawn;
         self.foundation = obj.foundation.clone();
+        self.native_type_index = obj.native_type_index();
         if category == EntityCategory::Structure {
             self.building_hidden_occupancy = Some(obj.hidden_occupancy);
             self.base_reservation_spacing = obj.base_reservation_spacing;
             self.build_const_eligible = obj.build_const_eligible;
-            self.base_plan_type_index = obj.base_plan_type_index;
             self.base_plan_is_defense = obj.is_base_defense;
             self.base_plan_has_undeploy_target = obj.undeploys_into.is_some();
         }
@@ -731,9 +772,22 @@ impl TypeFacts {
         self.build_const_eligible
     }
 
-    /// The BuildingType registry index, `-1` for any other type.
+    /// The actual GetTechnoType receiver's class-array index, or an unstamped
+    /// scene object's -1. UnitLoad7445C7 and InfantryLoad521AB7 restore their
+    /// exact Type pointers through Swizzle6CF240 rather than another ID find.
+    pub(crate) fn native_type_index(&self) -> i32 {
+        self.native_type_index
+    }
+
+    /// A name-only fixture replacement has not selected a native array slot.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn clear_native_type_index_for_test(&mut self) {
+        self.native_type_index = -1;
+    }
+
+    /// The BuildingType index consumed by Building-only BasePlan callers.
     pub(crate) fn base_plan_type_index(&self) -> i32 {
-        self.base_plan_type_index
+        self.native_type_index
     }
 
     /// `IsBaseDefense=`.
@@ -776,7 +830,7 @@ impl TypeFacts {
     /// Install a fixture's `base_plan_type_index`.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_base_plan_type_index_for_test(&mut self, value: i32) {
-        self.base_plan_type_index = value;
+        self.native_type_index = value;
     }
 
     /// Install a fixture's `base_plan_is_defense`.

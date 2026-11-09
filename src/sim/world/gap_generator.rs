@@ -136,7 +136,7 @@ impl Simulation {
         if entity.category() != EntityCategory::Structure {
             return None;
         }
-        let object = self.interner.object_type(entity.type_ref(), rules)?;
+        let object = self.entity_object_type(entity, rules)?;
         let facts = power_system::OperationalFacts {
             // `0x004555DA`: an offline building (independent latch) is not
             // operational unless two retained Tesla chargers bypass it.
@@ -177,7 +177,7 @@ impl Simulation {
         if !entity.lifecycle.object_alive() || entity.lifecycle.in_limbo() {
             return None;
         }
-        let object = self.interner.object_type(entity.type_ref(), rules)?;
+        let object = self.entity_object_type(entity, rules)?;
         object
             .gap_generator
             .then(|| {
@@ -372,7 +372,7 @@ impl Simulation {
         if entity.category() != EntityCategory::Structure {
             return None;
         }
-        let object = self.interner.object_type(entity.type_ref(), rules)?;
+        let object = self.entity_object_type(entity, rules)?;
         if !object.gap_generator {
             return None;
         }
@@ -404,7 +404,7 @@ impl Simulation {
         let Some(entity) = self.substrate.entities.get(id) else {
             return;
         };
-        let Some(object) = self.interner.object_type(entity.type_ref(), rules) else {
+        let Some(object) = self.entity_object_type(entity, rules) else {
             return;
         };
         if !object.gap_generator || object.super_gap_radius_in_cells == 0 {
@@ -630,7 +630,7 @@ impl Simulation {
     /// exists and its type is a `GapGenerator=`.
     fn map_callback_gap_radius(&self, id: u64, rules: &RuleSet) -> Option<i32> {
         let entity = self.substrate.entities.get(id)?;
-        let object = self.interner.object_type(entity.type_ref(), rules)?;
+        let object = self.entity_object_type(entity, rules)?;
         object
             .gap_generator
             .then(|| i32::from(object.gap_radius_in_cells))

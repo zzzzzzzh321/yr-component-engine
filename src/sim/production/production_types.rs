@@ -147,7 +147,14 @@ impl ProductionSelection {
         };
         Some(Self {
             rtti,
-            type_index: rules.type_array_index(object.category, &object.id)?,
+            type_index: {
+                let index = object.native_type_index();
+                rules
+                    .type_array_at(object.category, index)?
+                    .id
+                    .eq_ignore_ascii_case(&object.id)
+                    .then_some(index)?
+            },
             naval: object.naval,
         })
     }

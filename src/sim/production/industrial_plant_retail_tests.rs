@@ -11,9 +11,7 @@ use crate::sim::command::{Command, CommandEnvelope};
 use crate::sim::intern::InternedId;
 use crate::sim::mission::MissionType;
 use crate::sim::world::{FrameEffects, Simulation, TickLane};
-use crate::skirmish_launch::{
-    AiDifficulty, LaunchCountry, LaunchStartPosition, SkirmishLaunchOptions,
-};
+use crate::skirmish_launch::{AiDifficulty, LaunchCountry, LaunchStartPosition, SkirmishLaunchOptions};
 use std::collections::BTreeSet;
 
 const OWNER: &str = "VERA-OBSERVER";
@@ -314,9 +312,15 @@ fn stock_plant_gain_and_sale_preserve_tank_debt_and_settle_current_price() {
                 );
                 assert!(sim.entities().get(id).is_none());
                 assert_eq!(
-                    sim.production
-                        .factories()
-                        .count_total(owner, CATEGORY, tank),
+                    sim.production.factories().count_total(
+                        owner,
+                        CATEGORY,
+                        (
+                            crate::rules::object_type::ObjectCategory::Vehicle,
+                            rules.object("HTNK").unwrap().native_type_index()
+                        ),
+                        None
+                    ),
                     0
                 );
                 if step == 12100 {

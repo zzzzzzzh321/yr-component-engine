@@ -68,6 +68,10 @@ mod command_bar_sound_rules_tests;
 #[path = "multiplayer_rules_tests.rs"]
 mod multiplayer_rules_tests;
 
+#[cfg(test)]
+#[path = "native_techno_identity_tests.rs"]
+mod native_techno_identity_tests;
+
 /// Country-level fields needed by gameplay systems.
 #[derive(Debug, Clone)]
 pub struct CountryRules {
@@ -4606,6 +4610,23 @@ pub struct TypeWeapons {
 }
 
 impl TypeWeapons {
+    /// Techno7129F2 stores actual Weapon factory results. The retained native
+    /// slots are projected once, without resolving equal stored IDs again.
+    pub(crate) fn from_native_slots(
+        rules_serial: u64,
+        base: impl IntoIterator<Item = Option<usize>>,
+        elite: impl IntoIterator<Item = Option<usize>>,
+    ) -> Self {
+        let handle =
+            |index| WeaponHandle(u32::try_from(index).expect("native Weapon index exceeds dword"));
+        Self {
+            rules_serial,
+            base: base.into_iter().map(|slot| slot.map(handle)).collect(),
+            elite: elite.into_iter().map(|slot| slot.map(handle)).collect(),
+            occupy: [None; 2],
+        }
+    }
+
     /// The base or, `elite`, the elite record at `index`.
     #[inline]
     pub(crate) fn slot(&self, index: usize, elite: bool) -> ResolvedWeapon {
@@ -4703,21 +4724,25 @@ pub struct RuleSet {
     >,
     /// All game objects in registry insertion order, indexed by `TypeHandle`.
     object_list: Vec<ObjectType>,
+    /// Immutable binding projection of each ProcessedType.body, parallel to
+    /// object_list. Only construction from the retained process owner writes it.
+    object_read_sections: Vec<IniSection>,
+    /// Derived exact class-array slot to handle index. Name lookup caches below
+    /// contain first aliases; they are never the authority for resolved slots.
+    native_type_arrays: [Vec<TypeHandle>; 4],
     /// Uppercase type ID → handle. Uppercase keys give O(1) case-insensitive
     /// resolution, matching the engine's case-insensitive find-or-allocate.
     object_index: LookupMap<String, TypeHandle>,
     /// Distinct for every `RuleSet` the process builds, so a cache of this
     /// set's handles can tell it from another set ([`Self::serial`]).
     serial: u64,
-    /// Per-native-registry identity authority. Unlike the broad lookup above,
-    /// this retains distinct types when malformed/custom rules list the same
-    /// ID in more than one category.
+    /// First case-insensitive stored-ID alias within each native class. Exact
+    /// pointer-bearing callers use native_type_arrays, not this name cache.
     object_category_index: HashMap<(ObjectCategory, String), TypeHandle>,
     /// Read-only projection of the process owner's global TechnoType array.
     /// Constructor order can interleave categories across lazy allocations
-    /// and later Rules passes; it is not TYPE_REGISTRIES order. An absent
-    /// handle records a native slot the older name-based object projection
-    /// cannot represent uniquely, so exact lookup must not silently alias it.
+    /// and later Rules passes; it is not TYPE_REGISTRIES order. Every actual
+    /// native slot retains its exact projected handle, including equal IDs.
     native_techno_type_order: Vec<(ObjectCategory, String, Option<TypeHandle>)>,
     /// Case-insensitive identity of each type in the four native TechnoType
     /// registries to its ordered array index (`+0xDF8`).
@@ -5082,7 +5107,7 @@ pub struct RuleSet {
     animation_sequence_by_handle: Vec<Option<crate::rules::animation_sequence::SequenceSet>>,
     /// Original UnitType fixed-ART read state. The animation catalog derives
     /// its supported frame projection here; asset installation never rereads it.
-    unit_shp_read_states: BTreeMap<String, crate::rules::shp_vehicle_sequence::UnitShpReadState>,
+    unit_shp_read_states: Vec<crate::rules::shp_vehicle_sequence::UnitShpReadState>,
     /// Per-mission behaviour table parsed from the `[<MissionName>]` sections
     /// (Rate/AARate + NoThreat/Zombie/Recruitable/Paralyzed/Retaliate/Scatter).
     pub mission_control: MissionControl,
@@ -5466,17 +5491,12 @@ impl RuleSet {
         }
         // Every resource has been admitted before changing effective geometry.
         // TypeFacts and all spatial consumers continue using this one value.
-        for (name, foundation) in foundations {
-            if let Some(object) = self
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Building && object.id == name)
-            {
-                object.foundation = foundation;
-                object.base_reservation_spacing = object
-                    .base_reservation_writer_eligible()
-                    .then_some(self.ai_base_spacing);
-            }
+        for (handle, foundation) in foundations {
+            let object = &mut self.object_list[handle.0 as usize];
+            object.foundation = foundation;
+            object.base_reservation_spacing = object
+                .base_reservation_writer_eligible()
+                .then_some(self.ai_base_spacing);
         }
         for (name, policy) in projectile_policies {
             self.projectiles
@@ -5607,9 +5627,8 @@ impl RuleSet {
             .object_list
             .iter()
             .map(|object| {
-                let declaration = self
-                    .type_array_index(object.category, &object.id)
-                    .and_then(|index| u32::try_from(index).ok())
+                let declaration = u32::try_from(object.native_type_index())
+                    .ok()
                     .and_then(|index| declarations.get(&(object.category, index)))
                     .cloned()
                     .unwrap_or_default();
@@ -5664,10 +5683,7 @@ impl RuleSet {
             let Some(object) = self.object(type_id) else {
                 return [None, None];
             };
-            let Some(ordinal) = self
-                .type_array_index(object.category, &object.id)
-                .and_then(|index| u32::try_from(index).ok())
-            else {
+            let Some(ordinal) = u32::try_from(object.native_type_index()).ok() else {
                 return [None, None];
             };
             let category = match object.category {
@@ -5719,7 +5735,7 @@ impl RuleSet {
     }
     fn collect_foundation_resource_bindings(
         &self,
-    ) -> Result<Vec<(String, crate::rules::foundation::Foundation)>, String> {
+    ) -> Result<Vec<(TypeHandle, crate::rules::foundation::Foundation)>, String> {
         use crate::rules::foundation::Foundation;
         use vera_mod_api::{
             FixedIniSource, FoundationResourceContext, FoundationResourcePolicy,
@@ -5746,7 +5762,13 @@ impl RuleSet {
                 };
                 program
                     .foundation_resource_policy(&FoundationResourceContext { building })
-                    .map(|policy| (name.clone(), policy))
+                    .map(|policy| {
+                        (
+                            self.native_type_arrays[ObjectCategory::Building as usize][ordinal],
+                            name.clone(),
+                            policy,
+                        )
+                    })
             })
             .collect::<Result<Vec<_>, String>>()?;
         let source = self.fixed_art_source.as_deref();
@@ -5754,7 +5776,7 @@ impl RuleSet {
         // Validate all references before parsing even one large geometry.
         // Earlier seed references remain valid: readpoint history is an input
         // to the component, not an authorization list for immutable resources.
-        for (name, policy) in &policies {
+        for (_, name, policy) in &policies {
             match policy {
                 None => {}
                 Some(FoundationResourcePolicy::Stock { selector }) => {
@@ -5782,8 +5804,8 @@ impl RuleSet {
         }
         policies
             .into_iter()
-            .filter_map(|(name, policy)| policy.map(|policy| (name, policy)))
-            .map(|(name, policy)| {
+            .filter_map(|(handle, name, policy)| policy.map(|policy| (handle, name, policy)))
+            .map(|(handle, name, policy)| {
                 let foundation = match policy {
                     FoundationResourcePolicy::Stock { selector } => Foundation::Stock(selector),
                     FoundationResourcePolicy::ArtSection { reference } => {
@@ -5797,7 +5819,7 @@ impl RuleSet {
                 if !foundation.valid() {
                     return Err(format!("invalid custom foundation resource for {name}"));
                 }
-                Ok((name, foundation))
+                Ok((handle, foundation))
             })
             .collect()
     }
@@ -6504,96 +6526,15 @@ impl RuleSet {
                 processed.side_projection(),
             ),
         )?;
-        let mut native_identity_counts = HashMap::new();
-        for (category, id, _) in processed.techno_type_states() {
-            *native_identity_counts
-                .entry((category, id.to_ascii_uppercase()))
-                .or_insert(0usize) += 1;
-        }
-        for (category, id, tech_level) in processed.techno_type_states() {
-            let key = (category, id.to_ascii_uppercase());
-            let object = rules
-                .object_category_index
-                .get(&key)
-                .copied()
-                .filter(|handle| rules.object_by_handle(*handle).id == id);
-            if let Some(object) = object {
-                // TechnoType+634 is retained typed state, not a merged INI
-                // default: reached ReadINI714570 and outgoing106 handoff.
-                // Equal truncated stored IDs share one projected object, which
-                // the last such member's body built; its value is written last.
-                rules.object_list[object.0 as usize].tech_level = tech_level;
-            }
-            let handle = object.filter(|_| native_identity_counts[&key] == 1);
-            rules
-                .native_techno_type_order
-                .push((category, id.to_owned(), handle));
-        }
-        for (category, id, coefficients) in processed.techno_threat_coefficients() {
-            let key = (category, id.to_ascii_uppercase());
-            if let Some(handle) = rules.object_category_index.get(&key).copied()
-                && rules.object_by_handle(handle).id == id
-            {
-                rules.object_list[handle.0 as usize].project_threat_coefficients(coefficients);
-            }
-        }
-        for (category, name, slots) in processed.weapon_slot_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.turret_count = slots.turret_count();
-                object.weapon_count = slots.weapon_count();
-                // Techno ReadINI7129F2 stores the factory's actual pointer;
-                // Weapon772FA0 may allocate distinct equal stored IDs.
-                let base = slots.base();
-                let elite = slots.elite();
-                let name = |index: usize| rules.weapon_types[index].id.clone();
-                object.weapon_list = base.iter().map(|slot| slot.map(&name)).collect();
-                object.elite_weapon_list = elite.iter().map(|slot| slot.map(&name)).collect();
-                object.project_resolved_weapons(TypeWeapons {
-                    rules_serial: rules.serial,
-                    base: base
-                        .into_iter()
-                        .map(|slot| {
-                            slot.map(|index| {
-                                WeaponHandle(
-                                    u32::try_from(index)
-                                        .expect("native Weapon index exceeds dword"),
-                                )
-                            })
-                        })
-                        .collect(),
-                    elite: elite
-                        .into_iter()
-                        .map(|slot| {
-                            slot.map(|index| {
-                                WeaponHandle(
-                                    u32::try_from(index)
-                                        .expect("native Weapon index exceeds dword"),
-                                )
-                            })
-                        })
-                        .collect(),
-                    occupy: [None; 2],
-                });
-                object.bind_weapon_offsets(slots.offsets());
-            }
-        }
-        // Phobos TechnoTypeExt reads insignia keys on every reached pass, so
-        // the processor's accumulated state is the owner, not a projection of
-        // the final merged section.
-        #[cfg(feature = "phobos")]
-        for (category, name, insignia) in processed.techno_insignia_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.phobos_insignia = insignia.clone();
-            }
-        }
+        // TechnoType71181D appends each real allocation to the shared array;
+        // family slots resolve directly even when stored24 IDs coincide.
+        rules.native_techno_type_order = processed
+            .techno_states()
+            .map(|state| {
+                let handle = rules.native_type_arrays[state.category as usize][state.ordinal];
+                (state.category, state.id.to_owned(), Some(handle))
+            })
+            .collect();
         rules.crate_rules = processed.crate_rules().clone();
         rules.powerups = processed.powerups().clone();
         rules.general.metallic_debris = processed.metallic_debris().to_vec();
@@ -6684,96 +6625,6 @@ impl RuleSet {
                 warhead.particle_system = particle_system.map(str::to_owned);
             }
         }
-        for (
-            category,
-            name,
-            emp,
-            abilities,
-            attachment,
-            cloak_allowed,
-            turret_rot,
-            aircraft_crashable,
-        ) in processed.ares_techno_states()
-        {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.bind_ares_techno_rules(
-                    emp,
-                    abilities,
-                    attachment,
-                    cloak_allowed,
-                    turret_rot,
-                    aircraft_crashable,
-                );
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (category, name, enabled, options) in processed.ares_spotlight_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
-                rules.object_list[handle.0 as usize].bind_ares_spotlight(enabled, options);
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (category, name, retained) in processed.super_weapon_techno_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
-                rules.object_list[handle.0 as usize].bind_super_weapon_techno_rules(
-                    retained.designator_range,
-                    retained.inhibitor_range,
-                    retained.hunter_seeker_ignore,
-                );
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (category, name, group) in processed.selection_group_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
-                rules.object_list[handle.0 as usize].bind_selection_group(group);
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (category, name, driver) in processed.driver_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
-                rules.object_list[handle.0 as usize].bind_driver_rules(driver);
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (category, name, bounty) in processed.bounty_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
-                rules.object_list[handle.0 as usize].bind_bounty_rules(bounty);
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (category, name, crew) in processed.crew_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
-                rules.object_list[handle.0 as usize].bind_crew_rules(crew);
-            }
-        }
         for (name, ares) in processed.ares_warhead_states() {
             if let Some(warhead) = rules
                 .warheads
@@ -6784,17 +6635,10 @@ impl RuleSet {
             }
         }
         for (category, name, armor) in processed.object_armor_states() {
-            if let Some(category) = category {
-                if let Some(handle) = rules
-                    .object_category_index
-                    .get(&(category, name.to_ascii_uppercase()))
-                    .copied()
-                {
-                    rules.object_list[handle.0 as usize].bind_armor(armor);
-                }
-            } else if let Some(terrain) = rules
-                .terrain_object_types
-                .get_mut(&name.to_ascii_uppercase())
+            if category.is_none()
+                && let Some(terrain) = rules
+                    .terrain_object_types
+                    .get_mut(&name.to_ascii_uppercase())
             {
                 terrain.bind_armor(armor);
             }
@@ -6846,157 +6690,6 @@ impl RuleSet {
                 });
             rules.weapon_array.push((weapon.id.to_owned(), unambiguous));
         }
-        for (name, speed_type) in processed.unit_speed_type_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Vehicle && object.id == name)
-            {
-                object.speed_type = speed_type;
-            }
-        }
-        for (category, name, airstrike) in processed.airstrike_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.airstrike = airstrike.clone();
-            }
-        }
-        for (category, name, recoil) in processed.recoil_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.recoil = recoil;
-            }
-        }
-        for (category, name, segments) in processed.radial_fire_segments_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.radial_fire_segments = segments;
-            }
-        }
-        for (category, name, offset) in processed.lepton_mind_control_offset_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.lepton_mind_control_offset = offset;
-            }
-        }
-        for (category, name, prerequisite, prerequisite_override) in processed.prerequisite_states()
-        {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.prerequisite = prerequisite.to_vec();
-                object.prerequisite_override = prerequisite_override.to_vec();
-            }
-        }
-        for (category, name, gunner_turrets) in processed.gunner_turret_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.gunner = gunner_turrets.is_gunner();
-                object.gunner_turrets = gunner_turrets.clone();
-            }
-        }
-        for (category, name, is_gattling, stages) in processed.gattling_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.is_gattling = is_gattling;
-                object.gattling_stages = *stages;
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (category, name, state) in processed.factory_owner_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.project_factory_owners(state);
-            }
-        }
-        #[cfg(feature = "ares")]
-        for (name, state) in processed.explicit_factory_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Building && object.id == name)
-            {
-                object.project_explicit_factory(state);
-            }
-        }
-        for (category, name, references, image) in processed.techno_reference_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.project_image_state(image);
-                references.apply_to(object);
-            }
-        }
-        for (category, name, shadow_index) in processed.voxel_shadow_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == category && object.id == name)
-            {
-                object.set_voxel_shadow_index(shadow_index);
-            }
-        }
-        for (name, pips) in processed.infantry_pip_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Infantry && object.id == name)
-            {
-                object.project_infantry_pips(pips);
-            }
-        }
-        for (name, art) in processed.infantry_art_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Infantry && object.id == name)
-            {
-                object.project_infantry_art(art);
-            }
-        }
-        for (name, bank) in processed.infantry_sequence_banks() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Infantry && object.id == name)
-            {
-                object.project_infantry_sequence_bank(bank);
-            }
-        }
-        for (name, flags) in processed.infantry_infiltration_states() {
-            if let Some(object) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Infantry && object.id == name)
-            {
-                object.project_infantry_infiltration(flags);
-            }
-        }
         rules.anim_type_art_read_states = processed
             .anim_type_art_read_states()
             .map(|(name, read)| (name.to_owned(), read))
@@ -7025,86 +6718,8 @@ impl RuleSet {
             .collect();
         rules.unit_shp_read_states = processed
             .unit_shp_read_states()
-            .map(|(name, state)| (name.to_owned(), *state))
+            .map(|(_, state)| *state)
             .collect();
-        // Building ctor45DF13 / ReadINI461225..46125D: the process-resident
-        // owner retained +EF0 across reached rules passes and exact ART reads.
-        // Projection receives its result; RULES Foundation is not an input.
-        for (name, config) in processed.secret_lab_states() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Building && object.id == name)
-            {
-                building.set_secret_lab(config.clone());
-            }
-        }
-        for (name, foundation_id) in processed.building_foundation_geometries() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Building && object.id == name)
-            {
-                building.foundation = foundation_id.clone();
-                building.base_reservation_spacing = building
-                    .base_reservation_writer_eligible()
-                    .then_some(rules.ai_base_spacing);
-            }
-        }
-        for (name, flag) in processed.building_spotlight_flags() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|o| o.category == ObjectCategory::Building && o.id == name)
-            {
-                building.has_spotlight = flag;
-            }
-        }
-        for (name, light) in processed.building_light_states() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|o| o.category == ObjectCategory::Building && o.id == name)
-            {
-                building.project_building_light(light);
-            }
-        }
-        for (name, upgrade) in processed.building_upgrade_states() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|o| o.category == ObjectCategory::Building && o.id == name)
-            {
-                building.project_building_upgrade(upgrade.clone());
-            }
-        }
-        for (name, extra_power) in processed.building_extra_power_states() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Building && object.id == name)
-            {
-                building.extra_power = extra_power;
-            }
-        }
-        for (name, offset) in processed.building_target_coord_offsets() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Building && object.id == name)
-            {
-                building.set_target_coord_offset(offset);
-            }
-        }
-        for (name, location1, location2) in processed.building_half_damage_smoke_locations() {
-            if let Some(building) = rules
-                .object_list
-                .iter_mut()
-                .find(|object| object.category == ObjectCategory::Building && object.id == name)
-            {
-                building.set_half_damage_smoke_locations(location1, location2);
-            }
-        }
         // The registry processor owns native read timing and retained values;
         // the runtime definition receives that result, not another ART read.
         for (name, art, image) in processed.projectile_art_states() {
@@ -7170,14 +6785,6 @@ impl RuleSet {
                     .phobos_super_weapon_metadata
                     .insert(name.to_ascii_uppercase(), availability);
             }
-            for (name, gathering) in processed.ore_gathering_states() {
-                if let Some(unit) = rules.object_list.iter_mut().find(|object| {
-                    object.category == ObjectCategory::Vehicle
-                        && object.id.eq_ignore_ascii_case(name)
-                }) {
-                    unit.project_ore_gathering(gathering);
-                }
-            }
         }
         #[cfg(feature = "ares")]
         {
@@ -7224,14 +6831,6 @@ impl RuleSet {
                     .find(|sw| sw.id.eq_ignore_ascii_case(name))
                 {
                     sw.presentation = presentation.clone();
-                }
-            }
-            for (name, supers) in processed.additional_super_weapon_states() {
-                if let Some(building) = rules.object_list.iter_mut().find(|object| {
-                    object.category == ObjectCategory::Building
-                        && object.id.eq_ignore_ascii_case(name)
-                }) {
-                    building.project_additional_super_weapons(supers);
                 }
             }
         }
@@ -7297,11 +6896,8 @@ impl RuleSet {
         }
     }
 
-    /// The `ids` whose Type has an object of `category`. The ordered Rules
-    /// processor allocates a Type for each token its factory misses, and
-    /// native keeps it in the list; VERA's projection builds no object for
-    /// some of them (a token with surrounding spaces) and drops them here, an
-    /// approved exclusion that retail never reaches.
+    /// The `ids` found in the native array of `category`. This is a name
+    /// lookup; already-resolved Type records retain their actual array index.
     pub(crate) fn ids_with_objects(&self, ids: &[String], category: ObjectCategory) -> Vec<String> {
         ids.iter()
             .filter(|id| {
@@ -7532,8 +7128,10 @@ impl RuleSet {
                     .flatten();
             }
         }
-        for object in &mut self.object_list {
-            let section = ini.section(&object.id);
+        for (object, body) in self.object_list.iter_mut().zip(&self.object_read_sections) {
+            // Bind the same slot's admitted body. Flattened equal-ID sections
+            // can belong to a later allocation or a different native class.
+            let section = Some(body);
             object.bind_scalar_sound_references(section, sounds);
             object.bind_deploy_voice_references(section, sounds);
             object.bind_order_voice_references(section, sounds);
@@ -7723,7 +7321,10 @@ impl RuleSet {
         country_side_registry: ProjectedCountrySideRegistry,
     ) -> Result<Self, RulesError> {
         let ini = processed.ini();
+        let serial = next_rule_set_serial();
         let mut object_list: Vec<ObjectType> = Vec::new();
+        let mut object_read_sections = Vec::new();
+        let mut native_type_arrays: [Vec<TypeHandle>; 4] = std::array::from_fn(|_| Vec::new());
         let mut object_index: LookupMap<String, TypeHandle> = LookupMap::default();
         let mut object_category_index: HashMap<(ObjectCategory, String), TypeHandle> =
             HashMap::new();
@@ -7891,67 +7492,38 @@ impl RuleSet {
             crate::rules::house_colors::HouseColorRamps::from_schemes(&color_schemes);
         let color_add = processed.color_add_state().0.clone();
 
-        // Step 1: Parse each type registry and load object sections.
+        // Abstract410A60/Object5F92D0/Techno712170 admit each instance's
+        // own retained body. A missing body still leaves a constructor-owned
+        // Type in its class array; stored-ID aliases never replace a slot.
         for &(registry_name, category) in TYPE_REGISTRIES {
-            let ids: Vec<String> = parse_registry(ini, registry_name);
-            log::info!("Registry [{}]: {} entries", registry_name, ids.len());
-
-            for (registry_index, id) in ids.iter().enumerate() {
+            let mut ids = Vec::new();
+            for state in processed
+                .techno_states()
+                .filter(|state| state.category == category)
+            {
+                assert_eq!(state.ordinal, ids.len());
+                let mut object = state.project(serial);
+                object.base_reservation_spacing = object
+                    .base_reservation_writer_eligible()
+                    .then_some(ai_base_spacing);
+                let handle = TypeHandle(
+                    u32::try_from(object_list.len()).expect("TechnoType handles exceed dword"),
+                );
+                let key = state.id.to_ascii_uppercase();
+                let category_key = (category, key.clone());
                 type_array_indices
-                    .entry((category, id.to_ascii_uppercase()))
-                    .or_insert(registry_index as i32);
-                if let Some(section) = ini.section(id) {
-                    let mut obj: ObjectType = ObjectType::from_ini_section(id, section, category);
-                    if category == ObjectCategory::Building {
-                        obj.base_plan_type_index = type_array_indices
-                            .get(&(category, id.to_ascii_uppercase()))
-                            .copied()
-                            .expect("BuildingType index was registered above");
-                    }
-                    if obj.base_reservation_writer_eligible() {
-                        obj.base_reservation_spacing = Some(ai_base_spacing);
-                    }
-                    let key = id.to_ascii_uppercase();
-                    let category_key = (category, key.clone());
-                    // Find-or-allocate is per native type registry. A duplicate
-                    // within one registry reuses its slot; the same ID in a
-                    // different registry remains a distinct native type.
-                    let handle = match object_category_index.get(&category_key).copied() {
-                        Some(TypeHandle(idx)) => {
-                            log::warn!(
-                                "Object '{}' merges onto an existing case-duplicate {:?} type",
-                                id,
-                                category,
-                            );
-                            object_list[idx as usize] = obj;
-                            TypeHandle(idx)
-                        }
-                        None => {
-                            let handle = TypeHandle(object_list.len() as u32);
-                            object_list.push(obj);
-                            object_category_index.insert(category_key, handle);
-                            handle
-                        }
-                    };
-                    if object_index.get(&key).is_some_and(|prior| *prior != handle) {
-                        log::warn!(
-                            "Object '{}' is registered in multiple native type categories",
-                            id
-                        );
-                    }
-                    // Preserve the pre-existing broad lookup's later-registry
-                    // winner for callers that do not own a category order.
-                    object_index.insert(key, handle);
-                } else {
-                    log::trace!(
-                        "Object '{}' listed in [{}] but has no section",
-                        id,
-                        registry_name
-                    );
-                }
+                    .entry(category_key.clone())
+                    .or_insert(object.native_type_index());
+                let alias = *object_category_index.entry(category_key).or_insert(handle);
+                // Keep broad lookup's existing later-category precedence, but
+                // within each native class Find returns the first stored ID.
+                object_index.insert(key, alias);
+                native_type_arrays[category as usize].push(handle);
+                ids.push(state.id.to_owned());
+                object_read_sections.push(state.body.clone());
+                object_list.push(object);
             }
-
-            // Store ID lists per category.
+            log::info!("Registry [{}]: {} entries", registry_name, ids.len());
             match category {
                 ObjectCategory::Infantry => infantry_ids = ids,
                 ObjectCategory::Vehicle => vehicle_ids = ids,
@@ -8195,8 +7767,10 @@ impl RuleSet {
             sdk_superweapon_sources: Vec::new(),
             effect_resources: Default::default(),
             object_list,
+            object_read_sections,
+            native_type_arrays,
             object_index,
-            serial: next_rule_set_serial(),
+            serial,
             object_category_index,
             native_techno_type_order: Vec::new(),
             type_array_indices,
@@ -8359,7 +7933,7 @@ impl RuleSet {
             alpha_images: crate::rules::alpha_image_assets::AlphaImageCatalog::default(),
             animation_sequences: BTreeMap::new(),
             animation_sequence_by_handle: Vec::new(),
-            unit_shp_read_states: BTreeMap::new(),
+            unit_shp_read_states: Vec::new(),
             mission_control,
             // The boundary-sensitive RulesLayerStack hash.
             source_ini_hash: processed.content_hash(),
@@ -8425,10 +7999,8 @@ impl RuleSet {
     /// scanning TechnoType::Array A8EB04/countA8EB10 backwards. This has
     /// different semantics from broad `object()` and subtype lookup.
     ///
-    /// The old ObjectType projection merges repeated IDs in one category.
-    /// Native can construct those from >24-byte factory inputs. If the last
-    /// native match is one of these unrepresentable identities, return None;
-    /// never redirect the mutation to an earlier/global broad-lookup winner.
+    /// Native can construct equal stored IDs from >24-byte factory inputs.
+    /// Return the actual last matching slot, independently of Find aliases.
     pub(crate) fn native_techno_type_exact(&self, id: &str) -> Option<&ObjectType> {
         self.native_techno_type_order
             .iter()
@@ -8569,8 +8141,8 @@ impl RuleSet {
 
     /// The BuildingType at native array index `index` (`BuildingTypes[index]`,
     /// the index `ObjectType::base_plan_type_index` and BasePlan nodes hold).
-    /// `None` for a negative index, one past the array, or a registered name
-    /// without a section.
+    /// `None` for a negative index or one past the array. Constructor-only
+    /// types remain real entries even when no Rules body has been read.
     pub(crate) fn building_type_at(&self, index: i32) -> Option<&ObjectType> {
         self.type_array_at(ObjectCategory::Building, index)
     }
@@ -8586,7 +8158,7 @@ impl RuleSet {
     /// The ids of one native TechnoType array (`InfantryTypeClass::Array`
     /// `0xA8E34C`, `UnitTypeClass::Array` `0xA83CE4`, `AircraftTypeClass::
     /// Array` `0xA8B21C`, `BuildingTypeClass::Array` `0xA83C6C`), in index
-    /// order: the registry's first spelling of each identity.
+    /// order, including repeated stored IDs from distinct native allocations.
     pub(crate) fn type_array_ids(&self, category: ObjectCategory) -> &[String] {
         match category {
             ObjectCategory::Infantry => &self.infantry_ids,
@@ -8597,17 +8169,16 @@ impl RuleSet {
     }
 
     /// The type at native array index `index` of `category`'s array; `None`
-    /// for a negative index, one past the array, or a registered name
-    /// without a section.
+    /// for a negative index or one past the array. The answer is the actual
+    /// slot, independently of its stored-ID Find alias.
     pub(crate) fn type_array_at(
         &self,
         category: ObjectCategory,
         index: i32,
     ) -> Option<&ObjectType> {
-        let id = self
-            .type_array_ids(category)
-            .get(usize::try_from(index).ok()?)?;
-        self.object_in_category(category, id)
+        let handle =
+            *self.native_type_arrays[category as usize].get(usize::try_from(index).ok()?)?;
+        Some(self.object_by_handle(handle))
     }
 
     /// The native array index (`+0xDF8`) of `id` in `category`'s array.
@@ -9090,6 +8661,16 @@ impl RuleSet {
     /// iteration order (per process for `HashMap`, per target for
     /// `LookupMap`) pick which case variant survives: IDs longer than the
     /// registry's 0x18 stored bytes can differ only by case, and all are kept.
+    /// Hash every retained native slot rather than collapsing equal names in
+    /// maps. Class-array ordinals are gameplay identity; names remain labels.
+    fn object_hash_key(object: &ObjectType) -> (ObjectCategory, i32, String) {
+        (
+            object.category,
+            object.native_type_index(),
+            object.id.to_ascii_uppercase(),
+        )
+    }
+
     fn by_upper_id<'a, T>(entries: impl Iterator<Item = (&'a String, T)>) -> Vec<(String, T)> {
         let mut entries: Vec<_> = entries
             .map(|(id, value)| (id.to_ascii_uppercase(), id, value))
@@ -9278,12 +8859,7 @@ impl RuleSet {
         self.general.threat_coefficient_defaults.hash(&mut hasher);
         self.object_list
             .iter()
-            .map(|object| {
-                (
-                    (object.category, object.id.to_ascii_uppercase()),
-                    object.threat_coefficients(),
-                )
-            })
+            .map(|object| (Self::object_hash_key(object), object.threat_coefficients()))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         b"attack-cursor-disguise-v1".hash(&mut hasher);
@@ -9299,7 +8875,7 @@ impl RuleSet {
             })
             .map(|object| {
                 (
-                    object.id.to_ascii_uppercase(),
+                    Self::object_hash_key(object),
                     object.thief,
                     object.vehicle_thief,
                 )
@@ -9320,7 +8896,7 @@ impl RuleSet {
         self.object_list
             .iter()
             .filter(|object| object.category == ObjectCategory::Building)
-            .map(|object| (object.id.to_ascii_uppercase(), &object.foundation))
+            .map(|object| (Self::object_hash_key(object), &object.foundation))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         // ReadOwners4750D0 retains an explicit zero RequiredHouses mask
@@ -9332,7 +8908,7 @@ impl RuleSet {
             .filter(|object| {
                 object.required_houses.is_empty() && object.required_houses_mask(self) == 0
             })
-            .map(|object| (object.category, object.id.to_ascii_uppercase()))
+            .map(|object| Self::object_hash_key(object))
             .collect();
         if !empty_required_houses.is_empty() {
             empty_required_houses.sort_unstable();
@@ -9360,7 +8936,7 @@ impl RuleSet {
             .iter()
             .map(|object| {
                 (
-                    (object.category, object.id.to_ascii_uppercase()),
+                    Self::object_hash_key(object),
                     (object.is_gattling, object.gattling_stages),
                 )
             })
@@ -9500,7 +9076,7 @@ impl RuleSet {
         self.object_list
             .iter()
             .filter(|object| object.category == ObjectCategory::Building)
-            .map(|object| (object.id.to_ascii_uppercase(), object.building_upgrade()))
+            .map(|object| (Self::object_hash_key(object), object.building_upgrade()))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         // The process registry is admitted only when its retained capability
@@ -9517,7 +9093,7 @@ impl RuleSet {
                 .iter()
                 .map(|object| {
                     (
-                        (object.category, object.id.to_ascii_uppercase()),
+                        Self::object_hash_key(object),
                         object.factory_owners_hash_state(),
                     )
                 })
@@ -9528,12 +9104,7 @@ impl RuleSet {
             b"ares-no-manual-fire-v1".hash(&mut hasher);
             self.object_list
                 .iter()
-                .map(|object| {
-                    (
-                        (object.category, object.id.to_ascii_uppercase()),
-                        object.no_manual_fire(),
-                    )
-                })
+                .map(|object| (Self::object_hash_key(object), object.no_manual_fire()))
                 .collect::<BTreeMap<_, _>>()
                 .hash(&mut hasher);
             b"ares-keep-alive-v1".hash(&mut hasher);
@@ -9547,7 +9118,7 @@ impl RuleSet {
                 })
                 .map(|object| {
                     (
-                        (object.category, object.id.to_ascii_uppercase()),
+                        Self::object_hash_key(object),
                         (
                             object.designator_range(),
                             object.inhibitor_range(),
@@ -9562,12 +9133,7 @@ impl RuleSet {
             }
             self.object_list
                 .iter()
-                .map(|object| {
-                    (
-                        (object.category, object.id.to_ascii_uppercase()),
-                        object.keep_alive(),
-                    )
-                })
+                .map(|object| (Self::object_hash_key(object), object.keep_alive()))
                 .collect::<BTreeMap<_, _>>()
                 .hash(&mut hasher);
             let conversions = self
@@ -9576,7 +9142,7 @@ impl RuleSet {
                 .filter_map(|object| {
                     object
                         .script_conversion()
-                        .map(|target| ((object.category, object.id.to_ascii_uppercase()), target))
+                        .map(|target| (Self::object_hash_key(object), target))
                 })
                 .collect::<BTreeMap<_, _>>();
             if !conversions.is_empty() {
@@ -9592,7 +9158,7 @@ impl RuleSet {
                         object.surface_conversion(false),
                     );
                     (targets.0.is_some() || targets.1.is_some())
-                        .then(|| ((object.category, object.id.to_ascii_uppercase()), targets))
+                        .then(|| (Self::object_hash_key(object), targets))
                 })
                 .collect::<BTreeMap<_, _>>();
             if !surface_conversions.is_empty() {
@@ -9605,7 +9171,7 @@ impl RuleSet {
                 .filter_map(|object| {
                     object
                         .turret_rot_override()
-                        .map(|rate| ((object.category, object.id.to_ascii_uppercase()), rate))
+                        .map(|rate| (Self::object_hash_key(object), rate))
                 })
                 .collect::<BTreeMap<_, _>>();
             if !turn_overrides.is_empty() {
@@ -9621,7 +9187,7 @@ impl RuleSet {
                 .map(|object| {
                     (
                         object.category,
-                        object.id.to_ascii_uppercase(),
+                        Self::object_hash_key(object),
                         object.external_emp_hash_state(),
                     )
                 })
@@ -9641,7 +9207,7 @@ impl RuleSet {
                 .map(|object| {
                     (
                         object.category,
-                        object.id.to_ascii_uppercase(),
+                        Self::object_hash_key(object),
                         object.external_production_hash_state(),
                     )
                 })
@@ -9668,12 +9234,7 @@ impl RuleSet {
         self.ares_armors.hash(&mut hasher);
         self.object_list
             .iter()
-            .map(|object| {
-                (
-                    (object.category, object.id.to_ascii_uppercase()),
-                    object.armor_id(),
-                )
-            })
+            .map(|object| (Self::object_hash_key(object), object.armor_id()))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         Self::by_upper_id(
@@ -9729,12 +9290,7 @@ impl RuleSet {
                 .object_list
                 .iter()
                 .filter(|object| object.bounty_rules().has_gameplay_configuration())
-                .map(|object| {
-                    (
-                        (object.category, object.id.to_ascii_uppercase()),
-                        object.bounty_rules(),
-                    )
-                })
+                .map(|object| (Self::object_hash_key(object), object.bounty_rules()))
                 .collect::<BTreeMap<_, _>>();
             if !bounty.is_empty() {
                 b"ares-bounty-rules-v1".hash(&mut hasher);
@@ -9752,7 +9308,7 @@ impl RuleSet {
                 })
                 .map(|object| {
                     (
-                        (object.category, object.id.to_ascii_uppercase()),
+                        Self::object_hash_key(object),
                         (
                             object.driver_rules(),
                             object.vehicle_thief_sound(false),
@@ -9771,7 +9327,7 @@ impl RuleSet {
                 .filter_map(|object| {
                     object
                         .aircraft_crashable_override()
-                        .map(|value| ((object.category, object.id.to_ascii_uppercase()), value))
+                        .map(|value| (Self::object_hash_key(object), value))
                 })
                 .collect::<BTreeMap<_, _>>();
             if !aircraft_crash_overrides.is_empty() {
@@ -9784,12 +9340,7 @@ impl RuleSet {
                 .filter(|object| {
                     object.crew_rules() != &crate::rules::ares_crew::CrewTypeRules::default()
                 })
-                .map(|object| {
-                    (
-                        (object.category, object.id.to_ascii_uppercase()),
-                        object.crew_rules(),
-                    )
-                })
+                .map(|object| (Self::object_hash_key(object), object.crew_rules()))
                 .collect::<BTreeMap<_, _>>();
             if !crews.is_empty() {
                 b"ares-survivor-rules-v1".hash(&mut hasher);
@@ -9801,7 +9352,7 @@ impl RuleSet {
                 .iter()
                 .map(|object| {
                     (
-                        (object.category, object.id.to_ascii_uppercase()),
+                        Self::object_hash_key(object),
                         (
                             object.emp_rules(),
                             object.promotion_abilities(),
@@ -9825,7 +9376,7 @@ impl RuleSet {
         self.object_list
             .iter()
             .filter(|object| object.category == ObjectCategory::Vehicle)
-            .map(|object| (object.id.to_ascii_uppercase(), object.carries_crate()))
+            .map(|object| (Self::object_hash_key(object), object.carries_crate()))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         // Global construction order changes which category106 mutates when
@@ -9844,7 +9395,7 @@ impl RuleSet {
         self.object_list
             .iter()
             .filter(|object| object.category == ObjectCategory::Building)
-            .map(|object| (object.id.to_ascii_uppercase(), object.target_coord_offset()))
+            .map(|object| (Self::object_hash_key(object), object.target_coord_offset()))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         // Process-resident Gravity and Weapon postpass results can differ for
@@ -9901,7 +9452,7 @@ impl RuleSet {
                 object
                     .type_resource_policy()
                     .and_then(|policy| policy.spotlight)
-                    .map(|policy| (object.category, object.id.to_ascii_uppercase(), policy))
+                    .map(|policy| (object.category, Self::object_hash_key(object), policy))
             })
             .collect::<Vec<_>>();
         if !spotlight_policies.is_empty() {
@@ -9918,7 +9469,7 @@ impl RuleSet {
                     .map(|policy| {
                         (
                             object.category,
-                            object.id.to_ascii_uppercase(),
+                            Self::object_hash_key(object),
                             policy,
                             object.script_conversion(),
                         )
@@ -10024,7 +9575,7 @@ impl RuleSet {
             .object_list
             .iter()
             .filter(|object| object.nominal())
-            .map(|object| ((object.category, object.id.to_ascii_uppercase()), true))
+            .map(|object| (Self::object_hash_key(object), true))
             .collect::<BTreeMap<_, _>>();
         if !nominal_types.is_empty() {
             b"retained-type-nominal-v1".hash(&mut hasher);
@@ -10038,7 +9589,7 @@ impl RuleSet {
             .iter()
             .map(|object| {
                 (
-                    (object.category, object.id.to_ascii_uppercase()),
+                    Self::object_hash_key(object),
                     (
                         object.can_disguise,
                         object.perma_disguise,
@@ -10063,7 +9614,7 @@ impl RuleSet {
             .iter()
             .map(|object| {
                 (
-                    (object.category, object.id.to_ascii_uppercase()),
+                    Self::object_hash_key(object),
                     (
                         (
                             &object.image,
@@ -10672,7 +10223,7 @@ impl RuleSet {
                         object.promotion_sound_override(true),
                     );
                     (sounds.0.is_some() || sounds.1.is_some())
-                        .then(|| ((object.category, object.id.to_ascii_uppercase()), sounds))
+                        .then(|| (Self::object_hash_key(object), sounds))
                 })
                 .collect::<BTreeMap<_, _>>();
             if !promotion_sounds.is_empty() {
@@ -10687,7 +10238,7 @@ impl RuleSet {
             .iter()
             .map(|object| {
                 (
-                    (object.category, object.id.to_ascii_uppercase()),
+                    Self::object_hash_key(object),
                     (
                         &object.voice_select,
                         &object.voice_select_enslaved,
@@ -10712,7 +10263,7 @@ impl RuleSet {
             .filter(|object| object.category == ObjectCategory::Building)
             .map(|object| {
                 (
-                    object.id.to_ascii_uppercase(),
+                    Self::object_hash_key(object),
                     self.building_launch_height(object),
                 )
             })
@@ -10726,12 +10277,7 @@ impl RuleSet {
         self.general.laser_target_color.hash(&mut hasher);
         self.object_list
             .iter()
-            .map(|object| {
-                (
-                    (object.category, object.id.to_ascii_uppercase()),
-                    &object.airstrike,
-                )
-            })
+            .map(|object| (Self::object_hash_key(object), &object.airstrike))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         // Radial launch settings likewise survive earlier reached passes even
@@ -10739,12 +10285,7 @@ impl RuleSet {
         b"radial-fire-segments-v1".hash(&mut hasher);
         self.object_list
             .iter()
-            .map(|object| {
-                (
-                    (object.category, object.id.to_ascii_uppercase()),
-                    object.radial_fire_segments,
-                )
-            })
+            .map(|object| (Self::object_hash_key(object), object.radial_fire_segments))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
         // Reached-pass barrel resets are not derivable from final merged text.
@@ -10760,7 +10301,7 @@ impl RuleSet {
             .iter()
             .map(|object| {
                 (
-                    (object.category, object.id.to_ascii_uppercase()),
+                    Self::object_hash_key(object),
                     (
                         object.gunner,
                         object.ifv_mode,
@@ -10798,7 +10339,7 @@ impl RuleSet {
                         .collect::<Vec<_>>()
                 });
                 let consumed = (art.map_or(0, |art| art.turret_offset), slots, ports);
-                (object.id.to_ascii_uppercase(), consumed)
+                (Self::object_hash_key(object), consumed)
             })
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
@@ -10825,7 +10366,7 @@ impl RuleSet {
             .object_list
             .iter()
             .filter(|object| object.category == ObjectCategory::Building)
-            .map(|object| (object.id.to_ascii_uppercase(), object))
+            .map(|object| (Self::object_hash_key(object), object))
             .collect::<BTreeMap<_, _>>();
         for (name, object) in buildings {
             name.hash(hasher);
@@ -10871,7 +10412,7 @@ impl RuleSet {
                     .art_registry
                     .resolve_metadata_entry(&object.id, &object.image);
                 (
-                    object.id.to_ascii_uppercase(),
+                    Self::object_hash_key(object),
                     (
                         object.firestorm_wall,
                         art.map_or(9, |entry| entry.building_gate_stages),
@@ -10941,8 +10482,8 @@ impl RuleSet {
             && let Some(policy) = self.external_country_faction(country)
         {
             return policy.is_some_and(|policy| {
-                self.type_array_index(ObjectCategory::Building, &object.id)
-                    .is_some_and(|index| policy.veteran_buildings.contains(&(index as u32)))
+                u32::try_from(object.native_type_index())
+                    .is_ok_and(|index| policy.veteran_buildings.contains(&index))
             });
         }
         self.country_rules(country)
@@ -12482,8 +12023,21 @@ impl RuleSet {
         &self,
         type_id: &str,
     ) -> Option<&crate::rules::shp_vehicle_sequence::UnitShpReadState> {
-        let object = self.object(type_id)?;
-        self.unit_shp_read_states.get(&object.id)
+        self.unit_shp_read_state_for_type(
+            self.object_in_category(ObjectCategory::Vehicle, type_id)?,
+        )
+    }
+
+    /// Unit747620 consumes this resolved UnitType's retained ART read state,
+    /// independently of equal-name aliases in any native array.
+    pub(crate) fn unit_shp_read_state_for_type(
+        &self,
+        object: &ObjectType,
+    ) -> Option<&crate::rules::shp_vehicle_sequence::UnitShpReadState> {
+        (object.category == ObjectCategory::Vehicle)
+            .then(|| usize::try_from(object.native_type_index()).ok())
+            .flatten()
+            .and_then(|index| self.unit_shp_read_states.get(index))
     }
 
     #[cfg(any(test, feature = "test-support"))]
