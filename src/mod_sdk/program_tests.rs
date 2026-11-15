@@ -131,3 +131,129 @@ fn master_type_lists_uses_early_admission_and_ignores_retained_configuration() {
     assert_eq!(program.master_type_lists_policy().unwrap(), Some(policy));
     assert_eq!(program.config, [1]);
 }
+
+#[test]
+fn effects_send_only_exact_resources_in_the_current_event() {
+    use api::{EffectControl, EffectEvent, EffectResourceKind, EntityContext};
+    let key = |kind, name: &str| api::EffectResourceContext {
+        kind,
+        name: name.into(),
+    };
+    let own = key(EffectResourceKind::Unit, "SAME");
+    let hit = key(EffectResourceKind::Warhead, "SAME");
+    let active = key(EffectResourceKind::Warhead, "ACTIVE");
+    let unrelated = key(EffectResourceKind::Building, "SAME");
+    let records = [
+        (&own, "own"),
+        (&hit, "hit"),
+        (&active, "active"),
+        (&unrelated, "unused"),
+    ]
+    .into_iter()
+    .map(|(resource, value)| (resource.clone(), String::from(value)))
+    .collect::<BTreeMap<_, _>>();
+    let entry = api::EffectInstanceView {
+        resource: active.clone(),
+        remaining: 3,
+        source_owner: None,
+        has_animation: false,
+    };
+    let context = api::EffectContext {
+        frame: 0,
+        entity: EntityContext {
+            id: 1,
+            type_name: "SAME".into(),
+            owner: "Multi1".into(),
+            armor: "heavy".into(),
+            health: 100,
+            max_health: 100,
+            alive: true,
+            in_limbo: false,
+            immobilized: false,
+            temporal: false,
+            being_warped_out: false,
+            powered: true,
+            chrono_warp_latch: false,
+            ai_frozen: false,
+            deactivated: false,
+            immune: false,
+            type_immune: false,
+            invulnerable: false,
+        },
+        user: api::WEAPON_USER_UNIT,
+        inside_transport: false,
+        cloaked_or_cloaking: false,
+        entries: vec![entry.clone(), entry],
+        control: EffectControl::Disabled(0),
+        animations_hidden: false,
+        event: EffectEvent::Apply {
+            resource: hit.clone(),
+            source_owner: None,
+            source_is_owner: false,
+            source_is_ally: false,
+            affects_allies: true,
+            verses_bits: 1.0_f64.to_bits(),
+        },
+        configuration: None,
+    };
+
+    let mut projected = Context::Effects(context.clone());
+    assert!(scope_effect_configuration(&mut projected, &records));
+    let Context::Effects(projected) = projected else {
+        unreachable!()
+    };
+    let scoped = projected.configuration.unwrap();
+    assert_eq!(
+        scoped
+            .iter()
+            .map(|record| (&record.resource, record.data.as_str()))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(&own, "own"), (&hit, "hit"), (&active, "active")])
+    );
+
+    let request = Request {
+        api_version: api::API_VERSION,
+        context: Context::Effects(context.clone()),
+        config: vec![],
+        state: vec![],
+    };
+    let mut plan = Plan::unchanged(&request);
+    plan.effects = Some(api::EffectPlan::unchanged(&context));
+    let bytes = vera_mod_runtime::test_support::component_fixture(
+        &api::ModuleManifest {
+            api_version: api::API_VERSION,
+            id: "scoped-effect".into(),
+            version: "1".into(),
+            state_version: 1,
+            config_version: 1,
+            hooks: vec![
+                api::HookKind::Configure,
+                api::HookKind::Attach,
+                api::HookKind::Damage,
+                api::HookKind::Tick,
+                api::HookKind::EffectResource,
+                api::HookKind::Effects,
+                api::HookKind::EntityConfiguration,
+            ],
+        },
+        &serde_json::to_vec(&plan).unwrap(),
+        "(if (i32.gt_u (local.get 3) (i32.const 4096)) (then unreachable))",
+        "",
+    );
+    let digest = crate::util::sha256::sha256_hex(&bytes);
+    let program = AdmittedComponent::load(bytes, &digest)
+        .unwrap()
+        .into_configuration_seed();
+    assert!(
+        program
+            .entity_config
+            .set(Ok(Arc::new(EntityConfiguration {
+                bytes: vec![b'x'; 50_000],
+                attach_types: None,
+                effect_visit_exceptions: None,
+                effect_configuration: Some(records),
+            })))
+            .is_ok()
+    );
+    assert_eq!(program.evaluate(request.context, &[]).unwrap(), plan);
+}

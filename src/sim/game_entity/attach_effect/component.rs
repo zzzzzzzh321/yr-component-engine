@@ -110,6 +110,7 @@ impl Simulation {
             control: control_view(actor.attach_effects.self_effect),
             animations_hidden: actor.attach_effects.animations_hidden,
             event,
+            configuration: None,
         })
     }
 

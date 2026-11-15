@@ -4,7 +4,7 @@ use super::host::{IniNamesHost, NativeHost, StartupHost};
 use crate::rules::ini_parser::IniFile;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     hash::{Hash, Hasher},
     sync::{Arc, OnceLock},
@@ -51,6 +51,47 @@ struct EntityConfiguration {
     bytes: Vec<u8>,
     attach_types: Option<HashSet<String>>,
     effect_visit_exceptions: Option<BTreeSet<api::EffectResourceContext>>,
+    effect_configuration: Option<BTreeMap<api::EffectResourceContext, String>>,
+}
+
+fn scope_effect_configuration(
+    context: &mut Context,
+    records: &BTreeMap<api::EffectResourceContext, String>,
+) -> bool {
+    let Context::Effects(context) = context else {
+        return false;
+    };
+    let own =
+        api::EffectResourceKind::for_user(context.user).map(|kind| api::EffectResourceContext {
+            kind,
+            name: context.entity.type_name.clone(),
+        });
+    let event_resource = match &context.event {
+        api::EffectEvent::Apply { resource, .. } => Some(resource),
+        api::EffectEvent::TypeChanged { previous } => Some(previous),
+        api::EffectEvent::Visit | api::EffectEvent::EnterLimbo => None,
+    };
+    // The projection is scoped by identity; the live entry list keeps its
+    // ordering and duplicates for the guest's original transaction logic.
+    let resources: BTreeSet<_> = context
+        .entries
+        .iter()
+        .map(|entry| &entry.resource)
+        .chain(own.as_ref())
+        .chain(event_resource)
+        .collect();
+    context.configuration = Some(
+        resources
+            .into_iter()
+            .filter_map(|resource| {
+                Some(api::EffectConfigurationRecord {
+                    resource: resource.clone(),
+                    data: records.get(resource)?.clone(),
+                })
+            })
+            .collect(),
+    );
+    true
 }
 
 struct Executor {
@@ -1144,6 +1185,12 @@ impl Program {
                     bytes,
                     attach_types,
                     effect_visit_exceptions,
+                    effect_configuration: plan.effect_configuration.map(|records| {
+                        records
+                            .into_iter()
+                            .map(|record| (record.resource, record.data))
+                            .collect()
+                    }),
                 }))
             })
             .as_ref()
@@ -1187,7 +1234,7 @@ impl Program {
 
     fn evaluate_with_host(
         &self,
-        context: Context,
+        mut context: Context,
         state: &[u8],
         host: Arc<dyn vera_mod_runtime::HostServices>,
     ) -> Result<Plan, String> {
@@ -1200,14 +1247,23 @@ impl Program {
             .hooks
             .contains(&api::HookKind::EntityConfiguration)
         {
-            &self.entity_configuration()?.bytes
+            let projection = self.entity_configuration()?;
+            if projection
+                .effect_configuration
+                .as_ref()
+                .is_some_and(|records| scope_effect_configuration(&mut context, records))
+            {
+                Vec::new()
+            } else {
+                projection.bytes.clone()
+            }
         } else {
-            &self.config
+            self.config.clone()
         };
         let request = Request {
             api_version: api::API_VERSION,
             context,
-            config: config.clone(),
+            config,
             state: state.to_vec(),
         };
         let plan = executor

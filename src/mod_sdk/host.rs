@@ -31,7 +31,12 @@ impl HostServices for StartupHost {
         Err("configuration is unavailable to startup recipes".into())
     }
     fn registry(&self, name: &str) -> Vec<String> {
-        if self.entity_projection_extensions && name == api::ENTITY_FAST_PATHS_CAPABILITY {
+        if self.entity_projection_extensions
+            && matches!(
+                name,
+                api::ENTITY_FAST_PATHS_CAPABILITY | api::EFFECT_SCOPED_CONFIGURATION_CAPABILITY
+            )
+        {
             vec!["1".into()]
         } else {
             Vec::new()

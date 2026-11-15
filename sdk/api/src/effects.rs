@@ -46,6 +46,18 @@ pub struct EffectResourceContext {
     pub name: String,
 }
 
+/// Opt-in registry entry available during EntityConfiguration.
+pub const EFFECT_SCOPED_CONFIGURATION_CAPABILITY: &str = "$effect-scoped-configuration";
+
+/// One immutable, component-owned record. The host selects it using the
+/// exact resource kind and name and treats the data as opaque UTF-8.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectConfigurationRecord {
+    pub resource: EffectResourceContext,
+    pub data: String,
+}
+
 /// Values folded by the host's existing ordered numeric owner. Durations,
 /// stacking and admission rules remain in the component's frozen configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +120,11 @@ pub struct EffectContext {
     pub control: EffectControl,
     pub animations_hidden: bool,
     pub event: EffectEvent,
+    /// With a negotiated projection, the current type, active entries and
+    /// explicit event resource select these records. Missing records use the
+    /// component's defaults. None retains the complete Request::config path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<Vec<EffectConfigurationRecord>>,
 }
 
 /// Indices address the live list after preceding actions in this transaction.

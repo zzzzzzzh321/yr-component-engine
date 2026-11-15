@@ -38,8 +38,9 @@ pub use configuration::{
     ImmutableIniSectionRef, ImmutableIniValue,
 };
 pub use effects::{
-    EffectAction, EffectContext, EffectControl, EffectDescriptor, EffectEvent, EffectInstanceView,
-    EffectPlan, EffectResourceContext, EffectResourceKind,
+    EFFECT_SCOPED_CONFIGURATION_CAPABILITY, EffectAction, EffectConfigurationRecord, EffectContext,
+    EffectControl, EffectDescriptor, EffectEvent, EffectInstanceView, EffectPlan,
+    EffectResourceContext, EffectResourceKind,
 };
 pub use emp::{
     EmpResourceContext, EmpResourcePolicy, EmpTypePolicy, EmpWarheadPolicy, NullableResourceName,
@@ -475,6 +476,10 @@ pub struct Plan {
     /// declaration leaves all Visits with the guest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect_visit_exceptions: Option<Vec<EffectResourceContext>>,
+    /// Optional EntityConfiguration reply for scope-aware Effects calls.
+    /// Only publish it when the host advertises the scoped capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_configuration: Option<Vec<EffectConfigurationRecord>>,
 }
 
 /// Registry selector returning ["1"] during EntityConfiguration when the host
@@ -522,6 +527,7 @@ impl Plan {
             master_type_lists: None,
             attach_types: None,
             effect_visit_exceptions: None,
+            effect_configuration: None,
         }
     }
 }
@@ -648,6 +654,12 @@ impl Request {
         if let Context::WeaponInstanceResource(context) = &self.context {
             context.validate()?;
         }
+        if let Context::Effects(context) = &self.context
+            && context.configuration.is_some()
+            && !self.config.is_empty()
+        {
+            return Err("scoped effects cannot also consume the complete configuration".into());
+        }
         let user = match &self.context {
             Context::TypeResource(context) => Some(context.user),
             Context::Effects(context) => Some(context.user),
@@ -754,6 +766,24 @@ impl Plan {
                     .any(|ty| ty.kind.user().is_none() || !entity_type_name_valid(&ty.name)))
         {
             return Err("invalid empty effect visit exceptions".into());
+        }
+        if let Some(records) = &self.effect_configuration {
+            let mut resources = std::collections::BTreeSet::new();
+            if !matches!(request.context, Context::EntityConfiguration)
+                || self.config.is_none()
+                || records.len() > 16_384
+                || records
+                    .iter()
+                    .map(|record| record.data.len())
+                    .sum::<usize>()
+                    > MAX_CONFIG_BYTES
+                || records.iter().any(|record| {
+                    !entity_type_name_valid(&record.resource.name)
+                        || !resources.insert(&record.resource)
+                })
+            {
+                return Err("invalid scoped effect configuration".into());
+            }
         }
         if let Some(policy) = self.weapon_resource {
             if request.context.kind() != HookKind::WeaponResource {
