@@ -22,6 +22,25 @@ pub enum PaletteUpdate {
     Alternate([i32; 3]),
 }
 
+/// GetLightingColor10032700 output; RGB already uses native x10 units.
+#[derive(Clone, Copy)]
+struct LightingSelection {
+    profile: ScenarioLightingProfile,
+    ambient: i32,
+    rgb: [i32; 3],
+    has_value: bool,
+}
+
+impl LightingSelection {
+    fn palette(self) -> PaletteUpdate {
+        if self.has_value {
+            PaletteUpdate::Alternate(self.rgb)
+        } else {
+            PaletteUpdate::RestoreNormal
+        }
+    }
+}
+
 impl PaletteUpdate {
     pub fn from_scenario(state: &ScenarioLightingState) -> Self {
         state
@@ -250,9 +269,9 @@ impl Simulation {
 
     /// Logic55B4C6 and profile53C280->53AD00 must remain in order with source
     /// invalidations. A final-frame fingerprint cannot recover that history.
-    pub fn publish_global_lighting(&mut self, palette: PaletteUpdate) {
+    pub fn publish_global_lighting(&mut self, palette: PaletteUpdate, rules: &RuleSet) {
         let cell_profile = self.lighting_cell_profile();
-        let constructor_rgb = self.palette_constructor_rgb();
+        let constructor_rgb = self.palette_constructor_rgb(rules);
         self.lighting_sources.pending.push(LightingEvent::Global {
             state: *self.session.lighting(),
             cell_profile,
@@ -263,9 +282,9 @@ impl Simulation {
 
     /// Publish [`LightingEvent::RelightProfile`] after a change of
     /// [`Self::lighting_cell_profile`] that refreshes no cell.
-    pub fn publish_relight_profile(&mut self) {
+    pub fn publish_relight_profile(&mut self, rules: &RuleSet) {
         let cell_profile = self.lighting_cell_profile();
-        let constructor_rgb = self.palette_constructor_rgb();
+        let constructor_rgb = self.palette_constructor_rgb(rules);
         self.lighting_sources
             .pending
             .push(LightingEvent::RelightProfile {
@@ -277,7 +296,11 @@ impl Simulation {
     /// LightConvert555DA0's constructor branches555E50..556067: Storm first,
     /// then fading-in Nuke/Chrono, then active Dominator. This differs from
     /// both UpdateLighting's selection and a Cell's Ground/Level reader.
-    pub fn palette_constructor_rgb(&self) -> Option<[i32; 3]> {
+    pub fn palette_constructor_rgb(&self, rules: &RuleSet) -> Option<[i32; 3]> {
+        if rules.superweapon_lighting_enabled() {
+            let selected = self.ares_lighting_selection(rules, None);
+            return selected.has_value.then_some(selected.rgb);
+        }
         let profile = if crate::sim::superweapon::lightning_storm::raging(self) {
             ScenarioLightingProfile::Ion
         } else if self.session.lighting().nuke_flash_fading_in()
@@ -290,6 +313,86 @@ impl Simulation {
             return None;
         };
         Some(self.session.lighting().profile(profile).alternate_rgb())
+    }
+
+    /// Installed GetLightingColor10032700: one selector for impact, updates
+    /// and future Convert constructors. RGB selection is distinct from the
+    /// unchanged Cell Ground/Level selector below. Other redirected handler
+    /// source overrides remain with their not-yet-ported Ares effect owners.
+    fn ares_lighting_selection(
+        &self,
+        rules: &RuleSet,
+        explicit_source: Option<u32>,
+    ) -> LightingSelection {
+        let state = self.session.lighting();
+        let (profile, source) =
+            if state.nuke_flash_fading_in() || self.session.chrono_screen().active() {
+                (ScenarioLightingProfile::Nuke, state.current_nuke_source())
+            } else if crate::sim::superweapon::lightning_storm::raging(self) {
+                (ScenarioLightingProfile::Ion, None)
+            } else if crate::sim::superweapon::psychic_dominator::tints_scenario(self) {
+                (ScenarioLightingProfile::Dominator, None)
+            } else {
+                (ScenarioLightingProfile::Normal, None)
+            };
+        let base = state.profile(profile);
+        let mut selected = LightingSelection {
+            profile,
+            ambient: base.ambient_percent,
+            rgb: base.alternate_rgb(),
+            has_value: profile != ScenarioLightingProfile::Normal,
+        };
+        if let Some(source) = explicit_source.or(source) {
+            if let Some(light) = rules.super_weapon_light(source) {
+                if !light.enabled {
+                    selected.has_value = false;
+                    return selected;
+                }
+                if let Some(ambient) = light.ambient.filter(|value| *value >= 0) {
+                    selected.ambient = ambient;
+                }
+                for (destination, value) in
+                    selected
+                        .rgb
+                        .iter_mut()
+                        .zip([light.red, light.green, light.blue])
+                {
+                    if let Some(value) = value.filter(|value| *value >= 0) {
+                        //10032849/63/7E LEA+ADD: no selector clamp.
+                        *destination = value.wrapping_mul(10);
+                    }
+                }
+            }
+            // A nonnull enabled source sets HasValue even with no overrides.
+            selected.has_value = true;
+        }
+        selected
+    }
+
+    pub fn lighting_palette(&self, rules: &RuleSet) -> PaletteUpdate {
+        if rules.superweapon_lighting_enabled() {
+            self.ares_lighting_selection(rules, None).palette()
+        } else {
+            PaletteUpdate::from_scenario(self.session.lighting())
+        }
+    }
+
+    /// SWTypeExt::ChangeLighting10032370: false HasValue makes no ambient,
+    /// palette or Cell write; the caller's flash timer can still have started.
+    pub(crate) fn change_superweapon_lighting(
+        &mut self,
+        rules: &RuleSet,
+        source: Option<u32>,
+    ) -> bool {
+        let selected = self.ares_lighting_selection(rules, source);
+        if !selected.has_value {
+            return false;
+        }
+        self.session
+            .lighting_mut()
+            .select_resolved(selected.profile, selected.ambient);
+        self.publish_global_lighting(selected.palette(), rules);
+        true
     }
 
     /// The profile whose Ground/Level a cell's refresh reads
@@ -321,7 +424,18 @@ impl Simulation {
     /// ordinary one (`RecalcLighting(-1, -1, -1, 0)`). Active chrono screen
     /// (`53BAD0`, set by127/53B460) shares the first nuke arm. Original
     /// controls: superweapon_oracle.json/update_lighting, chrono=1.
-    pub(crate) fn update_lighting(&mut self) {
+    pub(crate) fn update_lighting(&mut self, rules: &RuleSet) {
+        // Installed Scenario_UpdateLighting10037B50 resets to the normal
+        // ambient/Convert mode when the shared selector declines.
+        if rules.superweapon_lighting_enabled() {
+            if !self.change_superweapon_lighting(rules, None) {
+                self.session
+                    .lighting_mut()
+                    .select(ScenarioLightingProfile::Normal);
+                self.publish_global_lighting(PaletteUpdate::RestoreNormal, rules);
+            }
+            return;
+        }
         let profile = if self.session.lighting().nuke_flash_fading_in()
             || self.session.chrono_screen().active()
         {
@@ -334,14 +448,17 @@ impl Simulation {
             ScenarioLightingProfile::Normal
         };
         self.session.lighting_mut().select(profile);
-        self.publish_global_lighting(PaletteUpdate::from_scenario(&self.session.lighting()));
+        self.publish_global_lighting(
+            PaletteUpdate::from_scenario(&self.session.lighting()),
+            rules,
+        );
     }
 
     /// User-load685120 ->53AB50 reselects from the incoming effect globals.
     /// The detached client lighting installation consumes this one refresh.
-    pub fn reinitialize_lighting_after_user_load(&mut self) {
+    pub fn reinitialize_lighting_after_user_load(&mut self, rules: &RuleSet) {
         debug_assert!(self.lighting_sources.pending().is_empty());
-        self.update_lighting();
+        self.update_lighting(rules);
         self.lighting_sources.discard_pending();
     }
 }

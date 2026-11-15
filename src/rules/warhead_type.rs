@@ -24,6 +24,23 @@ use crate::rules::ini_parser::IniSection;
 use crate::rules::ini_value::{PERCENT_SCALE, crt_atoi, parse_leading_f64};
 use crate::util::native_x87::X87Chop53;
 
+/// Immutable admitted WH suffix settings. Anim remains its registered native
+/// array ordinal; constructor/wait ownership stays with the existing Bullet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct WarheadImpactSettings {
+    pub flash_duration: Option<i32>,
+    pub pre_impact: Option<u32>,
+}
+
+impl WarheadType {
+    pub(crate) fn impact_settings(&self) -> Option<&WarheadImpactSettings> {
+        self.external_impact.as_ref()
+    }
+    pub(crate) fn bind_impact_settings(&mut self, settings: Option<WarheadImpactSettings>) {
+        self.external_impact = settings;
+    }
+}
+
 /// A warhead definition parsed from a rules.ini section.
 ///
 /// Warheads are the final link in the damage chain: weapon -> projectile -> warhead.
@@ -51,6 +68,7 @@ pub struct WarheadType {
     external_armor: Option<crate::rules::armor::FrozenArmorTable>,
     ares: Option<crate::rules::ares_warhead::AresWarheadRules>,
     external_emp: Option<crate::rules::ares_emp::EmpWarheadRules>,
+    external_impact: Option<WarheadImpactSettings>,
     /// Splash radius in cells (0 = direct hit only). Native `CellSpread=` is a
     /// **float** at `WarheadTypeClass+0x124` (ReadDouble `0x005283d0` called at
     /// `0x0075d3e6`, `FSTP float ptr` at `0x0075d3eb`, key string
@@ -746,6 +764,7 @@ impl WarheadType {
             electric_assault: section.read_bool("ElectricAssault", false),
             bomb_disarm: section.read_bool("BombDisarm", false),
             nuke_maker: section.read_bool("NukeMaker", false),
+            external_impact: None,
             em_effect: false,
 
             // List fields

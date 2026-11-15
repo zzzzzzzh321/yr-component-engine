@@ -205,6 +205,7 @@ impl crate::app::persistence::options::launcher::LauncherParentOperations
             presentation.lighting.refresh(
                 terrain,
                 &runtime.simulation,
+                &runtime.resources.rules,
                 presentation.in_game_options.detail_level,
             );
         }

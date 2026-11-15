@@ -318,7 +318,7 @@ pub(crate) fn install_world_presentation(
         runtime
             .view()
             .resolved_terrain()
-            .map(|terrain| (terrain, &runtime.simulation))
+            .map(|terrain| (terrain, &runtime.simulation, &runtime.resources.rules))
     });
     let presentation = &mut state.match_state.match_presentation;
     presentation.lighting.install(

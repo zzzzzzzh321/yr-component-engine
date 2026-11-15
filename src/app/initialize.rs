@@ -7,6 +7,8 @@ use anyhow::Context;
 use crate::app::frontend::startup_options::{RetailStartupOptions, ScreenSize};
 use crate::app::persistence::options_profile::{RetailOptionsLoad, RetailOptionsProfile};
 
+#[cfg(test)]
+use super::AssetManager;
 use super::{
     ActiveEventLoop, App, AppState, Arc, BTreeMap, BasicSection, BatchRenderer, BitFont,
     GameConfig, GameScreen, GpuContext, HashMap, HouseRoster, Instant, PhysicalSize, PlatformState,
@@ -16,8 +18,6 @@ use super::{
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use super::{MusicPlayer, SfxPlayer};
 use crate::map::scenario_sources;
-#[cfg(test)]
-use super::AssetManager;
 
 /// Main-thread startup slices retain presentation. CPU startup owns the original,
 /// unpublished process assets until they are returned for app-state installation.
@@ -39,13 +39,14 @@ impl InitializationStep {
     fn pending_cpu<T: Send + 'static>(
         window: Arc<Window>,
         synchronous: bool,
+        label: &'static str,
         work: impl FnOnce() -> T + Send + 'static,
         resume: impl FnOnce(T) -> Result<Self> + 'static,
     ) -> Result<Self> {
         if synchronous {
             return Self::pending(window, move || resume(work()));
         }
-        let job = crate::app::loading::cpu_job::CpuLoadJob::start("startup-rules", work)?;
+        let job = crate::app::loading::cpu_job::CpuLoadJob::start(label, work)?;
         Self::await_cpu(window, job, resume)
     }
 
@@ -552,19 +553,38 @@ impl App {
             GpuContext::new_browser(window.clone(), event_loop.owned_display_handle()),
         );
         let resume = move |gpu| {
-            Self::initialize_with_gpu(
-                gpu,
-                window,
-                game_config,
-                main_menu_shell_error,
-                startup_files,
-                personal_rules,
-                options_profile,
-                startup_options,
-                startup_audio,
-                capture_dimensions,
-                external_launch,
-                quickplay_allowed,
+            let source = game_config
+                .as_ref()
+                .map(|config| (config.paths.ra2_dir.clone(), config.ini.clone()));
+            let media = startup_options.media_archive_mode;
+            InitializationStep::pending_cpu(
+                window.clone(),
+                capture_dimensions.is_some(),
+                "startup-archives",
+                move || {
+                    source.map(|(root, ini)| {
+                        crate::mod_sdk::open_active_assets(&root, media)
+                            .and_then(|assets| assets.with_ini_roots(&ini))
+                            .context("Could not load the game archives")
+                    })
+                },
+                move |startup_assets| {
+                    Self::initialize_with_gpu(
+                        gpu,
+                        window,
+                        game_config,
+                        main_menu_shell_error,
+                        startup_files,
+                        personal_rules,
+                        options_profile,
+                        startup_options,
+                        startup_audio,
+                        capture_dimensions,
+                        external_launch,
+                        quickplay_allowed,
+                        startup_assets,
+                    )
+                },
             )
         };
         #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
@@ -590,6 +610,7 @@ impl App {
         capture_dimensions: Option<(u32, u32)>,
         external_launch: bool,
         quickplay_allowed: bool,
+        startup_assets: Option<Result<crate::assets::asset_manager::AssetManager>>,
     ) -> Result<InitializationStep> {
         let batch_renderer: BatchRenderer = BatchRenderer::new(&gpu);
         let status_screen_fill = batch_renderer.create_texture(&gpu, &[255; 4], 1, 1);
@@ -614,17 +635,8 @@ impl App {
             .map(|cfg| u64::from(cfg.gameplay.input_delay_ticks))
             .unwrap_or_else(|| u64::from(crate::util::config::default_input_delay_ticks()));
         let sidebar_layout_spec = SidebarChromeLayoutSpec::stock();
-        let startup_asset_manager = game_config.as_ref().and_then(|config| {
-            startup_asset_or_error(
-                crate::mod_sdk::open_active_assets(
-                    &config.paths.ra2_dir,
-                    startup_options.media_archive_mode,
-                )
-                .and_then(|assets| assets.with_ini_roots(&config.ini))
-                .context("Could not load the game archives"),
-                &mut main_menu_shell_error,
-            )
-        });
+        let startup_asset_manager = startup_assets
+            .and_then(|assets| startup_asset_or_error(assets, &mut main_menu_shell_error));
         // Native process startup seeds Scenario before the MPModes loader. The
         // Cooperative factory reached by that loader then advances this cursor
         // before the first shell is shown.
@@ -738,6 +750,7 @@ impl App {
         InitializationStep::pending_cpu(
             window.clone(),
             capture_dimensions.is_some(),
+            "startup-rules",
             move || {
                 // The worker uniquely owns these original, unpublished process resources.
                 // Window/GPU/audio output and the remaining continuation stay on the UI thread.

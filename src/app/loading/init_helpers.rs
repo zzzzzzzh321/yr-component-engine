@@ -584,6 +584,7 @@ pub(crate) fn finish_presentation_assets(
     overlays: crate::app::frontend::skirmish::OverlayPresentationAssets,
     house_color_map: HouseColorMap,
     csf: Option<crate::assets::csf_file::CsfFile>,
+    pending_atlases: Option<&mut PresentationAtlasJob>,
 ) -> anyhow::Result<crate::app::loading::init::PresentationLoadAssets> {
     // These nested MIXes live inside local.mix/localmd.mix and are not
     // auto-extracted by the two-level archive discovery pass.
@@ -593,7 +594,21 @@ pub(crate) fn finish_presentation_assets(
             Err(_) => log::debug!("{cameo_mix} not found (optional)"),
         }
     }
-    let sidebar_cameo_atlas = build_sidebar_cameo_atlas(gpu, batch, asset_manager, Some(rules));
+    let sidebar_cameo_atlas = if let Some(pending_atlases) = pending_atlases {
+        maybe_export_sidebar_cameo_debug(asset_manager, rules);
+        if let Some(palette) = load_sidebar_cameo_palette(asset_manager) {
+            let work = sidebar_cameo_atlas::SidebarCameoWork::prepare(
+                asset_manager,
+                rules,
+                palette,
+                gpu.device.limits().max_texture_dimension_2d,
+            );
+            pending_atlases.defer_sidebar_cameos(work)?;
+        }
+        None
+    } else {
+        build_sidebar_cameo_atlas(gpu, batch, asset_manager, Some(rules))
+    };
     #[cfg(feature = "phobos")]
     let uimd_bytes = asset_manager.get_ref("UIMD.INI");
     #[cfg(feature = "phobos")]
@@ -699,7 +714,7 @@ pub(crate) fn finish_presentation_assets(
     let lighting_grid = crate::app::presentation::lighting::rebuild_lighting_grid_from_sim(
         resolved_terrain,
         lighting_config,
-        Some(simulation),
+        Some((simulation, rules)),
         detail_level,
     );
     Ok(crate::app::loading::init::PresentationLoadAssets {

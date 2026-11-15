@@ -1619,7 +1619,7 @@ pub(crate) fn tick_active_superweapon_effects(
     let frame = sim.session.binary_frame() as i32;
     if sim.session.lighting_mut().step_nuke_flash(frame) {
         // `0x0053A705`; the screen redraw (`0x0053A711`) is presentation.
-        sim.update_lighting();
+        sim.update_lighting(rules);
     }
     let dominator = psychic_dominator::process(sim, rules, overlay_registry, frame_effects);
     let chrono = sim.session.process_chrono_screen_effect();

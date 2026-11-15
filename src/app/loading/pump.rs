@@ -1017,6 +1017,9 @@ impl LoadingSession {
             prepared.cancel_rules_prefix(assets);
         }
         if let LoadingStage::ConstructingScenario(constructing) = &mut self.stage {
+            if constructing.load.awaiting_rules() {
+                assets.retire_pending_scenario_rules();
+            }
             retire_rules_prefix(constructing.rules_prefix.take(), assets);
         }
         if let LoadingStage::PreparingPresentation { result }
@@ -2063,6 +2066,32 @@ fn pump_map_construction(
     } else {
         session
     };
+    let the_team_enabled = state
+        .frontend
+        .main_menu_shell_state
+        .typed_codes
+        .the_team_enabled();
+    if state.platform.capture_client_size.is_none() {
+        let LoadingStage::ConstructingScenario(constructing) = &mut session.stage else {
+            unreachable!()
+        };
+        match constructing.load.poll_offline_rules(
+            &mut state.process_assets,
+            &mut session.job.asset_manager,
+            &mut constructing.rules_prefix,
+            the_team_enabled,
+        ) {
+            Ok(std::task::Poll::Ready(())) => {}
+            Ok(std::task::Poll::Pending) => {
+                state.frontend.loading_session = Some(session);
+                return Ok(LoadingPump::Pending);
+            }
+            Err(error) => {
+                session.retire(&mut state.process_assets);
+                return Ok(LoadingPump::Failed(error));
+            }
+        }
+    }
     let render_size = [
         state.renderer.gpu.config.width,
         state.renderer.gpu.config.height,
@@ -2082,11 +2111,6 @@ fn pump_map_construction(
             state.process_assets.native_rules_mut_with_tile_cache();
         let native_rules_owner =
             rules.ok_or_else(|| anyhow::anyhow!("native construction lost its Rules owner"))?;
-        let the_team_enabled = state
-            .frontend
-            .main_menu_shell_state
-            .typed_codes
-            .the_team_enabled();
         let network = crate::app::lan_service::LoadingNetworkService::borrow(
             &mut state.match_state.session,
             state.match_state.lan_service.as_mut(),

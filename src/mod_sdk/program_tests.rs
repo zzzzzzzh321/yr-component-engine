@@ -74,7 +74,11 @@ fn repeated_admission_shares_compilation_without_trusting_a_cached_identity() {
         second
             .executor
             .runtime
-            .evaluate(&first.executor.module, &request, Arc::new(StartupHost),)
+            .evaluate(
+                &first.executor.module,
+                &request,
+                Arc::new(StartupHost::default()),
+            )
             .is_ok(),
         "re-admissions must use the same runtime's compiled module cache"
     );

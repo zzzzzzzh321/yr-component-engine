@@ -222,7 +222,7 @@ fn palette_constructor_priority_matches_eight_original_suffix_controls() {
                 None,
             );
         assert_eq!(
-            sim.palette_constructor_rgb(),
+            sim.palette_constructor_rgb(RuleSet::empty_for_test()),
             expected,
             "{storm}/{nuke}/{chrono}/{dom}"
         );

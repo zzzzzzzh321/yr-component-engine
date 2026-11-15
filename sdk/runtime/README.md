@@ -20,10 +20,18 @@ manifest/resource/gameplay call. Every call also
 receives 256 fuel per serialized input byte, since decoding opaque JSON byte
 arrays consumes guest instructions before the requested logic runs. This total
 is shared by decoding and logic; it is not a separate strict 5-million gameplay
-cap. `max_input_fuel` caps this extra allowance at 50 million even for the largest
-valid input, so default total budgets never exceed 55 million for ordinary calls
-or 100 million for Configure. Configuration also counts the frozen registry
-payload supplied through the host bulk reader within that same extra allowance.
+cap. `max_input_fuel` caps the extra allowance at 50 million for manifest and
+live gameplay calls. Startup reads and frozen resource declarations use
+`setup_max_input_fuel`, capped at 1 billion. Configuration calls use twice
+the byte rate to receive and return frozen configuration. A full `configure`
+pass uses `rules_pass_max_input_fuel`, capped at 4 billion, to visit larger
+catalogs.
+Default totals are capped at 55 million for ordinary calls, 1.005 billion for
+resource declarations, 1.05 billion for other configuration calls and
+4.05 billion for a full `configure` pass. Live `effects` uses the ordinary budget.
+Only configuration counts the frozen registry payload supplied through the host
+bulk reader. The full `configure` pass also gains one extra host call per 16
+bytes of that host-measured metadata, with at most 262,144 extra calls.
 The host memoizes and measures the exact payload once per immutable read view;
 gameplay calls receive no allowance for host configuration metadata. The 8 MiB
 wire limit remains separately enforced.
@@ -32,6 +40,19 @@ wire bounds remain independent; infinite loops still exhaust fuel. Traps report
 input size and consumed fuel/host calls; Rules admission adds its physical pass
 index and frozen configuration size. This allowance does not reduce repeated
 configuration decoding cost or guarantee arbitrary large-Mod throughput.
+
+The optional `entity_configuration` hook derives opaque bytes from frozen
+configuration once per configuration revision. The host passes those bytes to
+`attach`, `damage`, `tick` and `effects`. The hook has no entity state or source
+reads. The derived cache is rebuilt on restore and excluded from saves. Modules
+without the hook still receive their full configuration on those calls.
+
+The optional `resource_batch` hook receives ordered resource queries and one
+copy of the frozen configuration. It returns ordinary plans in query order.
+The host validates each plan against its own query before binding any policies.
+A batch accepts up to 128 queries under the normal message limit. Components
+can return JSON `null` to request smaller batches if their combined results
+would exceed the output bound. Components without this hook use scalar queries.
 
 The host's `config-read` uses the engine's existing typed INI reader semantics.
 Reader names are `int`, `bool`, `double-bits`, `nullable-int`, `nullable-bool`,
@@ -57,6 +78,8 @@ once, plus the bounded instance view. Simulation hosts expose neither source.
 `rules-registry-view` returns the typed catalogs and actual read-point prefixes
 for a physical Rules pass. Its bulk output uses the 8 MiB message cap; ordinary
 INI reader outputs and all reader current-value inputs retain their 64 KiB cap.
+`superweapon-registry-view` and `warhead-impact-registry-view` expose physical
+catalogs through the same 8 MiB bulk limit during configuration.
 The optional `fixed-art-view` is a separate bounded bulk read with that same
 8 MiB cap. Only a Foundation-capable configuration host exposes its fixed source;
 older components receive their unchanged production view and input allowance.

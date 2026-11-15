@@ -951,7 +951,7 @@ impl MatchLighting {
         mut grid: CellLightGrid,
         config: LightingConfig,
         detail_level: u32,
-        live: Option<(&ResolvedTerrainGrid, &Simulation)>,
+        live: Option<(&ResolvedTerrainGrid, &Simulation, &RuleSet)>,
         initial_events: Option<&[LightingEvent]>,
     ) {
         let saved = grid.take_saved_local_lighting();
@@ -962,9 +962,9 @@ impl MatchLighting {
             ..Self::default()
         };
         self.profile = lighting::normal_profile_units(&self.config).into();
-        if let Some((terrain, sim)) = live {
+        if let Some((terrain, sim, rules)) = live {
             self.theater = Some(sim.session().theater().to_owned());
-            let mut view = derive_lighting_view(&self.config, Some(sim), detail_level);
+            let mut view = derive_lighting_view(&self.config, Some((sim, rules)), detail_level);
             if initial_events.is_some() {
                 // Fresh Fill starts with the installed normal profile before
                 // authored overlays and later building source creation. Seed
@@ -985,7 +985,7 @@ impl MatchLighting {
             );
             if let Some(events) = initial_events {
                 self.apply_events(terrain, events);
-                self.refresh(terrain, sim, detail_level);
+                self.refresh(terrain, sim, rules, detail_level);
             } else {
                 (self.buildings, self.radiation) = source_maps(sim);
             }
@@ -1131,12 +1131,14 @@ impl MatchLighting {
 
     /// Reconcile explicit tool/fixture mutations and the detail option. Normal
     /// production frames first replay their ordered events via apply_events.
+    /// Returns whether reconciliation published events or rebuilt for detail.
     pub(crate) fn refresh(
         &mut self,
         terrain: &ResolvedTerrainGrid,
         sim: &Simulation,
+        rules: &RuleSet,
         detail_level: u32,
-    ) {
+    ) -> bool {
         // Retire only at physical disposal, never merely UnInit, detach or
         // loss of Logic/Display membership. Save uses the same store check.
         self.anim_intensities
@@ -1172,7 +1174,13 @@ impl MatchLighting {
             }
         }
         let cell_profile = sim.lighting_cell_profile();
-        if self.scenario != Some(*sim.session().lighting()) {
+        // Ares CurrentNuke10036998 can change without RecalcLighting.
+        // Such bookkeeping changes only the future constructor context below.
+        if !self
+            .scenario
+            .as_ref()
+            .is_some_and(|previous| previous.same_relight_inputs(sim.session().lighting()))
+        {
             events.push(LightingEvent::Global {
                 state: *sim.session().lighting(),
                 cell_profile,
@@ -1185,28 +1193,34 @@ impl MatchLighting {
                 }) {
                     PaletteUpdate::Preserve
                 } else {
-                    PaletteUpdate::from_scenario(&sim.session().lighting())
+                    sim.lighting_palette(rules)
                 },
-                constructor_rgb: sim.palette_constructor_rgb(),
+                constructor_rgb: sim.palette_constructor_rgb(rules),
             });
         } else if self.profile != scenario_profile(&sim.session().lighting(), cell_profile)
-            || self.grid.constructor_alternate_rgb() != sim.palette_constructor_rgb()
+            || !self
+                .grid
+                .constructor_alternate_rgb_matches(sim.palette_constructor_rgb(rules))
         {
             events.push(LightingEvent::RelightProfile {
                 cell_profile,
-                constructor_rgb: sim.palette_constructor_rgb(),
+                constructor_rgb: sim.palette_constructor_rgb(rules),
             });
         }
+        let detail_changed = self.detail_level != detail_level.min(2);
+        let changed = !events.is_empty() || detail_changed;
         self.apply_events(terrain, &events);
-        if self.detail_level != detail_level.min(2) {
+        if detail_changed {
             // Display4AE450 ->545000 destroys only Cell Converts. The
             // synchronous native iterator resample preserves ColorSchemes
             // and every already copied Anim+FC.
             self.detail_level = detail_level.min(2);
-            self.grid.reset_cell_converts(sim.palette_constructor_rgb());
+            self.grid
+                .reset_cell_converts(sim.palette_constructor_rgb(rules));
             let mut dirty = self.global_cells.iter().copied().collect();
             self.commit_source_cells(terrain, &mut dirty);
         }
+        changed
     }
 
     fn queue_area(
@@ -1322,18 +1336,22 @@ pub(crate) struct DerivedLightingView {
 /// Derive the complete visible lighting input from one committed world view.
 pub(crate) fn derive_lighting_view(
     lighting_config: &LightingConfig,
-    simulation: Option<&Simulation>,
+    simulation: Option<(&Simulation, &RuleSet)>,
     detail_level: u32,
 ) -> DerivedLightingView {
     let profile = simulation.map_or_else(
         || lighting::normal_profile_units(lighting_config).into(),
-        |sim| scenario_profile(&sim.session().lighting(), sim.lighting_cell_profile()),
+        |(sim, _)| scenario_profile(&sim.session().lighting(), sim.lighting_cell_profile()),
     );
-    let alternate_rgb = simulation.and_then(|sim| sim.session().lighting().alternate_rgb());
+    let alternate_rgb = simulation.and_then(|(sim, rules)| match sim.lighting_palette(rules) {
+        PaletteUpdate::Alternate(rgb) => Some(rgb),
+        PaletteUpdate::Preserve | PaletteUpdate::RestoreNormal | PaletteUpdate::Normal(_) => None,
+    });
 
-    let building_lights = collect_live_building_lights(simulation, detail_level);
+    let building_lights =
+        collect_live_building_lights(simulation.map(|(sim, _)| sim), detail_level);
     let radiation_lights = simulation
-        .map(|sim| {
+        .map(|(sim, _)| {
             sim.radiation()
                 .sites()
                 .filter_map(|site| site.light_source())
@@ -1347,7 +1365,7 @@ pub(crate) fn derive_lighting_view(
 
     DerivedLightingView {
         alternate_rgb,
-        constructor_rgb: simulation.and_then(Simulation::palette_constructor_rgb),
+        constructor_rgb: simulation.and_then(|(sim, rules)| sim.palette_constructor_rgb(rules)),
         profile,
         point_lights,
         detail_level: detail_level.min(2),
@@ -1377,7 +1395,7 @@ pub(crate) fn build_lighting_grid_from_view(
 pub(crate) fn rebuild_lighting_grid_from_sim(
     resolved_terrain: &ResolvedTerrainGrid,
     lighting_config: &LightingConfig,
-    simulation: Option<&Simulation>,
+    simulation: Option<(&Simulation, &RuleSet)>,
     detail_level: u32,
 ) -> CellLightGrid {
     let view = derive_lighting_view(lighting_config, simulation, detail_level);

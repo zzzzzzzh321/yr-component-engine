@@ -3,6 +3,8 @@
 //! physical-source projections. No frame is installed before both atlases finish.
 
 use super::{PreparedManifest, PresentationManifest};
+use crate::app::loading::cpu_job::CpuLoadJob;
+use crate::render::sidebar_cameo_atlas::{PreparedSidebarCameos, SidebarCameoWork};
 use crate::render::{batch::BatchRenderer, gpu::GpuContext, sprite_atlas, unit_atlas};
 use std::sync::{
     Arc,
@@ -17,6 +19,7 @@ pub(crate) struct PresentationAtlasJob {
         unit_atlas::UnitAtlasUpload,
     )>,
     sprite: Option<sprite_atlas::SpriteAtlasLoadingJob>,
+    cameos: Option<CpuLoadJob<Option<PreparedSidebarCameos>>>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -40,7 +43,6 @@ impl PreparedManifest {
     pub(crate) fn start_loading(
         self,
         gpu: &GpuContext,
-        batch: &BatchRenderer,
     ) -> anyhow::Result<(PresentationManifest, PresentationAtlasJob)> {
         let cancel = Arc::new(AtomicBool::new(false));
         let unit = match self.unit_work {
@@ -49,7 +51,7 @@ impl PreparedManifest {
         };
         let sprite = match self
             .sprite_work
-            .map(|work| work.start_loading(&gpu.device, &gpu.queue, batch))
+            .map(|work| work.start_loading(&gpu.device))
             .transpose()
         {
             Ok(sprite) => sprite,
@@ -67,6 +69,7 @@ impl PreparedManifest {
             PresentationAtlasJob {
                 unit,
                 sprite,
+                cameos: None,
                 cancel,
             },
         ))
@@ -74,6 +77,11 @@ impl PreparedManifest {
 }
 
 impl PresentationAtlasJob {
+    pub(crate) fn defer_sidebar_cameos(&mut self, work: SidebarCameoWork) -> anyhow::Result<()> {
+        self.cameos = Some(CpuLoadJob::start("sidebar-cameos", move || work.render())?);
+        Ok(())
+    }
+
     pub(crate) fn poll(
         &mut self,
         gpu: &GpuContext,
@@ -99,12 +107,19 @@ impl PresentationAtlasJob {
             }
         }
         if let Some(sprite) = &mut self.sprite {
-            if let Poll::Ready(atlas) = sprite.poll(&gpu.device, &gpu.queue)? {
+            if let Poll::Ready(atlas) = sprite.poll(&gpu.device, &gpu.queue, batch)? {
                 presentation.sprite_atlas = atlas;
                 self.sprite = None;
             }
         }
-        Ok(self.unit.is_none() && self.sprite.is_none())
+        if let Some(cameos) = &mut self.cameos
+            && let Poll::Ready(ready) = cameos.poll()?
+        {
+            presentation.sidebar_cameo_atlas =
+                ready.map(|atlas| atlas.upload(&gpu.device, &gpu.queue, batch));
+            self.cameos = None;
+        }
+        Ok(self.unit.is_none() && self.sprite.is_none() && self.cameos.is_none())
     }
 }
 

@@ -49,6 +49,7 @@ pub(super) struct SuperWeaponResourceBindings {
     frozen: Option<FrozenSuperWeaponBindings>,
     types: Option<HashMap<String, SuperWeaponType>>,
     ranges: Vec<Option<(Option<i32>, Option<i32>)>>,
+    warhead_impacts: Option<BTreeMap<String, crate::rules::warhead_type::WarheadImpactSettings>>,
 }
 
 impl SuperWeaponResourceBindings {
@@ -60,6 +61,49 @@ impl SuperWeaponResourceBindings {
 }
 
 impl RuleSet {
+    /// Explicit immutable selection; empty definitions still install Ares's
+    /// shared color hooks. Old components retain the stock selection.
+    pub(crate) fn superweapon_lighting_enabled(&self) -> bool {
+        self.external_superweapons
+            .as_ref()
+            .is_some_and(|catalog| catalog.policy.lighting == Some(true))
+    }
+
+    pub(crate) fn warhead_impact_enabled(&self) -> bool {
+        self.external_superweapons
+            .as_ref()
+            .is_some_and(|catalog| catalog.policy.nuclear_impacts.is_some())
+    }
+
+    /// Read the already-admitted native slot, never Find a final name at impact.
+    pub(crate) fn super_weapon_light(
+        &self,
+        ordinal: u32,
+    ) -> Option<&vera_mod_api::SuperWeaponLightPolicy> {
+        self.external_superweapons
+            .as_ref()?
+            .policy
+            .definitions
+            .iter()
+            .find(|definition| definition.ordinal == ordinal)?
+            .light
+            .as_ref()
+    }
+
+    pub(crate) fn super_weapon_create_radar_event(&self, ordinal: u32) -> bool {
+        self.external_superweapons
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .policy
+                    .definitions
+                    .iter()
+                    .find(|definition| definition.ordinal == ordinal)
+            })
+            .and_then(|definition| definition.create_radar_event)
+            .unwrap_or(true)
+    }
+
     pub(super) fn capture_superweapon_resource_sources(
         &mut self,
         processed: &ProcessedRulesLayers,
@@ -214,9 +258,54 @@ impl RuleSet {
                 frozen: None,
                 types,
                 ranges: vec![None; self.object_list.len()],
+                warhead_impacts: None,
             });
         };
         policy.validate()?;
+        let warhead_impacts = if let Some(declarations) = &policy.nuclear_impacts {
+            if declarations.len() != self.sdk_warhead_impact_names.len() {
+                return Err("Warhead impact declarations do not cover the native array".into());
+            }
+            let mut settings = BTreeMap::new();
+            for declaration in declarations {
+                let name = self
+                    .sdk_warhead_impact_names
+                    .get(declaration.ordinal as usize)
+                    .filter(|name| *name == &declaration.stored_id)
+                    .ok_or("Warhead impact identity differs from the native array")?;
+                if self.warhead(name).is_none() {
+                    return Err("registered Warhead impact has no runtime projection".into());
+                }
+                if let Some(index) = declaration.pre_impact
+                    && i32::try_from(index)
+                        .ok()
+                        .and_then(|index| self.anim_type_runtime_key_by_index(index))
+                        .is_none()
+                {
+                    return Err("Warhead PreImpact is outside the native Anim array".into());
+                }
+                let value = crate::rules::warhead_type::WarheadImpactSettings {
+                    flash_duration: declaration.flash_duration,
+                    pre_impact: declaration.pre_impact,
+                };
+                // The remaining WH runtime projection is name-addressed.
+                // Never silently choose one of differing native slot values;
+                // complete duplicate-WH pointer migration is a separate owner
+                // prerequisite, still recorded by the compatibility ledger.
+                let key = name.to_ascii_uppercase();
+                if settings
+                    .insert(key.clone(), value)
+                    .is_some_and(|old| old != value)
+                {
+                    return Err(format!(
+                        "distinct native Warhead impact slots alias [{key}]"
+                    ));
+                }
+            }
+            Some(settings)
+        } else {
+            None
+        };
         let exact_type = |identity: ProductionTypeRef| {
             i32::try_from(identity.ordinal)
                 .ok()
@@ -621,6 +710,7 @@ impl RuleSet {
             }),
             types: Some(types),
             ranges,
+            warhead_impacts,
         })
     }
 
@@ -628,6 +718,14 @@ impl RuleSet {
         &mut self,
         bindings: SuperWeaponResourceBindings,
     ) {
+        for warhead in self.warheads.values_mut() {
+            let settings = bindings
+                .warhead_impacts
+                .as_ref()
+                .and_then(|values| values.get(&warhead.id.to_ascii_uppercase()))
+                .copied();
+            warhead.bind_impact_settings(settings);
+        }
         if let Some(types) = bindings.types {
             self.super_weapons = types;
         }

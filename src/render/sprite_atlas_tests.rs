@@ -45,12 +45,12 @@ fn loading_job_publishes_the_same_index_pages_after_gpu_retirement() {
         PreparedSpriteAtlas::Raster(work, empty_upload(true))
     };
     let expected = prepare().finish(&gpu.device, &gpu.queue, &batch).unwrap();
-    let mut pending = prepare()
-        .start_loading(&gpu.device, &gpu.queue, &batch)
-        .unwrap();
+    let mut pending = prepare().start_loading(&gpu.device).unwrap();
     let deadline = Instant::now() + std::time::Duration::from_secs(5);
     let actual = loop {
-        if let std::task::Poll::Ready(atlas) = pending.poll(&gpu.device, &gpu.queue).unwrap() {
+        if let std::task::Poll::Ready(atlas) =
+            pending.poll(&gpu.device, &gpu.queue, &batch).unwrap()
+        {
             break atlas.unwrap();
         }
         assert!(Instant::now() < deadline, "loading band did not retire");
@@ -2801,11 +2801,11 @@ fn building_palette_gpu_control(
     module: Option<&[u8]>,
     independent: bool,
 ) -> [Vec<u8>; 4] {
+    use crate::assets::asset_manager::test_support::audio_test_install;
     use crate::render::{
         batch::{InstanceBufferPool, SpriteInstance},
         terrain_draw_gpu_tests::{camera, clear, sprite},
     };
-    use crate::assets::asset_manager::test_support::audio_test_install;
     use crate::rules::{
         audio_sources::AudioDefinitions, ini_parser::IniFile,
         process_owner::NativeScenarioRulesPrefix, retail_sources::RetailRulesSources,

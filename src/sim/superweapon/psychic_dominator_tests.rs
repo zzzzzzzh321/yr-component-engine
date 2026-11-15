@@ -436,7 +436,7 @@ fn update_lighting_matches_native() {
             PsychicDominatorState::for_test(psydom, ORACLE_CELL, Some(owner), None);
         let lighting_before = global_lighting_events(&sim);
 
-        sim.update_lighting();
+        sim.update_lighting(RuleSet::empty_for_test());
 
         let lighting = sim.session.lighting();
         assert_eq!(lighting.target_ambient(), int(&row["target"]), "{row}");

@@ -16,20 +16,22 @@ mod production;
 mod projectile;
 pub mod relationship;
 mod resource;
+pub mod resource_batch;
 mod startup;
 mod superweapon;
 pub mod timer;
+mod warhead_impact;
 pub use armor::{
     ArmorObjectKind, ArmorResourceContext, ArmorResourcePolicy, ArmorVersePolicy, BASE_ARMOR_NAMES,
 };
 pub use audio::{
-    PromotionSoundDeclaration, TypeSoundResourceContext, TypeSoundResourcePolicy,
-    MAX_PROMOTION_SOUND_TYPES,
+    MAX_PROMOTION_SOUND_TYPES, PromotionSoundDeclaration, TypeSoundResourceContext,
+    TypeSoundResourcePolicy,
 };
 pub use cameo::{
     CameoReadPoint, CameoRegistryView, CameoResourceContext, CameoResourcePolicy,
-    SuperWeaponCameoDeclaration, TechnoCameoDeclaration, MAX_CAMEO_DECLARATIONS,
-    MAX_CAMEO_FILENAME_BYTES,
+    MAX_CAMEO_DECLARATIONS, MAX_CAMEO_FILENAME_BYTES, SuperWeaponCameoDeclaration,
+    TechnoCameoDeclaration,
 };
 pub use configuration::{
     ConfigurationBoundary, ConfigureBoundaryContext, CountryReadPolicy, FixedIniSource,
@@ -65,6 +67,9 @@ pub use production::{
     ProductionRequirement, ProductionResourceContext, ProductionResourcePolicy,
     ProductionSemantics, ProductionTypeRef,
 };
+pub use warhead_impact::{
+    WarheadImpactDeclaration, WarheadImpactReadPoint, WarheadImpactRegistryView,
+};
 
 pub use projectile::{
     AirburstPolicy, BallisticScatterPolicy, ProjectileResourceContext, ProjectileResourcePolicy,
@@ -73,26 +78,26 @@ pub use projectile::{
 pub use resource::{
     DepletedWeaponPolicy, InputPolicy, ReloadPolicy, SpotlightAttachment, SpotlightPolicy,
     TypeConversionPolicy, TypeResourceContext, TypeResourcePolicy, WEAPON_USER_AIRCRAFT,
-    WEAPON_USER_BUILDING, WEAPON_USER_INFANTRY, WEAPON_USER_UNIT, WeaponResourceContext,
-    WeaponResourcePolicy, WeaponFiringResourceContext, WeaponFiringPolicy, WeaponTypeRef,
-    WeaponRegisteredType, WeaponRegistryView, WeaponReadValue, WeaponInstanceResourceContext,
-    WeaponInstanceResourcePolicy,
+    WEAPON_USER_BUILDING, WEAPON_USER_INFANTRY, WEAPON_USER_UNIT, WeaponFiringPolicy,
+    WeaponFiringResourceContext, WeaponInstanceResourceContext, WeaponInstanceResourcePolicy,
+    WeaponReadValue, WeaponRegisteredType, WeaponRegistryView, WeaponResourceContext,
+    WeaponResourcePolicy, WeaponTypeRef,
 };
 pub use startup::{
     CsfLanguageGate, EvaCatalogPolicy, IncludeSemantics, LongListReadersPolicy,
-    MasterTypeListsPolicy, MAX_STARTUP_RESOURCES, StartupAudioCatalog, StartupAudioPair,
-    StartupCsfCandidate, StartupCsfComposition, SpawnIdentityPolicy, StartupResourceContext,
+    MAX_STARTUP_RESOURCES, MasterTypeListsPolicy, SpawnIdentityPolicy, StartupAudioCatalog,
+    StartupAudioPair, StartupCsfCandidate, StartupCsfComposition, StartupResourceContext,
     StartupResourcePolicy,
 };
 
 pub use superweapon::{
-    ConfigureSuperReadContext, SuperReadValue, SuperReferenceRead, SuperWeaponReadPoint,
-    SuperWeaponReadSite, SuperWeaponRegistryView, SuperWeaponResourceContext,
-    SuperWeaponResourcePolicy, SuperWeaponSemantics, SuperWeaponAvailabilityPolicy,
-    SuperWeaponChargePolicy, SuperWeaponPresentationPolicy, SuperWeaponTargetingPolicy,
-    SuperWeaponDeliveryOwner, SuperWeaponPayloadPolicy, SuperWeaponDeclaration,
-    SuperWeaponProviderDeclaration, SuperWeaponCommonTargetingPolicy, SuperWeaponInfluencePolicy,
-    TechnoInfluenceDeclaration, SuperWeaponEvaPolicy,
+    ConfigureSuperReadContext, SuperReadValue, SuperReferenceRead, SuperWeaponAvailabilityPolicy,
+    SuperWeaponChargePolicy, SuperWeaponCommonTargetingPolicy, SuperWeaponDeclaration,
+    SuperWeaponDeliveryOwner, SuperWeaponEvaPolicy, SuperWeaponInfluencePolicy,
+    SuperWeaponLightPolicy, SuperWeaponPayloadPolicy, SuperWeaponPresentationPolicy,
+    SuperWeaponProviderDeclaration, SuperWeaponReadPoint, SuperWeaponReadSite,
+    SuperWeaponRegistryView, SuperWeaponResourceContext, SuperWeaponResourcePolicy,
+    SuperWeaponSemantics, SuperWeaponTargetingPolicy, TechnoInfluenceDeclaration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -150,6 +155,8 @@ pub enum HookKind {
     ProjectileResource,
     WeaponInstanceResource,
     MasterTypeLists,
+    EntityConfiguration,
+    ResourceBatch,
 }
 
 impl HookKind {
@@ -176,6 +183,8 @@ impl HookKind {
             Self::EvaCatalog => "eva_catalog",
             Self::LongListReaders => "long_list_readers",
             Self::MasterTypeLists => "master_type_lists",
+            Self::EntityConfiguration => "entity_configuration",
+            Self::ResourceBatch => "resource_batch",
             Self::ConfigureCountryRead => "configure_country_read",
             Self::FactionResource => "faction_resource",
             Self::ConfigureFactionPass => "configure_faction_pass",
@@ -321,6 +330,9 @@ pub enum Context {
     /// Pure installed declaration queried before physical Rules type loading.
     /// The host retains the master-list readers and registry lifecycle.
     MasterTypeLists,
+    /// Derive the configuration bytes used by live entity hooks from the
+    /// frozen Rules configuration. No host reads or entity writes are needed.
+    EntityConfiguration,
 }
 
 impl Context {
@@ -347,6 +359,7 @@ impl Context {
             Self::EvaCatalog => HookKind::EvaCatalog,
             Self::LongListReaders => HookKind::LongListReaders,
             Self::MasterTypeLists => HookKind::MasterTypeLists,
+            Self::EntityConfiguration => HookKind::EntityConfiguration,
             Self::ConfigureCountryRead => HookKind::ConfigureCountryRead,
             Self::FactionResource(_) => HookKind::FactionResource,
             Self::ConfigureFactionPass => HookKind::ConfigureFactionPass,
@@ -450,6 +463,26 @@ pub struct Plan {
     /// Optional pure declaration; absent in older components.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub master_type_lists: Option<MasterTypeListsPolicy>,
+    /// Opt-in EntityConfiguration reply. Attach outside these type names has
+    /// empty state and default presentation. Names match ASCII-insensitively.
+    /// Absent means visit every type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_types: Option<Vec<String>>,
+    /// Exact Techno resources whose first empty Waiting Visit still needs the
+    /// guest. For every other resource, an empty Waiting Visit has only one
+    /// effect: Waiting(counter) becomes Disabled(counter), provided the actor
+    /// is outside limbo/transport and has no chrono warp latch. A missing
+    /// declaration leaves all Visits with the guest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_visit_exceptions: Option<Vec<EffectResourceContext>>,
+}
+
+/// Registry selector returning ["1"] during EntityConfiguration when the host
+/// accepts the optional Attach and empty Effect Visit declarations.
+pub const ENTITY_FAST_PATHS_CAPABILITY: &str = "$entity-fast-paths";
+
+fn entity_type_name_valid(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
 }
 
 impl Plan {
@@ -487,6 +520,8 @@ impl Plan {
             super_reference_read: None,
             projectile_resource: None,
             master_type_lists: None,
+            attach_types: None,
+            effect_visit_exceptions: None,
         }
     }
 }
@@ -582,6 +617,7 @@ impl Request {
             HookKind::ConfigureCountryRead
                 | HookKind::ConfigureFactionPass
                 | HookKind::ConfigureSuperRead
+                | HookKind::EntityConfiguration
         ) && !self.state.is_empty()
         {
             return Err("early configuration has no entity state".into());
@@ -654,6 +690,7 @@ impl Request {
             | Context::EvaCatalog
             | Context::LongListReaders
             | Context::MasterTypeLists
+            | Context::EntityConfiguration
             | Context::ConfigureCountryRead
             | Context::FactionResource(_)
             | Context::ConfigureFactionPass
@@ -692,12 +729,31 @@ impl Plan {
                     | HookKind::ConfigureCountryRead
                     | HookKind::ConfigureFactionPass
                     | HookKind::ConfigureSuperRead
+                    | HookKind::EntityConfiguration
             )
         {
-            return Err("only configuration hooks may replace module configuration".into());
+            return Err("this hook cannot return configuration".into());
         }
         if self.damage.is_some() && request.context.kind() != HookKind::Damage {
             return Err("only damage may replace receiver damage".into());
+        }
+        if let Some(types) = &self.attach_types
+            && (!matches!(request.context, Context::EntityConfiguration)
+                || self.config.is_none()
+                || types.len() > 16_384
+                || types.iter().any(|name| !entity_type_name_valid(name)))
+        {
+            return Err("invalid entity attach type filter".into());
+        }
+        if let Some(types) = &self.effect_visit_exceptions
+            && (!matches!(request.context, Context::EntityConfiguration)
+                || self.config.is_none()
+                || types.len() > 16_384
+                || types
+                    .iter()
+                    .any(|ty| ty.kind.user().is_none() || !entity_type_name_valid(&ty.name)))
+        {
+            return Err("invalid empty effect visit exceptions".into());
         }
         if let Some(policy) = self.weapon_resource {
             if request.context.kind() != HookKind::WeaponResource {
@@ -762,6 +818,7 @@ impl Plan {
                 | HookKind::EvaCatalog
                 | HookKind::LongListReaders
                 | HookKind::MasterTypeLists
+                | HookKind::EntityConfiguration
                 | HookKind::ConfigureCountryRead
                 | HookKind::FactionResource
                 | HookKind::ConfigureFactionPass
@@ -942,6 +999,27 @@ pub struct DamageKernelInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_filter_only_belongs_to_the_frozen_entity_projection() {
+        let mut request = Request {
+            api_version: API_VERSION,
+            context: Context::EntityConfiguration,
+            config: vec![],
+            state: vec![],
+        };
+        let mut plan = Plan::unchanged(&request);
+        plan.attach_types = Some(vec![]);
+        assert!(plan.validate_for(&request).is_err());
+        plan.config = Some(vec![1]);
+        plan.validate_for(&request).unwrap();
+
+        plan.attach_types = Some(vec!["\n".into()]);
+        assert!(plan.validate_for(&request).is_err());
+        plan.attach_types = Some(vec!["TANK".into()]);
+        request.context = Context::ConfigureCountryRead;
+        assert!(plan.validate_for(&request).is_err());
+    }
 
     #[test]
     fn early_catalog_and_country_read_capabilities_keep_separate_authority() {

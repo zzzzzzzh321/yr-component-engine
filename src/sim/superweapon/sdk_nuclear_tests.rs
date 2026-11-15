@@ -489,3 +489,6 @@ fn sdk_nuclear_common_warhead_survives_intermediate_custom_type() {
     advance_until(&mut scene, 600, |sim| sim.projectiles.get(bullet).is_none());
     assert!(scene.sim.entities().get(target).unwrap().health.current() < health);
 }
+
+#[path = "sdk_nuclear_light_tests.rs"]
+mod light;

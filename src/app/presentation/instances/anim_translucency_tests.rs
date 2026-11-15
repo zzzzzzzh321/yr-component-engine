@@ -236,7 +236,7 @@ fn retained_squid_light_follows_event_order_and_keeps_live_palette_colours() {
             CellLightGrid::new(),
             LightingConfig::default(),
             detail,
-            Some((sim.resolved_terrain().unwrap(), &sim)),
+            Some((sim.resolved_terrain().unwrap(), &sim, &rules)),
             None,
         );
     }
@@ -283,7 +283,10 @@ fn retained_squid_light_follows_event_order_and_keeps_live_palette_colours() {
     sim.session_mut_for_test()
         .lighting_mut()
         .select(crate::sim::scenario_session::ScenarioLightingProfile::Nuke);
-    sim.publish_global_lighting(PaletteUpdate::from_scenario(sim.session().lighting()));
+    sim.publish_global_lighting(
+        PaletteUpdate::from_scenario(sim.session().lighting()),
+        &rules,
+    );
     let global = sim.lighting_sources().pending().last().unwrap().clone();
     high.apply_events(
         sim.resolved_terrain().unwrap(),
@@ -323,7 +326,7 @@ fn retained_squid_light_follows_event_order_and_keeps_live_palette_colours() {
         staged,
         LightingConfig::default(),
         2,
-        Some((sim.resolved_terrain().unwrap(), &sim)),
+        Some((sim.resolved_terrain().unwrap(), &sim, &rules)),
         None,
     );
     loaded.restore_anim_intensities(saved_anims);
@@ -378,10 +381,10 @@ fn retained_squid_light_follows_event_order_and_keeps_live_palette_colours() {
             state: *sim.session().lighting(),
             cell_profile: sim.lighting_cell_profile(),
             palette: PaletteUpdate::Normal([1200, 800, 600]),
-            constructor_rgb: sim.palette_constructor_rgb(),
+            constructor_rgb: sim.palette_constructor_rgb(&rules),
         }],
     );
-    high.refresh(sim.resolved_terrain().unwrap(), &sim, 0);
+    high.refresh(sim.resolved_terrain().unwrap(), &sim, &rules, 0);
     assert_eq!(
         high.anim_intensities().get(&id).copied(),
         Some(1150),
@@ -427,7 +430,7 @@ fn retained_squid_light_follows_event_order_and_keeps_live_palette_colours() {
         CellLightGrid::new(),
         LightingConfig::default(),
         0,
-        Some((sim.resolved_terrain().unwrap(), &sim)),
+        Some((sim.resolved_terrain().unwrap(), &sim, &rules)),
         None,
     );
     assert_eq!(restarted.grid().color_scheme_normal_rgb(), [1000; 3]);

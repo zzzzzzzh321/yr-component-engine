@@ -369,6 +369,7 @@ impl Simulation {
         let nuke = Some(crate::sim::projectile::NukeImpactContext::new(
             interner,
             &nuke_ball_type,
+            Some(rules),
         ));
         let result = self
             .projectiles

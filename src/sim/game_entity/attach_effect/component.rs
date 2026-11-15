@@ -24,6 +24,41 @@ fn control_value(value: api::EffectControl) -> SelfEffectState {
     }
 }
 
+/// The negotiated empty Visit transition only changes its control register.
+/// Check the same actor snapshot as the guest and commit through its usual plan.
+fn standard_empty_visit_plan(
+    context: &api::EffectContext,
+    has_custom_visit: impl FnOnce(&api::EffectResourceContext) -> Result<bool, String>,
+) -> Result<Option<api::EffectPlan>, String> {
+    if !matches!(context.event, api::EffectEvent::Visit)
+        || !context.entries.is_empty()
+        || context.entity.in_limbo
+        || context.entity.chrono_warp_latch
+        || context.inside_transport
+    {
+        return Ok(None);
+    }
+    let api::EffectControl::Waiting(counter) = context.control else {
+        return Ok(None);
+    };
+    let Some(kind) = api::EffectResourceKind::for_user(context.user) else {
+        return Ok(None);
+    };
+    let resource = api::EffectResourceContext {
+        kind,
+        name: context.entity.type_name.clone(),
+    };
+    if has_custom_visit(&resource)? {
+        return Ok(None);
+    }
+    let control = api::EffectControl::Disabled(counter);
+    Ok(Some(api::EffectPlan {
+        control,
+        animations_hidden: context.animations_hidden,
+        actions: vec![api::EffectAction::SetControl { control }],
+    }))
+}
+
 impl Simulation {
     fn component_effect_context(
         &self,
@@ -89,8 +124,17 @@ impl Simulation {
                 .filter(|p| p.has_effect_runtime())
                 .ok_or("Rules and simulation disagree about the effect component")?;
             let context = self.component_effect_context(target, event, rules)?;
-            let plan = program.evaluate(Context::Effects(context.clone()), &[])?;
-            if let Some(plan) = plan.effects {
+            let plan = match standard_empty_visit_plan(&context, |resource| {
+                program.has_custom_empty_effect_visit(resource)
+            })? {
+                Some(plan) => Some(plan),
+                None => {
+                    program
+                        .evaluate(Context::Effects(context.clone()), &[])?
+                        .effects
+                }
+            };
+            if let Some(plan) = plan {
                 self.commit_component_effects(&context, &plan, rules)?;
             }
             Ok::<(), String>(())

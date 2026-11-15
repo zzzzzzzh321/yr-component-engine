@@ -5221,7 +5221,10 @@ impl Simulation {
                     .session
                     .lighting_mut()
                     .retint_normal_component((action.kind - 142) as usize, value);
-                self.publish_global_lighting(crate::sim::light_sources::PaletteUpdate::Normal(rgb));
+                self.publish_global_lighting(
+                    crate::sim::light_sources::PaletteUpdate::Normal(rgb),
+                    rules,
+                );
             }
             73 => {
                 let Some(value) = value else {

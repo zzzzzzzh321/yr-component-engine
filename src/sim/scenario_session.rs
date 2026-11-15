@@ -203,6 +203,10 @@ pub struct ScenarioLightingState {
     /// nuke flash runs.
     nuke_change_rate: i32,
     nuke_flash: NukeFlash,
+    /// Ares CurrentNukeType100C1C84: retained native SW slot, independently
+    /// of the impacting Bullet and flash-running status. Saved globals
+    /// 1006DE60/1006DBC0 restore this before post-load UpdateLighting.
+    current_nuke_source: Option<u32>,
     /// Live Rules+1668/+1670 writes from Execute72/71. The immutable RuleSet
     /// supplies untouched inputs; retirement returns writes to the process
     /// Rules owner before its next prefix/read/reset sequence.
@@ -298,6 +302,7 @@ impl ScenarioLightingState {
             transition_timer: CdTimer::started(0, 0),
             nuke_change_rate,
             nuke_flash: NukeFlash::OFF,
+            current_nuke_source: None,
             ambient_change_overrides: [None; 2],
         }
     }
@@ -349,13 +354,46 @@ impl ScenarioLightingState {
     /// with its RGB times 10 and 1): [`Self::select`] of
     /// [`ScenarioLightingProfile::Nuke`]. The caller publishes the relight.
     pub(crate) fn start_nuke_flash(&mut self, frame: i32) {
+        self.begin_nuke_flash(frame, 30);
+        self.select(ScenarioLightingProfile::Nuke);
+    }
+
+    /// Shared timer writes of ScreenNukeFlash53AB70 and installed Ares
+    /// impact10036A09..10036A52. Palette selection is the caller's native
+    /// ChangeLighting step; it can decline even though the timer starts.
+    pub(crate) fn begin_nuke_flash(&mut self, frame: i32, duration: i32) {
         self.nuke_flash = NukeFlash {
             status: NukeFlashStatus::FadingIn,
             start: frame,
-            duration: 30,
+            duration,
         };
         self.transition_timer.start(frame, 1);
-        self.select(ScenarioLightingProfile::Nuke);
+    }
+
+    pub fn current_nuke_source(&self) -> Option<u32> {
+        self.current_nuke_source
+    }
+
+    /// Impact10036998 writes only for an associated, non-NukeMaker WH.
+    /// A disabled/zero-duration source still replaces the previous one.
+    pub(crate) fn remember_nuke_source(&mut self, ordinal: u32) {
+        self.current_nuke_source = Some(ordinal);
+    }
+
+    /// Source/status/timer changes alone do not refresh native Cells or
+    /// existing Converts. Ares10036A09 starts the ambient timer even when
+    /// ChangeLighting10032370 declines. Ordered presentation facts and actual
+    /// ambient/profile changes own refreshes, not that timer's bookkeeping.
+    pub fn same_relight_inputs(&self, other: &Self) -> bool {
+        let mut a = *self;
+        let mut b = *other;
+        a.current_nuke_source = None;
+        b.current_nuke_source = None;
+        a.nuke_flash = NukeFlash::OFF;
+        b.nuke_flash = NukeFlash::OFF;
+        a.transition_timer = CdTimer::started(0, 0);
+        b.transition_timer = CdTimer::started(0, 0);
+        a == b
     }
 
     /// The flash's step at the head of `LightningStorm::Process @
@@ -378,6 +416,8 @@ impl ScenarioLightingState {
             }
             NukeFlashStatus::FadingOut => {
                 self.nuke_flash.status = NukeFlashStatus::Off;
+                // Ares flash step10037391 clears source only at fadeout end.
+                self.current_nuke_source = None;
                 false
             }
             NukeFlashStatus::Off => false,
@@ -439,8 +479,12 @@ impl ScenarioLightingState {
     /// RGB is [`Self::alternate_rgb`].
     #[inline]
     pub fn select(&mut self, profile: ScenarioLightingProfile) {
+        self.select_resolved(profile, self.profile(profile).ambient_percent);
+    }
+
+    pub(crate) fn select_resolved(&mut self, profile: ScenarioLightingProfile, ambient: i32) {
         self.selected_profile = profile;
-        self.target_ambient = self.profile(profile).ambient_percent;
+        self.target_ambient = ambient;
     }
 
     /// Execute1426E2E60 /1436E2EB0 /1446E2F00 retains the raw signed
@@ -1879,6 +1923,10 @@ impl ScenarioSession {
         if lighting.ambient_change_overrides != [None; 2] {
             0x1668u16.hash(hasher);
             lighting.ambient_change_overrides.hash(hasher);
+        }
+        if let Some(source) = lighting.current_nuke_source {
+            b"ares-current-nuke-v1".hash(hasher);
+            source.hash(hasher);
         }
     }
 

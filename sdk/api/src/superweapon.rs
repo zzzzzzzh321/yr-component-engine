@@ -275,6 +275,31 @@ pub struct SuperWeaponEvaPolicy {
     pub select_target: crate::NullableResourceName,
 }
 
+/// Common SWTypeExt Light fields. Nullable integer presence is independent of
+/// its value: zero overrides, negative values keep the selected base component.
+/// Numeric conversion and live flash/source lifetime remain host responsibilities.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuperWeaponLightPolicy {
+    pub enabled: bool,
+    pub ambient: Option<i32>,
+    pub red: Option<i32>,
+    pub green: Option<i32>,
+    pub blue: Option<i32>,
+}
+
+impl Default for SuperWeaponLightPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ambient: None,
+            red: None,
+            green: None,
+            blue: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SuperWeaponDeclaration {
@@ -290,6 +315,14 @@ pub struct SuperWeaponDeclaration {
     /// present policy retains silence and first-initialization independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eva: Option<SuperWeaponEvaPolicy>,
+    /// None preserves the historical component domain. Present fields require
+    /// the batch's explicit native lighting selection below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<SuperWeaponLightPolicy>,
+    /// Common SW.CreateRadarEvent (constructor true). Historical absence
+    /// leaves the old impact producer unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_radar_event: Option<bool>,
     pub presentation: SuperWeaponPresentationPolicy,
     pub payload: SuperWeaponPayloadPolicy,
     /// None preserves the historical payload-specific targeting ABI. A present
@@ -325,6 +358,15 @@ pub struct SuperWeaponResourcePolicy {
     /// nullable ranges. Listed exact native slots override that unset base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub techno_influence: Option<Vec<TechnoInfluenceDeclaration>>,
+    /// None keeps historical dispatch; Some(true) selects the installed shared
+    /// color hooks even with zero definitions. Some(false) selects stock color
+    /// dispatch and cannot admit per-definition Light overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<bool>,
+    /// Actual WH slots with retained first-attempt/default/physical impact
+    /// reads. None preserves the historical literal-NUKE impact path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nuclear_impacts: Option<Vec<crate::WarheadImpactDeclaration>>,
 }
 
 impl SuperWeaponResourcePolicy {
@@ -352,6 +394,18 @@ impl SuperWeaponResourcePolicy {
             return Err("SuperWeapon declaration limit exceeded".into());
         }
         let mut influence_types = BTreeSet::new();
+        if let Some(warheads) = &self.nuclear_impacts {
+            if warheads.len() > LIMIT {
+                return Err("Warhead impact declaration limit exceeded".into());
+            }
+            let mut ordinals = BTreeSet::new();
+            for warhead in warheads {
+                warhead.validate()?;
+                if !ordinals.insert(warhead.ordinal) {
+                    return Err("duplicate Warhead impact slot".into());
+                }
+            }
+        }
         for declaration in self.techno_influence.iter().flatten() {
             if !influence_types.insert(declaration.object) {
                 return Err("duplicate Techno influence declaration".into());
@@ -359,6 +413,9 @@ impl SuperWeaponResourcePolicy {
         }
         let mut ordinals = BTreeSet::new();
         for definition in &self.definitions {
+            if definition.light.is_some() && self.lighting != Some(true) {
+                return Err("SuperWeapon Light requires its explicit lighting domain".into());
+            }
             if let Some(eva) = &definition.eva {
                 for reference in [
                     &eva.ready,
@@ -484,6 +541,8 @@ mod tests {
             money_amount: 0,
             insufficient_funds_eva: crate::NullableResourceName::Inherit,
             eva: None,
+            light: None,
+            create_radar_event: None,
             presentation: SuperWeaponPresentationPolicy {
                 animation: crate::NullableResourceName::Inherit,
                 height: 0,
@@ -494,6 +553,33 @@ mod tests {
             common_targeting: None,
             influence: None,
         }
+    }
+
+    #[test]
+    fn lighting_keeps_old_absence_and_requires_the_global_domain() {
+        let mut policy = SuperWeaponResourcePolicy {
+            definitions: vec![definition()],
+            ..SuperWeaponResourcePolicy::default()
+        };
+        let old = serde_json::to_value(&policy).unwrap();
+        assert!(old.get("lighting").is_none());
+        assert!(old["definitions"][0].get("light").is_none());
+        let restored: SuperWeaponResourcePolicy = serde_json::from_value(old).unwrap();
+        assert!(restored.lighting.is_none() && restored.definitions[0].light.is_none());
+        policy.definitions[0].light = Some(SuperWeaponLightPolicy::default());
+        assert!(policy.validate().is_err());
+        policy.lighting = Some(false);
+        assert!(policy.validate().is_err());
+        policy.lighting = Some(true);
+        policy.definitions[0].light.as_mut().unwrap().red = Some(i32::MAX);
+        policy.validate().unwrap();
+        policy.definitions.clear();
+        policy.validate().unwrap();
+        assert_eq!(
+            policy.lighting,
+            Some(true),
+            "global hooks do not depend on named definitions"
+        );
     }
 
     #[test]

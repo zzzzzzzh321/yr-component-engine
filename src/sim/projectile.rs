@@ -1490,15 +1490,35 @@ impl Projectile {
         shared_cell_dummy: &SharedCellDummy,
         candidate: ProjectileCoord,
     ) -> Option<ProjectileNukeImpact> {
-        if !nuke
-            .interner
-            .resolve(self.payload.warhead)
-            .eq_ignore_ascii_case(NUKE_WARHEAD)
+        let extension = if nuke
+            .rules
+            .is_some_and(|rules| rules.warhead_impact_enabled())
+        {
+            Some(nuke.extension(self)?)
+        } else {
+            None
+        };
+        if extension.is_none()
+            && !nuke
+                .interner
+                .resolve(self.payload.warhead)
+                .eq_ignore_ascii_case(NUKE_WARHEAD)
         {
             return None;
         }
-        self.position = raise_to_ground(self.position, terrain, shared_cell_dummy, self.on_bridge);
-        let waits = (nuke.nuke_ball_type)();
+        // Installed10036960 clamps only an associated non-NukeMaker impact;
+        // stock467E6B clamps every admitted literal NUKE impact.
+        if extension
+            .as_ref()
+            .is_none_or(|effect| effect.source.is_some())
+        {
+            self.position =
+                raise_to_ground(self.position, terrain, shared_cell_dummy, self.on_bridge);
+        }
+        let waits = extension.map_or_else(
+            || (nuke.nuke_ball_type)(),
+            |effect| effect.pre_impact.is_some(),
+        );
         if waits {
             self.awaiting_anim = true;
             self.awaited_anim = None;
@@ -1507,6 +1527,7 @@ impl Projectile {
         Some(ProjectileNukeImpact {
             projectile_id: self.id,
             waits,
+            extension,
         })
     }
 
@@ -1569,9 +1590,25 @@ pub struct ProjectileDetonation {
 pub(crate) struct ProjectileNukeImpact {
     projectile_id: u64,
     waits: bool,
+    extension: Option<WarheadImpactPresentation>,
+}
+
+/// Immutable receipt from the single Bullet impact admission. These are not
+/// a second runtime state machine; live timers and the wait remain with their
+/// existing scenario/projectile owners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WarheadImpactPresentation {
+    pub association: Option<u32>,
+    pub source: Option<u32>,
+    pub flash_enabled: bool,
+    pub flash_duration: i32,
+    pub pre_impact: Option<u32>,
 }
 
 impl ProjectileNukeImpact {
+    pub(crate) fn extension(self) -> Option<WarheadImpactPresentation> {
+        self.extension
+    }
     pub(crate) fn projectile_id(self) -> u64 {
         self.projectile_id
     }
@@ -1588,6 +1625,7 @@ impl ProjectileNukeImpact {
 pub struct NukeImpactContext<'a> {
     interner: &'a StringInterner,
     nuke_ball_type: &'a dyn Fn() -> bool,
+    rules: Option<&'a crate::rules::ruleset::RuleSet>,
 }
 
 impl<'a> NukeImpactContext<'a> {
@@ -1595,11 +1633,40 @@ impl<'a> NukeImpactContext<'a> {
     /// `nuke_ball_type` answers whether `AnimTypeClass::FindIndex("NUKEBALL")
     /// @ 0x00427CB0` finds a type (`0x00467EB1`), asked only at a `NUKE`
     /// impact.
-    pub(crate) fn new(interner: &'a StringInterner, nuke_ball_type: &'a dyn Fn() -> bool) -> Self {
+    pub(crate) fn new(
+        interner: &'a StringInterner,
+        nuke_ball_type: &'a dyn Fn() -> bool,
+        rules: Option<&'a crate::rules::ruleset::RuleSet>,
+    ) -> Self {
         Self {
             interner,
             nuke_ball_type,
+            rules,
         }
+    }
+
+    fn extension(&self, bullet: &Projectile) -> Option<WarheadImpactPresentation> {
+        let rules = self.rules?;
+        let warhead = rules.warhead(self.interner.resolve(bullet.payload.warhead))?;
+        let settings = warhead.impact_settings()?;
+        let association = bullet.launching_super_weapon;
+        let source = association.filter(|_| !warhead.nuke_maker);
+        //10036960..10036A05: only a qualified association supplies the30-frame
+        // base/Enabled gate. WH Duration overrides even unassociated/NukeMaker
+        // bullets; ChangeLighting receives the ORIGINAL association.
+        Some(WarheadImpactPresentation {
+            association,
+            source,
+            flash_enabled: source
+                .and_then(|ordinal| rules.super_weapon_light(ordinal))
+                .is_none_or(|light| light.enabled),
+            flash_duration: settings.flash_duration.unwrap_or(if source.is_some() {
+                30
+            } else {
+                0
+            }),
+            pre_impact: settings.pre_impact,
+        })
     }
 }
 

@@ -19,7 +19,15 @@ pub(super) struct SuperReadRecord {
     countries: Vec<(String, Option<String>)>,
     /// Only a reached Type body has a retained physical scalar source. This
     /// is a snapshot of the same member.body, not a second extension registry.
-    effective: Option<IniSection>,
+    effective: Option<Arc<EffectiveSuperReadSection>>,
+}
+
+#[derive(Debug)]
+struct EffectiveSuperReadSection {
+    section: IniSection,
+    /// The wire budget counts the exact JSON representation of this snapshot.
+    /// Every subsequent prefix can share it without encoding the body again.
+    encoded_len: Result<usize, String>,
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
@@ -56,7 +64,13 @@ impl RulesPassProcessor {
                     )
                 })
                 .collect(),
-            effective,
+            effective: effective.map(|section| {
+                let encoded_len = encode(&section).map(|bytes| bytes.len());
+                Arc::new(EffectiveSuperReadSection {
+                    section,
+                    encoded_len,
+                })
+            }),
         });
         read
     }
@@ -124,15 +138,14 @@ impl SdkRegistryPass {
         &self.superweapon
     }
 
-    /// Charge the same retained sections exposed to scalar reads. These bytes
-    /// are derived from this pass's sidecar, never a separately cached source.
+    /// Charge the same retained sections exposed to scalar reads.
     pub(crate) fn superweapon_effective_input_bytes(&self) -> Result<usize, String> {
         self.superweapon_reads
             .iter()
             .filter_map(|point| point.effective.as_ref())
-            .try_fold(0usize, |size, section| {
-                let bytes = encode(section)?;
-                Ok(size.saturating_add(bytes.len()))
+            .try_fold(0usize, |size, effective| {
+                let bytes = *effective.encoded_len.as_ref().map_err(Clone::clone)?;
+                Ok(size.saturating_add(bytes))
             })
     }
 
@@ -207,7 +220,8 @@ impl SdkRegistryPass {
         }
         point
             .effective
-            .as_ref()
+            .as_deref()
+            .map(|effective| &effective.section)
             .ok_or_else(|| "missing reached SuperWeapon body".into())
     }
 
@@ -469,6 +483,32 @@ mod tests {
             techno_list(&registries[0], &root, "Designators"),
             Some(vec![building])
         );
+    }
+
+    #[test]
+    fn retained_superweapon_budget_counts_the_canonical_json_size() {
+        let root = IniFile::from_str(
+            "[SuperWeaponTypes]\n0=POWER\n1=ABSENT\n[POWER]\nTag=Quote\"and\\slash\n",
+        );
+        let map = IniFile::from_str("[POWER]\nTag=\tAnother\"value\n");
+        let mut layers = RulesLayerStack::new(root);
+        layers.push(RulesLayerKind::Scenario, map);
+        let processed = layers.process().unwrap();
+        for pass in processed.sdk_registries() {
+            assert!(
+                pass.superweapon_reads
+                    .iter()
+                    .any(|point| point.effective.is_none())
+            );
+            let sections: Vec<_> = pass
+                .superweapon_reads
+                .iter()
+                .filter_map(|point| point.effective.as_deref())
+                .collect();
+            assert_eq!(sections.len(), 1);
+            let wire_size = serde_json::to_vec(&sections[0].section).unwrap().len();
+            assert_eq!(pass.superweapon_effective_input_bytes().unwrap(), wire_size);
+        }
     }
 
     #[test]

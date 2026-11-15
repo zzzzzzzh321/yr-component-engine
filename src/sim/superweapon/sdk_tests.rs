@@ -88,6 +88,17 @@ impl Scene {
         map: &str,
         eva: Option<&str>,
     ) -> Self {
+        Self::with_files(label, module, root, mode, map, eva, &[])
+    }
+    fn with_files(
+        label: &str,
+        module: Option<&[u8]>,
+        root: &str,
+        mode: Option<&str>,
+        map: &str,
+        eva: Option<&str>,
+        files: &[(&str, &[u8])],
+    ) -> Self {
         let dir = audio_test_install(label);
         if let Some(eva) = eva {
             std::fs::write(dir.path().join("evamd.ini"), eva).unwrap();
@@ -97,16 +108,20 @@ impl Scene {
         if let Some(module) = module {
             install(&dir, module);
         }
+        for (name, bytes) in files {
+            std::fs::write(dir.path().join(name), bytes).unwrap();
+        }
         let assets = open(&dir);
         let mut owner = process(&assets);
         let mode = mode.map(IniFile::from_str);
-        let (mut rules, ..) = owner
+        let (mut rules, _, fixed_art, _) = owner
             .load_scenario(
                 NativeScenarioRulesPrefix::NonCampaign(mode.as_ref()),
                 &IniFile::from_str(map),
             )
             .unwrap()
             .into_parts();
+        rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&fixed_art));
         let mut sim = Simulation::with_seed(17);
         bind_scenario_gameplay_resources(
             &mut rules,
@@ -207,6 +222,9 @@ impl Scene {
         program.validate_restore().unwrap();
         retained.retain_sdk_configuration_program(Some(std::sync::Arc::new(program.clone())));
         let mut rebound = self.owner.project_saved_scenario_rules(&retained).unwrap();
+        rebound.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(
+            self.owner.fixed_art(),
+        ));
         bind_scenario_gameplay_resources(
             &mut rebound,
             &self.assets,

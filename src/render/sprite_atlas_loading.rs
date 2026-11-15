@@ -39,34 +39,97 @@ struct LoadingUpload {
     texture_limit: u32,
 }
 
-pub(crate) struct SpriteAtlasLoadingJob {
-    ready: Option<Option<SpriteAtlas>>,
-    upload: Option<LoadingUpload>,
+/// Everything below GPU allocation is owned by the CPU worker. Only this
+/// private transfer, never a GPU resource, crosses back to the window thread.
+struct PackedLoadingAtlas {
+    completion: ShpAtlasUpload,
+    unrenderable: Vec<ShpSpriteKey>,
+    plan: ShpAtlasPackPlan,
+    palettes: ShpPalettes,
+    added: usize,
+    texture_limit: u32,
 }
+
+enum LoadingStage {
+    Preparing(mpsc::Receiver<anyhow::Result<Option<PackedLoadingAtlas>>>),
+    Uploading(Box<LoadingUpload>),
+    Empty,
+    Consumed,
+}
+
+pub(crate) struct SpriteAtlasLoadingJob(LoadingStage);
 
 impl PreparedSpriteAtlas {
     pub(crate) fn start_loading(
         self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        batch: &BatchRenderer,
     ) -> anyhow::Result<SpriteAtlasLoadingJob> {
         let (work, completion) = match self {
-            Self::Unchanged => return Ok(SpriteAtlasLoadingJob::ready(None)),
+            Self::Unchanged => return Ok(SpriteAtlasLoadingJob(LoadingStage::Empty)),
             Self::Raster(work, upload) => (work, upload),
         };
         anyhow::ensure!(completion.initial, "loading must not replace a live atlas");
-        // A map-load build that cannot draw a required frame fails here.
-        let Some((rendered, unrenderable, palettes)) = completion.drawn(work.render()) else {
-            return Ok(SpriteAtlasLoadingJob::ready(None));
+        let texture_limit = device.limits().max_texture_dimension_2d;
+        let (send, receive) = mpsc::channel();
+        let prepare = move || {
+            let _ = send.send(PackedLoadingAtlas::prepare(work, completion, texture_limit));
+        };
+        #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+        std::thread::Builder::new()
+            .name("shp-loading-prepare".into())
+            .spawn(prepare)?;
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        prepare();
+        Ok(SpriteAtlasLoadingJob(LoadingStage::Preparing(receive)))
+    }
+}
+
+impl PackedLoadingAtlas {
+    fn prepare(
+        work: ShpRasterWork,
+        completion: ShpAtlasUpload,
+        texture_limit: u32,
+    ) -> anyhow::Result<Option<Self>> {
+        // Fail the loading attempt with the raster's actual diagnostic. No
+        // candidate has been published, so the caller can retire its lease.
+        let (rendered, unrenderable, palettes) = match work.render().0 {
+            ShpRaster::Drawn {
+                rendered,
+                unrenderable,
+                rows,
+            } => (rendered, unrenderable, rows),
+            ShpRaster::Abandoned(failure) => anyhow::bail!("{failure}"),
         };
         let added = rendered.len();
         if rendered.is_empty() {
             log::warn!("No SHP sprites rendered");
-            return Ok(SpriteAtlasLoadingJob::ready(None));
+            return Ok(None);
         }
-        let texture_limit = device.limits().max_texture_dimension_2d;
-        let mut plan = plan_shp_pages(rendered, texture_limit);
+        let plan = plan_shp_pages(rendered, texture_limit);
+        Ok(Some(Self {
+            completion,
+            unrenderable,
+            plan,
+            palettes,
+            added,
+            texture_limit,
+        }))
+    }
+
+    fn begin_upload(
+        self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        batch: &BatchRenderer,
+    ) -> anyhow::Result<LoadingUpload> {
+        let Self {
+            completion,
+            unrenderable,
+            mut plan,
+            palettes,
+            added,
+            texture_limit,
+        } = self;
         let (atlas, indices) = create_packed_shp_atlas(device, queue, batch, &mut plan, palettes);
         #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
         let (send, messages) = mpsc::sync_channel(1);
@@ -132,32 +195,22 @@ impl PreparedSpriteAtlas {
                     .chain(std::iter::once(RasterMessage::Finished)),
             )
         };
-        Ok(SpriteAtlasLoadingJob {
-            ready: None,
-            upload: Some(LoadingUpload {
-                completion: Some(completion),
-                unrenderable,
-                atlas: Some(atlas),
-                indices,
-                messages,
-                #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
-                retired,
-                in_flight: None,
-                added,
-                texture_limit,
-            }),
+        Ok(LoadingUpload {
+            completion: Some(completion),
+            unrenderable,
+            atlas: Some(atlas),
+            indices,
+            messages,
+            #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+            retired,
+            in_flight: None,
+            added,
+            texture_limit,
         })
     }
 }
 
 impl SpriteAtlasLoadingJob {
-    fn ready(atlas: Option<SpriteAtlas>) -> Self {
-        Self {
-            ready: Some(atlas),
-            upload: None,
-        }
-    }
-
     /// At most one small queue write per event-loop pass, with no GPU wait.
     /// wgpu's completion callback is dispatched by Device::poll(Poll);
     /// unlike PollType::Wait this returns control to the window immediately.
@@ -165,14 +218,30 @@ impl SpriteAtlasLoadingJob {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        batch: &BatchRenderer,
     ) -> anyhow::Result<Poll<Option<SpriteAtlas>>> {
-        if let Some(atlas) = self.ready.take() {
-            return Ok(Poll::Ready(atlas));
+        if let LoadingStage::Preparing(result) = &self.0 {
+            self.0 = match result.try_recv() {
+                Ok(Ok(Some(atlas))) => {
+                    LoadingStage::Uploading(Box::new(atlas.begin_upload(device, queue, batch)?))
+                }
+                Ok(Ok(None)) => LoadingStage::Empty,
+                Ok(Err(error)) => return Err(error),
+                Err(mpsc::TryRecvError::Empty) => return Ok(Poll::Pending),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    anyhow::bail!("SHP preparation worker disconnected")
+                }
+            };
         }
-        let upload = self
-            .upload
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("SHP loading job already consumed"))?;
+        let upload = match &mut self.0 {
+            LoadingStage::Uploading(upload) => upload,
+            LoadingStage::Empty => {
+                self.0 = LoadingStage::Consumed;
+                return Ok(Poll::Ready(None));
+            }
+            LoadingStage::Consumed => anyhow::bail!("SHP loading job already consumed"),
+            LoadingStage::Preparing(_) => unreachable!("preparation consumed above"),
+        };
         device.poll(wgpu::PollType::Poll)?;
         if let Some(band) = &upload.in_flight {
             if !band.complete.load(Ordering::Acquire) {
@@ -223,7 +292,7 @@ impl SpriteAtlasLoadingJob {
                         upload.added,
                         std::mem::take(&mut upload.unrenderable),
                     );
-                self.upload = None;
+                self.0 = LoadingStage::Consumed;
                 Ok(Poll::Ready(Some(atlas)))
             }
             Err(mpsc::TryRecvError::Empty) => Ok(Poll::Pending),

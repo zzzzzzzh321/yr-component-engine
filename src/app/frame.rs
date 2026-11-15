@@ -675,6 +675,15 @@ impl App {
         mut hidden_run: Option<&mut crate::app::hidden_run::HiddenRun>,
         pass: FramePass,
     ) -> Result<FrameRenderOutcome> {
+        // A retired loading job still brings back the actual process Rules
+        // and MIX registry. Leave its last picture up until those are home.
+        if matches!(
+            state.process_assets.poll_retired_scenario_rules()?,
+            std::task::Poll::Pending
+        ) {
+            state.platform.window.request_redraw();
+            return Ok(FrameRenderOutcome::Deferred);
+        }
         if let Some(presented) = crate::app::persistence::commands::pump_saved_game_load(state) {
             return Ok(if presented {
                 FrameRenderOutcome::Presented

@@ -84,6 +84,11 @@ pub(crate) fn attach_entity(
     let Some(program) = rules.external_mod.as_deref() else {
         return Ok(());
     };
+    if !program.attaches_to_type(interner.resolve(entity.type_ref()))? {
+        entity.mod_component.clear();
+        entity.mod_presentation = Default::default();
+        return Ok(());
+    }
     let context = api::AttachContext {
         frame,
         entity: entity_context(entity, rules, interner),

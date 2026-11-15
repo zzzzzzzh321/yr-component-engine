@@ -2,6 +2,61 @@ use super::*;
 use vera_mod_api::{Context, EntityContext, HookKind, TickContext};
 
 #[test]
+fn resource_batches_validate_cardinality_and_each_context() {
+    use vera_mod_api::{ArmorObjectKind, ArmorResourceContext, ArmorResourcePolicy};
+
+    let queries = [
+        Context::ArmorResource(ArmorResourceContext::Object {
+            category: ArmorObjectKind::Unit,
+            name: "TANK".into(),
+        }),
+        Context::ArmorResource(ArmorResourceContext::Catalog),
+    ];
+    let mut object = Plan::unchanged(&query_request(queries[0].clone()));
+    object.armor_resource = Some(ArmorResourcePolicy::Object { armor: 3 });
+    let mut catalog = Plan::unchanged(&query_request(queries[1].clone()));
+    catalog.armor_resource = Some(ArmorResourcePolicy::Catalog {
+        names: vera_mod_api::BASE_ARMOR_NAMES.map(str::to_owned).into(),
+    });
+    let mut manifest = ModuleManifest {
+        api_version: API_VERSION,
+        id: "batch-test".into(),
+        version: "1".into(),
+        state_version: 1,
+        config_version: 1,
+        hooks: vec![HookKind::ArmorResource, HookKind::ResourceBatch],
+    };
+    let runtime = ComponentRuntime::new(Default::default()).unwrap();
+    let batch = ResourceBatch {
+        api_version: API_VERSION,
+        config: (&[][..]).into(),
+        queries: queries.as_slice().into(),
+    };
+    let evaluate = |manifest: &ModuleManifest, response: &[u8]| {
+        let module = load(
+            &runtime,
+            &test_support::component_fixture_by_kind(
+                manifest,
+                b"{}",
+                &[("resource_batch", response)],
+            ),
+        )
+        .unwrap();
+        runtime.evaluate_resource_batch(&module, &batch, Arc::new(ManifestHost))
+    };
+    let expected = vec![object.clone(), catalog.clone()];
+    assert_eq!(
+        evaluate(&manifest, &serde_json::to_vec(&expected).unwrap()).unwrap(),
+        Some(expected)
+    );
+    assert!(evaluate(&manifest, &serde_json::to_vec(&[object.clone()]).unwrap()).is_err());
+    assert!(evaluate(&manifest, &serde_json::to_vec(&[catalog, object]).unwrap()).is_err());
+    assert_eq!(evaluate(&manifest, b"null").unwrap(), None);
+    manifest.hooks.remove(0);
+    assert!(evaluate(&manifest, b"null").is_err());
+}
+
+#[test]
 fn registry_snapshot_has_a_bounded_bulk_limit_without_widening_scalar_readers() {
     use bindings::vera::mod_sdk::host::Host;
     struct ReaderOutput(usize);
@@ -81,6 +136,23 @@ fn registry_snapshot_has_a_bounded_bulk_limit_without_widening_scalar_readers() 
             .config_read("".into(), "".into(), "cameo-registry-view".into(), vec![])
             .is_err()
     );
+    for reader in ["superweapon-registry-view", "warhead-impact-registry-view"] {
+        assert_eq!(
+            state(65_537)
+                .config_read("".into(), "".into(), reader.into(), vec![])
+                .unwrap()
+                .unwrap()
+                .len(),
+            65_537,
+            "{reader}"
+        );
+        assert!(
+            state(MAX_MESSAGE_BYTES + 1)
+                .config_read("".into(), "".into(), reader.into(), vec![])
+                .is_err(),
+            "{reader}"
+        );
+    }
 }
 
 fn entity() -> EntityContext {
@@ -357,7 +429,7 @@ fn runtime_accounts_for_bounded_wire_input_without_disabling_fuel() {
 }
 
 #[test]
-fn runtime_counts_frozen_configuration_input_within_the_existing_cap() {
+fn runtime_counts_setup_wire_and_configuration_only_metadata() {
     struct MetadataHost;
     impl HostServices for MetadataHost {
         fn configuration_input_bytes(&self) -> usize {
@@ -386,24 +458,21 @@ fn runtime_counts_frozen_configuration_input_within_the_existing_cap() {
         fuel: 10_000,
         configure_fuel: 10_000,
         fuel_per_input_byte: 64,
-        max_input_fuel: 200_000,
+        max_input_fuel: 20_000,
+        setup_max_input_fuel: 200_000,
+        rules_pass_max_input_fuel: 300_000,
+        host_calls: 100,
+        rules_pass_max_extra_host_calls: 200,
         ..Default::default()
     })
     .unwrap();
-    let workload = load(
-        &runtime,
-        &fixture(
-            API_VERSION,
-            r#"
+    let burn = r#"
         (global.set $counter (i32.const 10000))
         (loop $work
             (global.set $counter (i32.sub (global.get $counter) (i32.const 1)))
             (br_if $work (global.get $counter)))
-    "#,
-            "",
-        ),
-    )
-    .unwrap();
+    "#;
+    let workload = load(&runtime, &fixture(API_VERSION, burn, "")).unwrap();
     let configure = Request {
         context: Context::Configure(vera_mod_api::ConfigureContext {
             pass: 0,
@@ -434,7 +503,7 @@ fn runtime_counts_frozen_configuration_input_within_the_existing_cap() {
             runtime
                 .call(&workload.component, kind, b"{}", Arc::new(MetadataHost))
                 .is_ok(),
-            "{kind} counts frozen metadata within the existing input cap"
+            "{kind} counts frozen metadata within the configuration input cap"
         );
     }
     assert!(
@@ -442,6 +511,32 @@ fn runtime_counts_frozen_configuration_input_within_the_existing_cap() {
             .evaluate(&workload, &request(), Arc::new(MetadataHost))
             .is_err(),
         "configuration metadata cannot grant an actor more fuel"
+    );
+    let resource = Request {
+        context: Context::SuperWeaponResource(vera_mod_api::SuperWeaponResourceContext {}),
+        ..request()
+    };
+    let mut resource_manifest = workload.manifest().clone();
+    resource_manifest.hooks.push(HookKind::SuperWeaponResource);
+    let resource_response = serde_json::to_vec(&Plan::unchanged(&resource)).unwrap();
+    let resource_fixture =
+        |body| test_support::component_fixture(&resource_manifest, &resource_response, body, "");
+    let resource_workload = load(&runtime, &resource_fixture(burn)).unwrap();
+    assert!(
+        runtime
+            .evaluate(&resource_workload, &resource, Arc::new(MetadataHost))
+            .is_err(),
+        "frozen resource declarations gain no physical configuration metadata"
+    );
+    let padded_resource = Request {
+        config: vec![255; 1024],
+        ..resource
+    };
+    assert!(
+        runtime
+            .evaluate(&resource_workload, &padded_resource, Arc::new(MetadataHost))
+            .is_ok(),
+        "whole-catalog wire input uses the bounded setup allowance"
     );
     let infinite = load(
         &runtime,
@@ -453,7 +548,28 @@ fn runtime_counts_frozen_configuration_input_within_the_existing_cap() {
             .evaluate(&infinite, &configure, Arc::new(MetadataHost))
             .is_err()
     );
-    assert_eq!(runtime.limits.fuel_for("configure", usize::MAX), 210_000);
+    assert_eq!(runtime.limits.fuel_for("configure", usize::MAX), 310_000);
+    assert_eq!(runtime.limits.host_calls_for("configure", 2_048), 228);
+    assert_eq!(runtime.limits.host_calls_for("configure", usize::MAX), 300);
+    assert_eq!(
+        runtime
+            .limits
+            .host_calls_for("configure_super_read", usize::MAX),
+        100
+    );
+    assert_eq!(runtime.limits.host_calls_for("tick", usize::MAX), 100);
+    let resource_infinite = load(&runtime, &resource_fixture("(loop $spin (br $spin))")).unwrap();
+    assert!(
+        runtime
+            .evaluate(&resource_infinite, &padded_resource, Arc::new(MetadataHost))
+            .is_err()
+    );
+    assert_eq!(
+        runtime.limits.fuel_for("superweapon_resource", usize::MAX),
+        210_000
+    );
+    assert_eq!(runtime.limits.fuel_for("effects", usize::MAX), 30_000);
+    assert_eq!(runtime.limits.fuel_for("tick", usize::MAX), 30_000);
     assert_eq!(
         RuntimeLimits {
             configure_fuel: 10_000,

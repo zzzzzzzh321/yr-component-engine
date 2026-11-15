@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::assets::asset_manager::AssetManager;
+use crate::assets::mix_archive::SharedBytes;
 use crate::assets::pal_file::Palette;
 use crate::assets::shp_file::ShpFile;
 use crate::render::atlas_growth;
@@ -112,6 +113,110 @@ struct RenderedCameo {
     sharp: Vec<bool>,
 }
 
+struct CameoSource {
+    name: String,
+    bytes: SharedBytes,
+    pcx: bool,
+}
+
+impl CameoSource {
+    fn resolve(assets: &AssetManager, name: String, pcx: bool) -> Option<Self> {
+        let bytes = assets.get_shared(&name)?;
+        Some(Self { name, bytes, pcx })
+    }
+}
+
+struct CameoRequest {
+    type_id: String,
+    kind: CameoKind,
+    sources: Vec<CameoSource>,
+}
+
+impl CameoRequest {
+    fn render(&self, palette: &Palette) -> Option<RenderedCameo> {
+        for source in &self.sources {
+            let pixels = if source.pcx {
+                render_pcx_bytes(&self.type_id, &source.bytes)
+            } else {
+                render_shp_frame0(&self.type_id, &source.bytes, palette)
+            };
+            if let Some(mut cameo) = pixels {
+                cameo.kind = self.kind;
+                log::debug!(
+                    "Sidebar {:?} cameo {} loaded from {}",
+                    self.kind,
+                    self.type_id,
+                    source.name
+                );
+                return Some(cameo);
+            }
+        }
+        None
+    }
+}
+
+/// Owns just the shared bytes of the selected sources, in their resolution
+/// order. Decoding and page preparation can run without the asset manager.
+pub(crate) struct SidebarCameoWork {
+    requests: Vec<CameoRequest>,
+    palette: Palette,
+    texture_limit: u32,
+}
+
+impl SidebarCameoWork {
+    pub(crate) fn prepare(
+        assets: &AssetManager,
+        rules: &RuleSet,
+        palette: Palette,
+        texture_limit: u32,
+    ) -> Self {
+        Self {
+            requests: cameo_requests(assets, rules),
+            palette,
+            texture_limit,
+        }
+    }
+
+    pub(crate) fn render(self) -> Option<PreparedSidebarCameos> {
+        let render = |requests: &[CameoRequest]| -> Vec<_> {
+            requests
+                .iter()
+                .filter_map(|request| request.render(&self.palette))
+                .collect()
+        };
+        #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+        let rendered = {
+            // Keep original request order when packing. Cap this worker's
+            // concurrency because the world atlases can be building alongside it.
+            let workers =
+                std::thread::available_parallelism().map_or(1, |count| count.get().min(4));
+            if workers > 1 && self.requests.len() >= 128 {
+                std::thread::scope(|scope| {
+                    let render = &render;
+                    let tasks: Vec<_> = self
+                        .requests
+                        .chunks(self.requests.len().div_ceil(workers))
+                        .map(|chunk| scope.spawn(move || render(chunk)))
+                        .collect();
+                    tasks
+                        .into_iter()
+                        .flat_map(|task| task.join().expect("cameo renderer panicked"))
+                        .collect()
+                })
+            } else {
+                render(&self.requests)
+            }
+        };
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        let rendered = render(&self.requests);
+        if rendered.is_empty() {
+            log::warn!("Sidebar cameo atlas: no cameo art found");
+            return None;
+        }
+        prepare_cameo_page(&rendered, self.texture_limit)
+    }
+}
+
 pub fn build_sidebar_cameo_atlas(
     gpu: &GpuContext,
     batch: &BatchRenderer,
@@ -119,27 +224,30 @@ pub fn build_sidebar_cameo_atlas(
     rules: &RuleSet,
     palette: &Palette,
 ) -> Option<SidebarCameoAtlas> {
-    let rendered = collect_sidebar_cameos(asset_manager, rules, palette);
-    if rendered.is_empty() {
-        log::warn!("Sidebar cameo atlas: no cameo art found");
-        return None;
-    }
-    let atlas = pack_cameos(&gpu.device, &gpu.queue, batch, &rendered)?;
-    log::info!(
-        "Sidebar cameo atlas built: {} entries, {}x{} px",
-        atlas.entries.len() + atlas.superweapon_entries.len(),
-        atlas.texture.width,
-        atlas.texture.height
-    );
-    Some(atlas)
+    SidebarCameoWork::prepare(
+        asset_manager,
+        rules,
+        palette.clone(),
+        gpu.device.limits().max_texture_dimension_2d,
+    )
+    .render()
+    .map(|ready| ready.upload(&gpu.device, &gpu.queue, batch))
 }
 
+#[cfg(test)]
 fn collect_sidebar_cameos(
     asset_manager: &AssetManager,
     rules: &RuleSet,
     palette: &Palette,
 ) -> Vec<RenderedCameo> {
-    let mut rendered: Vec<RenderedCameo> = Vec::new();
+    cameo_requests(asset_manager, rules)
+        .into_iter()
+        .filter_map(|work| work.render(palette))
+        .collect()
+}
+
+fn cameo_requests(asset_manager: &AssetManager, rules: &RuleSet) -> Vec<CameoRequest> {
+    let mut requests = Vec::new();
     let type_ids = rules
         .building_ids
         .iter()
@@ -148,22 +256,16 @@ fn collect_sidebar_cameos(
         .chain(rules.aircraft_ids.iter());
 
     for type_id in type_ids {
-        if let Some(cameo) = render_cameo(type_id, asset_manager, rules, palette) {
-            rendered.push(cameo);
-        }
-        if let Some(cameo) = render_alt_cameo(type_id, asset_manager, rules, palette) {
-            rendered.push(cameo);
-        }
+        requests.extend(cameo_request(type_id, asset_manager, rules));
+        requests.extend(alt_cameo_request(type_id, asset_manager, rules));
     }
 
     // Ares1005E410 selects a surface owned by this SuperWeaponType's extension.
     // A shared invalid PCX filename may have a different SHP fallback per type.
     for sw in rules.super_weapons.values() {
-        if let Some(cameo) = render_superweapon_cameo(sw, asset_manager, rules, palette) {
-            rendered.push(cameo);
-        }
+        requests.extend(superweapon_cameo_request(sw, asset_manager, rules));
     }
-    rendered
+    requests
 }
 
 /// Export a side-by-side palette comparison sheet for a few cameos.
@@ -271,15 +373,23 @@ fn render_cameo(
     rules: &RuleSet,
     palette: &Palette,
 ) -> Option<RenderedCameo> {
+    cameo_request(type_id, asset_manager, rules)?.render(palette)
+}
+
+fn cameo_request(
+    type_id: &str,
+    asset_manager: &AssetManager,
+    rules: &RuleSet,
+) -> Option<CameoRequest> {
     let rules_image = rules
         .object(type_id)
         .map(|obj| obj.image.clone())
         .unwrap_or_else(|| type_id.to_string());
-    if let [Some(name), _] = rules.pcx_cameos_for_type(type_id)
-        && let Some(cameo) = render_pcx_cameo(type_id, name, asset_manager)
-    {
-        return Some(cameo);
-    }
+    let [pcx, _] = rules.pcx_cameos_for_type(type_id);
+    let mut sources: Vec<_> = pcx
+        .and_then(|name| CameoSource::resolve(asset_manager, name.into(), true))
+        .into_iter()
+        .collect();
     let resolved_image = rules
         .art()
         .resolve_effective_image_id(type_id, &rules_image);
@@ -296,36 +406,41 @@ fn render_cameo(
         &resolved_cameo,
     ));
 
-    if let Some((data, file_name)) = candidates
-        .iter()
-        .find_map(|name| asset_manager.get_ref(name).map(|data| (data, name.clone())))
+    if let Some(source) = candidates
+        .into_iter()
+        .find_map(|name| CameoSource::resolve(asset_manager, name, false))
     {
-        let cameo = render_shp_frame0(type_id, data, palette)?;
-        log::debug!("Sidebar cameo {} loaded from {}", type_id, file_name);
-        return Some(cameo);
+        // The first physical SHP wins even when its decoder refuses it.
+        sources.push(source);
+    } else {
+        #[cfg(feature = "phobos")]
+        sources.extend(missing_cameo_sources(rules.missing_cameo(), asset_manager));
     }
-    // A cameo that does not load leaves the stock XXICON.SHP
-    // (`TechnoTypeClass::ReadINI`, `0x00715A4D`), which Phobos's
-    // `MissingCameo=` replaces.
-    #[cfg(feature = "phobos")]
-    {
-        render_missing_cameo(type_id, rules.missing_cameo(), asset_manager, palette)
-    }
-    #[cfg(not(feature = "phobos"))]
-    {
-        None
-    }
+    (!sources.is_empty()).then(|| CameoRequest {
+        type_id: type_id.into(),
+        kind: CameoKind::Ordinary,
+        sources,
+    })
 }
 
 /// A type's `AltCameo=` image: `<AltCameo>.SHP`, read from the type's image
 /// section only (`TechnoTypeClass::ReadINI`, section `+0x1F8` at
 /// `0x00715A73`), with no fallback when it is missing.
+#[cfg(test)]
 fn render_alt_cameo(
     type_id: &str,
     asset_manager: &AssetManager,
     rules: &RuleSet,
     palette: &Palette,
 ) -> Option<RenderedCameo> {
+    alt_cameo_request(type_id, asset_manager, rules)?.render(palette)
+}
+
+fn alt_cameo_request(
+    type_id: &str,
+    asset_manager: &AssetManager,
+    rules: &RuleSet,
+) -> Option<CameoRequest> {
     let rules_image = rules
         .object(type_id)
         .map(|obj| obj.image.clone())
@@ -333,59 +448,63 @@ fn render_alt_cameo(
     // Ares3.0 Cameos1005E430..1005E470: use promoted PCX only if loaded;
     // otherwise the ordinary PCX still takes precedence over an AltCameo SHP.
     let [normal, promoted] = rules.pcx_cameos_for_type(type_id);
-    for name in [promoted, normal].into_iter().flatten() {
-        if let Some(mut cameo) = render_pcx_cameo(type_id, name, asset_manager) {
-            cameo.kind = CameoKind::Promoted;
-            return Some(cameo);
-        }
-    }
+    let mut sources: Vec<_> = [promoted, normal]
+        .into_iter()
+        .flatten()
+        .filter_map(|name| CameoSource::resolve(asset_manager, name.into(), true))
+        .collect();
     let alt_cameo = rules
         .art()
-        .resolve_declared_alt_cameo_id(type_id, &rules_image)?;
-    let shp_name = format!("{alt_cameo}.SHP");
-    let mut cameo = render_shp_frame0(type_id, asset_manager.get_ref(&shp_name)?, palette)?;
-    cameo.kind = CameoKind::Promoted;
-    log::debug!("Sidebar alt cameo {} loaded from {}", type_id, shp_name);
-    Some(cameo)
+        .resolve_declared_alt_cameo_id(type_id, &rules_image);
+    sources.extend(
+        alt_cameo
+            .and_then(|name| CameoSource::resolve(asset_manager, format!("{name}.SHP"), false)),
+    );
+    (!sources.is_empty()).then(|| CameoRequest {
+        type_id: type_id.into(),
+        kind: CameoKind::Promoted,
+        sources,
+    })
 }
 
 /// Load a superweapon sidebar image SHP directly by name.
 ///
 /// SW sidebar images are standalone SHP files (e.g. `BOLTICON.SHP`) in
 /// `cameo(md).mix`, not referenced in art.ini. No image/cameo resolution needed.
+#[cfg(test)]
 fn render_superweapon_cameo(
     sw: &crate::rules::superweapon_type::SuperWeaponType,
     asset_manager: &AssetManager,
     rules: &RuleSet,
     palette: &Palette,
 ) -> Option<RenderedCameo> {
-    let key = &sw.id;
-    if let Some(name) = rules.pcx_cameo_for_superweapon(key)
-        && let Some(mut cameo) = render_pcx_cameo(key, name, asset_manager)
-    {
-        cameo.kind = CameoKind::SuperWeapon;
-        return Some(cameo);
-    }
-    if let Some(image_name) = sw.sidebar_image.as_deref() {
-        let shp_name = format!("{image_name}.SHP");
-        if let Some(data) = asset_manager.get_ref(&shp_name)
-            && let Some(mut cameo) = render_shp_frame0(key, data, palette)
-        {
-            cameo.kind = CameoKind::SuperWeapon;
-            log::debug!("SW sidebar cameo {} loaded from {}", image_name, shp_name);
-            return Some(cameo);
-        }
-    }
+    superweapon_cameo_request(sw, asset_manager, rules)?.render(palette)
+}
+
+fn superweapon_cameo_request(
+    sw: &crate::rules::superweapon_type::SuperWeaponType,
+    asset_manager: &AssetManager,
+    rules: &RuleSet,
+) -> Option<CameoRequest> {
+    let mut sources: Vec<_> = rules
+        .pcx_cameo_for_superweapon(&sw.id)
+        .and_then(|name| CameoSource::resolve(asset_manager, name.into(), true))
+        .into_iter()
+        .collect();
+    sources.extend(
+        sw.sidebar_image
+            .as_deref()
+            .and_then(|name| CameoSource::resolve(asset_manager, format!("{name}.SHP"), false)),
+    );
     // `SWTypeClass::Load`/`ReadINI` take the same `MissingCameo` replacement,
     // so a superweapon with no icon shows the placeholder too.
     #[cfg(feature = "phobos")]
-    if let Some(mut cameo) =
-        render_missing_cameo(key, rules.missing_cameo(), asset_manager, palette)
-    {
-        cameo.kind = CameoKind::SuperWeapon;
-        return Some(cameo);
-    }
-    None
+    sources.extend(missing_cameo_sources(rules.missing_cameo(), asset_manager));
+    (!sources.is_empty()).then(|| CameoRequest {
+        type_id: sw.id.clone(),
+        kind: CameoKind::SuperWeapon,
+        sources,
+    })
 }
 
 /// One PCX as gamemd's PCX blit6BA580 draws it.
@@ -428,13 +547,17 @@ pub(crate) fn decode_native_pcx(bytes: &[u8]) -> Option<NativePcxImage> {
 /// a60x48 destination canvas;6BA5EF..600 uses source dimensions without scaling.
 /// https://ares-developers.github.io/Ares-docs/new/pcxcameos.html
 /// Phobos MissingCameo also reaches the same PCX blit.
+#[cfg(test)]
 fn render_pcx_cameo(
     key: &str,
     filename: &str,
     asset_manager: &AssetManager,
 ) -> Option<RenderedCameo> {
-    let image = decode_native_pcx(asset_manager.get_ref(filename)?)?;
-    log::debug!("Sidebar PCX cameo {key} loaded from {filename}");
+    render_pcx_bytes(key, asset_manager.get_ref(filename)?)
+}
+
+fn render_pcx_bytes(key: &str, data: &[u8]) -> Option<RenderedCameo> {
+    let image = decode_native_pcx(data)?;
     // A loaded surface remains selected even if every word is keyed out.
     // Cropping it to None would incorrectly select the legacy SHP instead.
     Some(RenderedCameo {
@@ -490,32 +613,19 @@ fn render_shp_frame0(key: &str, data: &[u8], palette: &Palette) -> Option<Render
 /// name containing `.pcx` into the 60x48 cell. Otherwise, or when the
 /// configured file does not load, the stock `XXICON.SHP` draws.
 #[cfg(feature = "phobos")]
-fn render_missing_cameo(
-    key: &str,
-    name: &str,
-    asset_manager: &AssetManager,
-    palette: &Palette,
-) -> Option<RenderedCameo> {
+fn missing_cameo_sources(name: &str, asset_manager: &AssetManager) -> Vec<CameoSource> {
     let lower = name.to_ascii_lowercase();
-    if lower != "xxicon.shp"
-        && lower.contains(".shp")
-        && let Some(cameo) = asset_manager
-            .get_ref(name)
-            .and_then(|data| render_shp_frame0(key, data, palette))
-    {
-        log::debug!("Sidebar cameo {key} fell back to {name}");
-        return Some(cameo);
+    let mut sources = Vec::new();
+    if lower != "xxicon.shp" && lower.contains(".shp") {
+        sources.extend(CameoSource::resolve(asset_manager, name.into(), false));
     }
-    let stock = asset_manager.get_ref("XXICON.SHP")?;
-    if lower.contains(".pcx")
-        && let Some(cameo) = render_pcx_cameo(key, name, asset_manager)
-    {
-        log::debug!("Sidebar cameo {key} fell back to {name}");
-        return Some(cameo);
+    if let Some(stock) = CameoSource::resolve(asset_manager, "XXICON.SHP".into(), false) {
+        if lower.contains(".pcx") {
+            sources.extend(CameoSource::resolve(asset_manager, name.into(), true));
+        }
+        sources.push(stock);
     }
-    let cameo = render_shp_frame0(key, stock, palette)?;
-    log::debug!("Sidebar cameo {key} fell back to XXICON.SHP");
-    Some(cameo)
+    sources
 }
 
 /// Repo-only fallback guesses kept out of `rules::art_data`.
@@ -681,13 +791,57 @@ fn blit_rgba(
     }
 }
 
+#[cfg(test)]
 fn pack_cameos(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     batch: &BatchRenderer,
     cameos: &[RenderedCameo],
 ) -> Option<SidebarCameoAtlas> {
-    let max_texture_dim = device.limits().max_texture_dimension_2d;
+    prepare_cameo_page(cameos, device.limits().max_texture_dimension_2d)
+        .map(|prepared| prepared.upload(device, queue, batch))
+}
+
+pub(crate) struct PreparedSidebarCameos {
+    rgba: Vec<u8>,
+    size: [u32; 2],
+    sharp: Vec<bool>,
+    pieces: Vec<[u32; 4]>,
+    entries: HashMap<String, SidebarCameoEntry>,
+    alt_entries: HashMap<String, SidebarCameoEntry>,
+    superweapon_entries: HashMap<String, SidebarCameoEntry>,
+}
+
+impl PreparedSidebarCameos {
+    pub(crate) fn upload(
+        self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        batch: &BatchRenderer,
+    ) -> SidebarCameoAtlas {
+        let [width, height] = self.size;
+        let texture =
+            batch.create_texture_on_device(device, queue, &self.rgba, width, height, None);
+        log::info!(
+            "Sidebar cameo atlas built: {} entries, {width}x{height} px",
+            self.entries.len() + self.superweapon_entries.len()
+        );
+        SidebarCameoAtlas {
+            texture,
+            entries: self.entries,
+            alt_entries: self.alt_entries,
+            superweapon_entries: self.superweapon_entries,
+            smooth_source: SmoothSource::new(self.rgba, self.size, self.pieces)
+                .with_sharp_pixels(self.sharp),
+            smooth: None,
+        }
+    }
+}
+
+fn prepare_cameo_page(
+    cameos: &[RenderedCameo],
+    max_texture_dim: u32,
+) -> Option<PreparedSidebarCameos> {
     let widest_cameo = cameos.iter().map(|cameo| cameo.width).max().unwrap_or(1);
     if widest_cameo > max_texture_dim {
         log::error!("Sidebar cameo width {widest_cameo} exceeds GPU limit {max_texture_dim}");
@@ -756,21 +910,14 @@ fn pack_cameos(
         );
     }
 
-    Some(SidebarCameoAtlas {
-        texture: batch.create_texture_on_device(
-            device,
-            queue,
-            &rgba,
-            atlas_width,
-            atlas_height,
-            None,
-        ),
+    Some(PreparedSidebarCameos {
+        rgba,
+        size: [atlas_width, atlas_height],
+        sharp,
+        pieces,
         entries,
         alt_entries,
         superweapon_entries,
-        smooth_source: SmoothSource::new(rgba, [atlas_width, atlas_height], pieces)
-            .with_sharp_pixels(sharp),
-        smooth: None,
     })
 }
 
@@ -1176,7 +1323,9 @@ mod tests {
 
     #[test]
     fn pcx_source_dimensions_do_not_resize_the_native_cameo_canvas() {
-        use crate::{assets::asset_manager::AssetManager, map::source::test_support::TestDirectory};
+        use crate::{
+            assets::asset_manager::AssetManager, map::source::test_support::TestDirectory,
+        };
         let dir = TestDirectory::new("cameo-pcx-dimensions");
         write_pcx(dir.path(), "wide.pcx", [20, 40, 60]);
         let bytes = std::fs::read(dir.path().join("wide.pcx")).unwrap();

@@ -100,7 +100,7 @@ fn overlay_sample_flushes_prior_sources_and_survives_later_relight() {
         CellLightGrid::new(),
         LightingConfig::default(),
         2,
-        Some((&terrain, &sim)),
+        Some((&terrain, &sim, &rules)),
         None,
     );
     control.apply_events(&terrain, std::slice::from_ref(&source));
@@ -115,7 +115,7 @@ fn overlay_sample_flushes_prior_sources_and_survives_later_relight() {
         CellLightGrid::new(),
         LightingConfig::default(),
         2,
-        Some((&terrain, &sim)),
+        Some((&terrain, &sim, &rules)),
         Some(&events),
     );
     assert_eq!(lights.anim_intensities()[&id], expected);
@@ -123,7 +123,7 @@ fn overlay_sample_flushes_prior_sources_and_survives_later_relight() {
         lights.grid().cell_light_at(cell).unwrap().top_scalar,
         expected
     );
-    lights.refresh(&terrain, &sim, 0);
+    lights.refresh(&terrain, &sim, &rules, 0);
     assert_eq!(
         lights.anim_intensities()[&id],
         expected,
@@ -147,13 +147,13 @@ fn overlay_sample_flushes_prior_sources_and_survives_later_relight() {
 
 #[test]
 fn save_projects_pending_anim_reads_without_consuming_live_history() {
-    let (mut sim, _rules, terrain, events, id, cell) = cell_anim();
+    let (mut sim, rules, terrain, events, id, cell) = cell_anim();
     let mut lights = MatchLighting::default();
     lights.install(
         CellLightGrid::new(),
         LightingConfig::default(),
         2,
-        Some((&terrain, &sim)),
+        Some((&terrain, &sim, &rules)),
         None,
     );
     // A pending producer at the pre-Logic boundary: the save sees its prefix,
@@ -189,7 +189,7 @@ fn save_projects_pending_anim_reads_without_consuming_live_history() {
         CellLightGrid::new(),
         LightingConfig::default(),
         2,
-        Some((&terrain, &loaded.sim)),
+        Some((&terrain, &loaded.sim, &rules)),
         None,
     );
     assert!(
@@ -202,7 +202,7 @@ fn save_projects_pending_anim_reads_without_consuming_live_history() {
     );
     lights.restore_anim_intensities(loaded.anim_intensities);
     assert_eq!(lights.anim_intensities()[&id], expected);
-    lights.refresh(&terrain, &Simulation::new(), 2);
+    lights.refresh(&terrain, &Simulation::new(), &rules, 2);
     assert!(
         lights.anim_intensities().is_empty(),
         "physical disposal retires the sample"

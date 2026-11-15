@@ -17,7 +17,10 @@
 //! A double return keeps the resident manager and logs instead of silently
 //! replacing process-sticky state.
 
+use crate::app::loading::init::{RunRules, ScenarioRulesOutcome, ScenarioRulesTask};
 use crate::assets::asset_manager::{AssetManager, MediaArchiveMode};
+use crate::rules::process_owner::{NativeNonCampaignPrefixPreparation, NativeRulesProcessOwner};
+use std::task::Poll;
 
 /// Return the outgoing scene's live Rules writes before any native Type reset,
 /// whether the next consumer is Full_Init or an RMG preview.
@@ -51,10 +54,11 @@ pub(crate) struct ProcessAssets {
     /// None means sources have not been selected. A selected empty catalog is
     /// still final for this process; later maps cannot replace its definitions.
     audio_catalog: Option<ProcessAudioCatalog>,
-    /// One process-resident native Rules registry authority. Unlike the MIX
-    /// manager it never leaves this owner: scenario transitions mutate it
-    /// synchronously in place, so later failures cannot drop or roll it back.
-    native_rules: Option<crate::rules::process_owner::NativeRulesProcessOwner>,
+    /// One process-resident native Rules registry authority. Offline authored
+    /// loading can lend it to `scenario_rules_task`, which returns the actual
+    /// registry even when a transition fails or its result is no longer needed.
+    native_rules: Option<NativeRulesProcessOwner>,
+    scenario_rules_task: Option<ScenarioRulesTask>,
     /// CampaignClass's retained array. Init_Game52C605 creates it before
     /// Load_Game_Rules selects Movies; ClearScene685609 rereads its sources.
     campaigns: Option<crate::rules::campaigns::CampaignRegistry>,
@@ -107,6 +111,7 @@ impl ProcessAssets {
             load_audio_index,
             audio_catalog: None,
             native_rules: None,
+            scenario_rules_task: None,
             campaigns: None,
             shared_cell_dummy: Default::default(),
             csf: None,
@@ -197,6 +202,9 @@ impl ProcessAssets {
         ),
         String,
     > {
+        if self.scenario_rules_task.is_some() {
+            return Err("process Rules are still leased to scenario preparation".into());
+        }
         self.startup_resources
             .get_or_insert_with(|| assets.startup_resources().clone());
         if self
@@ -339,6 +347,78 @@ impl ProcessAssets {
         &self,
     ) -> Option<&crate::rules::process_owner::NativeRulesProcessOwner> {
         self.native_rules.as_ref()
+    }
+
+    pub(crate) fn start_scenario_rules(
+        &mut self,
+        leased_manager: &mut Option<AssetManager>,
+        rules_prefix: &mut Option<NativeNonCampaignPrefixPreparation>,
+        the_team_enabled: bool,
+        work: RunRules,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.scenario_rules_task.is_none()
+                && self.native_rules.is_some()
+                && leased_manager.is_some(),
+            "scenario Rules preparation requires the actual Rules and asset authorities",
+        );
+        self.scenario_rules_task = Some(ScenarioRulesTask::start(
+            &mut self.native_rules,
+            leased_manager,
+            rules_prefix,
+            the_team_enabled,
+            work,
+        )?);
+        Ok(())
+    }
+
+    pub(crate) fn poll_scenario_rules(&mut self) -> anyhow::Result<Poll<ScenarioRulesOutcome>> {
+        let task = self
+            .scenario_rules_task
+            .as_mut()
+            .expect("scenario Rules runtime task");
+        let result = task.poll();
+        if !matches!(result, Ok(Poll::Pending)) {
+            self.scenario_rules_task = None;
+        }
+        if result.is_err() {
+            self.note_lease_ended_without_return();
+        }
+        result
+    }
+
+    pub(crate) fn restore_scenario_rules_owner(&mut self, owner: NativeRulesProcessOwner) {
+        assert!(self.native_rules.is_none());
+        self.native_rules = Some(owner);
+    }
+
+    pub(crate) fn retire_pending_scenario_rules(&mut self) {
+        if let Some(task) = &mut self.scenario_rules_task {
+            task.retired = true;
+        }
+    }
+
+    /// Recover the unique authorities before a replacement shell or map can
+    /// read them. The retired attempt cannot consume its prepared projection.
+    pub(crate) fn poll_retired_scenario_rules(&mut self) -> anyhow::Result<Poll<()>> {
+        if !self
+            .scenario_rules_task
+            .as_ref()
+            .is_some_and(|task| task.retired)
+        {
+            return Ok(Poll::Ready(()));
+        }
+        let Poll::Ready(mut outcome) = self.poll_scenario_rules()? else {
+            return Ok(Poll::Pending);
+        };
+        if let Some(prefix) = outcome.rules_prefix {
+            outcome
+                .owner
+                .cancel_prepared_noncampaign_scenario_prefix(prefix);
+        }
+        self.restore_scenario_rules_owner(outcome.owner);
+        self.return_from_loading(outcome.assets);
+        Ok(Poll::Ready(()))
     }
 
     pub(crate) fn native_ini_hashes(
@@ -1077,6 +1157,64 @@ mod tests {
                 owner.native_rules().unwrap().fixed_sounds()
             ));
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn retired_scenario_rules_returns_both_authorities_and_cancels_unconsumed_prefix() {
+        use crate::map::source::test_support::TestDirectory;
+        use std::{
+            sync::mpsc,
+            task::Poll,
+            time::{Duration, Instant},
+        };
+
+        let dir = TestDirectory::new("retired-scenario-rules");
+        dir.write("rulesmd.ini", b"[General]\nBuildSpeed=.7\n");
+        dir.write("artmd.ini", b"[Test]\n");
+        let manager = AssetManager::from_loose_root_for_test(dir.path());
+        let mut process = ProcessAssets::new(MediaArchiveMode::STOCK_DIGITAL, false);
+        process.initialize_sources_if_needed(&manager).unwrap();
+        let owner = process.native_rules.as_mut().unwrap();
+        let sounds = owner.fixed_sounds().clone();
+        let mut prefix = Some(owner.prepare_noncampaign_scenario_prefix().unwrap());
+        process.return_from_loading(manager);
+        let mut lease = process.lease_for_loading();
+        let (release, gate) = mpsc::channel();
+
+        process
+            .start_scenario_rules(
+                &mut lease,
+                &mut prefix,
+                false,
+                Box::new(move |_, _, prefix, _| {
+                    gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert!(prefix.is_some());
+                    anyhow::bail!("source selection rejected before the Rules reset");
+                }),
+            )
+            .unwrap();
+        assert!(lease.is_none() && prefix.is_none());
+        process.retire_pending_scenario_rules();
+        assert!(matches!(
+            process.poll_retired_scenario_rules().unwrap(),
+            Poll::Pending
+        ));
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while matches!(
+            process.poll_retired_scenario_rules().unwrap(),
+            Poll::Pending
+        ) {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+
+        assert!(process.is_available() && !process.is_leased());
+        let owner = process.native_rules.as_mut().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&sounds, owner.fixed_sounds()));
+        let next = owner.prepare_noncampaign_scenario_prefix().unwrap();
+        owner.cancel_prepared_noncampaign_scenario_prefix(next);
     }
 
     #[test]

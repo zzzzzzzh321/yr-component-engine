@@ -2,12 +2,26 @@
 //! kernel. No feature-specific configuration interpretation belongs here.
 use crate::rules::ini_parser::IniFile;
 use std::sync::{Arc, OnceLock};
+
+#[cfg(test)]
+#[path = "warhead_impact_tests.rs"]
+mod warhead_impact_tests;
 use vera_mod_api as api;
 use vera_mod_runtime::HostServices;
 
 /// Early recipes have no source, configuration, numeric or simulation services.
-/// Their only input is the closed stage context supplied in the request.
-pub(super) struct StartupHost;
+#[derive(Default)]
+pub(super) struct StartupHost {
+    entity_projection_extensions: bool,
+}
+
+impl StartupHost {
+    pub(super) fn entity_projection() -> Self {
+        Self {
+            entity_projection_extensions: true,
+        }
+    }
+}
 
 impl HostServices for StartupHost {
     fn config(&self, _: &str, _: &str) -> Option<String> {
@@ -16,8 +30,12 @@ impl HostServices for StartupHost {
     fn config_read(&self, _: &str, _: &str, _: &str, _: &[u8]) -> Result<Vec<u8>, String> {
         Err("configuration is unavailable to startup recipes".into())
     }
-    fn registry(&self, _: &str) -> Vec<String> {
-        Vec::new()
+    fn registry(&self, name: &str) -> Vec<String> {
+        if self.entity_projection_extensions && name == api::ENTITY_FAST_PATHS_CAPABILITY {
+            vec!["1".into()]
+        } else {
+            Vec::new()
+        }
     }
     fn damage_kernel(&self, _: &api::DamageKernelInput) -> Result<i32, String> {
         Err("numeric services are unavailable to startup recipes".into())
@@ -90,6 +108,7 @@ pub(super) struct NativeHost {
     faction_message: OnceLock<Result<Vec<u8>, String>>,
     superweapon_inputs: bool,
     superweapon_message: OnceLock<Result<Vec<u8>, String>>,
+    warhead_impact_message: OnceLock<Result<Vec<u8>, String>>,
     weapon_inputs: bool,
     weapon_instance_inputs: bool,
     weapon_instance_message: OnceLock<Result<Vec<u8>, String>>,
@@ -98,8 +117,12 @@ pub(super) struct NativeHost {
 
 impl NativeHost {
     pub(super) fn configuration(ini: IniFile, weapons: Vec<String>) -> Self {
+        Self::configuration_shared(Arc::new(ini), weapons)
+    }
+
+    pub(super) fn configuration_shared(ini: Arc<IniFile>, weapons: Vec<String>) -> Self {
         Self {
-            ini: Some(Arc::new(ini)),
+            ini: Some(ini),
             weapons,
             registries: None,
             registry_message: OnceLock::new(),
@@ -112,6 +135,7 @@ impl NativeHost {
             faction_message: OnceLock::new(),
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
+            warhead_impact_message: OnceLock::new(),
             weapon_inputs: false,
             weapon_instance_inputs: false,
             weapon_instance_message: OnceLock::new(),
@@ -130,6 +154,7 @@ impl NativeHost {
         self.cameo_message = OnceLock::new();
         self.faction_message = OnceLock::new();
         self.superweapon_message = OnceLock::new();
+        self.warhead_impact_message = OnceLock::new();
         self
     }
 
@@ -215,6 +240,7 @@ impl NativeHost {
             faction_message: OnceLock::new(),
             superweapon_inputs: false,
             superweapon_message: OnceLock::new(),
+            warhead_impact_message: OnceLock::new(),
             weapon_inputs: false,
             weapon_instance_inputs: false,
             weapon_instance_message: OnceLock::new(),
@@ -335,6 +361,25 @@ impl NativeHost {
         })
     }
 
+    fn warhead_impact_view_bytes(&self) -> Result<&[u8], String> {
+        if !self.superweapon_inputs || self.ini.is_none() {
+            return Err("Warhead impact configuration is unavailable".into());
+        }
+        self.warhead_impact_message
+            .get_or_init(|| {
+                let view = self
+                    .registries
+                    .as_ref()
+                    .ok_or("missing Warhead impact read points")?
+                    .warhead_impact_view();
+                view.validate()?;
+                serde_json::to_vec(&view).map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
+    }
+
     fn retained_resource_source_bytes(&self) -> usize {
         if self.ini.is_none() {
             return 0;
@@ -382,6 +427,7 @@ impl HostServices for NativeHost {
             .saturating_add(self.fixed_art_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.cameo_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.superweapon_view_bytes().map_or(0, <[u8]>::len))
+            .saturating_add(self.warhead_impact_view_bytes().map_or(0, <[u8]>::len))
             .saturating_add(self.superweapon_source_bytes())
             .saturating_add(self.retained_resource_source_bytes())
             .saturating_add(self.weapon_instance_view_input_bytes())
@@ -458,6 +504,23 @@ impl HostServices for NativeHost {
         }
         if reader == "superweapon-registry-view" {
             return self.superweapon_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader == "warhead-impact-registry-view" {
+            return self.warhead_impact_view_bytes().map(<[u8]>::to_vec);
+        }
+        if reader.starts_with("warhead-impact-") {
+            if !self.superweapon_inputs {
+                return Err("component has no Warhead impact configuration capability".into());
+            }
+            let ini = self
+                .ini
+                .as_ref()
+                .ok_or("Warhead impact input is unavailable during simulation")?;
+            return self
+                .registries
+                .as_ref()
+                .ok_or("missing Warhead impact read points")?
+                .read_warhead_impact_value(reader, section, ini, key, current);
         }
         if reader.starts_with("super-") && !reader.starts_with("super-effective:") {
             if !self.superweapon_inputs {

@@ -374,6 +374,8 @@ pub enum SnapshotRestoreError {
         projectile_id: u64,
         super_ordinal: u32,
     },
+    #[error("invalid saved Nuclear lighting source SuperWeapon slot {super_ordinal}")]
+    InvalidNuclearLightingSource { super_ordinal: u32 },
     #[error("invalid saved TechnoType TechLevel state: {reason}")]
     InvalidTypeTechLevels { reason: String },
     #[error("invalid saved Techno {object_id} Type identity")]
@@ -2165,6 +2167,16 @@ impl Simulation {
     ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
         self.validate_type_tech_levels(rules)?;
         self.validate_entity_type_bindings(rules)?;
+        // Ares globals are relocated before post-load lighting6851AC. A
+        // source can survive without a Bullet or running flash; validate its
+        // saved immutable Type identity rather than rebuilding from Bullets.
+        if let Some(ordinal) = self.session.lighting().current_nuke_source()
+            && (!rules.warhead_impact_enabled() || rules.nuclear_super_weapon(ordinal).is_none())
+        {
+            return Err(SnapshotRestoreError::InvalidNuclearLightingSource {
+                super_ordinal: ordinal,
+            });
+        }
         // BulletClass Load46AE70 swizzles WeaponType+130 separately from
         // BulletType+AC. A saved ordinal must resolve in the reconstructed
         // frozen rules before this simulation can resume.

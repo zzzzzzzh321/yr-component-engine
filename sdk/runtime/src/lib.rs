@@ -7,7 +7,10 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use vera_mod_api::{API_VERSION, DamageKernelInput, MAX_MESSAGE_BYTES, ModuleManifest, Plan, Request};
+use vera_mod_api::resource_batch::{ResourceBatch, query_request};
+use vera_mod_api::{
+    API_VERSION, DamageKernelInput, MAX_MESSAGE_BYTES, ModuleManifest, Plan, Request,
+};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -29,7 +32,7 @@ mod bindings {
 /// the existing typed INI readers and damage kernel, not duplicate their math.
 pub trait HostServices: Send + Sync {
     /// Additional frozen input exposed out of band during configuration, for
-    /// example a physical registry snapshot. It shares the existing capped
+    /// example a physical registry snapshot. It uses the capped configuration
     /// input allowance and never increases gameplay-call budgets.
     fn configuration_input_bytes(&self) -> usize {
         0
@@ -57,10 +60,16 @@ pub struct RuntimeLimits {
     /// for configuration. JSON data costs guest instructions to decode too.
     /// Zero retains a fixed per-call budget; the extra allowance is capped.
     pub fuel_per_input_byte: u64,
+    /// Supplemental input cap for manifest and live gameplay calls.
     pub max_input_fuel: u64,
+    /// Supplemental cap for startup reads and frozen resource declarations.
+    pub setup_max_input_fuel: u64,
+    /// A full physical Rules pass visits entire catalogs in one call.
+    pub rules_pass_max_input_fuel: u64,
     pub memory_bytes: usize,
     pub component_bytes: usize,
     pub host_calls: u32,
+    pub rules_pass_max_extra_host_calls: u32,
     pub cache_entries: usize,
 }
 
@@ -71,9 +80,12 @@ impl Default for RuntimeLimits {
             configure_fuel: 50_000_000,
             fuel_per_input_byte: 256,
             max_input_fuel: 50_000_000,
+            setup_max_input_fuel: 1_000_000_000,
+            rules_pass_max_input_fuel: 4_000_000_000,
             memory_bytes: 32 * 1024 * 1024,
             component_bytes: 16 * 1024 * 1024,
             host_calls: 65_536,
+            rules_pass_max_extra_host_calls: 262_144,
             cache_entries: 8,
         }
     }
@@ -81,16 +93,38 @@ impl Default for RuntimeLimits {
 
 impl RuntimeLimits {
     fn fuel_for(&self, kind: &str, input_bytes: usize) -> u64 {
-        let base = if is_configuration_call(kind) {
+        let configuration = is_configuration_call(kind);
+        let base = if configuration {
             self.configure_fuel
         } else {
             self.fuel
         };
-        let input_fuel = self
-            .fuel_per_input_byte
-            .saturating_mul(input_bytes as u64)
-            .min(self.max_input_fuel);
+        let input_cap = if kind == "configure" {
+            self.rules_pass_max_input_fuel
+        } else if configuration || is_resource_declaration_call(kind) {
+            self.setup_max_input_fuel
+        } else {
+            self.max_input_fuel
+        };
+        // Configuration calls can return a replacement for the growing
+        // frozen catalog in addition to decoding it.
+        let input_rate = if configuration {
+            self.fuel_per_input_byte.saturating_mul(2)
+        } else {
+            self.fuel_per_input_byte
+        };
+        let input_fuel = input_rate.saturating_mul(input_bytes as u64).min(input_cap);
         base.saturating_add(input_fuel)
+    }
+
+    fn host_calls_for(&self, kind: &str, configuration_bytes: usize) -> u32 {
+        if kind != "configure" {
+            return self.host_calls;
+        }
+        // The host measures the physical catalog. Guest-supplied padding must
+        // not expand the number of INI reads the component can request.
+        let extra = (configuration_bytes / 16).min(self.rules_pass_max_extra_host_calls as usize);
+        self.host_calls.saturating_add(extra as u32)
     }
 }
 
@@ -105,6 +139,43 @@ fn is_configuration_call(kind: &str) -> bool {
     )
 }
 
+/// Frozen declarations are materialized by the existing resource binders,
+/// without entity state or live simulation operations. They decode the same
+/// whole configuration as Configure, but gain no physical host metadata.
+/// In particular Effects is a live call and keeps the ordinary allowance.
+fn is_resource_declaration_call(kind: &str) -> bool {
+    use vera_mod_api::HookKind;
+    [
+        HookKind::WeaponResource,
+        HookKind::WeaponFiringResource,
+        HookKind::WeaponInstanceResource,
+        HookKind::ProjectileResource,
+        HookKind::TypeResource,
+        HookKind::MatchRules,
+        HookKind::EffectResource,
+        HookKind::ArmorResource,
+        HookKind::ProductionResource,
+        HookKind::EmpResource,
+        HookKind::FoundationResource,
+        HookKind::StartupResources,
+        HookKind::EvaCatalog,
+        HookKind::LongListReaders,
+        HookKind::MasterTypeLists,
+        HookKind::FactionResource,
+        HookKind::LoadingThemeResource,
+        HookKind::CameoResource,
+        HookKind::TypeSoundResource,
+        HookKind::SpawnIdentity,
+        HookKind::PrismSupportDefaults,
+        HookKind::SoundSampleAdmission,
+        HookKind::SuperWeaponResource,
+        HookKind::EntityConfiguration,
+        HookKind::ResourceBatch,
+    ]
+    .into_iter()
+    .any(|candidate| candidate.as_str() == kind)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("invalid gameplay component: {0}")]
@@ -117,7 +188,7 @@ pub enum RuntimeError {
 
 #[derive(Clone)]
 pub struct LoadedModule {
-    component: Component,
+    component: bindings::GameplayPre<HostState>,
     manifest: ModuleManifest,
     sha256: String,
     engine_token: Arc<()>,
@@ -136,7 +207,7 @@ pub struct ComponentRuntime {
     engine: Engine,
     linker: Linker<HostState>,
     limits: RuntimeLimits,
-    components: Mutex<BTreeMap<String, Component>>,
+    components: Mutex<BTreeMap<String, bindings::GameplayPre<HostState>>>,
     engine_token: Arc<()>,
 }
 
@@ -195,8 +266,7 @@ impl bindings::vera::mod_sdk::host::Host for HostState {
             ));
         }
         let result = self.services.config_read(&section, &key, &reader, &current);
-        // A physical registry snapshot is a bounded bulk message, not one
-        // scalar INI value. Keep scalar readers at their original64KiB cap.
+        // Physical catalogs use the bounded bulk message limit.
         let output_limit = if matches!(
             reader.as_str(),
             "rules-registry-view"
@@ -204,6 +274,8 @@ impl bindings::vera::mod_sdk::host::Host for HostState {
                 | "fixed-art-view"
                 | "faction-registry-view"
                 | "cameo-registry-view"
+                | "superweapon-registry-view"
+                | "warhead-impact-registry-view"
         ) {
             MAX_MESSAGE_BYTES
         } else {
@@ -329,6 +401,13 @@ impl ComponentRuntime {
         } else {
             let c = Component::new(&self.engine, bytes)
                 .map_err(|e| RuntimeError::Invalid(e.to_string()))?;
+            // Resolve imports and export indices once per compiled module.
+            // Calls still start from a new Store and isolated instance below.
+            let c = self
+                .linker
+                .instantiate_pre(&c)
+                .and_then(bindings::GameplayPre::new)
+                .map_err(|e| RuntimeError::Execution(format!("{e:#}")))?;
             if cache.len() >= self.limits.cache_entries {
                 cache.pop_first();
             }
@@ -354,18 +433,9 @@ impl ComponentRuntime {
         request: &Request,
         host: Arc<dyn HostServices>,
     ) -> Result<Plan, RuntimeError> {
-        if !Arc::ptr_eq(&self.engine_token, &module.engine_token) {
-            return Err(RuntimeError::Invalid(
-                "module belongs to a different runtime".into(),
-            ));
-        }
-        request.validate().map_err(RuntimeError::Invalid)?;
         let kind = request.context.kind();
-        if module.manifest.api_version != API_VERSION || !module.manifest.hooks.contains(&kind) {
-            return Err(RuntimeError::Invalid(
-                "module did not declare this hook".into(),
-            ));
-        }
+        self.validate_hook(module, kind)?;
+        request.validate().map_err(RuntimeError::Invalid)?;
         let input = serde_json::to_vec(request)
             .map_err(|_| RuntimeError::Invalid("cannot encode component request".into()))?;
         let output = self.call(&module.component, kind.as_str(), &input, host)?;
@@ -375,9 +445,63 @@ impl ComponentRuntime {
         Ok(plan)
     }
 
+    /// A null reply requests smaller batches when the combined output cannot
+    /// fit the wire limit. Malformed plans and execution errors still fail.
+    pub fn evaluate_resource_batch(
+        &self,
+        module: &LoadedModule,
+        batch: &ResourceBatch<'_>,
+        host: Arc<dyn HostServices>,
+    ) -> Result<Option<Vec<Plan>>, RuntimeError> {
+        let kind = vera_mod_api::HookKind::ResourceBatch;
+        self.validate_hook(module, kind)?;
+        batch
+            .validate(&module.manifest.hooks)
+            .map_err(RuntimeError::Invalid)?;
+        let input = serde_json::to_vec(batch)
+            .map_err(|_| RuntimeError::Invalid("cannot encode resource batch".into()))?;
+        if input.len() > MAX_MESSAGE_BYTES {
+            return Ok(None);
+        }
+        let output = self.call(&module.component, kind.as_str(), &input, host)?;
+        let Some(plans): Option<Vec<Plan>> = serde_json::from_slice(&output)
+            .map_err(|_| RuntimeError::Invalid("invalid resource batch response".into()))?
+        else {
+            return Ok(None);
+        };
+        if plans.len() != batch.queries.len() {
+            return Err(RuntimeError::Invalid(
+                "resource batch response count mismatch".into(),
+            ));
+        }
+        for (plan, context) in plans.iter().zip(batch.queries.iter()) {
+            plan.validate_for(&query_request(context.clone()))
+                .map_err(RuntimeError::Invalid)?;
+        }
+        Ok(Some(plans))
+    }
+
+    fn validate_hook(
+        &self,
+        module: &LoadedModule,
+        kind: vera_mod_api::HookKind,
+    ) -> Result<(), RuntimeError> {
+        if !Arc::ptr_eq(&self.engine_token, &module.engine_token) {
+            return Err(RuntimeError::Invalid(
+                "module belongs to a different runtime".into(),
+            ));
+        }
+        if module.manifest.api_version != API_VERSION || !module.manifest.hooks.contains(&kind) {
+            return Err(RuntimeError::Invalid(
+                "module did not declare this hook".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn call(
         &self,
-        component: &Component,
+        component: &bindings::GameplayPre<HostState>,
         kind: &str,
         input: &[u8],
         host: Arc<dyn HostServices>,
@@ -400,12 +524,13 @@ impl ComponentRuntime {
         } else {
             0
         };
+        let host_call_limit = self.limits.host_calls_for(kind, configuration_bytes);
         let mut store = Store::new(
             &self.engine,
             HostState {
                 services: host,
                 limits,
-                calls_left: self.limits.host_calls,
+                calls_left: host_call_limit,
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -415,18 +540,17 @@ impl ComponentRuntime {
         store
             .set_fuel(fuel)
             .map_err(|e| RuntimeError::Execution(format!("{e:#}")))?;
-        let instance = bindings::Gameplay::instantiate(&mut store, component, &self.linker)
+        let instance = component
+            .instantiate(&mut store)
             .map_err(|e| RuntimeError::Execution(format!("{e:#}")))?;
         let output = instance
             .call_evaluate(&mut store, kind, input)
             .map_err(|e| {
                 RuntimeError::Execution(format!(
-                    "{kind} failed (input bytes {}, configuration metadata bytes {configuration_bytes}, fuel used {}/{fuel}, host calls {}): {e:#}",
+                    "{kind} failed (input bytes {}, configuration metadata bytes {configuration_bytes}, fuel used {}/{fuel}, host calls {}/{host_call_limit}): {e:#}",
                     input.len(),
                     fuel.saturating_sub(store.get_fuel().unwrap_or(0)),
-                    self.limits
-                        .host_calls
-                        .saturating_sub(store.data().calls_left),
+                    host_call_limit.saturating_sub(store.data().calls_left),
                 ))
             })?
             .map_err(|e| RuntimeError::Rejected(e.chars().take(4096).collect()))?;

@@ -251,6 +251,19 @@ pub(crate) fn gameplay_effect_anim_roots(rules: &RuleSet) -> Vec<String> {
             }
         }
     }
+    // Installed Bullet impact10036A52 ->467EB6 constructs the admitted
+    // PreImpact Anim through the ordinary AnimClass owner. A registered
+    // pointer need not occur in AnimList, so final component admission must
+    // extend this same tolerant asset closure, including indexed aliases.
+    for warhead in rules.warheads_iter() {
+        if let Some(index) = warhead.impact_settings().and_then(|value| value.pre_impact)
+            && let Some(name) = i32::try_from(index)
+                .ok()
+                .and_then(|index| rules.anim_type_runtime_key_by_index(index))
+        {
+            insert(name.as_ref());
+        }
+    }
     roots.into_iter().collect()
 }
 

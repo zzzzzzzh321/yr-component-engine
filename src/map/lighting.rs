@@ -178,6 +178,10 @@ pub struct LightProfileCache {
 }
 
 impl LightProfileCache {
+    fn normalized_constructor_rgb(rgb: Option<LightRgbKey>) -> Option<LightRgbKey> {
+        rgb.map(|rgb| rgb.map(|v| v.clamp(0, 2000)))
+    }
+
     pub fn new() -> Self {
         let mut cache = Self {
             profiles: Vec::new(),
@@ -499,11 +503,19 @@ impl CellLightGrid {
     /// Constructor context changes only future cache entries; it never
     /// rewrites an existing Convert's retained colors or selected mode.
     pub fn set_constructor_alternate_rgb(&mut self, rgb: Option<LightRgbKey>) {
-        self.profiles.constructor_alternate_rgb = rgb.map(|rgb| rgb.map(|v| v.clamp(0, 2000)));
+        self.profiles.constructor_alternate_rgb =
+            LightProfileCache::normalized_constructor_rgb(rgb);
     }
 
     pub fn constructor_alternate_rgb(&self) -> Option<LightRgbKey> {
         self.profiles.constructor_alternate_rgb
+    }
+
+    /// Compare raw selector inputs against the same normalized context the
+    /// setter retains; out-of-range channels do not require another update.
+    pub fn constructor_alternate_rgb_matches(&self, rgb: Option<LightRgbKey>) -> bool {
+        self.profiles.constructor_alternate_rgb
+            == LightProfileCache::normalized_constructor_rgb(rgb)
     }
 
     /// RecalcLighting flag0 with explicit RGB changes every existing normal

@@ -292,7 +292,9 @@ impl PreparedSavedGame {
         // Load685120 ->53AB50 calls the canonical selector after restoring
         // incoming effects. Its one Cell refresh is staged below; outgoing
         // process palette/cache state stays immutable during preparation.
-        world.simulation.reinitialize_lighting_after_user_load();
+        world
+            .simulation
+            .reinitialize_lighting_after_user_load(rules);
         let scheme_normal_rgb = view
             .lighting
             .normal_scheme_for_user_load(view.current_simulation, &theater_name);
@@ -393,6 +395,7 @@ impl PreparedSavedGame {
             overlays,
             map.house_colors().clone(),
             csf,
+            None,
         )
         .map_err(|error| PreparedLoadError::Resources(error.to_string()))?;
         presentation

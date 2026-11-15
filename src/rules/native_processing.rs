@@ -51,11 +51,14 @@ use crate::rules::superweapon_type::{DeliveryOwner, DeliveryType};
 use crate::util::native_x87::NativeF64Bits;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 #[path = "native_faction.rs"]
 mod faction;
 #[path = "native_superweapon.rs"]
 mod superweapon;
+#[path = "native_warhead_impact.rs"]
+mod warhead_impact;
 
 /// AbstractType constructor410800's stored byte ID. The INI store represents
 /// native bytes as characters, so this cut is shared by Type and Campaign
@@ -172,12 +175,12 @@ pub(crate) fn ares_country_index_of_name<'a>(
 /// Each caller supplies its actual currently registered native type array.
 pub(crate) fn ares_type_index_of_name<'a>(
     incoming: &str,
-    mut ids: impl Iterator<Item = &'a str>,
+    ids: impl Iterator<Item = &'a str>,
 ) -> Option<usize> {
     if is_native_none_type_name(incoming) {
         return None;
     }
-    ids.position(|id| id.eq_ignore_ascii_case(incoming))
+    super_weapon_index_of_name(incoming, ids)
 }
 
 /// Ares registered pointer Parser1000C9C0/Find1000D3E0. Empty or unknown
@@ -188,25 +191,41 @@ pub(crate) fn read_ares_registered_reference<'a>(
     key: &str,
     mut ids: impl Iterator<Item = &'a str> + Clone,
 ) -> Option<Option<String>> {
-    match read_ares_registered_index(section, key, ids.clone())? {
+    match read_ares_registered_index(
+        section,
+        key,
+        AresRegisteredLookupOrder::SentinelFirst,
+        ids.clone(),
+    )? {
         Some(index) => Some(Some(ids.nth(index)?.to_owned())),
         None => Some(None),
     }
 }
 
-/// Common ReadString2048 / nullable Find input for Anim1000C9C0 and
-/// Techno1003C650. Find1000D3E6/10007EA6 reject none before scanning; the
-/// containing reader then clears its pointer. Unknown names retain it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AresRegisteredLookupOrder {
+    SentinelFirst,
+    RegisteredFirst,
+}
+
+/// Common ReadString2048 / nullable registered reference input. Anim1000C9C0
+/// and Techno1003C650 reject none before Find1000D3E6/10007EA6; PreImpact
+/// reader100524C0 instead calls raw Find10051BE0 before the none predicate.
+/// Unknown names retain the current pointer; neither order allocates a type.
 fn read_ares_registered_index<'a>(
     section: &IniSection,
     key: &str,
+    order: AresRegisteredLookupOrder,
     ids: impl Iterator<Item = &'a str>,
 ) -> Option<Option<usize>> {
     let name = section.read_name(key, 2048)?;
-    if is_native_none_type_name(name) {
+    let none = is_native_none_type_name(name);
+    if order == AresRegisteredLookupOrder::SentinelFirst && none {
         return Some(None);
     }
-    ares_type_index_of_name(name, ids).map(Some)
+    super_weapon_index_of_name(name, ids)
+        .map(Some)
+        .or_else(|| none.then_some(None))
 }
 
 /// BuildingTypeExt's SuperWeapons IndexLookup1000D4D0: raw stored-ID
@@ -848,6 +867,7 @@ const PARADROP_INFANTRY_KEYS: [&str; 4] = [
 pub(crate) struct SdkRegistryPass {
     animations: Vec<String>,
     reads: Vec<SdkRegistryRead>,
+    warheads: Vec<String>,
     // Retained physical sources are class-qualified: a same-ID resource in
     // another family cannot replace the native object's reached body history.
     resource_bodies: std::sync::Arc<HashMap<RulesTypeFamily, Vec<IniSection>>>,
@@ -886,6 +906,7 @@ struct SdkRegistryRead {
     registry: &'static str,
     owner: String,
     animation_count: usize,
+    warhead_impact: Option<vera_mod_api::WarheadImpactReadPoint>,
 }
 
 impl SdkRegistryPass {
@@ -1073,6 +1094,7 @@ impl SdkRegistryPass {
             if let Some(target) = read_ares_registered_index(
                 section,
                 key,
+                AresRegisteredLookupOrder::SentinelFirst,
                 types.iter().map(|entry| entry.name.as_str()),
             ) {
                 current = target.map(|index| types[index].identity);
@@ -1187,6 +1209,19 @@ impl ProcessedRulesLayers {
 
     pub(crate) fn sdk_registries(&self) -> &[SdkRegistryPass] {
         &self.sdk_registries
+    }
+
+    /// Native Warhead array identities from the retained allocation owner.
+    /// Repeated stored IDs are distinct slots, including constructor-only Types.
+    pub fn warhead_impact_type_names(&self) -> Vec<String> {
+        self.native_type_construction_trace
+            .registry_state()
+            .families
+            .get(&RulesTypeFamily::Warhead)
+            .into_iter()
+            .flatten()
+            .map(|member| member.native_stored_id.clone())
+            .collect()
     }
 
     #[cfg(feature = "ares")]
@@ -6893,6 +6928,7 @@ impl RulesPassProcessor {
         let target = read_ares_registered_index(
             section,
             key,
+            AresRegisteredLookupOrder::SentinelFirst,
             self.techno_type_order
                 .iter()
                 .map(|&(family, index)| self.families[&family][index].native_stored_id.as_str()),
@@ -6941,6 +6977,7 @@ impl RulesPassProcessor {
         let index = read_ares_registered_index(
             section,
             key,
+            AresRegisteredLookupOrder::SentinelFirst,
             self.families
                 .get(&family)
                 .into_iter()
@@ -7412,6 +7449,7 @@ impl RulesPassProcessor {
             registry,
             owner: self.families[&family][index].native_stored_id.clone(),
             animation_count: self.family_len(RulesTypeFamily::Animation),
+            warhead_impact: None,
         });
     }
 
@@ -7432,6 +7470,7 @@ impl RulesPassProcessor {
             registry,
             owner: self.families[&family][index].native_stored_id.clone(),
             animation_count: 0,
+            warhead_impact: None,
         });
     }
 
@@ -7488,6 +7527,13 @@ impl RulesPassProcessor {
             animations: self
                 .families
                 .get(&RulesTypeFamily::Animation)
+                .into_iter()
+                .flatten()
+                .map(|member| member.native_stored_id.clone())
+                .collect(),
+            warheads: self
+                .families
+                .get(&RulesTypeFamily::Warhead)
                 .into_iter()
                 .flatten()
                 .map(|member| member.native_stored_id.clone())
@@ -7636,6 +7682,7 @@ impl RulesPassProcessor {
             registry: "$armor-before-type-data",
             owner: "ArmorTypes".into(),
             animation_count: 0,
+            warhead_impact: None,
         });
         // Installed679A15 ->1002AEF0 reads each WeaponTypes entry once with
         // ReadString2048 at1002B337, then Weapon factory10010570 at1002B345.
@@ -8035,6 +8082,7 @@ impl RulesPassProcessor {
     fn prepare_super_reference_read(
         &mut self,
         pass: &IniFile,
+        shared_pass: &mut Option<Arc<IniFile>>,
         index: usize,
         body_read: bool,
         effective_type: Option<String>,
@@ -8074,11 +8122,14 @@ impl RulesPassProcessor {
             expected: "accepted physical SuperWeapon reference read".into(),
             value,
         };
+        // Each visit observes a new registry prefix, but the physical INI is
+        // immutable throughout the whole family sweep.
+        let shared_pass = Arc::clone(shared_pass.get_or_insert_with(|| Arc::new(pass.clone())));
         let (candidate, policy) = self
             .sdk_configuration_seed
             .as_ref()
             .expect("checked configuration seed")
-            .configure_super_read(pass, context, self.sdk_registry_pass(false))
+            .configure_super_read(shared_pass, context, self.sdk_registry_pass(false))
             .map_err(error)?;
         if !body_read
             && matches!(
@@ -8153,6 +8204,7 @@ impl RulesPassProcessor {
             let payload = read_ares_registered_index(
                 raw,
                 "Nuke.Payload",
+                AresRegisteredLookupOrder::SentinelFirst,
                 self.families
                     .get(&RulesTypeFamily::Weapon)
                     .into_iter()
@@ -8174,6 +8226,7 @@ impl RulesPassProcessor {
         pass: &IniFile,
         _fixed_eva: &EvaRegistry,
     ) -> Result<(), RulesError> {
+        let mut shared_pass = None;
         let mut index = 0;
         while index < self.family_len(RulesTypeFamily::SuperWeapon) {
             if let Some((_id, raw, effective)) =
@@ -8230,8 +8283,13 @@ impl RulesPassProcessor {
                 } else {
                     None
                 };
-                let (candidate, reference_read) =
-                    self.prepare_super_reference_read(pass, index, true, kind.map(str::to_owned))?;
+                let (candidate, reference_read) = self.prepare_super_reference_read(
+                    pass,
+                    &mut shared_pass,
+                    index,
+                    true,
+                    kind.map(str::to_owned),
+                )?;
                 self.read_super_weapon_references(index, &raw, reference_read, kind)?;
                 #[cfg(feature = "ares")]
                 {
@@ -8436,7 +8494,8 @@ impl RulesPassProcessor {
             } else {
                 // LoadFromINIFile10033284 ->10033347 still consumes the first
                 // visit without a Rules section. It cannot allocate a payload.
-                let (candidate, _) = self.prepare_super_reference_read(pass, index, false, None)?;
+                let (candidate, _) =
+                    self.prepare_super_reference_read(pass, &mut shared_pass, index, false, None)?;
                 if let Some(candidate) = candidate {
                     self.sdk_configuration_seed = Some(std::sync::Arc::new(candidate));
                 }
@@ -9612,6 +9671,10 @@ impl RulesPassProcessor {
             // WH body had no physical section. Keep this visit independent of
             // the pointer-reader metadata below.
             self.record_sdk_armor_read(RulesTypeFamily::Warhead, index);
+            // Ares WarheadTypeClass_LoadFromINI10051D10 is installed on both
+            // original epilogues75DEA0/75DEAF. First initialization precedes
+            // its own section gate, after original AnimList allocations.
+            self.record_sdk_warhead_impact_read(index, pass);
             // WarheadType's extension suffix follows its original body. Only
             // a reached physical section supplies pointer reads for this type.
             if pass

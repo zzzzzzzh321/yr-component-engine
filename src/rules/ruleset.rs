@@ -4718,6 +4718,9 @@ pub struct RuleSet {
     /// Immutable inputs from the same processed registry, before publishing
     /// effective Super resources. This is not a second runtime registry.
     sdk_superweapon_sources: Vec<SdkSuperWeaponSource>,
+    /// Native WH stored IDs in actual Process array order, captured from the
+    /// same owner for immutable impact declaration admission.
+    sdk_warhead_impact_names: Vec<String>,
     effect_resources: std::collections::BTreeMap<
         vera_mod_api::EffectResourceContext,
         vera_mod_api::EffectDescriptor,
@@ -5127,6 +5130,17 @@ pub(crate) enum StartupResourceScope {
     Frontend,
 }
 
+fn collect_mod_resources<T>(
+    program: Option<&crate::mod_sdk::Program>,
+    queries: &[vera_mod_api::Context],
+    select: impl Fn(vera_mod_api::Plan) -> Option<T>,
+) -> Result<Vec<Option<T>>, String> {
+    match program {
+        Some(program) => program.collect_resources(queries, select),
+        None => Ok(queries.iter().map(|_| None).collect()),
+    }
+}
+
 impl RuleSet {
     pub(crate) fn long_list_read_capacity(&self) -> usize {
         crate::rules::ini_value::long_list_read_capacity(self.long_list_readers)
@@ -5261,6 +5275,7 @@ impl RuleSet {
     }
 
     pub(crate) fn bind_resource_policies(&mut self) -> Result<(), String> {
+        let started = crate::util::time::Instant::now();
         let foundations = self.collect_foundation_resource_bindings()?;
         let cameos = self.collect_cameo_resource_bindings()?;
         let type_sounds = self.collect_type_sound_bindings()?;
@@ -5285,8 +5300,16 @@ impl RuleSet {
                 kind: EffectResourceKind::Warhead,
                 name: name.clone(),
             });
-            for resource in objects.chain(warheads) {
-                if let Some(mut descriptor) = program.effect_resource_policy(&resource)? {
+            let queries: Vec<_> = objects
+                .chain(warheads)
+                .map(vera_mod_api::Context::EffectResource)
+                .collect();
+            let descriptors = program.collect_resources(&queries, |plan| plan.effect_resource)?;
+            for (query, policy) in queries.into_iter().zip(descriptors) {
+                let vera_mod_api::Context::EffectResource(resource) = query else {
+                    unreachable!()
+                };
+                if let Some(mut descriptor) = policy {
                     if let Some(name) = descriptor.animation.as_ref() {
                         let canonical = self
                             .sdk_animation_names
@@ -5323,32 +5346,40 @@ impl RuleSet {
                 .entry(weapon.id.to_ascii_uppercase())
                 .or_default() += 1;
         }
-        let policies = self.weapon_types
+        let weapon_queries = self
+            .weapon_types
             .iter()
             .enumerate()
             .map(|(ordinal, weapon)| {
-                let handle = WeaponHandle(u32::try_from(ordinal).map_err(|_| "Weapon array exceeds SDK width")?);
-                let context = vera_mod_api::WeaponFiringResourceContext {
-                    weapon_name: weapon.id.clone(),
-                    animation_count: weapon
-                        .anim
-                        .len()
-                        .try_into()
-                        .map_err(|_| "weapon animation count exceeds SDK width")?,
-                    is_sonic: weapon.is_sonic,
-                    use_fire_particles: weapon.use_fire_particles,
-                };
+                let ordinal =
+                    u32::try_from(ordinal).map_err(|_| "Weapon array exceeds SDK width")?;
+                Ok(vera_mod_api::Context::WeaponInstanceResource(
+                    vera_mod_api::WeaponInstanceResourceContext {
+                        identity: vera_mod_api::WeaponTypeRef { ordinal },
+                        weapon_name: weapon.id.clone(),
+                        animation_count: weapon
+                            .anim
+                            .len()
+                            .try_into()
+                            .map_err(|_| "weapon animation count exceeds SDK width")?,
+                        is_sonic: weapon.is_sonic,
+                        use_fire_particles: weapon.use_fire_particles,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let instance_policies =
+            collect_mod_resources(self.external_mod.as_deref(), &weapon_queries, |plan| {
+                plan.weapon_instance_resource
+            })?;
+        let policies = weapon_queries.into_iter().zip(instance_policies)
+            .map(|(query, policy)| {
+                let vera_mod_api::Context::WeaponInstanceResource(instance) = query else { unreachable!() };
+                let handle = WeaponHandle(instance.identity.ordinal);
                 let Some(program) = self.external_mod.as_ref() else {
                     return Ok((handle, None, None));
                 };
-                let instance = vera_mod_api::WeaponInstanceResourceContext {
-                    identity: vera_mod_api::WeaponTypeRef { ordinal: handle.0 },
-                    weapon_name: context.weapon_name.clone(),
-                    animation_count: context.animation_count,
-                    is_sonic: context.is_sonic,
-                    use_fire_particles: context.use_fire_particles,
-                };
-                if let Some(policy) = program.weapon_instance_resource_policy(instance)? {
+                if let Some(policy) = policy {
                     return Ok((handle, policy.resource, policy.firing));
                 }
                 // Older strict contexts have no instance identity. Keep their
@@ -5356,28 +5387,37 @@ impl RuleSet {
                 // first/last instance's declarations onto a different pointer.
                 let legacy = program.manifest().hooks.iter().any(|hook| matches!(hook,
                     vera_mod_api::HookKind::WeaponResource | vera_mod_api::HookKind::WeaponFiringResource));
-                if legacy && weapon_name_counts[&weapon.id.to_ascii_uppercase()] != 1 {
-                    return Err(format!("legacy weapon component cannot identify distinct native instances named {:?}; use a component supporting weapon_instance_resource", weapon.id));
+                if legacy && weapon_name_counts[&instance.weapon_name.to_ascii_uppercase()] != 1 {
+                    return Err(format!("legacy weapon component cannot identify distinct native instances named {:?}; use a component supporting weapon_instance_resource", instance.weapon_name));
                 }
-                let policy = program.weapon_resource_policy(&weapon.id)?;
-                let firing = program.weapon_firing_resource_policy(context)?;
+                let policy = program.weapon_resource_policy(&instance.weapon_name)?;
+                let firing = program.weapon_firing_resource_policy(vera_mod_api::WeaponFiringResourceContext {
+                    weapon_name: instance.weapon_name,
+                    animation_count: instance.animation_count,
+                    is_sonic: instance.is_sonic,
+                    use_fire_particles: instance.use_fire_particles,
+                })?;
                 Ok((handle, policy, firing))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut projectile_names: Vec<_> = self.projectiles.keys().cloned().collect();
         projectile_names.sort_unstable();
-        let projectile_policies = projectile_names
-            .into_iter()
+        let projectile_queries: Vec<_> = projectile_names
+            .iter()
             .map(|name| {
-                let policy = self
-                    .external_mod
-                    .as_ref()
-                    .map(|program| program.projectile_resource_policy(&name))
-                    .transpose()?
-                    .flatten();
-                Ok((name, policy))
+                vera_mod_api::Context::ProjectileResource(vera_mod_api::ProjectileResourceContext {
+                    projectile_name: name.clone(),
+                })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect();
+        let projectile_policies: Vec<_> = projectile_names
+            .into_iter()
+            .zip(collect_mod_resources(
+                self.external_mod.as_deref(),
+                &projectile_queries,
+                |plan| plan.projectile_resource,
+            )?)
+            .collect();
         let ares_fan = match_rules_policy.and_then(|p| p.airburst_tail)
             == Some(vera_mod_api::AirburstTailPolicy::AresReplacement);
         if !ares_fan
@@ -5432,20 +5472,40 @@ impl RuleSet {
                 }
             }
         }
-        let type_policies = self
+        let type_queries: Vec<_> = self
             .object_list
             .iter()
             .map(|object| {
-                let policy = self
-                    .external_mod
-                    .as_ref()
-                    .map(|program| program.type_resource_policy(&object.id, object.resource_user()))
-                    .transpose()?
-                    .flatten()
-                    .filter(|policy| policy.applies_to(object.resource_user()));
-                Ok(policy)
+                vera_mod_api::Context::TypeResource(vera_mod_api::TypeResourceContext {
+                    type_name: object.id.clone(),
+                    user: object.resource_user(),
+                })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect();
+        let type_policies =
+            collect_mod_resources(self.external_mod.as_deref(), &type_queries, |plan| {
+                plan.type_resource
+            })?;
+        if type_policies
+            .iter()
+            .flatten()
+            .any(|policy| policy.keep_alive.is_some())
+            && self.external_mod.as_ref().is_some_and(|program| {
+                !program
+                    .manifest()
+                    .hooks
+                    .contains(&vera_mod_api::HookKind::MatchRules)
+            })
+        {
+            return Err("survival type policies require the match_rules capability".into());
+        }
+        let type_policies: Vec<_> = type_policies
+            .into_iter()
+            .zip(&self.object_list)
+            .map(|(policy, object)| {
+                policy.filter(|policy| policy.applies_to(object.resource_user()))
+            })
+            .collect();
         // Convert.Script1003C650 binds a registered Techno pointer, including
         // Building and cross-class targets that the runtime converter refuses.
         // Validate all ordinals before publishing any resource projection.
@@ -5555,6 +5615,12 @@ impl RuleSet {
                 .get_mut(&name)
                 .expect("retained Warhead")
                 .bind_external_armor(table);
+        }
+        if self.external_mod.is_some() {
+            log::info!(
+                "Component resources bound in {} ms",
+                started.elapsed().as_millis()
+            );
         }
         Ok(())
     }
@@ -5750,27 +5816,29 @@ impl RuleSet {
         };
         // Use the native Building array, including constructor-only entries.
         // Class ordinals do not come from the projected object/name lookup.
-        let policies = self
+        let queries = self
             .building_ids
             .iter()
             .enumerate()
-            .map(|(ordinal, name)| {
+            .map(|(ordinal, _)| {
                 let building = ProductionTypeRef {
                     category: ProductionObjectKind::Building,
                     ordinal: u32::try_from(ordinal)
                         .map_err(|_| "Building registry exceeds resource identity space")?,
                 };
-                program
-                    .foundation_resource_policy(&FoundationResourceContext { building })
-                    .map(|policy| {
-                        (
-                            self.native_type_arrays[ObjectCategory::Building as usize][ordinal],
-                            name.clone(),
-                            policy,
-                        )
-                    })
+                Ok(vera_mod_api::Context::FoundationResource(
+                    FoundationResourceContext { building },
+                ))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let policies = program.collect_resources(&queries, |plan| plan.foundation_resource)?;
+        let policies: Vec<_> = self.native_type_arrays[ObjectCategory::Building as usize]
+            .iter()
+            .copied()
+            .zip(self.building_ids.iter().cloned())
+            .zip(policies)
+            .map(|((handle, name), policy)| (handle, name, policy))
+            .collect();
         let source = self.fixed_art_source.as_deref();
         let source_hash = source.map(IniFile::content_hash);
         // Validate all references before parsing even one large geometry.
@@ -5868,36 +5936,51 @@ impl RuleSet {
                 .cloned()
                 .ok_or_else(|| format!("EMP animation is not registered: {name}"))
         };
-        let objects = self
+        let queries: Vec<_> = self
             .object_list
             .iter()
             .map(|object| {
-                match query(Query::Type {
+                vera_mod_api::Context::EmpResource(Query::Type {
                     user: object.resource_user(),
                     name: object.id.clone(),
-                })? {
-                    None if rules.is_none() => Ok(None),
-                    Some(Policy::Type { mut policy }) if rules.is_some() => {
-                        if let NullableResourceName::Named(name) = &mut policy.sparkles {
-                            *name = canonical_animation(name)?;
-                        }
-                        Ok(Some(crate::rules::ares_emp::EmpTypeRules::from_sdk(policy)))
+                })
+            })
+            .collect();
+        let object_policies = collect_mod_resources(program, &queries, |plan| plan.emp_resource)?;
+        let objects = self
+            .object_list
+            .iter()
+            .zip(object_policies)
+            .map(|(object, policy)| match policy {
+                None if rules.is_none() => Ok(None),
+                Some(Policy::Type { mut policy }) if rules.is_some() => {
+                    if let NullableResourceName::Named(name) = &mut policy.sparkles {
+                        *name = canonical_animation(name)?;
                     }
-                    _ => Err(format!(
-                        "EMP Rules require complete type bindings: {}",
-                        object.id
-                    )),
+                    Ok(Some(crate::rules::ares_emp::EmpTypeRules::from_sdk(policy)))
                 }
+                _ => Err(format!(
+                    "EMP Rules require complete type bindings: {}",
+                    object.id
+                )),
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut warheads = self.warheads.keys().cloned().collect::<Vec<_>>();
         warheads.sort();
+        let queries: Vec<_> = warheads
+            .iter()
+            .map(|name| {
+                vera_mod_api::Context::EmpResource(Query::Warhead {
+                    name: self.warheads[name].id.clone(),
+                })
+            })
+            .collect();
+        let warhead_policies = collect_mod_resources(program, &queries, |plan| plan.emp_resource)?;
         let warheads = warheads
             .into_iter()
-            .map(|name| {
-                let policy = match query(Query::Warhead {
-                    name: self.warheads[&name].id.clone(),
-                })? {
+            .zip(warhead_policies)
+            .map(|(name, policy)| {
+                let policy = match policy {
                     None if rules.is_none() => None,
                     Some(Policy::Warhead { mut policy }) if rules.is_some() => {
                         if let Some(name) = &mut policy.sparkles {
@@ -5989,46 +6072,52 @@ impl RuleSet {
                 }
             }
         }
-        let objects = self
+        let queries: Vec<_> = self
             .object_list
             .iter()
             .map(|object| {
-                let result = query(Query::Object {
+                vera_mod_api::Context::ProductionResource(Query::Object {
                     category: production_kind(object.category),
                     name: object.id.clone(),
-                })?;
-                match result {
-                    None if catalog.is_none() => Ok(None),
-                    Some(Policy::Object { policy }) if catalog.is_some() => {
-                        if policy
-                            .prerequisites
+                })
+            })
+            .collect();
+        let object_policies =
+            collect_mod_resources(program, &queries, |plan| plan.production_resource)?;
+        let objects = self
+            .object_list
+            .iter()
+            .zip(object_policies)
+            .map(|(object, result)| match result {
+                None if catalog.is_none() => Ok(None),
+                Some(Policy::Object { policy }) if catalog.is_some() => {
+                    if policy
+                        .prerequisites
+                        .iter()
+                        .chain(&policy.prerequisite_override)
+                        .any(|entry| !valid_requirement(entry))
+                        || policy.built_at.iter().any(|&index| {
+                            index > i32::MAX as u32 || index as usize >= self.building_ids.len()
+                        })
+                        || policy
+                            .factory_owners
                             .iter()
-                            .chain(&policy.prerequisite_override)
-                            .any(|entry| !valid_requirement(entry))
-                            || policy.built_at.iter().any(|&index| {
-                                index > i32::MAX as u32 || index as usize >= self.building_ids.len()
+                            .chain(&policy.forbidden_factory_owners)
+                            .any(|&index| {
+                                index > u16::MAX as u32 || index as usize >= self.country_ids.len()
                             })
-                            || policy
-                                .factory_owners
-                                .iter()
-                                .chain(&policy.forbidden_factory_owners)
-                                .any(|&index| {
-                                    index > u16::MAX as u32
-                                        || index as usize >= self.country_ids.len()
-                                })
-                        {
-                            return Err(format!(
-                                "production reference is outside its registry: {}",
-                                object.id
-                            ));
-                        }
-                        FrozenProductionObject::bind(policy).map(Some)
+                    {
+                        return Err(format!(
+                            "production reference is outside its registry: {}",
+                            object.id
+                        ));
                     }
-                    _ => Err(format!(
-                        "production catalog requires complete type bindings: {}",
-                        object.id
-                    )),
+                    FrozenProductionObject::bind(policy).map(Some)
                 }
+                _ => Err(format!(
+                    "production catalog requires complete type bindings: {}",
+                    object.id
+                )),
             })
             .collect::<Result<Vec<_>, String>>()?;
         let catalog = catalog
@@ -6118,11 +6207,8 @@ impl RuleSet {
         let count = names
             .as_ref()
             .map_or_else(|| self.native_armor_count(), Vec::len);
-        let binding = |category, name: &str, native: ArmorId| -> Result<Option<ArmorId>, String> {
-            let selected = match query(Query::Object {
-                category,
-                name: name.into(),
-            })? {
+        let binding = |policy, name: &str, native: ArmorId| -> Result<Option<ArmorId>, String> {
+            let selected = match policy {
                 None => None,
                 Some(Policy::Object { armor }) => Some(ArmorId::from_index(armor as usize)),
                 _ => {
@@ -6138,46 +6224,62 @@ impl RuleSet {
             }
             Ok(selected)
         };
-        let objects = self
-            .object_list
-            .iter()
-            .map(|object| {
-                binding(
-                    object_kind(object.category),
-                    &object.id,
-                    object.native_armor_id(),
-                )
-            })
-            .collect::<Result<Vec<_>, String>>()?;
         let mut terrain_names = self
             .terrain_object_types
             .keys()
             .cloned()
             .collect::<Vec<_>>();
         terrain_names.sort();
+        let queries: Vec<_> = self
+            .object_list
+            .iter()
+            .map(|object| Query::Object {
+                category: object_kind(object.category),
+                name: object.id.clone(),
+            })
+            .chain(terrain_names.iter().map(|key| Query::Object {
+                category: ArmorObjectKind::Terrain,
+                name: self.terrain_object_types[key].name.clone(),
+            }))
+            .map(vera_mod_api::Context::ArmorResource)
+            .collect();
+        let mut object_policies =
+            collect_mod_resources(program, &queries, |plan| plan.armor_resource)?.into_iter();
+        let objects = self
+            .object_list
+            .iter()
+            .zip(object_policies.by_ref())
+            .map(|(object, policy)| binding(policy, &object.id, object.native_armor_id()))
+            .collect::<Result<Vec<_>, String>>()?;
         let terrain = terrain_names
             .into_iter()
-            .map(|key| {
+            .zip(object_policies)
+            .map(|(key, policy)| {
                 let object = &self.terrain_object_types[&key];
                 Ok((
                     key.clone(),
-                    binding(
-                        ArmorObjectKind::Terrain,
-                        &object.name,
-                        object.native_armor_id(),
-                    )?,
+                    binding(policy, &object.name, object.native_armor_id())?,
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut warhead_names = self.warheads.keys().cloned().collect::<Vec<_>>();
         warhead_names.sort();
+        let queries: Vec<_> = warhead_names
+            .iter()
+            .map(|key| {
+                vera_mod_api::Context::ArmorResource(Query::Warhead {
+                    name: self.warheads[key].id.clone(),
+                })
+            })
+            .collect();
+        let warhead_policies =
+            collect_mod_resources(program, &queries, |plan| plan.armor_resource)?;
         let warheads = warhead_names
             .into_iter()
-            .map(|key| {
+            .zip(warhead_policies)
+            .map(|(key, policy)| {
                 let warhead = &self.warheads[&key];
-                let table = match query(Query::Warhead {
-                    name: warhead.id.clone(),
-                })? {
+                let table = match policy {
                     None => None,
                     Some(Policy::Warhead {
                         entries,
@@ -7765,6 +7867,7 @@ impl RuleSet {
                 .map(|(name, _)| name.to_owned())
                 .collect(),
             sdk_superweapon_sources: Vec::new(),
+            sdk_warhead_impact_names: processed.warhead_impact_type_names(),
             effect_resources: Default::default(),
             object_list,
             object_read_sections,

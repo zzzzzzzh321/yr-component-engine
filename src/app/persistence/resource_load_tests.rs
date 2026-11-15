@@ -283,6 +283,7 @@ fn snapshot_bytes_with_lighting(
         Some((
             runtime.simulation.resolved_terrain().unwrap(),
             &runtime.simulation,
+            &runtime.resources.rules,
         )),
         None,
     );
@@ -717,7 +718,11 @@ fn saved_local_lighting_projects_pending_history_and_rejects_invalid_cells() {
         CellLightGrid::new(),
         save.map.lighting().clone(),
         2,
-        Some((sim.resolved_terrain().unwrap(), sim)),
+        Some((
+            sim.resolved_terrain().unwrap(),
+            sim,
+            &save.incoming.resources.rules,
+        )),
         None,
     );
     // Exercise the projection shared with PreparedSave's writer: pre-Logic
@@ -733,7 +738,10 @@ fn saved_local_lighting_projects_pending_history_and_rejects_invalid_cells() {
     sim.session_mut_for_test()
         .lighting_mut()
         .set_current_ambient_for_test(0);
-    sim.publish_global_lighting(PaletteUpdate::from_scenario(sim.session().lighting()));
+    sim.publish_global_lighting(
+        PaletteUpdate::from_scenario(sim.session().lighting()),
+        &save.incoming.resources.rules,
+    );
     sim.lighting_sources_mut_for_test()
         .publish_for_test(LightingEvent::RetainAnimIntensity {
             anim,
@@ -742,7 +750,7 @@ fn saved_local_lighting_projects_pending_history_and_rejects_invalid_cells() {
     sim.session_mut_for_test()
         .lighting_mut()
         .set_current_ambient_for_test(120);
-    sim.publish_global_lighting(PaletteUpdate::Preserve);
+    sim.publish_global_lighting(PaletteUpdate::Preserve, &save.incoming.resources.rules);
     let before = (sim.state_hash(), sim.rng_state());
     let (mut saved, saved_anims) = lights.clone().saved_at(sim);
     assert_eq!(
@@ -783,7 +791,7 @@ fn saved_local_lighting_projects_pending_history_and_rejects_invalid_cells() {
         state: *sim.session().lighting(),
         cell_profile: sim.lighting_cell_profile(),
         palette: PaletteUpdate::Normal([1200, 800, 600]),
-        constructor_rgb: sim.palette_constructor_rgb(),
+        constructor_rgb: sim.palette_constructor_rgb(&save.incoming.resources.rules),
     };
     sim.lighting_sources_mut_for_test().publish_for_test(retint);
     // Loaded Scenario normal RGB differs from the surviving process cache.
@@ -853,15 +861,19 @@ fn saved_local_lighting_projects_pending_history_and_rejects_invalid_cells() {
     );
     assert_eq!(incoming.session().lighting().target_ambient(), 200);
     let terrain = incoming.resolved_terrain().unwrap();
-    let mut staged =
-        rebuild_lighting_grid_from_sim(terrain, save.map.lighting(), Some(incoming), 2);
+    let mut staged = rebuild_lighting_grid_from_sim(
+        terrain,
+        save.map.lighting(),
+        Some((incoming, &prepared.resources.rules)),
+        2,
+    );
     staged.stage_saved_local_lighting(&prepared.lighting, prepared.scheme_normal_rgb);
     let mut restored = MatchLighting::default();
     restored.install(
         staged,
         save.map.lighting().clone(),
         2,
-        Some((terrain, incoming)),
+        Some((terrain, incoming, &prepared.resources.rules)),
         None,
     );
     restored.restore_anim_intensities(prepared.world.anim_intensities.clone());
@@ -892,15 +904,23 @@ fn saved_local_lighting_projects_pending_history_and_rejects_invalid_cells() {
     );
     assert_eq!(normal_world.session().lighting().target_ambient(), 70);
     let normal_terrain = normal_world.resolved_terrain().unwrap();
-    let mut normal_grid =
-        rebuild_lighting_grid_from_sim(normal_terrain, save.map.lighting(), Some(normal_world), 2);
+    let mut normal_grid = rebuild_lighting_grid_from_sim(
+        normal_terrain,
+        save.map.lighting(),
+        Some((normal_world, &normal_prepared.resources.rules)),
+        2,
+    );
     normal_grid.stage_saved_local_lighting(&saved, prepared.scheme_normal_rgb);
     let mut normal_lights = MatchLighting::default();
     normal_lights.install(
         normal_grid,
         save.map.lighting().clone(),
         2,
-        Some((normal_terrain, normal_world)),
+        Some((
+            normal_terrain,
+            normal_world,
+            &normal_prepared.resources.rules,
+        )),
         None,
     );
     assert_eq!(normal_lights.grid().color_scheme_rgb(), [1200, 800, 600]);
@@ -978,7 +998,7 @@ fn saved_local_lighting_projects_pending_history_and_rejects_invalid_cells() {
         Some(0),
         "failed candidate leaves local owner intact"
     );
-    restored.refresh(terrain, incoming, 2);
+    restored.refresh(terrain, incoming, &prepared.resources.rules, 2);
     assert_eq!(restored.anim_intensities().get(&anim).copied(), Some(0));
     assert_eq!(
         lights.grid().color_scheme_rgb(),
@@ -1790,6 +1810,7 @@ fn retail_saved_resources_prepare_cross_map_and_roll_back_late_failure() {
         Some((
             outgoing.simulation.resolved_terrain().unwrap(),
             &outgoing.simulation,
+            &outgoing.resources.rules,
         )),
         None,
     );

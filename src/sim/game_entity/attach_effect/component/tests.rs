@@ -121,6 +121,49 @@ fn visit(sim: &mut Simulation, rules: &RuleSet, target: u64) {
 }
 
 #[test]
+fn negotiated_empty_visit_preserves_the_counter_and_actor_gates() {
+    let (mut sim, rules, target, _) = scene(None, false);
+    let mut context = sim
+        .component_effect_context(target, api::EffectEvent::Visit, &rules)
+        .unwrap();
+    context.control = api::EffectControl::Waiting(42);
+    context.animations_hidden = true;
+    let actor = sim.substrate.entities.get_mut(target).unwrap();
+    actor.attach_effects.self_effect = SelfEffectState::Pending(42);
+    actor.attach_effects.animations_hidden = true;
+
+    assert!(
+        standard_empty_visit_plan(&context, |_| Ok(true))
+            .unwrap()
+            .is_none()
+    );
+    context.entity.chrono_warp_latch = true;
+    assert!(
+        standard_empty_visit_plan(&context, |_| panic!(
+            "a gated visit must stay with the guest"
+        ))
+        .unwrap()
+        .is_none()
+    );
+    context.entity.chrono_warp_latch = false;
+    let plan = standard_empty_visit_plan(&context, |resource| {
+        assert_eq!(resource.kind, api::EffectResourceKind::Unit);
+        assert_eq!(resource.name, "VICTIM");
+        Ok(false)
+    })
+    .unwrap()
+    .unwrap();
+    sim.commit_component_effects(&context, &plan, &rules)
+        .unwrap();
+    let actor = sim.entities().get(target).unwrap();
+    assert_eq!(
+        actor.attach_effects.self_effect,
+        SelfEffectState::Disabled(42)
+    );
+    assert!(actor.attach_effects.animations_hidden);
+}
+
+#[test]
 #[ignore = "requires the packaged Ares component in VERA_SDK_EFFECT_WASM"]
 fn zero_damage_bullet_updates_the_only_effect_store_and_resumes_after_save() {
     let wasm = component();

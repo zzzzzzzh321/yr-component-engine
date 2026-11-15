@@ -243,6 +243,93 @@ fn mutable_lookup_keeps_old_cell_pointers_and_row_counts_while_new_samples_get_n
 }
 
 #[test]
+fn repeated_out_of_range_constructor_context_does_not_republish_or_retint() {
+    let rules = RuleSet::empty_for_test();
+    let terrain =
+        crate::map::resolved_terrain::test_grid(3, 1, crate::map::resolved_terrain::test_flat_cell);
+    let mut sim = Simulation::with_seed(0);
+    let ion = sim.session_mut_for_test().lighting_mut().ion_mut_for_test();
+    ion.red_percent = 250;
+    ion.green_percent = -1;
+    ion.blue_percent = 125;
+    let mut lights = MatchLighting::default();
+    lights.install(
+        CellLightGrid::new(),
+        LightingConfig::default(),
+        2,
+        Some((&terrain, &sim, rules)),
+        None,
+    );
+    lights
+        .grid
+        .insert_profiled_light((0, 0), [0.512, 0.640, 0.768], 1.0);
+    let old_cell = lights.grid.cell_light_at((0, 0)).unwrap().clone();
+    let old_convert = lights
+        .grid
+        .profiles()
+        .get(old_cell.profile_id)
+        .unwrap()
+        .clone();
+    let owner = sim.intern("LightingFixture");
+    *sim.lightning_storm_mut_for_test() =
+        crate::sim::superweapon::lightning_storm::LightningStorm::raging_for_test(owner, (0, 0));
+
+    assert!(lights.refresh(&terrain, &sim, rules, 2));
+    assert_eq!(
+        lights.grid.constructor_alternate_rgb(),
+        Some([2000, 0, 1250])
+    );
+    assert!(
+        lights
+            .grid
+            .constructor_alternate_rgb_matches(Some([2500, -10, 1250]))
+    );
+    assert!(
+        !lights.refresh(&terrain, &sim, rules, 2),
+        "the same raw selector input must not publish another RelightProfile"
+    );
+    assert_eq!(lights.grid.cell_light_at((0, 0)).unwrap(), &old_cell);
+    assert_eq!(
+        lights.grid.profiles().get(old_cell.profile_id).unwrap(),
+        &old_convert
+    );
+    lights
+        .grid
+        .insert_profiled_light((1, 0), [0.960, 0.640, 0.512], 1.0);
+    let new_convert = lights.grid.cell_light_at((1, 0)).unwrap().profile_id;
+    assert_ne!(new_convert, old_cell.profile_id);
+    assert_eq!(lights.grid.palette_rgb(new_convert), [2000, 0, 1250]);
+}
+
+#[test]
+fn flash_timer_only_write_does_not_refresh_retained_cells() {
+    let rules = RuleSet::empty_for_test();
+    let terrain =
+        crate::map::resolved_terrain::test_grid(1, 1, crate::map::resolved_terrain::test_flat_cell);
+    let mut sim = Simulation::with_seed(0);
+    let mut lights = MatchLighting::default();
+    lights.install(
+        CellLightGrid::new(),
+        LightingConfig::default(),
+        2,
+        Some((&terrain, &sim, rules)),
+        None,
+    );
+    lights
+        .grid
+        .insert_profiled_light((0, 0), [0.512, 0.640, 0.768], 0.5);
+    let retained = lights.grid.cell_light_at((0, 0)).unwrap().clone();
+    //10036A09 restarts this timer before ChangeLighting10032370 can
+    // decline an explicitly disabled source. No Cell refresh occurs there.
+    sim.session_mut_for_test()
+        .lighting_mut()
+        .restart_transition_timer(777, 1);
+    assert!(!lights.refresh(&terrain, &sim, rules, 2));
+    assert_eq!(lights.grid.cell_light_at((0, 0)), Some(&retained));
+    assert!(!lights.refresh(&terrain, &sim, rules, 2));
+}
+
+#[test]
 fn live_tag_rgb_overrides_reach_packets_and_survive_ambient_writes_during_storm() {
     let map = MapFile::from_bytes(b"[Map]\nTheater=TEMPERATE\nSize=0,0,2,1\nLocalSize=0,0,2,1\n[IsoMapPack5]\n1=DwALABwBAAIA/////wAAABEAAA==\n[Basic]\nNewINIFormat=4\n[Triggers]\nRGB=Neutral,<none>,RGB,0,1,1,1,0\n[Events]\nRGB=1,13,0,0\n[Actions]\nRGB=4,142,0,120,0,0,0,0,A,143,0,80,0,0,0,0,A,144,0,60,0,0,0,0,A,73,0,80,0,0,0,0,A\n[Tags]\nRGBTAG=0,RGB,RGB\n").unwrap();
     let mut sim = Simulation::with_seed(0);
@@ -269,7 +356,10 @@ fn live_tag_rgb_overrides_reach_packets_and_survive_ambient_writes_during_storm(
     lights
         .grid
         .insert_profiled_light((0, 0), [0.512, 0.640, 0.768], 1.0);
-    sim.publish_global_lighting(PaletteUpdate::from_scenario(&sim.session().lighting()));
+    sim.publish_global_lighting(
+        PaletteUpdate::from_scenario(&sim.session().lighting()),
+        crate::rules::ruleset::RuleSet::empty_for_test(),
+    );
     lights.apply_events(&terrain, sim.lighting_sources().pending());
     sim.lighting_sources_mut_for_test().discard_pending();
     sim.advance_triggers(
@@ -282,7 +372,12 @@ fn live_tag_rgb_overrides_reach_packets_and_survive_ambient_writes_during_storm(
     sim.lighting_sources_mut_for_test().discard_pending();
     //73 changes normal Ambient after the final RGB publication. Reconciling
     // that state must not infer a new Ion palette operation.
-    lights.refresh(&terrain, &sim, 2);
+    lights.refresh(
+        &terrain,
+        &sim,
+        crate::rules::ruleset::RuleSet::empty_for_test(),
+        2,
+    );
     let before = lights.grid.cell_light_at((0, 0)).unwrap().profile_id;
     assert_eq!(lights.grid.palette_rgb(before), [1200, 800, 600]);
     let brightness = lights.grid.cell_light_at((0, 0)).unwrap().top_scalar;
@@ -371,7 +466,7 @@ fn a_bound_radiation_type_tints_the_field_with_its_own_color() {
             CellLightGrid::new(),
             LightingConfig::default(),
             2,
-            Some((&terrain, &sim)),
+            Some((&terrain, &sim, &rules)),
             None,
         );
         let mut sources = std::mem::take(sim.lighting_sources_mut_for_test());

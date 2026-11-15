@@ -4924,7 +4924,7 @@ impl Simulation {
         ) {
             self.trigger_runtime.mark_ambient_light_changed();
             //55B4C6 refreshes Cell scalars without calling palette53AD00.
-            self.publish_global_lighting(crate::sim::light_sources::PaletteUpdate::Preserve);
+            self.publish_global_lighting(crate::sim::light_sources::PaletteUpdate::Preserve, rules);
         }
     }
 

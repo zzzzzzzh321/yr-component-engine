@@ -540,7 +540,7 @@ fn retail_paid_destruction_and_replacement_reach_smudge_rendering() {
         crate::map::lighting::CellLightGrid::new(),
         crate::map::lighting::parse_lighting(&scene.map.ini),
         2,
-        Some((scene.sim().resolved_terrain().unwrap(), scene.sim())),
+        Some((scene.sim().resolved_terrain().unwrap(), scene.sim(), rules)),
         None,
     );
     // Declared neutral-A viewport for the live producer, not a native whole-map

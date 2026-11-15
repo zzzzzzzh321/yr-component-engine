@@ -333,7 +333,7 @@ pub(crate) fn start(
     for viewer in radar_viewers {
         sim.power_states.house_mut(viewer).recheck_radar();
     }
-    sim.update_lighting();
+    sim.update_lighting(rules);
     if rules.general.lightning_print_text {
         sim.sound_events.emit(SimSoundEvent::LightningStormBegan);
     }
@@ -391,7 +391,7 @@ pub(super) fn process(
                 storm.active = false;
                 storm.owner = None;
                 storm.cell = EMPTY_CELL;
-                sim.update_lighting();
+                sim.update_lighting(rules);
             }
             sim.lightning_storm.time_to_end = false;
         }

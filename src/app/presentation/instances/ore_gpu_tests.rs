@@ -200,7 +200,11 @@ impl Probe {
             CellLightGrid::new(),
             crate::map::lighting::parse_lighting(&scene.map.ini),
             2,
-            Some((scene.sim().resolved_terrain().unwrap(), scene.sim())),
+            Some((
+                scene.sim().resolved_terrain().unwrap(),
+                scene.sim(),
+                &scene.runtime.resources.rules,
+            )),
             None,
         );
         Self {

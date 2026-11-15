@@ -4,6 +4,7 @@ use super::host::{IniNamesHost, NativeHost, StartupHost};
 use crate::rules::ini_parser::IniFile;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{BTreeSet, HashSet},
     fmt,
     hash::{Hash, Hasher},
     sync::{Arc, OnceLock},
@@ -17,12 +18,39 @@ mod tests;
 
 #[derive(Serialize, Deserialize)]
 pub struct Program {
-    bytes: Vec<u8>,
+    #[serde(
+        serialize_with = "serialize_module_bytes",
+        deserialize_with = "deserialize_module_bytes"
+    )]
+    bytes: Arc<Vec<u8>>,
     digest: String,
     manifest: api::ModuleManifest,
     config: Vec<u8>,
     #[serde(skip)]
     compiled: OnceLock<Result<Arc<Executor>, String>>,
+    #[serde(skip)]
+    entity_config: OnceLock<Result<Arc<EntityConfiguration>, String>>,
+}
+
+// Preserve the saved Vec layout while sharing the immutable module across
+// the configuration candidates created at physical Rules read points.
+fn serialize_module_bytes<S: serde::Serializer>(
+    bytes: &Arc<Vec<u8>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    bytes.as_ref().serialize(serializer)
+}
+
+fn deserialize_module_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<Vec<u8>>, D::Error> {
+    Vec::deserialize(deserializer).map(Arc::new)
+}
+
+struct EntityConfiguration {
+    bytes: Vec<u8>,
+    attach_types: Option<HashSet<String>>,
+    effect_visit_exceptions: Option<BTreeSet<api::EffectResourceContext>>,
 }
 
 struct Executor {
@@ -39,7 +67,7 @@ impl Executor {
             state: Vec::new(),
         };
         self.runtime
-            .evaluate(&self.module, &request, Arc::new(StartupHost))
+            .evaluate(&self.module, &request, Arc::new(StartupHost::default()))
             .map_err(|e| e.to_string())
     }
 }
@@ -61,7 +89,7 @@ fn component_runtime() -> Result<Arc<ComponentRuntime>, String> {
 /// Immutable module admission shared by early resource recipes and later Rules
 /// configuration. The runtime and its LoadedModule never cross engine tokens.
 pub(super) struct AdmittedComponent {
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     digest: String,
     manifest: api::ModuleManifest,
     executor: Arc<Executor>,
@@ -69,6 +97,10 @@ pub(super) struct AdmittedComponent {
 
 impl AdmittedComponent {
     pub(super) fn load(bytes: Vec<u8>, expected: &str) -> Result<Self, String> {
+        Self::load_shared(Arc::new(bytes), expected)
+    }
+
+    fn load_shared(bytes: Arc<Vec<u8>>, expected: &str) -> Result<Self, String> {
         let runtime = component_runtime()?;
         let module = runtime.load(&bytes, expected).map_err(|e| e.to_string())?;
         let manifest = module.manifest().clone();
@@ -231,6 +263,7 @@ impl AdmittedComponent {
             manifest: self.manifest,
             config: Vec::new(),
             compiled: OnceLock::from(Ok(self.executor)),
+            entity_config: OnceLock::new(),
         }
     }
 
@@ -288,6 +321,7 @@ impl Clone for Program {
             manifest: self.manifest.clone(),
             config: self.config.clone(),
             compiled: self.compiled.clone(),
+            entity_config: self.entity_config.clone(),
         }
     }
 }
@@ -398,6 +432,7 @@ impl Program {
     pub(crate) fn fresh_configuration_seed(&self) -> Self {
         let mut program = self.clone();
         program.config.clear();
+        program.entity_config.take();
         program
     }
 
@@ -454,6 +489,7 @@ impl Program {
         let mut candidate = self.clone();
         if let Some(config) = plan.config {
             candidate.config = config;
+            candidate.entity_config.take();
         }
         Ok((candidate, plan.country_read))
     }
@@ -463,7 +499,7 @@ impl Program {
     /// import and cannot replay the allocation after the pass is complete.
     pub(crate) fn configure_super_read(
         &self,
-        pass: &IniFile,
+        pass: Arc<IniFile>,
         context: api::ConfigureSuperReadContext,
         registry: crate::rules::native_processing::SdkRegistryPass,
     ) -> Result<(Self, Option<api::SuperReferenceRead>), String> {
@@ -473,7 +509,7 @@ impl Program {
         let plan = self.configuration_plan(
             self.executor()?,
             Context::ConfigureSuperRead(context),
-            NativeHost::configuration(pass.clone(), Vec::new())
+            NativeHost::configuration_shared(pass, Vec::new())
                 .with_registries(registry)
                 .enable_superweapon_inputs()
                 .enable_type_sound_inputs(),
@@ -482,6 +518,7 @@ impl Program {
         let mut candidate = self.clone();
         if let Some(config) = plan.config {
             candidate.config = config;
+            candidate.entity_config.take();
         }
         Ok((candidate, plan.super_reference_read))
     }
@@ -728,6 +765,7 @@ impl Program {
         let plan = self.configuration_plan(executor, context, host, label)?;
         if let Some(config) = plan.config {
             self.config = config;
+            self.entity_config.take();
         }
         Ok(())
     }
@@ -810,24 +848,13 @@ impl Program {
             .weapon_firing_resource)
     }
 
-    pub(crate) fn weapon_instance_resource_policy(
-        &self,
-        context: api::WeaponInstanceResourceContext,
-    ) -> Result<Option<api::WeaponInstanceResourcePolicy>, String> {
-        if !self.has_weapon_instance_resource() {
-            return Ok(None);
-        }
-        Ok(self
-            .evaluate(Context::WeaponInstanceResource(context), &[])?
-            .weapon_instance_resource)
-    }
-
     pub(crate) fn has_weapon_instance_resource(&self) -> bool {
         self.manifest
             .hooks
             .contains(&api::HookKind::WeaponInstanceResource)
     }
 
+    #[cfg(test)]
     pub(crate) fn projectile_resource_policy(
         &self,
         name: &str,
@@ -916,6 +943,7 @@ impl Program {
             .cameo_resource)
     }
 
+    #[cfg(test)]
     pub(crate) fn foundation_resource_policy(
         &self,
         resource: &api::FoundationResourceContext,
@@ -978,17 +1006,7 @@ impl Program {
         self.manifest.hooks.contains(&api::HookKind::Effects)
     }
 
-    pub(crate) fn effect_resource_policy(
-        &self,
-        resource: &api::EffectResourceContext,
-    ) -> Result<Option<api::EffectDescriptor>, String> {
-        if !self.has_effect_runtime() {
-            return Ok(None);
-        }
-        let plan = self.evaluate(Context::EffectResource(resource.clone()), &[])?;
-        Ok(plan.effect_resource)
-    }
-
+    #[cfg(test)]
     pub(crate) fn type_resource_policy(
         &self,
         name: &str,
@@ -1023,10 +1041,62 @@ impl Program {
             .match_rules)
     }
 
+    pub(crate) fn collect_resources<T>(
+        &self,
+        queries: &[Context],
+        select: impl Fn(Plan) -> Option<T>,
+    ) -> Result<Vec<Option<T>>, String> {
+        let Some(first) = queries.first() else {
+            return Ok(Vec::new());
+        };
+        let kind = first.kind();
+        debug_assert!(queries.iter().all(|query| query.kind() == kind));
+        if !self.manifest.hooks.contains(&kind) {
+            return Ok(queries.iter().map(|_| None).collect());
+        }
+        let batch = self.manifest.hooks.contains(&api::HookKind::ResourceBatch);
+        let mut policies = Vec::with_capacity(queries.len());
+        let mut remaining = queries;
+        let mut limit = if batch {
+            api::resource_batch::MAX_QUERIES
+        } else {
+            1
+        };
+        let executor = self.executor()?;
+        let host: Arc<dyn vera_mod_runtime::HostServices> = Arc::new(NativeHost::simulation());
+        while !remaining.is_empty() {
+            let count = limit.min(remaining.len());
+            if batch && count > 1 {
+                let request = api::resource_batch::ResourceBatch {
+                    api_version: api::API_VERSION,
+                    config: self.config.as_slice().into(),
+                    queries: (&remaining[..count]).into(),
+                };
+                let reply = executor
+                    .runtime
+                    .evaluate_resource_batch(&executor.module, &request, Arc::clone(&host))
+                    .map_err(|e| format!("{} batch: {e}", kind.as_str()))?;
+                let Some(plans) = reply else {
+                    limit = count.div_ceil(2);
+                    continue;
+                };
+                policies.extend(plans.into_iter().map(&select));
+            } else {
+                policies.push(select(self.evaluate_with_host(
+                    remaining[0].clone(),
+                    &[],
+                    Arc::clone(&host),
+                )?));
+            }
+            remaining = &remaining[count..];
+        }
+        Ok(policies)
+    }
+
     fn executor(&self) -> Result<&Arc<Executor>, String> {
         self.compiled
             .get_or_init(|| {
-                let admitted = AdmittedComponent::load(self.bytes.clone(), &self.digest)?;
+                let admitted = AdmittedComponent::load_shared(self.bytes.clone(), &self.digest)?;
                 if admitted.manifest != self.manifest {
                     return Err("saved module manifest mismatch".into());
                 }
@@ -1040,6 +1110,81 @@ impl Program {
         self.evaluate_with_host(context, state, Arc::new(NativeHost::simulation()))
     }
 
+    fn entity_configuration(&self) -> Result<&EntityConfiguration, String> {
+        self.entity_config
+            .get_or_init(|| {
+                let executor = self.executor()?;
+                let request = Request {
+                    api_version: api::API_VERSION,
+                    context: Context::EntityConfiguration,
+                    config: self.config.clone(),
+                    state: Vec::new(),
+                };
+                let plan = executor
+                    .runtime
+                    .evaluate(
+                        &executor.module,
+                        &request,
+                        Arc::new(StartupHost::entity_projection()),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let bytes = plan
+                    .config
+                    .ok_or_else(|| "missing entity configuration".to_owned())?;
+                let attach_types = plan.attach_types.map(|names| {
+                    names
+                        .into_iter()
+                        .map(|name| name.to_ascii_uppercase())
+                        .collect()
+                });
+                let effect_visit_exceptions = plan
+                    .effect_visit_exceptions
+                    .map(|types| types.into_iter().collect());
+                Ok(Arc::new(EntityConfiguration {
+                    bytes,
+                    attach_types,
+                    effect_visit_exceptions,
+                }))
+            })
+            .as_ref()
+            .map(Arc::as_ref)
+            .map_err(Clone::clone)
+    }
+
+    pub(crate) fn attaches_to_type(&self, name: &str) -> Result<bool, String> {
+        if !self
+            .manifest
+            .hooks
+            .contains(&api::HookKind::EntityConfiguration)
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .entity_configuration()?
+            .attach_types
+            .as_ref()
+            .is_none_or(|types| types.contains(&name.to_ascii_uppercase())))
+    }
+
+    pub(crate) fn has_custom_empty_effect_visit(
+        &self,
+        resource: &api::EffectResourceContext,
+    ) -> Result<bool, String> {
+        if resource.kind.user().is_none()
+            || !self
+                .manifest
+                .hooks
+                .contains(&api::HookKind::EntityConfiguration)
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .entity_configuration()?
+            .effect_visit_exceptions
+            .as_ref()
+            .is_none_or(|types| types.contains(resource)))
+    }
+
     fn evaluate_with_host(
         &self,
         context: Context,
@@ -1047,10 +1192,22 @@ impl Program {
         host: Arc<dyn vera_mod_runtime::HostServices>,
     ) -> Result<Plan, String> {
         let executor = self.executor()?;
+        let config = if matches!(
+            context,
+            Context::Attach(_) | Context::Damage(_) | Context::Tick(_) | Context::Effects(_)
+        ) && self
+            .manifest
+            .hooks
+            .contains(&api::HookKind::EntityConfiguration)
+        {
+            &self.entity_configuration()?.bytes
+        } else {
+            &self.config
+        };
         let request = Request {
             api_version: api::API_VERSION,
             context,
-            config: self.config.clone(),
+            config: config.clone(),
             state: state.to_vec(),
         };
         let plan = executor

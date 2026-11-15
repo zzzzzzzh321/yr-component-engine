@@ -78,25 +78,54 @@ pub(crate) fn impact(sim: &mut Simulation, rules: &RuleSet, impact: ProjectileNu
         return;
     };
     let frame = sim.session.binary_frame() as i32;
-    sim.session.lighting_mut().start_nuke_flash(frame);
-    // ScreenNukeFlash53AC39 calls RecalcLighting with alternate flag1.
-    sim.publish_global_lighting(crate::sim::light_sources::PaletteUpdate::from_scenario(
-        sim.session.lighting(),
-    ));
-    let cell = |leptons: i32| (leptons / 256) as i16 as u16;
-    sim.sound_events.emit(SimSoundEvent::RadarEvent {
-        radar: RadarEventRequest::new(
-            RadarEventType::ImpactSilent,
-            cell(location.x),
-            cell(location.y),
-        ),
-    });
+    let animation = if let Some(effect) = impact.extension() {
+        // Installed BulletClass_Update_NukeBall10036960. The source survives
+        // disabled/zero-duration impacts and Bullet retirement. Publish only
+        // future-constructor inputs for that assignment, never a Global.
+        if let Some(source) = effect.source {
+            sim.session.lighting_mut().remember_nuke_source(source);
+            sim.publish_relight_profile(rules);
+            if rules.super_weapon_create_radar_event(source) {
+                emit_impact_radar(sim, location);
+            }
+        }
+        if effect.flash_enabled && effect.flash_duration > 0 {
+            sim.session
+                .lighting_mut()
+                .begin_nuke_flash(frame, effect.flash_duration);
+            //10036A3E passes the ORIGINAL association even for NukeMaker,
+            // which skipped CurrentNuke assignment and the Enabled gate.
+            if !sim.change_superweapon_lighting(rules, effect.association) {
+                sim.publish_relight_profile(rules);
+            }
+        }
+        effect
+            .pre_impact
+            .and_then(|index| i32::try_from(index).ok())
+            .and_then(|index| rules.anim_type_runtime_key_by_index(index))
+    } else {
+        sim.session.lighting_mut().start_nuke_flash(frame);
+        // Original ScreenNukeFlash53AC39 uses fixed Nuke RGB.
+        sim.publish_global_lighting(
+            crate::sim::light_sources::PaletteUpdate::from_scenario(sim.session.lighting()),
+            rules,
+        );
+        emit_impact_radar(sim, location);
+        Some(std::borrow::Cow::Borrowed(
+            crate::rules::effect_asset_catalog::NUKE_BALL_ANIM,
+        ))
+    };
     if !impact.waits() {
         return;
     }
-    let nuke_ball = sim
-        .interner
-        .intern(crate::rules::effect_asset_catalog::NUKE_BALL_ANIM);
+    // PreImpact10036A52 ->467EB6 retains the same combat Anim constructor
+    // and wait owner for ANY registered type. Allocation-null still waits on
+    // a null pointer until the next Bullet AI head; never detonate early here.
+    let Some(animation) = animation else {
+        sim.projectiles.await_anim(impact.projectile_id(), None);
+        return;
+    };
+    let nuke_ball = sim.interner.intern(animation.as_ref());
     let fx = crate::sim::combat::detonation_anim::placed_effect(nuke_ball, location);
     let anim = sim.spawn_combat_explosion_anim(
         rules,
@@ -109,6 +138,19 @@ pub(crate) fn impact(sim: &mut Simulation, rules: &RuleSet, impact: ProjectileNu
         fx.world_z,
     );
     sim.projectiles.await_anim(impact.projectile_id(), anim);
+}
+
+/// CreateRadarEvent65FA70(type13, ObjectClass::GetMapCoords41BEA0), also
+/// used by installed Ares100369C8..100369E4 after SW.CreateRadarEvent.
+fn emit_impact_radar(sim: &mut Simulation, location: crate::sim::projectile::ProjectileCoord) {
+    let cell = |leptons: i32| (leptons / 256) as i16 as u16;
+    sim.sound_events.emit(SimSoundEvent::RadarEvent {
+        radar: RadarEventRequest::new(
+            RadarEventType::ImpactSilent,
+            cell(location.x),
+            cell(location.y),
+        ),
+    });
 }
 
 /// `AnimTypeClass::FindIndex("NUKEBALL") @ 0x00427CB0` (`0x00467EB1`)

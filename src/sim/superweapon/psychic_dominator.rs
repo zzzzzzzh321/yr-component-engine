@@ -191,7 +191,7 @@ fn start(sim: &mut Simulation, rules: &RuleSet, owner: InternedId, cell: (i16, i
     sim.session
         .lighting_mut()
         .restart_transition_timer(frame, START_FADE_FRAMES);
-    sim.update_lighting();
+    sim.update_lighting(rules);
 }
 
 /// `PsychicDominator::Process @ 0x0053AF40` for one frame. Returns whether
@@ -225,7 +225,7 @@ pub(super) fn process(
                 state.status = Status::FadingBack;
                 state.cell = (0, 0);
                 state.anim = None;
-                sim.update_lighting();
+                sim.update_lighting(rules);
             }
         }
         Status::FadingBack => {
@@ -234,7 +234,7 @@ pub(super) fn process(
             if lighting.current_ambient() == lighting.target_ambient() {
                 sim.psychic_dominator.status = Status::Idle;
                 // Later relights leave PsyDom::Active's arm; no cell refreshes.
-                sim.publish_relight_profile();
+                sim.publish_relight_profile(rules);
             }
         }
     }
