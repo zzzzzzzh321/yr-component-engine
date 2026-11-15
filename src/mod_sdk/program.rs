@@ -1082,10 +1082,10 @@ impl Program {
             .match_rules)
     }
 
-    pub(crate) fn collect_resources<T>(
+    pub(crate) fn collect_resources<T: Send>(
         &self,
         queries: &[Context],
-        select: impl Fn(Plan) -> Option<T>,
+        select: impl Fn(Plan) -> Option<T> + Sync,
     ) -> Result<Vec<Option<T>>, String> {
         let Some(first) = queries.first() else {
             return Ok(Vec::new());
@@ -1096,6 +1096,47 @@ impl Program {
             return Ok(queries.iter().map(|_| None).collect());
         }
         let batch = self.manifest.hooks.contains(&api::HookKind::ResourceBatch);
+        let executor = self.executor()?;
+        let host: Arc<dyn vera_mod_runtime::HostServices> = Arc::new(NativeHost::simulation());
+        let collect = |queries: &[Context]| {
+            self.collect_resource_shard(queries, batch, executor, &host, &select)
+        };
+
+        // Only the explicitly immutable batch protocol runs concurrently. A
+        // group shares the frozen configuration, and results are consumed in
+        // query order even when a later group finishes earlier. Each Store has
+        // its own memory budget, so bound the number active on the global pool.
+        #[cfg(not(target_arch = "wasm32"))]
+        if batch {
+            use rayon::prelude::*;
+            let max_batch = api::resource_batch::MAX_QUERIES;
+            let batch_count = queries.len().div_ceil(max_batch);
+            let workers = rayon::current_num_threads().min(4);
+            if workers > 1 && batch_count > 1 {
+                let shard_size = batch_count.div_ceil(workers) * max_batch;
+                let shards = queries
+                    .par_chunks(shard_size)
+                    .map(collect)
+                    .collect::<Vec<_>>();
+                let mut policies = Vec::with_capacity(queries.len());
+                for shard in shards {
+                    policies.extend(shard?);
+                }
+                return Ok(policies);
+            }
+        }
+
+        collect(queries)
+    }
+
+    fn collect_resource_shard<T>(
+        &self,
+        queries: &[Context],
+        batch: bool,
+        executor: &Executor,
+        host: &Arc<dyn vera_mod_runtime::HostServices>,
+        select: impl Fn(Plan) -> Option<T>,
+    ) -> Result<Vec<Option<T>>, String> {
         let mut policies = Vec::with_capacity(queries.len());
         let mut remaining = queries;
         let mut limit = if batch {
@@ -1103,8 +1144,6 @@ impl Program {
         } else {
             1
         };
-        let executor = self.executor()?;
-        let host: Arc<dyn vera_mod_runtime::HostServices> = Arc::new(NativeHost::simulation());
         while !remaining.is_empty() {
             let count = limit.min(remaining.len());
             if batch && count > 1 {
@@ -1115,8 +1154,8 @@ impl Program {
                 };
                 let reply = executor
                     .runtime
-                    .evaluate_resource_batch(&executor.module, &request, Arc::clone(&host))
-                    .map_err(|e| format!("{} batch: {e}", kind.as_str()))?;
+                    .evaluate_resource_batch(&executor.module, &request, Arc::clone(host))
+                    .map_err(|e| format!("{} batch: {e}", remaining[0].kind().as_str()))?;
                 let Some(plans) = reply else {
                     limit = count.div_ceil(2);
                     continue;
@@ -1126,7 +1165,7 @@ impl Program {
                 policies.push(select(self.evaluate_with_host(
                     remaining[0].clone(),
                     &[],
-                    Arc::clone(&host),
+                    Arc::clone(host),
                 )?));
             }
             remaining = &remaining[count..];

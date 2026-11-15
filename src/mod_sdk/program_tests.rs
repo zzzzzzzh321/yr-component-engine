@@ -257,3 +257,58 @@ fn effects_send_only_exact_resources_in_the_current_event() {
     );
     assert_eq!(program.evaluate(request.context, &[]).unwrap(), plan);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn independent_resource_shards_retain_overflow_fallback_and_the_single_query_tail() {
+    let query = Context::EffectResource(api::EffectResourceContext {
+        kind: api::EffectResourceKind::Warhead,
+        name: "WH".into(),
+    });
+    let mut plan = Plan::unchanged(&api::resource_batch::query_request(query.clone()));
+    let descriptor = api::EffectDescriptor {
+        firepower_multiplier_bits: 0.5f64.to_bits(),
+        armor_multiplier_bits: 1.0f64.to_bits(),
+        rof_multiplier_bits: 1.0f64.to_bits(),
+        speed_multiplier_bits: 1.0f64.to_bits(),
+        cloakable: false,
+        animation: None,
+    };
+    plan.effect_resource = Some(descriptor.clone());
+    let manifest = api::ModuleManifest {
+        api_version: api::API_VERSION,
+        id: "resource-overflow".into(),
+        version: "1".into(),
+        state_version: 1,
+        config_version: 1,
+        hooks: vec![
+            api::HookKind::Configure,
+            api::HookKind::Attach,
+            api::HookKind::Damage,
+            api::HookKind::Tick,
+            api::HookKind::EffectResource,
+            api::HookKind::Effects,
+            api::HookKind::ResourceBatch,
+        ],
+    };
+    let module = vera_mod_runtime::test_support::component_fixture_by_kind(
+        &manifest,
+        &serde_json::to_vec(&plan).unwrap(),
+        &[(api::HookKind::ResourceBatch.as_str(), b"null")],
+    );
+    let digest = crate::util::sha256::sha256_hex(&module);
+    let program = AdmittedComponent::load(module, &digest)
+        .unwrap()
+        .into_configuration_seed();
+    let workers = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    let count = api::resource_batch::MAX_QUERIES + 1;
+    let queries = vec![query; count];
+
+    let policies = workers
+        .install(|| program.collect_resources(&queries, |plan| plan.effect_resource))
+        .unwrap();
+    assert_eq!(policies, vec![Some(descriptor); count]);
+}

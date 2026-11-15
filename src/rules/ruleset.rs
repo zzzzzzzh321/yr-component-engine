@@ -5130,10 +5130,10 @@ pub(crate) enum StartupResourceScope {
     Frontend,
 }
 
-fn collect_mod_resources<T>(
+fn collect_mod_resources<T: Send>(
     program: Option<&crate::mod_sdk::Program>,
     queries: &[vera_mod_api::Context],
-    select: impl Fn(vera_mod_api::Plan) -> Option<T>,
+    select: impl Fn(vera_mod_api::Plan) -> Option<T> + Sync,
 ) -> Result<Vec<Option<T>>, String> {
     match program {
         Some(program) => program.collect_resources(queries, select),
