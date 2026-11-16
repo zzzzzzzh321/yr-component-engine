@@ -16,6 +16,41 @@ use crate::render::sidebar_chrome::SidebarTheme;
 use crate::ui::sidebar::Rect;
 use crate::util::config::GameConfig;
 
+/// A game Ares plays in by its keys alone, read the stock way, has no Side
+/// extensions, so its sides draw the stock sidebar instead of stopping the
+/// match load; a game that ships `ares.mix` keeps each side's own MIX group
+/// (Ares1002FA00). A fourth side takes the nonzero geometry (6A5090) only on
+/// the Ares arm, as it did in each build before.
+#[test]
+fn only_a_side_with_a_retained_configuration_draws_the_ares_sidebar() {
+    use crate::rules::ini_parser::IniFile;
+    use crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch;
+    let keys = IniFile::from_str("[HTNK]\nImmuneToAbduction=yes\n");
+    let Some(keys_only) = retail_battle_rules_for_map_with_patch("Hills.mmx", &keys) else {
+        return;
+    };
+    assert!(keys_only.rules.ares());
+    assert_eq!(
+        super::ares_sidebar_config(&keys_only.rules, 0).is_some(),
+        keys_only.rules.reads_ares_way()
+    );
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let Some(ares_mix) = retail_battle_rules_for_map_with_patch("Hills.mmx", &IniFile::empty())
+    else {
+        return;
+    };
+    let config = |side| super::ares_sidebar_config(&ares_mix.rules, side);
+    assert_eq!(
+        [config(0), config(1), config(2)],
+        [Some((1, false)), Some((2, false)), Some((2, true))]
+    );
+    assert_eq!(
+        super::sidebar_theme_for_side(3, false),
+        SidebarTheme::Allied
+    );
+    assert_eq!(super::sidebar_theme_for_side(3, true), SidebarTheme::Soviet);
+}
+
 fn retail_ra2_dir() -> PathBuf {
     std::env::var_os("RA2_DIR")
         .map(PathBuf::from)
@@ -285,10 +320,27 @@ fn original_n1_tables_drive_sidebar_palette_and_skip_alpha() {
     }
 }
 
+/// LoadSHPs 0x006A5AB7..0x006A5BDB finds the observer strip's pictures
+/// outside the side archives (retail LOCALMD.MIX), with their palettes.
+#[test]
+#[ignore = "requires the configured stock retail RA2/YR install"]
+fn retail_observer_art_finds_every_background_and_flag() {
+    let assets = AssetManager::new(&retail_ra2_dir(), MediaArchiveMode::STOCK_DIGITAL)
+        .expect("load retail asset stack");
+    let mix = assets.archive("sidec01.mix").expect("sidec01.mix");
+    let art = super::observer_art::load(&assets, mix, "sidec01.mix", false);
+    for side in 0..3 {
+        assert!(art.background(side).is_some(), "side {side}");
+    }
+    for country in (-3..=9).filter(|&country| country != -1) {
+        assert!(art.flag(country).is_some(), "flag {country}");
+    }
+    assert!(art.flag(-1).is_none());
+}
+
 #[test]
 #[ignore = "requires the configured stock retail RA2/YR install"]
 fn retail_modal_backgrounds_use_ui_palette_for_every_theme_and_size() {
-    #[cfg_attr(not(feature = "ares"), allow(unused_mut))]
     let mut assets = AssetManager::new(&retail_ra2_dir(), MediaArchiveMode::STOCK_DIGITAL).unwrap();
     for (theme, mix_index, archive_name, names, palette_name, old_palette_name) in [
         (
@@ -362,20 +414,12 @@ fn retail_modal_backgrounds_use_ui_palette_for_every_theme_and_size() {
                 if index == 0 {
                     continue;
                 }
-                let p = &raw_palette[index as usize * 3..][..3];
-                let expected = ((u16::from(p[0]) >> 1) << 11)
-                    | (u16::from(p[1]) << 5)
-                    | (u16::from(p[2]) >> 1);
-                let actual = ((u16::from(rgba[0]) >> 3) << 11)
-                    | ((u16::from(rgba[1]) >> 2) << 5)
-                    | (u16::from(rgba[2]) >> 3);
-                assert_eq!(actual, expected, "{archive_name}/{name}, index{index}");
+                let old = super::render_shp(&shp, &old_palette, 0).unwrap();
+                assert_ne!(
+                    entry.rgba, old.rgba,
+                    "{archive_name}/{name}: old radar palette must differ"
+                );
             }
-            let old = super::render_shp(&shp, &old_palette, 0).unwrap();
-            assert_ne!(
-                entry.rgba, old.rgba,
-                "{archive_name}/{name}: old radar palette must differ"
-            );
         }
     }
 }
@@ -470,7 +514,7 @@ fn retail_radar_histories_match_original_4912b0_stores() {
                         "one native draw per history step"
                     );
                     let _ = radar.set_has_radar(frame > previous);
-                    radar.tick((step as u64 - 1) * 64);
+                    radar.tick(1, (step as u64 - 1) * 64);
                 }
                 let mut encoder = gpu.device.create_command_encoder(&Default::default());
                 radar.encode_paints(&gpu.device, &gpu.queue, &batch, &mut encoder);

@@ -146,7 +146,16 @@ pub fn open_active_assets(
     path: &Path,
     media: MediaArchiveMode,
 ) -> Result<AssetManager, AssetError> {
-    let assets = AssetManager::new_with_startup_admission(path, media, |assets| {
+    open_active_assets_with_mod(path, None, media)
+}
+
+pub fn open_active_assets_with_mod(
+    path: &Path,
+    mod_dir: Option<&Path>,
+    media: MediaArchiveMode,
+) -> Result<AssetManager, AssetError> {
+    let assets = AssetManager::with_mod_and_startup_admission(path, mod_dir, media, |assets| {
+        let _ares = crate::rules::ares_switch::read_ares_way(assets.ares_form());
         early_resources(assets).map_err(asset_error)
     })?;
     validate_visible_late_component(&assets).map_err(asset_error)?;
@@ -159,7 +168,17 @@ pub fn reopen_active_assets(
     media: MediaArchiveMode,
     frozen: &native::StartupResources,
 ) -> Result<AssetManager, AssetError> {
-    let assets = AssetManager::new_with_startup_admission(path, media, |_| Ok(frozen.clone()))?;
+    reopen_active_assets_with_mod(path, None, media, frozen)
+}
+
+pub fn reopen_active_assets_with_mod(
+    path: &Path,
+    mod_dir: Option<&Path>,
+    media: MediaArchiveMode,
+    frozen: &native::StartupResources,
+) -> Result<AssetManager, AssetError> {
+    let assets =
+        AssetManager::with_mod_and_startup_admission(path, mod_dir, media, |_| Ok(frozen.clone()))?;
     validate_visible_late_component(&assets).map_err(asset_error)?;
     Ok(assets)
 }

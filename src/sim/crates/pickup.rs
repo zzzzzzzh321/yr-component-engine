@@ -195,11 +195,11 @@ fn crate_land_type(sim: &Simulation, cell: (i16, i16)) -> u8 {
         })
 }
 
-/// `VocClass::PlayAt @ 0x007509E0` of one `[AudioVisual]` crate sound at the
+/// `VocClass::PlayAt @ 0x007509E0` of one configured crate sound at the
 /// crate centre. Every arm but Reveal plays it only when `HouseClass::
 /// IsControlledByCurrentPlayer @ 0x0050B6F0` admits the actor's house
-/// (`heard_by`): the sim cannot see the local player, so the event carries
-/// the house and the app applies that test. Reveal (`0x0048202D..0x0048203C`)
+/// (`heard_by`): the event carries the collecting house and the app applies
+/// the shared control predicate. Reveal (`0x0048202D..0x0048203C`)
 /// plays it for everyone.
 fn play_crate_sound(
     sound_events: &mut FrameChannel<SimSoundEvent>,
@@ -459,7 +459,19 @@ pub(crate) fn pickup_crate(
     // `0x00481D86`: removal, then the replacement crate.
     let _ = remove_pickup_crate(sim, rules, registry, cell);
     if multiplayer && sim.session.game_options().crates {
-        let _ = place_one_random_crate(sim, rules, registry, ForcedPostPrecheckFailure::None);
+        if let Err(error) = place_one_random_crate(
+            sim,
+            rules,
+            registry,
+            ForcedPostPrecheckFailure::None,
+            frame_effects,
+        ) {
+            // The bool pickup receiver has no fallible continuation. Native
+            // would fault in the replacement's invalid Image/Mark chain;
+            // refuse the remaining pickup effect while keeping prior writes.
+            log::error!("crate pickup replacement at {cell:?} stopped: {error}");
+            return false;
+        }
     }
     if powerup == POWERUP_SQUAD {
         powerup = POWERUP_MONEY;
@@ -528,14 +540,23 @@ pub(crate) fn pickup_crate(
             POWERUP_MONEY => {
                 let amount = effects::money_crate_amount(
                     &mut sim.scenario_rng,
+                    rules,
                     selection.solo_money,
                     magnitude,
                 );
-                // `0x004824B0..0x004824D4`: in game mode 0 a player-controlled
-                // actor pays `PlayerPtr`; the sim cannot see that house and
-                // pays the actor's owner. Identical whenever the controlled
-                // house is the player's own, the campaign norm.
-                crate::sim::credit_income::add_credits(&mut sim.houses, owner, amount);
+                // PickupCrate4824A7..4824D4: every Money dispatch pays
+                // PlayerPtr in mode0 when IsHumanPlayer50B6F0 admits the
+                // collector, including the random and Unit-fallback routes.
+                // Mode 0 is the campaign alone, so no network peer asks.
+                let recipient =
+                    if !sim.session.game_mode_nonzero() && sim.house_is_human_player(owner) {
+                        sim.session.current_house()
+                    } else {
+                        Some(owner)
+                    };
+                if let Some(recipient) = recipient {
+                    crate::sim::credit_income::add_credits(&mut sim.houses, recipient, amount);
+                }
                 // 4824EF..482529 samples retained ESI after amount/credits;
                 // the independent 483307..483334 animation query follows sound.
                 let center = crate_center(sim, cell, receiver);
@@ -555,6 +576,9 @@ pub(crate) fn pickup_crate(
                     cell,
                     center,
                 );
+                // PickupCrate482C13 plays before the first healing receiver
+                // at482C8C, including that receiver's sound/RNG effects.
+                frame_effects.flush_sound(sim, rules);
                 effects::apply_heal_base_crate(sim, rules, Some(registry), actor_id, frame_effects);
             }
             POWERUP_DARKNESS => {
@@ -705,7 +729,14 @@ pub(crate) fn pickup_crate(
                 );
             }
             POWERUP_TIBERIUM => {
-                effects::apply_tiberium_crate(sim, rules, registry, cell, center);
+                if let Err(error) =
+                    effects::apply_tiberium_crate(sim, rules, registry, cell, center, frame_effects)
+                {
+                    // Native-invalid Image: stop this pickup arm after its
+                    // preceding writes, with no later placement/animation draw.
+                    log::error!("Tiberium crate failed: {error}");
+                    return false;
+                }
             }
             _ => {}
         }
@@ -768,11 +799,11 @@ fn spawn_pickup_anim(
     true
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_c_g))]
 #[path = "pickup_tests.rs"]
 mod pickup_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_c_g))]
 mod tests {
     use super::super::tests::{crate_registry, crate_ruleset};
     use super::*;

@@ -477,7 +477,7 @@ impl RulesPassProcessor {
         &mut self,
         pass: &IniFile,
     ) -> Result<CountryReadPolicy, RulesError> {
-        let fallback = if crate::rules::ARES_ENABLED {
+        let fallback = if self.reads_ares_way {
             CountryReadPolicy::ExistingOnly2048
         } else {
             CountryReadPolicy::RetailAllocate128

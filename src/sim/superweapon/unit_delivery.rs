@@ -17,12 +17,11 @@ use crate::rules::superweapon_type::{DeliveryOwner, SuperWeaponType};
 use crate::sim::components::DriveCoord;
 use crate::sim::intern::InternedId;
 use crate::sim::mission::{MissionId, MissionType};
-use crate::util::state_hasher::StateHasher;
 use crate::sim::world::Simulation;
 use crate::sim::world::{FrameEffects, SimSoundEvent};
 use std::hash::{Hash, Hasher};
 
-#[cfg(all(test, feature = "ares"))]
+#[cfg(all(test, tests_sim_superweapon))]
 #[path = "unit_delivery_tests.rs"]
 mod tests;
 
@@ -51,16 +50,17 @@ impl UnitDeliveryState {
         }
     }
 
-    pub(crate) fn validate(
-        &self,
-        sim: &Simulation,
-        custom_payloads: bool,
-    ) -> Result<(), &'static str> {
-        if !custom_payloads && !self.pending.is_empty() {
-            return Err(
-                "pending deliveries require the restored SuperWeapon custom-payload semantics",
-            );
+    /// Saved pending deliveries load only into a game Ares plays in (`ares`,
+    /// [`RuleSet::ares`]), like the entity's delivery base override
+    /// (`GameEntity::validate_ares_build_compatibility`).
+    pub(crate) fn validate_ares_build_compatibility(&self, ares: bool) -> Result<(), &'static str> {
+        if !ares && !self.pending.is_empty() {
+            return Err("pending deliveries require a game Ares plays in");
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate(&self, sim: &Simulation) -> Result<(), &'static str> {
         if self.pending.iter().any(|delivery| {
             !sim.houses.contains_key(&delivery.owner)
                 || delivery.types.is_empty()
@@ -75,9 +75,9 @@ impl UnitDeliveryState {
     }
 }
 
-#[cfg(all(test, not(feature = "ares")))]
+#[cfg(test)]
 #[test]
-fn default_build_rejects_pending_unit_delivery_state() {
+fn a_game_without_ares_rejects_pending_unit_delivery_state() {
     let mut sim = Simulation::with_seed(0);
     let owner = sim.interner.intern("Americans");
     let sw_type = sim.interner.intern("Delivery");
@@ -86,7 +86,7 @@ fn default_build_rejects_pending_unit_delivery_state() {
             owner, 0, None, true, 0, 10,
         ));
     let mut state = UnitDeliveryState::default();
-    assert!(state.validate(&sim, false).is_ok());
+    assert!(state.validate_ares_build_compatibility(false).is_ok());
     state.pending.push(PendingDelivery {
         sw_type,
         owner,
@@ -101,9 +101,11 @@ fn default_build_rejects_pending_unit_delivery_state() {
         activation_sound: None,
     });
     assert_eq!(
-        state.validate(&sim, false),
-        Err("pending deliveries require the restored SuperWeapon custom-payload semantics")
+        state.validate_ares_build_compatibility(false),
+        Err("pending deliveries require a game Ares plays in")
     );
+    assert!(state.validate_ares_build_compatibility(true).is_ok());
+    assert!(state.validate(&sim).is_ok());
 }
 
 fn delivery_owner(
@@ -235,6 +237,14 @@ fn apply(
     registry: Option<&OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) {
+    // Update10075DE0 prints Message.Activate first. Its firer is the
+    // Super's owner; the request retains the resolved payload owner, which
+    // differs only for a non-invoker Deliver.Owner (colour with FirerColor).
+    sim.sound_events
+        .emit(SimSoundEvent::AresSuperWeaponActivated {
+            owner: request.owner,
+            sw_type: request.sw_type,
+        });
     if !sim.houses.contains_key(&request.owner) {
         return;
     }
@@ -256,8 +266,8 @@ fn apply(
             },
         ));
     }
-    for (index, payload) in request.types.iter().enumerate() {
-        place(sim, rules, &request, payload, index, registry, effects);
+    for payload in &request.types {
+        place(sim, rules, &request, payload, registry, effects);
     }
 }
 
@@ -266,7 +276,6 @@ fn place(
     rules: &RuleSet,
     request: &PendingDelivery,
     payload: &DeliveryType,
-    index: usize,
     registry: Option<&OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) {
@@ -293,138 +302,147 @@ fn place(
     ) else {
         return;
     };
-    let mut hash = StateHasher::new();
-    request.owner.hash(&mut hash);
-    request.sw_type.hash(&mut hash);
-    request.cell.hash(&mut hash);
-    request.issued_frame.hash(&mut hash);
-    id.hash(&mut hash);
-    index.hash(&mut hash);
-    let seed = hash.finish() as i32;
-    // Ares PlaceUnits centers the foundation on the target before searching.
-    // Keep VERA's declared ring order, but use the same anchor coordinate.
-    let (width, height) = if payload.category == ObjectCategory::Building {
-        ty.foundation.dimensions()
-    } else {
-        (1, 1)
-    };
-    let anchor = (
-        i32::from(request.cell.0) - i32::from(width / 2),
-        i32::from(request.cell.1) - i32::from(height / 2),
-    );
-    let radius_cap = sim.resolved_terrain.as_ref().map_or(32, |terrain| {
-        i32::from(terrain.width().max(terrain.height()))
-    });
-    let mut placed = false;
-    for radius in 0..=radius_cap {
-        let count = if radius == 0 { 1 } else { radius * 8 };
-        let mut candidates = Vec::with_capacity(count as usize);
-        for step in 0..count {
-            let (dx, dy) = ring_offset(step, radius);
-            let (Ok(x), Ok(y)) = (u16::try_from(anchor.0 + dx), u16::try_from(anchor.1 + dy))
-            else {
-                continue;
-            };
-            let cell = (x, y);
-            if !on_map(sim, cell) {
-                continue;
-            }
-            if sim.constructed_object_can_enter_at(id, cell, rules, registry) {
-                candidates.push((cell, dx * dx + dy * dy));
-            }
-        }
-        if candidates.is_empty() {
-            continue;
-        }
-        let start = if payload.category == ObjectCategory::Building {
-            candidates
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, (_, distance))| *distance)
-                .unwrap()
-                .0
-        } else {
-            ((seed.wrapping_mul(397) ^ radius) as u32 as usize) % candidates.len()
-        };
-        for offset in 0..candidates.len() {
-            let cell = candidates[(start + offset) % candidates.len()].0;
-            let [x, y, z] = super::deck_coords(sim, cell);
-            let on_bridge =
-                super::cell_grid::cell_has_bridge_flag(sim, cell.0 as i16, cell.1 as i16);
-            if sim
-                .reveal_finished_object_at_coord(
-                    id,
-                    DriveCoord { x, y, z },
-                    on_bridge,
-                    rules,
-                    registry,
-                    effects,
-                )
-                .is_some()
-            {
-                placed = true;
-                break;
-            }
-        }
-        if placed {
-            break;
-        }
-    }
-    if !placed {
-        sim.discard_constructed_limbo(id, rules, effects);
-        return;
-    }
+    // Ares PlaceUnits (10075A60) marks a `Deliver.BaseNormal=no` building
+    // NoBaseNormal before Put, so its Unlimbo reserves no base space.
     if let Some(entity) = sim.substrate.entities.get_mut(id) {
         entity.set_unit_delivery_base_normal(request.base_normal);
     }
-    let mission = if payload.category == ObjectCategory::Building {
-        MissionType::Guard
-    } else if sim.houses[&request.owner].is_controlled_by_human(sim.session.game_mode_nonzero()) {
-        MissionType::AreaGuard
-    } else {
-        MissionType::Hunt
+    // PlaceUnits10075A60 searches once with MapClass::NearByLocation
+    // (Find_Nearby_Passable_Cell 0x56DC20) from the target less half the
+    // extent: a building's foundation (height with its bib) as Track/Normal
+    // with the occupancy test (`buildable`), or Float without it; a Foot type
+    // its own SpeedType and MovementZone, an Aircraft Track/Normal, both 1x1.
+    // No zone, no overlay, height or burrow test, no bridge cells and no
+    // target cell, so the pick is the frame-counter modulo. A PlaceAnywhere
+    // building takes the anchor itself.
+    use crate::rules::locomotor_type::{MovementZone, SpeedType};
+    use crate::sim::find_nearby_cell::{
+        NearbyArgs, NearbyFootprint, NearbySearchOptions, PassabilityArgs,
     };
-    let _ = sim.mission_queue_exact(
-        id,
-        MissionId::from_known(mission),
-        1,
-        sim.session.binary_frame(),
-        &crate::sim::mission::authority::LiveReadyInputProvider { rules },
-    );
-    // Ares PlaceUnits explicitly scatters flying Foot types after Put. Their
-    // ground-idle locomotor does not start moving merely from AreaGuard/Hunt.
-    // Reuse the class Scatter owner, including its existing Scenario draws
-    // and Infantry's immediate Process; never set flight state directly.
-    if payload.category != ObjectCategory::Building
-        && (ty.balloon_hover || ty.jumpjet)
-        && let Err(error) = sim.scatter(
+    let building = payload.category == ObjectCategory::Building;
+    let (width, height) = if building {
+        let (width, _) = ty.foundation.dimensions();
+        (
+            i32::from(width),
+            ty.foundation.height_with_bib(true, ty.bib),
+        )
+    } else {
+        (1, 1)
+    };
+    let (speed_type, movement_zone, buildable) = if building {
+        if ty.speed_type == SpeedType::Float {
+            (SpeedType::Float, MovementZone::Normal, false)
+        } else {
+            (SpeedType::Track, MovementZone::Normal, true)
+        }
+    } else if payload.category == ObjectCategory::Aircraft {
+        (SpeedType::Track, MovementZone::Normal, false)
+    } else {
+        (ty.speed_type, ty.movement_zone, false)
+    };
+    // 3.0 reads no Deliver.Buildups (SW+0x4A8, default true): a building
+    // queues Construction before its Put and builds up.
+    if building {
+        let _ = sim.mission_queue_exact(
             id,
-            None,
-            crate::sim::movement::ScatterFlags::new(true, false),
+            MissionId::from_known(MissionType::Construction),
+            1,
+            sim.session.binary_frame(),
+            &crate::sim::mission::authority::LiveReadyInputProvider { rules },
+        );
+    }
+    let anchor = (
+        i32::from(request.cell.0) - width / 2,
+        i32::from(request.cell.1) - height / 2,
+    );
+    let cell = if building && ty.place_anywhere {
+        u16::try_from(anchor.0)
+            .ok()
+            .zip(u16::try_from(anchor.1).ok())
+    } else {
+        sim.nearby_passable_cell(
+            anchor,
+            NearbyArgs {
+                passability: PassabilityArgs {
+                    speed_type,
+                    required_zone_id: None,
+                    movement_zone,
+                    bridge_aware_zone: false,
+                },
+                footprint: NearbyFootprint::new(width, height),
+                allow_bridge_cells: false,
+                check_height: false,
+                require_burrowable: false,
+                check_occupancy: buildable,
+                target_cell: None,
+                options: NearbySearchOptions {
+                    reject_any_overlay: false,
+                },
+            },
+        )
+        // An empty answer finds no cell Put can use.
+        .filter(|&cell| cell != (0, 0))
+    };
+    // One Put at the cell's GetCoordsWithBridge, OnBridge from the cell, with
+    // the DirType (GetCellIndex & 7) << 5: the index (Y << 9) + X keeps X's
+    // low three bits (Cell+0x24). A refused Put UnInits the payload.
+    let placed = cell.is_some_and(|cell| {
+        let [x, y, z] = super::deck_coords(sim, cell);
+        let on_bridge = super::cell_grid::cell_has_bridge_flag(sim, cell.0 as i16, cell.1 as i16);
+        let facing = ((cell.0 & 7) << 5) as u8;
+        sim.reveal_delivered_object_at_coord(
+            id,
+            DriveCoord { x, y, z },
+            facing,
+            on_bridge,
             rules,
             registry,
             effects,
         )
-    {
-        log::debug!("UnitDelivery {id} post-placement Scatter failed: {error}");
+        .is_some()
+    });
+    if !placed {
+        sim.discard_constructed_limbo(id, rules, effects);
+        return;
     }
-}
-
-/// Contributor-reported ResolveSupportSpawnRingOffset order, retained as
-/// VERA's deterministic placement policy; not an executed donor/Ares oracle.
-fn ring_offset(step: i32, radius: i32) -> (i32, i32) {
-    if radius == 0 {
-        return (0, 0);
+    if !building {
+        let mission =
+            if sim.houses[&request.owner].is_controlled_by_human(sim.session.game_mode_nonzero()) {
+                MissionType::AreaGuard
+            } else {
+                MissionType::Hunt
+            };
+        let _ = sim.mission_queue_exact(
+            id,
+            MissionId::from_known(mission),
+            1,
+            sim.session.binary_frame(),
+            &crate::sim::mission::authority::LiveReadyInputProvider { rules },
+        );
+        // Ares PlaceUnits explicitly scatters flying Foot types after Put. Their
+        // ground-idle locomotor does not start moving merely from AreaGuard/Hunt.
+        // Reuse the class Scatter owner, including its existing Scenario draws
+        // and Infantry's immediate Process; never set flight state directly.
+        if (ty.balloon_hover || ty.jumpjet)
+            && let Err(error) = sim.scatter(
+                id,
+                None,
+                crate::sim::movement::ScatterFlags::new(true, false),
+                rules,
+                registry,
+                effects,
+            )
+        {
+            log::debug!("UnitDelivery {id} post-placement Scatter failed: {error}");
+        }
     }
-    let side = radius * 2;
-    let step = step % (side * 4);
-    if step < side {
-        (-radius + step, -radius)
-    } else if step < side * 2 {
-        (radius, -radius + step - side)
-    } else if step < side * 3 {
-        (radius - (step - side * 2), radius)
-    } else {
-        (-radius, radius - (step - side * 3))
+    // 10075A60's tail: a payload that is not powered (TechnoExt IsPowered
+    // 100454F0) or needs an absent operator (IsOperated 10045440) is
+    // Deactivated, and a building's house rechecks its tech tree.
+    if !sim.ares_is_powered(id, rules) || !sim.ares_is_operated(id, rules) {
+        sim.techno_deactivate(id, rules, effects);
+        if building {
+            sim.houses.request_house_tech_tree_recheck(request.owner);
+        }
     }
 }

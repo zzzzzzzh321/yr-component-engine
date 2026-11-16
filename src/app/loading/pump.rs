@@ -12,14 +12,14 @@
 mod render;
 pub(crate) use render::transfer_progress_draws;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests;
 
-#[cfg(all(test, feature = "ares"))]
+#[cfg(all(test, tests_app))]
 #[path = "pump/country_loading_tests.rs"]
 mod country_loading_tests;
 
-#[cfg(all(test, feature = "ares"))]
+#[cfg(all(test, tests_app))]
 #[path = "pump/loading_theme_tests.rs"]
 mod loading_theme_tests;
 
@@ -38,6 +38,7 @@ use crate::app::loading::fresh_scenario::FreshScenarioLoadContextDescriptor;
 use crate::app::loading::init::{self, MapLoadInitial, MapLoadResult};
 use crate::app::loading::progress_row::LoadingProgressRowSnapshot;
 use crate::app::match_bootstrap::{LoadingStartup, PreparedMatchStartup};
+use crate::app::match_runtime::sim_host::SimWrite;
 use crate::assets::asset_manager::AssetManager;
 use crate::assets::pal_file::Color;
 use crate::assets::pcx_file::PcxFile;
@@ -439,6 +440,7 @@ impl LoadingRequest {
                 .map(|launch| launch.mode.override_file.as_str()),
             self.startup().session_mode(),
             self.the_team_enabled,
+            self.startup().match_seed(),
             progress,
         )?;
         if let LoadingStartup::Network(_) = self.startup() {
@@ -936,6 +938,8 @@ impl NativeLoadingScreenState {
         }
         // Ares1002F8F0 publishes this signed index once for the loading
         // attempt; negative resumes the stock side-color branch above.
+        // GetSideColor642B60's hook (0x642B91, 1002F870) follows its
+        // observer LightGrey test, and an observer publishes no Country here.
         if let Some(text_rgb) = self
             .early_country_loading
             .as_ref()
@@ -1317,10 +1321,12 @@ pub(crate) fn cancel_network_loading(state: &mut AppState, text: &str) -> bool {
     if !network_loading_active(state) {
         return false;
     }
-    fail_loading(
+    // No box: the lobby line below is this cancellation's message.
+    fail_loading_with(
         state,
         LoadingFailurePolicy::RetryNetworkShell,
         anyhow::anyhow!(text.to_owned()),
+        false,
     );
     // The failure has reopened the lobby. Native returns without a word;
     // VERA's lobbies say why the load stopped.
@@ -1422,6 +1428,33 @@ fn prepare_session_for_loading(
     }
 }
 
+/// VERA: a network match plays the rules its room took from its host
+/// (`HostRules`), which the room's agreement already compared, and so does
+/// a replay that recorded them; every other game, offline replays included,
+/// plays the player's own Options switches.
+fn play_startup_personal_rules(
+    process_assets: &mut crate::app::process_assets::ProcessAssets,
+    startup: &LoadingStartup,
+) {
+    let room = match startup {
+        LoadingStartup::Network(startup) => &startup.launch_session().options.host_rules,
+        // A network match recorded the room's, none included.
+        LoadingStartup::Replay {
+            session, game_mode, ..
+        } if game_mode.is_network() => &session.options.host_rules,
+        _ => return process_assets.use_own_personal_rules(),
+    };
+    match room.personal_rules() {
+        Ok(rules) => process_assets.use_personal_rules(rules),
+        // A network room refused these before its start; a replay plays on
+        // without them and its check reports the difference.
+        Err(error) => {
+            log::error!("The room's rules do not read: {error}");
+            process_assets.use_personal_rules(Default::default());
+        }
+    }
+}
+
 pub(crate) fn begin_loading(state: &mut AppState, request: LoadingRequest) {
     state
         .frontend
@@ -1430,6 +1463,7 @@ pub(crate) fn begin_loading(state: &mut AppState, request: LoadingRequest) {
     let wall_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
     crate::app::radar_movie::retire(state, wall_ms);
     crate::app::chrono_screen::retire(state, wall_ms);
+    play_startup_personal_rules(&mut state.process_assets, request.startup());
     // The shell writes GameMode before the loading screen (`0x0052E10F`
     // Skirmish, `0x0052E175` campaign); the session owner is live from here.
     prepare_session_for_loading(&mut state.match_state.session, request.startup());
@@ -1488,6 +1522,7 @@ pub(crate) fn begin_loading(state: &mut AppState, request: LoadingRequest) {
         session,
         now_ms,
     );
+    crate::app::App::close_shell_menu_at_launch(state);
     state.frontend.screen = GameScreen::Loading;
 }
 
@@ -1673,8 +1708,7 @@ pub(crate) fn clear_loading_state(state: &mut AppState) {
 }
 
 fn reset_loading_presentation(state: &mut AppState) {
-    state.match_state.match_presentation.interpolation.clear();
-    state.renderer.fps_overlay.set_simulation_readout(None);
+    state.renderer.performance_overlay.clear_simulation_rate();
     state.frontend.loading_screen_atlas = None;
     state.frontend.loading_progress = LoadingProgressState::standard_skirmish();
 }
@@ -1831,7 +1865,7 @@ fn pump_loading_after_present(
                 state
                     .match_state
                     .sim_runtime
-                    .as_mut()
+                    .write_sim(SimWrite::Lifecycle)
                     .map(|runtime| &mut runtime.simulation),
                 session,
                 false,
@@ -1907,7 +1941,7 @@ fn pump_loading_after_present(
                 &state.renderer.depth_view,
                 &state.renderer.batch_renderer,
                 &state.renderer.bit_font,
-                &state.renderer.fps_overlay,
+                &state.renderer.performance_overlay,
                 native,
                 8,
                 render_size,
@@ -1938,7 +1972,7 @@ fn pump_loading_after_present(
         let should_retire_outgoing = prepared_rules_prefix.is_none();
         if !initial.has_generated_rules()
             && should_retire_outgoing
-            && let Some(runtime) = state.match_state.sim_runtime.as_mut()
+            && let Some(runtime) = state.match_state.sim_runtime.write_sim(SimWrite::Lifecycle)
         {
             crate::app::process_assets::transfer_outgoing_simulation_rules(
                 native_rules_owner,
@@ -1969,7 +2003,7 @@ fn pump_loading_after_present(
                         &state.renderer.depth_view,
                         &state.renderer.batch_renderer,
                         &state.renderer.bit_font,
-                        &state.renderer.fps_overlay,
+                        &state.renderer.performance_overlay,
                         render_size,
                         scale,
                     )
@@ -2129,7 +2163,7 @@ fn pump_map_construction(
                     &state.renderer.depth_view,
                     &state.renderer.batch_renderer,
                     &state.renderer.bit_font,
-                    &state.renderer.fps_overlay,
+                    &state.renderer.performance_overlay,
                     render_size,
                     scale,
                 )
@@ -2228,7 +2262,7 @@ fn publish_load_complete(
             &state.renderer.depth_view,
             &state.renderer.batch_renderer,
             &state.renderer.bit_font,
-            &state.renderer.fps_overlay,
+            &state.renderer.performance_overlay,
             native,
             terminal_raw_percent,
             render_size,
@@ -2674,7 +2708,7 @@ fn prepare_scenario_initial_before_first_frame(state: &mut AppState) -> anyhow::
         state
             .match_state
             .sim_runtime
-            .as_mut()
+            .write_sim(SimWrite::Lifecycle)
             .map(|runtime| &mut runtime.simulation),
         session,
         true,
@@ -2983,6 +3017,26 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
             metadata.apply_ini(&selected.ini, scenario);
             names.apply_ini(&selected.ini, scenario, csf);
         }
+        // Ares ProgressScreenClass_GetLoadTextColor (1002F870, hook
+        // 0x642B36) colours the campaign title and briefing with the scheme
+        // CacheSP (1002F680, hook 0x686D7F) found, where Get_Side_ColorScheme
+        // 0x642B30 picks AlliedLoad/SovietLoad by Campaign.CD; no scheme of
+        // that name keeps the stock colour. Only when the Rules are read the
+        // Ares way.
+        let ares = state
+            .process_assets
+            .native_rules()
+            .is_some_and(|owner| owner.reads_ares_way());
+        let ares_text_rgb = if ares {
+            state.rules().and_then(|rules| {
+                let schemes = &rules.color_schemes;
+                scheme_entry_by_name(schemes, metadata.load_text_color())
+                    .and_then(|entry| scheme_hsv_by_entry(schemes, entry))
+                    .map(|hsv| normalize_rgb(hsv_to_rgb(hsv)))
+            })
+        } else {
+            None
+        };
         let presentation = super::campaign_presentation::CampaignLoadingPresentation::new(
             &metadata,
             csf,
@@ -3013,6 +3067,9 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
             .and_then(|session| session.native.as_mut())
             .expect("campaign native session");
         native.campaign_presentation = Some(presentation);
+        if let Some(text_rgb) = ares_text_rgb {
+            native.text_rgb = text_rgb;
+        }
         native.campaign_names = Some(names);
         native.atlas = atlas;
         log::info!("Native campaign loading atlas ready");
@@ -3392,7 +3449,35 @@ fn apply_network_loading_disconnects(
         .collect()
 }
 
+/// What the shell says after a failed load returned to it, for the policies
+/// that go back to the menu or lobby. Native retries the shell without a
+/// word (`0x0052E732`, `0x0052E75F`); VERA-only: the player is told why, as
+/// the skirmish result card already does.
+fn failed_load_notice(policy: LoadingFailurePolicy, err: &anyhow::Error) -> Option<String> {
+    matches!(
+        policy,
+        LoadingFailurePolicy::RetryCampaignShell | LoadingFailurePolicy::RetryNetworkShell
+    )
+    .then(|| {
+        let mut detail = format!("{err:#}");
+        if let Some((end, _)) = detail.char_indices().nth(400) {
+            detail.truncate(end);
+            detail.push('…');
+        }
+        format!("{}\n\n{detail}", crate::i18n::tr("VERA:LoadingFailed"))
+    })
+}
+
 fn fail_loading(state: &mut AppState, policy: LoadingFailurePolicy, err: anyhow::Error) {
+    fail_loading_with(state, policy, err, true);
+}
+
+fn fail_loading_with(
+    state: &mut AppState,
+    policy: LoadingFailurePolicy,
+    err: anyhow::Error,
+    notify: bool,
+) {
     log::warn!("Could not load map: {err:#}");
     let policy = retire_failed_loading_attempt(
         &mut state.frontend.loading_session,
@@ -3415,9 +3500,12 @@ fn fail_loading(state: &mut AppState, policy: LoadingFailurePolicy, err: anyhow:
         // network StartScenario call52E745 follows the same retry at52E75F;
         // GameMode3 re-enters LAN at52DAEF/52E356, so retain its lobby context.
         crate::app::App::return_to_main_menu(state);
+        if notify && let Some(text) = failed_load_notice(policy, &err) {
+            crate::app::App::open_shell_notice(state, text);
+        }
     } else if policy == LoadingFailurePolicy::ReportNativeFailure {
         state.frontend.screen = GameScreen::MissionResult {
-            title: "Loading Failed".to_string(),
+            title: crate::i18n::tr("VERA:LoadingFailed"),
             detail: format!("{err:#}"),
         };
     } else {
@@ -3471,17 +3559,24 @@ pub(crate) fn present_saved_game_loading(state: &mut AppState) -> anyhow::Result
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Saved Game Loading"),
             });
+    state.renderer.window_ui.begin_frame();
     crate::app::frontend::skirmish_shell_render::render_saved_game_loading(
         state,
         &mut encoder,
         &output.texture,
     )?;
-    state.renderer.fps_overlay.encode(
+    state.renderer.performance_overlay.encode(
         &state.renderer.gpu,
         &state.renderer.batch_renderer,
         &mut encoder,
         &output.texture,
+        &state.renderer.bit_font,
+        None,
     );
+    state
+        .renderer
+        .gpu
+        .encode_color_vision(&mut encoder, &output.texture);
     state
         .renderer
         .gpu
@@ -3499,7 +3594,8 @@ pub(crate) fn present_game_mode_blank(state: &AppState) {
         &state.renderer.gpu,
         &state.renderer.shell_surface_presenter,
         &state.renderer.batch_renderer,
-        &state.renderer.fps_overlay,
+        &state.renderer.performance_overlay,
+        &state.renderer.bit_font,
     ) {
         log::warn!("Game-mode blank frame failed: {err:#}");
     }
@@ -3602,7 +3698,7 @@ fn advance_and_present_native_progress<'a>(
     depth_view: &'a wgpu::TextureView,
     batch: &'a BatchRenderer,
     font: &'a BitFont,
-    fps_overlay: &'a crate::app::diagnostics::fps_overlay::FpsOverlay,
+    performance_overlay: &'a crate::app::diagnostics::performance_overlay::PerformanceOverlay,
     native: &'a mut NativeLoadingScreenState,
     raw_percent: u32,
     render_size: [u32; 2],
@@ -3619,7 +3715,7 @@ fn advance_and_present_native_progress<'a>(
                 depth_view,
                 batch,
                 font,
-                fps_overlay,
+                performance_overlay,
                 render_size,
                 scale,
             )
@@ -3637,7 +3733,7 @@ struct RenderingProgressSink<'a> {
     depth_view: &'a wgpu::TextureView,
     batch: &'a BatchRenderer,
     font: &'a BitFont,
-    fps_overlay: &'a crate::app::diagnostics::fps_overlay::FpsOverlay,
+    performance_overlay: &'a crate::app::diagnostics::performance_overlay::PerformanceOverlay,
     gate: GatedProgressSink<'a>,
     atlas: &'a LoadingScreenAtlas,
     composition: Option<&'a LoadingCompositionSnapshot>,
@@ -3657,7 +3753,7 @@ impl<'a> RenderingProgressSink<'a> {
         depth_view: &'a wgpu::TextureView,
         batch: &'a BatchRenderer,
         font: &'a BitFont,
-        fps_overlay: &'a crate::app::diagnostics::fps_overlay::FpsOverlay,
+        performance_overlay: &'a crate::app::diagnostics::performance_overlay::PerformanceOverlay,
         render_size: [u32; 2],
         scale: ShellScale,
     ) -> Self {
@@ -3667,7 +3763,7 @@ impl<'a> RenderingProgressSink<'a> {
             depth_view,
             batch,
             font,
-            fps_overlay,
+            performance_overlay,
             gate: GatedProgressSink {
                 progress: &mut native.progress,
                 progress_row: &mut native.progress_row,
@@ -3699,7 +3795,7 @@ impl LoadingProgressSink for RenderingProgressSink<'_> {
                 self.depth_view,
                 self.batch,
                 self.font,
-                self.fps_overlay,
+                self.performance_overlay,
                 self.atlas,
                 self.composition,
                 self.campaign_presentation,

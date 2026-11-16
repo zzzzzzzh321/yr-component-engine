@@ -18,15 +18,37 @@ pub(crate) struct SuperWeaponInfluence {
 /// TechnoTypeExt's nullable ranges are retained across reached INI passes:
 /// an invalid later value must not erase an earlier explicit range.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[cfg(feature = "ares")]
 pub(crate) struct TechnoSuperWeaponRules {
     /// TechnoTypeExt constructor: EAX=0 at1003CB80, byte store1003CC79.
     pub(crate) hunter_seeker_ignore: bool,
     pub(crate) designator_range: Option<i32>,
     pub(crate) inhibitor_range: Option<i32>,
+    #[serde(default)]
+    pub(crate) chronoshift: ChronoshiftRules,
 }
 
-#[cfg(feature = "ares")]
+/// TechnoTypeExt `Chronoshift.Allow`, `.IsVehicle` and `.Crushable`
+/// (+0x160..+0x162): constructor 1003C710 stores the dword 0x10001 at +0x160
+/// (Allow and Crushable true, IsVehicle false); LoadFromINI 1003DFB0 reads
+/// each with Valueable<bool>. SW_ChronoWarp's lambda (1006F4D0) reads Allow
+/// and IsVehicle, the Teleport make-room hook (718275, 1004B980) Crushable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ChronoshiftRules {
+    pub(crate) allow: bool,
+    pub(crate) is_vehicle: bool,
+    pub(crate) crushable: bool,
+}
+
+impl Default for ChronoshiftRules {
+    fn default() -> Self {
+        Self {
+            allow: true,
+            is_vehicle: false,
+            crushable: true,
+        }
+    }
+}
+
 impl TechnoSuperWeaponRules {
     pub(crate) fn read_pass(&mut self, section: &crate::rules::ini_parser::IniSection) {
         // Ares TechnoTypeExt::LoadFromINI1003DEC0: Ignore1003ED8F,
@@ -38,5 +60,11 @@ impl TechnoSuperWeaponRules {
             section.read_ares_nullable_int("DesignatorRange", self.designator_range);
         self.inhibitor_range =
             section.read_ares_nullable_int("InhibitorRange", self.inhibitor_range);
+        let chronoshift = &mut self.chronoshift;
+        chronoshift.allow = section.read_ares_bool("Chronoshift.Allow", chronoshift.allow);
+        chronoshift.is_vehicle =
+            section.read_ares_bool("Chronoshift.IsVehicle", chronoshift.is_vehicle);
+        chronoshift.crushable =
+            section.read_ares_bool("Chronoshift.Crushable", chronoshift.crushable);
     }
 }

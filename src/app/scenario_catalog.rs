@@ -228,7 +228,9 @@ impl ScenarioCatalog {
                 return None;
             }
             let length = u64::try_from(metadata.byte_length).ok()?;
-            std::iter::once(root)
+            crate::map::source::mod_dir()
+                .into_iter()
+                .chain(std::iter::once(root))
                 .chain(crate::map::source::downloaded_maps_dir())
                 .filter_map(|dir| crate::util::file_system::read_dir(dir).ok())
                 .flatten()
@@ -281,7 +283,7 @@ impl Drop for RecordsMut<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
     use crate::map::skirmish_scenarios::SkirmishScenarioSource;

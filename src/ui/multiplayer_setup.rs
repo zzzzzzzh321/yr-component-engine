@@ -29,9 +29,49 @@ pub(crate) const GAME_OPTIONS_OK: u16 = 0x7F03;
 /// VERA-only: the missing-map offer's Download and Leave.
 pub(crate) const MAP_OFFER_DOWNLOAD: u16 = 0x7F04;
 pub(crate) const MAP_OFFER_LEAVE: u16 = 0x7F05;
+/// VERA-only: the host's Teams button under Game Options, and in its box
+/// the Teams count, Team Starts and Team Colors. The box closes with Game
+/// Options' OK.
+pub(crate) const TEAMS: u16 = 0x7F0C;
+pub(crate) const TEAM_COUNT: u16 = 0x7F0D;
+pub(crate) const TEAM_STARTS: u16 = 0x7F0E;
+pub(crate) const TEAM_COLORS: u16 = 0x7F11;
+/// VERA-only, online: the Teams box's Balance and Balance automatically.
+pub(crate) const BALANCE: u16 = 0x7F0F;
+pub(crate) const AUTO_BALANCE: u16 = 0x7F10;
 /// VERA-only combos of the rows past the resource's eight, one block of
 /// 0x20 ids per column.
 const ROOM_ROW_COMBOS: u16 = 0x7F20;
+/// VERA's Player list items past gamemd's 0..7: the host moves a seated
+/// guest to the spectators, or a spectator into a free seat.
+pub(crate) const MOVE_TO_SPECTATORS: i32 = 8;
+pub(crate) const GIVE_SEAT: i32 = 9;
+/// VERA-only header rows ([`SetupHeader`]): each one's Join (or Watch)
+/// button and the host's Add AI list, by the row on the page.
+const TEAM_JOIN: u16 = 0x7FC0;
+const TEAM_ADD_AI: u16 = 0x7FD0;
+
+/// The Join button of the header on page row `row`.
+pub(crate) fn team_join(row: usize) -> u16 {
+    TEAM_JOIN + row as u16
+}
+/// The host's Add AI list on the header on page row `row`.
+pub(crate) fn team_add_ai(row: usize) -> u16 {
+    TEAM_ADD_AI + row as u16
+}
+fn page_row(id: u16, first: u16) -> Option<usize> {
+    id.checked_sub(first)
+        .map(usize::from)
+        .filter(|row| *row < MODERN_SETUP_ROWS)
+}
+/// The page row of a header's Join button.
+pub(crate) fn team_join_row(id: u16) -> Option<usize> {
+    page_row(id, TEAM_JOIN)
+}
+/// The page row of a header's Add AI list.
+pub(crate) fn team_add_ai_row(id: u16) -> Option<usize> {
+    page_row(id, TEAM_ADD_AI)
+}
 pub(crate) const START: u16 = 0x588;
 pub(crate) const ACCEPT: u16 = 0x59F;
 pub(crate) const BACK: u16 = 2;
@@ -50,16 +90,30 @@ pub(crate) const NO_YURI: u16 = 0x7F08;
 pub(crate) const NO_FRANCE: u16 = 0x7F09;
 pub(crate) const NO_SPY: u16 = 0x7F0A;
 pub(crate) const NO_STOLEN_TECH: u16 = 0x7F0B;
-pub(crate) const ROOM_CHECKBOXES: [u16; 6] =
-    [BRIDGES, ALLYING, NO_YURI, NO_FRANCE, NO_SPY, NO_STOLEN_TECH];
-/// Their labels; the retail string table has none for them.
-pub(crate) const ROOM_CHECKBOX_LABELS: [&str; 6] = [
-    "Destroyable Bridges",
-    "In-game Allying",
-    "No Yuri",
-    "No France",
-    "No Spy",
-    "No Stolen Tech",
+/// The room's Terrain Deformation ([`HostRules`](crate::skirmish_launch::HostRules)).
+pub(crate) const TERRAIN_DEFORMATION: u16 = 0x7F12;
+/// The room's Superweapon Limit, a trackbar in VERA's Game Options only
+/// ([`HostRules`](crate::skirmish_launch::HostRules)).
+pub(crate) const SUPERWEAPON_LIMIT: u16 = 0x7F14;
+pub(crate) const ROOM_CHECKBOXES: [u16; 7] = [
+    BRIDGES,
+    ALLYING,
+    NO_YURI,
+    NO_FRANCE,
+    NO_SPY,
+    NO_STOLEN_TECH,
+    TERRAIN_DEFORMATION,
+];
+/// Their labels in VERA's language files; the retail string table has none
+/// for them.
+pub(crate) const ROOM_CHECKBOX_LABELS: [&str; 7] = [
+    "VERA:DestroyableBridges",
+    "VERA:InGameAllying",
+    "VERA:NoYuri",
+    "VERA:NoFrance",
+    "VERA:NoSpy",
+    "VERA:NoStolenTech",
+    "VERA:TerrainDeformation",
 ];
 /// The trackbars VERA's room moves into Game Options; Difficulty stays.
 pub(crate) const OPTION_TRACKBARS: [u16; 3] = [SPEED, CREDITS, UNITS];
@@ -115,9 +169,14 @@ impl SetupDialog {
     }
     /// VERA's room captions BC's map button "Choose Map": retail's
     /// `GUI:ChooseMap` text, "Customize Battle", reads as the game settings
-    /// the room keeps under Game Options. `None` keeps the CSF caption.
+    /// the room keeps under Game Options. The caption's label in VERA's
+    /// language files; `None` keeps the CSF caption.
     pub(crate) fn button_label(self, id: u16) -> Option<&'static str> {
-        (self.modern && id == CHOOSE_MAP).then_some("Choose Map")
+        match id {
+            CHOOSE_MAP if self.modern => Some("VERA:ChooseMap"),
+            TEAMS => Some("VERA:Teams"),
+            _ => None,
+        }
     }
     /// Rows one roster page shows.
     pub(crate) const fn rows_per_page(self) -> usize {
@@ -254,6 +313,14 @@ const GAME_OPTIONS_BUTTON: MenuPageButtonSpec = MenuPageButtonSpec {
     tooltip_key: "",
     result: None,
 };
+/// The host's Teams, the place under Game Options.
+const TEAMS_BUTTON: MenuPageButtonSpec = MenuPageButtonSpec {
+    id: TEAMS,
+    dlu_top: 0,
+    csf_key: "",
+    tooltip_key: "",
+    result: None,
+};
 const MODERN_HOST_PAGE: MenuPageSpec = MenuPageSpec {
     stacked: &[
         HOST_PAGE.stacked[0],
@@ -261,6 +328,10 @@ const MODERN_HOST_PAGE: MenuPageSpec = MenuPageSpec {
         MenuPageButtonSpec {
             dlu_top: 2 * HOST_PAGE.stacked[1].dlu_top - HOST_PAGE.stacked[0].dlu_top,
             ..GAME_OPTIONS_BUTTON
+        },
+        MenuPageButtonSpec {
+            dlu_top: 3 * HOST_PAGE.stacked[1].dlu_top - 2 * HOST_PAGE.stacked[0].dlu_top,
+            ..TEAMS_BUTTON
         },
     ],
     ..HOST_PAGE
@@ -286,6 +357,10 @@ const MODERN_WOL_HOST_PAGE: MenuPageSpec = MenuPageSpec {
         MenuPageButtonSpec {
             dlu_top: WOL_HOST_PAGE.stacked[2].dlu_top,
             ..GAME_OPTIONS_BUTTON
+        },
+        MenuPageButtonSpec {
+            dlu_top: 2 * WOL_HOST_PAGE.stacked[2].dlu_top - WOL_HOST_PAGE.stacked[1].dlu_top,
+            ..TEAMS_BUTTON
         },
     ],
     ..WOL_HOST_PAGE
@@ -424,7 +499,43 @@ pub(crate) struct SetupRowIcon {
     pub(crate) country: Option<String>,
     pub(crate) host: bool,
     pub(crate) accepted: bool,
+    /// VERA's online room: the player's badge
+    /// ([`crate::ui::wol_lobby::badge`]), drawn at the right of their name.
+    pub(crate) badge: Option<&'static str>,
 }
+
+/// The rows a header row of VERA's room starts, in a mode with teams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupGroup {
+    /// The players on one team, by its number (0 is Team A).
+    Team(u8),
+    /// The players on no team.
+    NoTeam,
+    /// The seats no one holds, then the host's Add slot row.
+    OpenSeats,
+    Spectators,
+}
+
+/// A header row of VERA's room: its caption in the Player column, then a
+/// Join button (Watch on the spectators' header) and, for the host, an Add
+/// AI list among the combos.
+#[derive(Debug, Clone)]
+pub(crate) struct SetupHeader {
+    pub(crate) group: SetupGroup,
+    pub(crate) caption: String,
+    /// The button's caption; `None` shows no button.
+    pub(crate) join: Option<String>,
+    pub(crate) join_enabled: bool,
+}
+
+/// A box VERA's room opens over itself; it takes the room's input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomBox {
+    GameOptions,
+    /// The host's Teams: the Teams count and Team Starts.
+    Teams,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SetupView {
     pub(crate) first_row: usize,
@@ -442,13 +553,30 @@ pub(crate) struct SetupView {
     pub(crate) trackbars: Vec<SetupTrackbar>,
     pub(crate) checks: [bool; 5],
     /// [`ROOM_CHECKBOXES`]' states.
-    pub(crate) room_checks: [bool; 6],
+    pub(crate) room_checks: [bool; 7],
     /// Indexed by the row on the page, up to [`SetupDialog::rows_per_page`].
     pub(crate) row_icons: [Option<SetupRowIcon>; MODERN_SETUP_ROWS],
+    /// VERA's header rows, by the row on the page.
+    pub(crate) headers: [Option<SetupHeader>; MODERN_SETUP_ROWS],
+    /// The rows are grouped under headers, which [`Self::row_count`]
+    /// counts too.
+    pub(crate) grouped: bool,
     /// C2/C9 ping statics; always empty on BC/BD.
     pub(crate) ping_icons: [Option<u8>; MODERN_SETUP_ROWS],
-    /// VERA's Game Options popup is open over the room.
-    pub(crate) options_open: bool,
+    /// The box open over VERA's room.
+    pub(crate) open_box: Option<RoomBox>,
+    /// The host's Teams button: the room's mode seats players on teams.
+    pub(crate) teams_enabled: bool,
+    /// Team Starts: Teams is set and the map has starts to give.
+    pub(crate) team_starts_enabled: bool,
+    /// Team Colors: Teams is set.
+    pub(crate) team_colors_enabled: bool,
+    /// Online, the host's Balance: the room's mode seats players on teams.
+    pub(crate) balance_enabled: bool,
+    /// Online, Balance automatically's tick, and whether the host can
+    /// change it: Teams is set.
+    pub(crate) auto_balance: bool,
+    pub(crate) auto_balance_enabled: bool,
     /// VERA's missing-map offer is open over the room.
     pub(crate) map_offer_open: bool,
     pub(crate) mode_label: String,
@@ -467,6 +595,13 @@ impl SetupView {
     pub(crate) fn combo(&self, id: u16) -> Option<&SetupCombo> {
         self.combos.iter().find(|combo| combo.id == id)
     }
+    /// The header whose Join button is `id`, while it shows one.
+    pub(crate) fn header_button(&self, id: u16) -> Option<&SetupHeader> {
+        self.headers
+            .get(team_join_row(id)?)?
+            .as_ref()
+            .filter(|header| header.join.is_some())
+    }
     pub(crate) fn enabled(&self, id: u16) -> bool {
         if matches!(
             id,
@@ -481,12 +616,20 @@ impl SetupView {
         match id {
             BACK | CHAT | CHAT_LOG | GAME_OPTIONS => true,
             START | CHOOSE_MAP => self.host,
+            TEAMS => self.teams_enabled,
+            TEAM_STARTS => self.team_starts_enabled,
+            TEAM_COLORS => self.team_colors_enabled,
+            BALANCE => self.balance_enabled,
+            AUTO_BALANCE => self.auto_balance_enabled,
             PAGE => self.dialog.wol(),
             PREVIOUS_ROWS => self.first_row > 0,
             NEXT_ROWS => self.first_row + self.dialog.rows_per_page() < self.row_count,
             ACCEPT => !self.host && self.accept_enabled,
             0x54E if self.short_game_locked => false,
             id if CHECKBOXES.contains(&id) || ROOM_CHECKBOXES.contains(&id) => self.host,
+            id if team_join_row(id).is_some() => self
+                .header_button(id)
+                .is_some_and(|header| header.join_enabled),
             id => {
                 self.combo(id)
                     .is_some_and(|combo| combo.visible && combo.enabled)
@@ -516,6 +659,10 @@ pub(crate) enum SetupAction {
         control: u16,
         value: i32,
     },
+    /// A header's Join, or the spectators' Watch, in VERA's room.
+    Join {
+        control: u16,
+    },
     Chat(Vec<u16>),
     /// C2/C9 0x3ED sends the chat edit's text as an action message.
     Emote,
@@ -523,10 +670,14 @@ pub(crate) enum SetupAction {
     RosterPage {
         forward: bool,
     },
-    /// VERA's Game Options popup opens or closes.
-    GameOptions {
-        open: bool,
-    },
+    /// A box over VERA's room opens, or the open one closes.
+    OpenBox(Option<RoomBox>),
+    /// The host's Team Starts in the Teams box.
+    TeamStarts,
+    /// The host's Team Colors in the Teams box.
+    TeamColors,
+    /// The host's Balance in the Teams box, online.
+    Balance,
     /// The missing-map offer's answer: download the room's map, or leave.
     MapOffer {
         download: bool,
@@ -569,8 +720,8 @@ pub(crate) struct MultiplayerSetupState {
     pub(crate) focused_control: u16,
     focus_started: Instant,
     accept_flash_started: Option<Instant>,
-    /// VERA's Game Options popup is open; it takes the room's input.
-    pub(crate) options_open: bool,
+    /// The box open over VERA's room; it takes the room's input.
+    pub(crate) open_box: Option<RoomBox>,
     /// VERA's missing-map offer; open until its map arrives, it takes the
     /// room's input.
     pub(crate) map_offer: Option<MapOffer>,
@@ -596,7 +747,7 @@ impl Default for MultiplayerSetupState {
             focused_control: CHAT,
             focus_started: Instant::now(),
             accept_flash_started: None,
-            options_open: false,
+            open_box: None,
             map_offer: None,
             briefings_checked: Vec::new(),
         }
@@ -635,8 +786,8 @@ impl MultiplayerSetupState {
         self.briefings_checked.push(file.to_owned());
         true
     }
-    pub(crate) fn show_options(&mut self, open: bool) {
-        self.options_open = open;
+    pub(crate) fn show_box(&mut self, open: Option<RoomBox>) {
+        self.open_box = open;
         self.popup.close();
         self.cancel_pointer();
     }
@@ -659,12 +810,15 @@ impl MultiplayerSetupState {
         let combo = view
             .combo(id)
             .filter(|combo| combo.visible && combo.enabled)?;
-        let (column, _) = SetupColumn::decode(id)?;
-        // VERA's room shows its Player menu whole, with no scrollbar.
-        let cap = if view.dialog.modern && column == SetupColumn::Player {
-            0
-        } else {
-            column.visible_rows()
+        // VERA's room shows its Player and Add AI menus whole, with no
+        // scrollbar.
+        let cap = match SetupColumn::decode(id) {
+            Some((SetupColumn::Player, _)) if view.dialog.modern => 0,
+            Some((column, _)) => column.visible_rows(),
+            None => {
+                team_add_ai_row(id)?;
+                0
+            }
         };
         Some(ComboPopup::new(
             layout.control_rect(id)?,
@@ -724,8 +878,18 @@ pub(crate) struct MultiplayerSetupLayout {
     /// the trackbars of [`OPTION_TRACKBARS`] and [`Self::option_labels`].
     pub(crate) checkboxes: [RectPx; 5],
     /// [`ROOM_CHECKBOXES`], placed only in [`Self::game_options`].
-    pub(crate) room_checkboxes: [RectPx; 6],
-    pub(crate) trackbars: [(u16, RectPx); 4],
+    pub(crate) room_checkboxes: [RectPx; 7],
+    /// [`SUPERWEAPON_LIMIT`]'s label, placed only in [`Self::game_options`].
+    pub(crate) superweapon_limit_label: RectPx,
+    /// The Teams box shares [`Self::game_options`]' box and OK: the Teams
+    /// count's label, Team Starts and Team Colors, placed only with it, and
+    /// online Balance and Balance automatically.
+    pub(crate) teams_label: RectPx,
+    pub(crate) team_starts: RectPx,
+    pub(crate) team_colors: RectPx,
+    pub(crate) balance: Option<RectPx>,
+    pub(crate) auto_balance: Option<RectPx>,
+    pub(crate) trackbars: [(u16, RectPx); 6],
     pub(crate) labels: Vec<(&'static str, RectPx)>,
     pub(crate) option_labels: [(&'static str, RectPx); 3],
     pub(crate) game_options: Option<GameOptionsLayout>,
@@ -860,7 +1024,13 @@ impl MultiplayerSetupLayout {
                 rect(checkbox_x, option_y[3], 151, 17),
                 rect(302, option_y[3], build_off_ally_width, 17),
             ],
-            room_checkboxes: [RectPx::new(0, 0, 0, 0); 6],
+            room_checkboxes: [RectPx::new(0, 0, 0, 0); 7],
+            superweapon_limit_label: RectPx::new(0, 0, 0, 0),
+            teams_label: RectPx::new(0, 0, 0, 0),
+            team_starts: RectPx::new(0, 0, 0, 0),
+            team_colors: RectPx::new(0, 0, 0, 0),
+            balance: None,
+            auto_balance: None,
             trackbars: [
                 (SPEED, rect(404, option_y[0], 129, 21)),
                 (CREDITS, rect(404, credit_y, 129, 21)),
@@ -869,6 +1039,8 @@ impl MultiplayerSetupLayout {
                     DIFFICULTY,
                     rect(180, 215, 266, if dialog.wol() && host { 21 } else { 22 }),
                 ),
+                (TEAM_COUNT, RectPx::new(0, 0, 0, 0)),
+                (SUPERWEAPON_LIMIT, RectPx::new(0, 0, 0, 0)),
             ],
             labels,
             option_labels,
@@ -896,13 +1068,13 @@ impl MultiplayerSetupLayout {
             )),
         };
         if dialog.modern {
-            layout.move_options_into_popup();
+            layout.move_options_into_popup(dialog.wol());
         }
         layout
     }
     /// VERA's room: the options go into Game Options, and the roster's
     /// navigation moves under its [`MODERN_SETUP_ROWS`] rows.
-    fn move_options_into_popup(&mut self) {
+    fn move_options_into_popup(&mut self, online: bool) {
         let scale = self.page.scale;
         let base = |x, y, w, h| scale.scale_rect(RectPx::new(x, y, w, h));
         // Where the shell's menu boxes sit on the 800x600 page, at resource
@@ -919,17 +1091,43 @@ impl MultiplayerSetupLayout {
             if let Some(index) = OPTION_TRACKBARS.iter().position(|option| option == id) {
                 *bar = popup(215, 30 + 30 * index as i32, 129, 21);
             }
+            // The Teams box's count, in Game Speed's place.
+            if *id == TEAM_COUNT {
+                *bar = popup(215, 30, 129, 21);
+            }
+            // Superweapon Limit under Unit Count.
+            if *id == SUPERWEAPON_LIMIT {
+                *bar = popup(215, 30 + 30 * OPTION_TRACKBARS.len() as i32, 129, 21);
+            }
         }
-        // Two columns of six under the trackbars, the left one over the art:
-        // the native five and Destroyable Bridges, then In-game Allying and
-        // the four bans.
-        let row = |index: i32| 124 + 22 * index;
+        self.superweapon_limit_label = popup(24, 32 + 30 * OPTION_TRACKBARS.len() as i32, 185, 17);
+        self.teams_label = popup(24, 32, 185, 17);
+        self.team_starts = popup(215, 62, 124, 24);
+        self.team_colors = popup(215, 92, 124, 24);
+        // Online, Balance under Team Colors and Balance automatically under
+        // it, as the right column's checkboxes in Game Options.
+        if online {
+            self.balance = Some(popup(215, 122, 124, 24));
+            self.auto_balance = Some(popup(215, 154, 226, 17));
+        }
+        // Two columns of six under the trackbars and Superweapon Limit, the
+        // left one over the art: the native five and Destroyable Bridges,
+        // then In-game Allying, the four bans and Terrain Deformation.
+        let row = |index: i32| 154 + 22 * index;
         let left = |index| popup(24, row(index), 185, 17);
         let right = |index| popup(215, row(index), 226, 17);
         for (index, checkbox) in self.checkboxes.iter_mut().enumerate() {
             *checkbox = left(index as i32);
         }
-        self.room_checkboxes = [left(5), right(0), right(1), right(2), right(3), right(4)];
+        self.room_checkboxes = [
+            left(5),
+            right(0),
+            right(1),
+            right(2),
+            right(3),
+            right(4),
+            right(5),
+        ];
         self.game_options = Some(GameOptionsLayout {
             dialog: popup(0, 0, options.w, options.h),
             ok: popup(276, 292, 124, 24),
@@ -968,6 +1166,26 @@ impl MultiplayerSetupLayout {
         if let Some((column, row)) = SetupColumn::decode(id) {
             return Some(self.combos[row][column as usize]);
         }
+        if let Some(row) = team_join_row(id) {
+            // Over the Side column, the size of the MNBTTN art as Previous
+            // and Next under the roster.
+            let side = self.combos[row][SetupColumn::Country as usize];
+            return Some(self.page.scale.derive_rect(side, |mut rect| {
+                rect.w = ROSTER_BUTTON_W;
+                rect.h = ROSTER_BUTTON_H;
+                rect
+            }));
+        }
+        if let Some(row) = team_add_ai_row(id) {
+            // Over the Colour, Start and Team columns.
+            let [_, _, color, _, team] = self.combos[row];
+            return Some(RectPx::new(
+                color.x,
+                color.y,
+                team.x + team.w - color.x,
+                color.h,
+            ));
+        }
         if let Some(index) = CHECKBOXES.iter().position(|candidate| *candidate == id) {
             return Some(self.checkboxes[index]);
         }
@@ -997,6 +1215,10 @@ impl MultiplayerSetupLayout {
             EMOTE => self.emote,
             NO_PREVIEW => self.no_preview,
             GAME_OPTIONS_OK => self.game_options.map(|popup| popup.ok),
+            TEAM_STARTS => self.game_options.map(|_| self.team_starts),
+            TEAM_COLORS => self.game_options.map(|_| self.team_colors),
+            BALANCE => self.game_options.and(self.balance),
+            AUTO_BALANCE => self.game_options.and(self.auto_balance),
             MAP_OFFER_DOWNLOAD => Some(self.map_offer.ok),
             MAP_OFFER_LEAVE => Some(self.map_offer.cancel),
             _ => self.page.button_rect(id),
@@ -1012,15 +1234,34 @@ impl MultiplayerSetupLayout {
         if view.map_offer_open {
             return [MAP_OFFER_DOWNLOAD, MAP_OFFER_LEAVE].into_iter().find(hit);
         }
-        if view.options_open {
-            return CHECKBOXES
+        match view.open_box {
+            Some(RoomBox::GameOptions) => {
+                return CHECKBOXES
+                    .into_iter()
+                    .chain(ROOM_CHECKBOXES)
+                    .chain(OPTION_TRACKBARS)
+                    .chain([SUPERWEAPON_LIMIT, GAME_OPTIONS_OK])
+                    .find(hit);
+            }
+            Some(RoomBox::Teams) => {
+                return [
+                    TEAM_COUNT,
+                    TEAM_STARTS,
+                    TEAM_COLORS,
+                    BALANCE,
+                    AUTO_BALANCE,
+                    GAME_OPTIONS_OK,
+                ]
                 .into_iter()
-                .chain(ROOM_CHECKBOXES)
-                .chain(OPTION_TRACKBARS)
-                .chain([GAME_OPTIONS_OK])
                 .find(hit);
+            }
+            None => {}
         }
-        let in_room = |id: &u16| self.game_options.is_none() || !OPTION_TRACKBARS.contains(id);
+        let in_room = |id: &u16| {
+            *id != TEAM_COUNT
+                && *id != SUPERWEAPON_LIMIT
+                && (self.game_options.is_none() || !OPTION_TRACKBARS.contains(id))
+        };
         let paged = view.row_count > view.dialog.rows_per_page();
         view.combos
             .iter()
@@ -1037,6 +1278,11 @@ impl MultiplayerSetupLayout {
                 CHECKBOXES
                     .into_iter()
                     .filter(|_| self.game_options.is_none()),
+            )
+            .chain(
+                (0..MODERN_SETUP_ROWS)
+                    .map(team_join)
+                    .filter(|id| view.header_button(*id).is_some()),
             )
             .chain([CHAT, CHAT_LOG])
             .chain(
@@ -1100,7 +1346,7 @@ pub(crate) fn tooltip_key(dialog: SetupDialog, control: u16) -> Option<String> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_ui))]
 mod tests {
     use super::*;
 
@@ -1200,17 +1446,20 @@ mod tests {
             let place = native.remove(&replaced).unwrap();
             native.remove(&PAGE);
             native.insert(GAME_OPTIONS, place);
-            assert_eq!(
-                buttons(host, flavor, true),
-                native,
-                "{flavor:?} host {host}"
-            );
+            let mut modern = buttons(host, flavor, true);
+            // The host's Teams goes under Game Options, above Back.
+            if let Some(teams) = modern.remove(&TEAMS) {
+                assert!(host && teams.y > place.y && teams.y + teams.h <= modern[&BACK].y);
+            }
+            assert_eq!(modern, native, "{flavor:?} host {host}");
         }
         let mut lan_host = buttons(true, SetupFlavor::Lan, true);
         let options = lan_host.remove(&GAME_OPTIONS).unwrap();
+        let teams = lan_host.remove(&TEAMS).unwrap();
         assert_eq!(lan_host, buttons(true, SetupFlavor::Lan, false));
         let choose_map = lan_host[&CHOOSE_MAP];
         assert_eq!(options.y - choose_map.y, choose_map.y - lan_host[&START].y);
+        assert_eq!(teams.y - options.y, options.y - choose_map.y);
     }
 
     #[test]
@@ -1218,7 +1467,7 @@ mod tests {
         for flavor in [SetupFlavor::Lan, SetupFlavor::Wol] {
             assert_eq!(
                 dialog(true, flavor, true).button_label(CHOOSE_MAP),
-                Some("Choose Map")
+                Some("VERA:ChooseMap")
             );
             assert_eq!(dialog(true, flavor, false).button_label(CHOOSE_MAP), None);
         }
@@ -1269,10 +1518,18 @@ mod tests {
             combos: Vec::new(),
             trackbars: Vec::new(),
             checks: [false; 5],
-            room_checks: [false; 6],
+            room_checks: [false; 7],
             row_icons: std::array::from_fn(|_| None),
+            headers: std::array::from_fn(|_| None),
+            grouped: false,
             ping_icons: [None; MODERN_SETUP_ROWS],
-            options_open: true,
+            open_box: Some(RoomBox::GameOptions),
+            teams_enabled: true,
+            team_starts_enabled: true,
+            team_colors_enabled: true,
+            balance_enabled: true,
+            auto_balance: true,
+            auto_balance_enabled: true,
             map_offer_open: false,
             mode_label: String::new(),
             map_label: String::new(),
@@ -1287,7 +1544,29 @@ mod tests {
         assert_eq!(popup_layout.control_at(&view, x, y), Some(CHECKBOXES[0]));
         let (x, y) = center(popup_layout.chat);
         assert_eq!(popup_layout.control_at(&view, x, y), None);
-        view.options_open = false;
+        // The Teams box shares the box: its count sits where Game Speed does.
+        view.open_box = Some(RoomBox::Teams);
+        let (x, y) = center(popup_layout.control_rect(SPEED).unwrap());
+        assert_eq!(popup_layout.control_at(&view, x, y), Some(TEAM_COUNT));
+        for id in [TEAM_STARTS, TEAM_COLORS] {
+            let (x, y) = center(popup_layout.control_rect(id).unwrap());
+            assert_eq!(popup_layout.control_at(&view, x, y), Some(id));
+        }
+        // Online, Balance and Balance automatically sit in the box under
+        // them; a LAN room has neither.
+        for id in [BALANCE, AUTO_BALANCE] {
+            let rect = popup_layout.control_rect(id).unwrap();
+            assert!(
+                rect.x >= popup.dialog.x + 215
+                    && rect.x + rect.w <= popup.dialog.x + popup.dialog.w
+            );
+            let (x, y) = center(rect);
+            assert_eq!(popup_layout.control_at(&view, x, y), Some(id));
+        }
+        let lan =
+            MultiplayerSetupLayout::new(dialog(true, SetupFlavor::Lan, true), 800, 600, false);
+        assert_eq!(lan.control_rect(BALANCE), None);
+        view.open_box = None;
         // VERA's missing-map offer takes every press until it is answered.
         view.map_offer_open = true;
         let (x, y) = center(popup_layout.chat);

@@ -20,13 +20,14 @@ use super::text::{
 use super::{
     SHELL_CONTROL_DEPTH, SHELL_CONTROL_TEXT_DEPTH, SHELL_DISABLED_TEXT_RGB_FROM_PACKED_0000009F,
     SHELL_DROPDOWN_DEPTH, SHELL_DROPDOWN_TEXT_DEPTH, SHELL_LABEL_TEXT_RGB,
-    SHELL_PARENT_BACKGROUND_DEPTH,
+    SHELL_PARENT_BACKGROUND_DEPTH, SHELL_SWATCH_DEPTH,
 };
 use crate::app::AppState;
 use crate::app::frontend::shell_transition::ShellSlideKind;
 use crate::render::batch::SpriteInstance;
 use crate::render::shell_paint::{self, ModalButton, PaintLabel};
 use crate::render::shell_text::{self, ShellAlign, ShellTextDraw};
+use crate::render::skirmish_shell_chrome::{SkirmishShellChromeAtlas, SkirmishShellChromeEntry};
 use crate::ui::multiplayer_setup::*;
 use crate::ui::shell::geom::RectPx;
 use crate::util::time::Instant;
@@ -108,6 +109,7 @@ pub(crate) fn render_multiplayer_setup(
         crate::app::frontend::preview_zoom::close(state);
         let (progress_meter, texts) =
             crate::app::loading::pump::transfer_progress_draws(state, completed, total)?;
+        let smooth_art = state.smooth_online_menus();
         let layout = crate::app::input::multiplayer_setup::layout(state);
         let atlas = state
             .frontend
@@ -138,6 +140,7 @@ pub(crate) fn render_multiplayer_setup(
             ShellFrameOverlay {
                 progress_meter,
                 texts,
+                smooth_art,
                 ..Default::default()
             },
             ShellFrameCursor::Hidden,
@@ -190,14 +193,12 @@ pub(crate) fn render_multiplayer_setup(
             .set_map_labels(&view.mode_label, &view.map_label, now);
         let shown = ui.statics.paint(now, sliding);
         [
-            (shown.heading, layout.page.title),
-            (shown.game_type, layout.mode_label),
-            (shown.map_label, layout.map_label),
+            (shown.heading, layout.page.title, ShellAlign::PANEL_TITLE),
+            (shown.game_type, layout.mode_label, ShellAlign::H_CENTER),
+            (shown.map_label, layout.map_label, ShellAlign::H_CENTER),
         ]
         .into_iter()
-        .filter_map(|(shown, rect)| {
-            shown.map(|shown| static_label(shown, rect, ShellAlign::H_CENTER))
-        })
+        .filter_map(|(shown, rect, align)| shown.map(|shown| static_label(shown, rect, align)))
         .chain(status_line_label(
             shown.status_line,
             layout.page.status_help,
@@ -267,7 +268,10 @@ pub(crate) fn render_multiplayer_setup(
     }
     let mut controls = Vec::new();
     let mut texts = Vec::new();
-    let mut overlay = ShellFrameOverlay::default();
+    let mut overlay = ShellFrameOverlay {
+        smooth_art: state.smooth_online_menus(),
+        ..Default::default()
+    };
     let text = |value: &str, rect: RectPx, align: ShellAlign, rgb: [f32; 3], depth: f32| {
         shell_text::draw_in_rect_scaled(
             font,
@@ -299,7 +303,7 @@ pub(crate) fn render_multiplayer_setup(
             // Ordinary MNBTTN buttons, as Game Options' OK; one with no page
             // to go to is hidden.
             let mut buttons = Vec::new();
-            for (id, caption) in [(PREVIOUS_ROWS, "Previous"), (NEXT_ROWS, "Next")] {
+            for (id, caption) in [(PREVIOUS_ROWS, "VERA:Previous"), (NEXT_ROWS, "VERA:Next")] {
                 if !view.enabled(id) {
                     continue;
                 }
@@ -311,7 +315,7 @@ pub(crate) fn render_multiplayer_setup(
                     enabled: true,
                 });
                 texts.push(text(
-                    caption,
+                    &crate::i18n::tr(caption),
                     crate::app::frontend::shell_pass::owner_draw_button_label_rect(rect, pressed),
                     ShellAlign::H_CENTER | ShellAlign::V_CENTER,
                     SHELL_LABEL_TEXT_RGB,
@@ -330,19 +334,83 @@ pub(crate) fn render_multiplayer_setup(
                     text: SHELL_CONTROL_TEXT_DEPTH,
                 },
             ));
+            // Header rows are no players, so a grouped list counts pages.
+            let page_line = if view.grouped {
+                crate::i18n::tr_fill(
+                    "VERA:PageOf",
+                    &[
+                        ("page", &(view.first_row / page_rows + 1)),
+                        ("pages", &view.row_count.div_ceil(page_rows)),
+                    ],
+                )
+            } else {
+                crate::i18n::tr_fill(
+                    "VERA:RosterPage",
+                    &[
+                        ("first", &(view.first_row + 1)),
+                        ("last", &(view.first_row + page_rows).min(view.row_count)),
+                        ("total", &view.row_count),
+                    ],
+                )
+            };
             texts.push(text(
-                &format!(
-                    "Players {}-{} of {}",
-                    view.first_row + 1,
-                    (view.first_row + page_rows).min(view.row_count),
-                    view.row_count
-                ),
+                &page_line,
                 layout.roster_page_label,
                 ShellAlign::H_CENTER | ShellAlign::V_CENTER,
                 SHELL_LABEL_TEXT_RGB,
                 SHELL_CONTROL_TEXT_DEPTH,
             ));
         }
+        // VERA's header rows: the caption where the players' names stand,
+        // then Join (or Watch) drawn as the roster's Previous and Next.
+        let mut header_buttons = Vec::new();
+        for (row, header) in view.headers.iter().enumerate() {
+            let Some(header) = header else {
+                continue;
+            };
+            texts.push(text(
+                &header.caption,
+                crate::ui::skirmish_shell::combo_text_rect(layout.combos[row][0], scale),
+                ShellAlign::V_CENTER,
+                SHELL_LABEL_TEXT_RGB,
+                SHELL_CONTROL_TEXT_DEPTH,
+            ));
+            let Some(caption) = &header.join else {
+                continue;
+            };
+            let id = team_join(row);
+            let rect = layout.control_rect(id).expect("header button rect");
+            let enabled = view.enabled(id);
+            let pressed = enabled && ui.buttons.is_pressed(id);
+            header_buttons.push(ModalButton {
+                rect,
+                pressed,
+                enabled,
+            });
+            texts.push(text(
+                caption,
+                crate::app::frontend::shell_pass::owner_draw_button_label_rect(rect, pressed),
+                ShellAlign::H_CENTER | ShellAlign::V_CENTER,
+                if enabled {
+                    SHELL_LABEL_TEXT_RGB
+                } else {
+                    SHELL_DISABLED_TEXT_RGB_FROM_PACKED_0000009F
+                },
+                SHELL_CONTROL_TEXT_DEPTH,
+            ));
+        }
+        controls.extend(shell_paint::paint_modal_sprites(
+            None,
+            type3_button_frames(atlas),
+            RectPx::new(0, 0, 0, 0),
+            &header_buttons,
+            scale,
+            shell_paint::ModalDepths {
+                background: SHELL_CONTROL_DEPTH,
+                button: SHELL_CONTROL_DEPTH,
+                text: SHELL_CONTROL_TEXT_DEPTH,
+            },
+        ));
         for combo in view.combos.iter().filter(|combo| combo.visible) {
             let Some(rect) = layout.control_rect(combo.id) else {
                 continue;
@@ -355,7 +423,7 @@ pub(crate) fn render_multiplayer_setup(
                     rect,
                     swatch: selected
                         .and_then(|item| item.swatch)
-                        .map(|index| house_color_tint(&[], index)),
+                        .map(|index| house_color_tint(state.rules(), index)),
                     open: ui.popup.control == Some(combo.id),
                     disabled: !view.enabled(combo.id),
                 },
@@ -364,9 +432,14 @@ pub(crate) fn render_multiplayer_setup(
             if let Some(item) = selected
                 && item.swatch.is_none()
             {
+                let mut face = crate::ui::skirmish_shell::combo_text_rect(rect, scale);
+                // VERA's online room: the name stops short of its badge.
+                if let Some((_, badge)) = player_badge(atlas, &view, &layout, combo.id) {
+                    face.w = badge.x - face.x;
+                }
                 texts.push(text(
                     &item.text,
-                    crate::ui::skirmish_shell::combo_text_rect(rect, scale),
+                    face,
                     ShellAlign::V_CENTER,
                     super::text::combo_face_text_color(!view.enabled(combo.id)),
                     SHELL_CONTROL_TEXT_DEPTH,
@@ -399,6 +472,19 @@ pub(crate) fn render_multiplayer_setup(
                     SHELL_CONTROL_DEPTH,
                 );
             }
+            // VERA's online room: the badge over the name's face, as the
+            // colour list's swatch.
+            if let Some((entry, rect)) =
+                player_badge(atlas, &view, &layout, SetupColumn::Player.control(row))
+            {
+                push_flag_entry_clipped_centered(
+                    &mut controls,
+                    entry,
+                    rect,
+                    scale,
+                    SHELL_SWATCH_DEPTH,
+                );
+            }
         }
         // C2/C9 ping statics 0x754+row, kind-2 images like the acceptance ones.
         if let Some(rects) = &layout.ping_icons {
@@ -425,11 +511,12 @@ pub(crate) fn render_multiplayer_setup(
                 SHELL_CONTROL_TEXT_DEPTH,
             );
         }
-        for bar in view
-            .trackbars
-            .iter()
-            .filter(|bar| bar.visible && !OPTION_TRACKBARS.contains(&bar.id))
-        {
+        for bar in view.trackbars.iter().filter(|bar| {
+            bar.visible
+                && !OPTION_TRACKBARS.contains(&bar.id)
+                && bar.id != TEAM_COUNT
+                && bar.id != SUPERWEAPON_LIMIT
+        }) {
             push_trackbar(
                 &mut controls,
                 &mut texts,
@@ -545,20 +632,24 @@ pub(crate) fn render_multiplayer_setup(
                             .preview_source_bounds()
                     })
                     .flatten();
+                // The host's RandMap sentinel numbers the last Generate's
+                // starts, copied back by 0x0058BB30 (0x005E67ED).
+                let entry = view
+                    .selected_map_index
+                    .and_then(|index| state.frontend.scenario_catalog.shell_maps().get(index));
+                let own_bounds = super::preview::start_marker_bounds(
+                    entry
+                        .is_some_and(super::preview::is_random_map_sentinel_entry)
+                        .then(|| state.frontend.random_map_retention.generated_header()),
+                    entry.and_then(|entry| entry.preview_source_bounds.as_ref()),
+                );
                 let bounds = state
                     .frontend
                     .network_setup_protocol
                     .as_ref()
                     .and_then(|protocol| protocol.received_preview_bounds())
                     .or(received_bounds.as_ref())
-                    .or_else(|| {
-                        view.selected_map_index
-                            .and_then(|index| {
-                                state.frontend.scenario_catalog.shell_maps().get(index)
-                            })
-                            .filter(|entry| !super::preview::is_random_map_sentinel_entry(entry))
-                            .and_then(|entry| entry.preview_source_bounds.as_ref())
-                    });
+                    .or(own_bounds.as_ref());
                 overlay.zoom = zoom_layout
                     .as_ref()
                     .map(|zoom_layout| zoom_draws(state, atlas, zoom_layout, bounds, scale));
@@ -600,11 +691,11 @@ pub(crate) fn render_multiplayer_setup(
                         font,
                         &view.dialog.button_label(button.id).map_or_else(
                             || localized_label(state, spec.csf_key, spec.csf_key),
-                            str::to_owned,
+                            crate::i18n::tr,
                         ),
                         button_text_rect(button.rect, pressed, scale),
                         super::text::button_label_color_for_disabled(!view.enabled(button.id)),
-                        ShellAlign::H_CENTER | ShellAlign::V_CENTER,
+                        ShellAlign::BUTTON_CAPTION,
                         [0.0; 2],
                         SHELL_CONTROL_TEXT_DEPTH,
                         scale.factor(),
@@ -651,7 +742,7 @@ pub(crate) fn render_multiplayer_setup(
                     scale.derive_rect(popup.row_rect(index)?, |row| {
                         RectPx::new(row.x + 2, row.y + 2, row.w - 4, 19)
                     }),
-                    house_color_tint(&[], combo.choices.get(index)?.swatch?),
+                    house_color_tint(state.rules(), combo.choices.get(index)?.swatch?),
                 ))
             });
             push_popup_instances(
@@ -682,21 +773,54 @@ pub(crate) fn render_multiplayer_setup(
                 }
             }
         }
-        // VERA's Game Options over the room, on the box art the online
-        // lobby's popups use: the box and OK first, then its controls.
-        if view.options_open
+        // VERA's Game Options and Teams over the room, on the box art the
+        // online lobby's popups use: the box and its buttons first, then its
+        // controls.
+        if let Some(open) = view.open_box
             && let Some(popup) = layout.game_options
         {
-            let pressed = ui.buttons.is_pressed(GAME_OPTIONS_OK);
-            let ok = PaintLabel {
-                text: localized_label(state, "GUI:OK", "GUI:OK").into(),
-                rect: crate::app::frontend::shell_pass::owner_draw_button_label_rect(
-                    popup.ok, pressed,
-                ),
-                align: ShellAlign::H_CENTER | ShellAlign::V_CENTER,
-                rgb: SHELL_LABEL_TEXT_RGB,
-                path_a_reveal: None,
+            let button = |id: u16, rect: RectPx, text: String| {
+                let pressed = ui.buttons.is_pressed(id);
+                let enabled = view.enabled(id);
+                let label = PaintLabel {
+                    text: text.into(),
+                    rect: crate::app::frontend::shell_pass::owner_draw_button_label_rect(
+                        rect, pressed,
+                    ),
+                    align: ShellAlign::H_CENTER | ShellAlign::V_CENTER,
+                    rgb: super::text::button_label_color_for_disabled(!enabled),
+                    path_a_reveal: None,
+                };
+                (
+                    ModalButton {
+                        rect,
+                        pressed,
+                        enabled,
+                    },
+                    label,
+                )
             };
+            let mut buttons = vec![button(
+                GAME_OPTIONS_OK,
+                popup.ok,
+                localized_label(state, "GUI:OK", "GUI:OK"),
+            )];
+            if open == RoomBox::Teams {
+                buttons.push(button(
+                    TEAM_STARTS,
+                    layout.team_starts,
+                    crate::i18n::tr("VERA:TeamStarts"),
+                ));
+                buttons.push(button(
+                    TEAM_COLORS,
+                    layout.team_colors,
+                    crate::i18n::tr("VERA:TeamColors"),
+                ));
+                if let Some(rect) = layout.balance {
+                    buttons.push(button(BALANCE, rect, crate::i18n::tr("VERA:Balance")));
+                }
+            }
+            let (buttons, labels): (Vec<_>, Vec<_>) = buttons.into_iter().unzip();
             let draw = shell_paint::paint_modal_shp(
                 font,
                 atlas
@@ -704,25 +828,64 @@ pub(crate) fn render_multiplayer_setup(
                     .or_else(|| atlas.mode_two_dialog_background(None)),
                 type3_button_frames(atlas),
                 popup.dialog,
-                &[ModalButton {
-                    rect: popup.ok,
-                    pressed,
-                    enabled: true,
-                }],
-                &[ok],
+                &buttons,
+                &labels,
                 scale,
                 super::wol_lobby::POPUP_DEPTHS,
             );
             overlay.controls.extend(draw.sprites);
             overlay.texts.extend(draw.text);
-            push_option_controls(
-                &mut overlay.controls,
-                &mut overlay.texts,
-                state,
-                &view,
-                &layout,
-                super::wol_lobby::POPUP_DEPTHS.text,
-            );
+            match open {
+                RoomBox::GameOptions => push_option_controls(
+                    &mut overlay.controls,
+                    &mut overlay.texts,
+                    state,
+                    &view,
+                    &layout,
+                    super::wol_lobby::POPUP_DEPTHS.text,
+                ),
+                RoomBox::Teams => {
+                    overlay.texts.push(text(
+                        &crate::i18n::tr("VERA:Teams"),
+                        layout.teams_label,
+                        ShellAlign::NONE,
+                        SHELL_LABEL_TEXT_RGB,
+                        super::wol_lobby::POPUP_DEPTHS.text,
+                    ));
+                    if let Some(bar) = view.trackbars.iter().find(|bar| bar.id == TEAM_COUNT) {
+                        push_trackbar(
+                            &mut overlay.controls,
+                            &mut overlay.texts,
+                            state,
+                            &view,
+                            &layout,
+                            bar,
+                            super::wol_lobby::POPUP_DEPTHS.text,
+                        );
+                    }
+                    if let (Some(rect), Some(atlas)) = (
+                        layout.auto_balance,
+                        state.frontend.skirmish_shell_chrome.as_ref(),
+                    ) {
+                        paint_control(
+                            &mut overlay.controls,
+                            &atlas.control_chrome(),
+                            ControlPaint::Checkbox {
+                                rect,
+                                checked: view.auto_balance,
+                            },
+                            scale,
+                        );
+                        overlay.texts.push(text(
+                            &crate::i18n::tr("VERA:BalanceAutomatically"),
+                            crate::ui::skirmish_shell::checkbox_text_rect(rect, scale),
+                            ShellAlign::V_CENTER,
+                            SHELL_LABEL_TEXT_RGB,
+                            super::wol_lobby::POPUP_DEPTHS.text,
+                        ));
+                    }
+                }
+            }
         }
         // VERA asks a guest before downloading a map it does not have, then
         // shows the download, on the art of VERA's other online-service boxes.
@@ -744,12 +907,16 @@ pub(crate) fn render_multiplayer_setup(
                 .flatten()
                 .map(|(completed, total)| (u64::from(completed), u64::from(total)));
             let body = match progress {
-                Some((completed, total)) => format!(
-                    "Downloading {}... {}%",
-                    offer.name,
-                    completed.min(total) * 100 / total.max(1)
+                Some((completed, total)) => crate::i18n::tr_fill(
+                    "VERA:DownloadingMapPercent",
+                    &[
+                        ("name", &offer.name),
+                        ("percent", &(completed.min(total) * 100 / total.max(1))),
+                    ],
                 ),
-                None if offer.downloading => format!("Downloading {}...", offer.name),
+                None if offer.downloading => {
+                    crate::i18n::tr_fill("VERA:DownloadingMap", &[("name", &offer.name)])
+                }
                 None => offer.message.clone(),
             };
             let button_label = |text: String, rect: RectPx, pressed: bool, rgb| PaintLabel {
@@ -768,7 +935,7 @@ pub(crate) fn render_multiplayer_setup(
                     path_a_reveal: None,
                 },
                 button_label(
-                    "Download".to_owned(),
+                    crate::i18n::tr("VERA:Download"),
                     boxed.ok,
                     pressed(MAP_OFFER_DOWNLOAD),
                     if offer.downloading {
@@ -886,11 +1053,33 @@ pub(crate) fn render_multiplayer_setup(
         overlay,
         ShellFrameCursor::Visible,
     )?;
-    if let Some(ui) = state.frontend.multiplayer_setup.as_mut() {
-        ui.statics.commit_presented();
-    }
     state.platform.window.request_redraw();
     Ok(())
+}
+
+/// VERA's online room: a Player list's badge ([`SetupRowIcon::badge`]) and
+/// its cell, one badge wide at the right end of the list's face, as far
+/// short of the arrow as the name starts in from the left.
+fn player_badge(
+    atlas: &SkirmishShellChromeAtlas,
+    view: &SetupView,
+    layout: &MultiplayerSetupLayout,
+    control: u16,
+) -> Option<(SkirmishShellChromeEntry, RectPx)> {
+    use crate::ui::skirmish_shell::{COMBO_ARROW_RESERVE_W, COMBO_FACE_H, COMBO_TEXT_LEFT_INSET};
+    let (SetupColumn::Player, row) = SetupColumn::decode(control)? else {
+        return None;
+    };
+    let entry = atlas.wol_badge(view.row_icons.get(row)?.as_ref()?.badge?)?;
+    let width = entry.pixel_size[0].round() as i32;
+    let cell = layout
+        .page
+        .scale
+        .derive_rect(layout.control_rect(control)?, |rect| {
+            let right = rect.x + rect.w - COMBO_ARROW_RESERVE_W - COMBO_TEXT_LEFT_INSET;
+            RectPx::new(right - width, rect.y, width, COMBO_FACE_H)
+        });
+    Some((entry, cell))
 }
 
 /// The game options, in the room or in VERA's Game Options popup: their
@@ -969,10 +1158,22 @@ fn push_option_controls(
                 scale,
             );
             texts.push(text(
-                label,
+                &crate::i18n::tr(label),
                 crate::ui::skirmish_shell::checkbox_text_rect(rect, scale),
                 ShellAlign::V_CENTER,
             ));
+        }
+        texts.push(text(
+            &crate::i18n::tr(crate::ui::main_menu_dialogs::options::SUPERWEAPON_LIMIT_LABEL),
+            layout.superweapon_limit_label,
+            ShellAlign::NONE,
+        ));
+        if let Some(bar) = view
+            .trackbars
+            .iter()
+            .find(|bar| bar.id == SUPERWEAPON_LIMIT)
+        {
+            push_trackbar(controls, texts, state, view, layout, bar, text_depth);
         }
     }
     for bar in view
@@ -1014,9 +1215,27 @@ fn push_trackbar(
         scale,
     );
     if bar.id != DIFFICULTY {
+        let value = match bar.id {
+            SPEED => {
+                let context = crate::ui::shell::game_speed::SpeedContext::Network;
+                context.value_text(context.stored_speed(bar.value))
+            }
+            CREDITS => state
+                .frontend
+                .skirmish_shell_state
+                .trackbar_bounds
+                .credits_from_visual_position(bar.value)
+                .to_string(),
+            // 1 is Teams Off.
+            TEAM_COUNT if bar.value < 2 => crate::i18n::tr("VERA:TeamsOff"),
+            SUPERWEAPON_LIMIT if bar.value < 2 => {
+                crate::i18n::tr(crate::ui::main_menu_dialogs::options::SUPERWEAPON_LIMIT_OFF)
+            }
+            _ => bar.range.stepped(bar.value).to_string(),
+        };
         texts.push(shell_text::draw_in_rect_scaled(
             &state.renderer.bit_font,
-            &bar.range.stepped(bar.value).to_string(),
+            &value,
             rect_to_text_rect(crate::ui::shell::trackbar::value_text_rect(rect, scale)),
             if view.enabled(bar.id) {
                 SHELL_LABEL_TEXT_RGB

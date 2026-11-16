@@ -82,18 +82,6 @@ pub(crate) struct WolLoginAccepted {
     pub(crate) motd: String,
 }
 
-/// The game's own message of the day for an accepted login, used when the
-/// lobby sends no operator welcome: a welcome, and how to page with the chat's
-/// `TXT_PAGE_COMMAND`, since the online screens have no Page button.
-pub(super) fn vera_motd(state: &AppState) -> String {
-    let page = App::csf_label(state, "TXT_PAGE_COMMAND", "TXT_PAGE_COMMAND");
-    format!(
-        "Welcome to VERA20K Online!\n\
-         Create a game or join one, and chat with everyone here.\n\
-         To send a private message, type {page} <name> <message>."
-    )
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum WolServiceRequest {
     /// `WOL__EnsureWolapiObject` `0x00786390`.
@@ -203,8 +191,8 @@ pub(crate) enum WolServiceRequest {
         matchbot: String,
         request: super::quick_match::MatchRequest,
     },
-    /// VERA's chat translation of a received line into `[VERA]
-    /// TranslateChat=`'s language; [`super::translation`] shows the reply.
+    /// VERA's chat translation of a received line into the chosen language;
+    /// [`super::translation`] shows the reply.
     Translate {
         text: Vec<u16>,
         line: super::translation::TranslatedLine,
@@ -230,10 +218,21 @@ pub(crate) struct WolLadderRecord {
     pub(crate) losses: i32,
     /// `+0x10`.
     pub(crate) points: i32,
+    /// VERA's OS in hundredths, which the lobby sends beside `points`, the
+    /// OS rounded; not in the native record.
+    pub(crate) os_hundredths: i32,
     /// `+0x1C`.
     pub(crate) rank: i32,
     /// `+0x20`.
     pub(crate) disconnects: i32,
+}
+
+impl WolLadderRecord {
+    /// The OS as the leaderboard shows it, to the hundredth: `48.51`.
+    pub(crate) fn os_text(&self) -> String {
+        let os = self.os_hundredths.max(0);
+        format!("{}.{:02}", os / 100, os % 100)
+    }
 }
 
 /// One high-score record (`0x44` bytes) of `CNetUtilEventSink+0x24`
@@ -355,6 +354,9 @@ pub(crate) enum WolServiceEvent {
     /// The find sink `0x007A9970`: the channel the located user is in, or
     /// the result code.
     Located(Result<WolChannel, u32>),
+    /// VERA: the season VERA20K Online's `ladder` event came from, before
+    /// its records ([`super::lobby::ladder_season`]).
+    LadderSeason(Option<u32>),
     /// The ladder sink `CNetUtilEventSink+0x10` (`0x007A3100`): records
     /// for the table `[0xB77E0C]`.
     Ladder(Vec<WolLadderRecord>),
@@ -965,6 +967,10 @@ pub(crate) fn service_event(state: &mut AppState, event: WolServiceEvent) {
             super::lobby::channel_ban(state, &name, banned);
             return;
         }
+        WolServiceEvent::LadderSeason(season) => {
+            super::lobby::ladder_season(state, season);
+            return;
+        }
         WolServiceEvent::Ladder(records) => {
             super::buddies::ladder_received(state, records);
             return;
@@ -1234,6 +1240,12 @@ fn connect_succeeded(state: &mut AppState) {
     }
     if online {
         state.frontend.wol.as_mut().expect("WOL visit").flow = None;
+        // VERA: the lobby forgets a locale at sign-out, so the country the
+        // player chose on their card goes again after each sign-in.
+        let locale = state.persistence.options_profile.online_locale;
+        if locale != 0 {
+            send_locale(state, locale);
+        }
         finish_login(state);
         return;
     }
@@ -1310,7 +1322,7 @@ pub(super) fn locale_chosen(state: &mut AppState, locale: i32) {
 
 /// API+0xB8, the locale request again, and the table entry: `0x007AE1F0`
 /// removes it and only a removed one is inserted again (`0x007ACBE0`).
-fn send_locale(state: &mut AppState, locale: i32) {
+pub(super) fn send_locale(state: &mut AppState, locale: i32) {
     let nickname = state.frontend.wol_account.nickname.clone();
     let Some(visit) = state.frontend.wol.as_mut() else {
         return;
@@ -1470,7 +1482,7 @@ pub(super) fn poll_wait(state: &mut AppState) -> Option<Instant> {
     [limit, reveal].into_iter().flatten().min()
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
 
@@ -1533,8 +1545,8 @@ mod tests {
         let column = ShellSlideKind::WolLogin.column(9, Some(modern));
         assert_eq!(
             (column.top_buttons, column.bottom_button),
-            (5, true),
-            "Login, Play as Guest and the three account buttons"
+            (4, true),
+            "Play and the three account buttons"
         );
         visit.page = WolPage::Login(Box::new(WolLoginState::open(&mut globals, &[])));
         let native = visit.login().unwrap().policy.page_spec();

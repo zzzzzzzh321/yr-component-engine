@@ -20,7 +20,10 @@ pub(crate) use simulation::{
     attach_entity, live_entity_context, pre_receive_damage, preview_receive_damage, tick_entity,
     weapon_user,
 };
-pub use startup::{open_active_assets, reopen_active_assets};
+pub use startup::{
+    open_active_assets, open_active_assets_with_mod, reopen_active_assets,
+    reopen_active_assets_with_mod,
+};
 pub use vera_mod_api::{InputPolicy, Meter, Projection, Tint};
 
 #[path = "mod_sdk/acceptance.rs"]

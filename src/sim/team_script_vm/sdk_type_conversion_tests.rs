@@ -396,7 +396,7 @@ fn sdk_script68_mixed_team_preserves_instances_and_resumes_exact_program_after_s
     assert_eq!(actor.body_facing.rot_per_frame(), 6 << 8);
     assert!(actor.barrel_facing.is_none());
     assert_eq!(
-        actor.crate_multipliers.firepower(),
+        actor.firepower_multiplier(),
         NativeF64Bits::ONE,
         "conversion removes the old self effect"
     );

@@ -5,9 +5,10 @@
 use crate::map::entities::EntityCategory;
 use crate::map::resolved_terrain::NativeCellQuery;
 use crate::rules::ruleset::RuleSet;
+use crate::rules::superweapon_targeting::HouseMask;
 use crate::rules::superweapon_targeting::TargetReject;
 use crate::rules::superweapon_targeting::{
-    HouseMask, LaunchSite, TargetContent, TargetMask, TargetPreflightInput, evaluate_target,
+    LaunchSite, TargetContent, TargetMask, TargetPreflightInput, evaluate_target,
 };
 use crate::rules::superweapon_type::SuperWeaponType;
 use crate::sim::intern::InternedId;
@@ -187,22 +188,15 @@ pub(super) fn check(
     automatic: bool,
 ) -> Result<(), TargetReject> {
     if !rules.superweapon_semantics().custom_payloads {
-        return if matches!(
-            sw.kind,
-            crate::rules::superweapon_type::SuperWeaponKind::GenericWarhead
-                | crate::rules::superweapon_type::SuperWeaponKind::UnitDelivery
-                | crate::rules::superweapon_type::SuperWeaponKind::HunterSeeker
-        ) {
+        return if sw.kind.is_extension() {
             Err(TargetReject::InvalidPayload)
         } else {
             Ok(())
         };
     }
-    // The shared prepared query also admits component-authored targeting.
-    if rules.external_mod.is_none()
-        && !automatic
-        && sw.kind == crate::rules::superweapon_type::SuperWeaponKind::HunterSeeker
-    {
+    // Without a target action the native cameo sends SPECIAL_PLACE at (0,0).
+    // Component targeting retains the prepared query even for such a cameo.
+    if rules.uses_native_superweapon_targeting() && !automatic && sw.action.is_none() {
         return Ok(());
     }
     let data = prepare(sim, rules, owner, sw);
@@ -328,7 +322,11 @@ pub(super) fn check_with_data(
         }),
         fire_into_shroud,
         shrouded,
-        range,
+        range: if sw.kind == crate::rules::superweapon_type::SuperWeaponKind::EMPulse {
+            launch_site_range(rules, sw)
+        } else {
+            range
+        },
         requires_launch_site: false,
         launch_sites: &data.sites,
     })?;
@@ -351,6 +349,7 @@ pub(super) fn launch_range(rules: &RuleSet, sw: &SuperWeaponType) -> (f64, f64) 
 
 /// ra2-mono ResolveSuperweaponLaunchSites adaptation: VERA's retained House
 /// building order and operational-state owner replace OOP/ECS bridge lookups.
+/// The House's buildings that are launch sites of the type ([`launch_site`]).
 pub(super) fn launch_sites(
     sim: &Simulation,
     rules: &RuleSet,
@@ -361,39 +360,123 @@ pub(super) fn launch_sites(
         .get(&owner)
         .into_iter()
         .flat_map(|house| house.base_projection().buildings())
-        .filter_map(|&id| {
-            let entity = sim.substrate.entities.get(id)?;
-            if !super::provided_supers(sim, rules, entity)
-                .any(|name| name.eq_ignore_ascii_case(&sw.id))
-            {
-                return None;
-            }
-            let coord = crate::sim::movement::ground_pose::object_get_coords(
-                entity,
-                sim.resolved_terrain.as_ref(),
-            );
-            Some((
-                id,
-                LaunchSite {
-                    center: (coord.x / 256, coord.y / 256),
-                    // Base IsLaunchSite1006D9D0 checks life, HP and power.
-                    // Nuclear100733E0 adds NukeSilo before that same base
-                    // predicate, in both prepared preview and activation.
-                    eligible: entity.owner() == owner
-                        && entity.is_object_alive()
-                        && entity.health.current() != 0
-                        && !entity.lifecycle.in_limbo()
-                        && sim.building_operational_state(id, rules) == Some(true)
-                        && (sw.nuclear.is_none()
-                            || sim
-                                .entity_object_type(entity, rules)
-                                .is_some_and(|object| object.nuke_silo)),
-                    range_minimum_override: None,
-                    range_maximum_override: None,
-                },
-            ))
-        })
+        .filter_map(|&id| launch_site(sim, rules, owner, sw, id).map(|site| (id, site)))
         .collect()
+}
+
+/// Building `id` as a launch site of the type, `None` when it is not one
+/// (IsLaunchSite 1006D9D0: it provides the type). SW_EMPulse's (10071490)
+/// takes the `EMPulse.Cannons` types whatever they provide, else the
+/// providing `EMPulseCannon=` ones, and gives each its own range
+/// ([`emp_pulse_site_range`]).
+pub(super) fn launch_site(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    sw: &SuperWeaponType,
+    id: u64,
+) -> Option<LaunchSite> {
+    let emp_pulse = (sw.kind == crate::rules::superweapon_type::SuperWeaponKind::EMPulse)
+        .then(|| rules.super_weapon_metadata(&sw.id))
+        .flatten();
+    let entity = sim.substrate.entities.get(id)?;
+    let provides =
+        || super::provided_supers(sim, rules, entity).any(|name| name.eq_ignore_ascii_case(&sw.id));
+    let site = match emp_pulse {
+        Some(metadata) => {
+            let cannons = &metadata.launch().emp_pulse().cannons;
+            let object = sim.object_type(entity.type_ref(), rules)?;
+            if cannons.is_empty() {
+                object.emp_pulse_cannon && provides()
+            } else {
+                cannons.iter().any(|id| id.eq_ignore_ascii_case(&object.id))
+            }
+        }
+        None => provides(),
+    };
+    if !site {
+        return None;
+    }
+    let coord =
+        crate::sim::movement::ground_pose::object_get_coords(entity, sim.resolved_terrain.as_ref());
+    let range = emp_pulse.map(|metadata| emp_pulse_site_range(sim, rules, metadata, entity));
+    Some(LaunchSite {
+        center: (coord.x / 256, coord.y / 256),
+        eligible: entity.owner() == owner
+            && entity.is_object_alive()
+            && entity.health.current() != 0
+            && !entity.lifecycle.in_limbo()
+            && sim.building_operational_state(id, rules) == Some(true)
+            && (sw.nuclear.is_none()
+                || sim
+                    .entity_object_type(entity, rules)
+                    .is_some_and(|object| object.nuke_silo)),
+        range_minimum_override: range.map(|range| range.0),
+        range_maximum_override: range.map(|range| range.1),
+    })
+}
+
+/// GetLaunchSiteRange without a building: NewSWType's (1006D180) is
+/// `SW.RangeMinimum`/`.RangeMaximum`; SW_EMPulse's (10071380) is (-1, -1)
+/// under `EMPulse.TargetSelf`, else (0, 0), so its sites are always asked.
+pub(super) fn launch_site_range(rules: &RuleSet, sw: &SuperWeaponType) -> (f64, f64) {
+    let Some(metadata) = rules.super_weapon_metadata(&sw.id) else {
+        return (-1.0, -1.0);
+    };
+    if sw.kind == crate::rules::superweapon_type::SuperWeaponKind::EMPulse {
+        if metadata.launch().emp_pulse().target_self {
+            (-1.0, -1.0)
+        } else {
+            (0.0, 0.0)
+        }
+    } else {
+        launch_range(rules, sw)
+    }
+}
+
+/// SW_EMPulse::GetLaunchSiteRange (10071380) for a building: (-1, -1) under
+/// `EMPulse.TargetSelf`; with a weapon 0 (GetWeapon vt+0x3F8), a negative
+/// `SW.RangeMaximum` takes its `Range=` and a negative `SW.RangeMinimum` its
+/// `MinimumRange=` in whole cells (`>> 8` unsigned, `0x100713D9`/`0x100713FB`);
+/// without one, NewSWType's type range.
+fn emp_pulse_site_range(
+    sim: &Simulation,
+    rules: &RuleSet,
+    metadata: &crate::rules::superweapon_type::AresSuperWeaponMetadata,
+    building: &crate::sim::game_entity::GameEntity,
+) -> (f64, f64) {
+    if metadata.launch().emp_pulse().target_self {
+        return (-1.0, -1.0);
+    }
+    let (minimum, maximum) = metadata.targeting().unwrap_or_default().range();
+    let weapon = sim
+        .object_type(building.type_ref(), rules)
+        .and_then(|object| {
+            crate::sim::combat::combat_weapon::get_weapon(
+                building,
+                object,
+                0,
+                &sim.substrate.entities,
+                rules,
+                &sim.interner,
+            )
+        });
+    let Some(weapon) = weapon else {
+        return (minimum, maximum);
+    };
+    let cells = |leptons: i32| f64::from((leptons as u32) >> 8);
+    (
+        if minimum < 0.0 {
+            cells(weapon.minimum_range_leptons)
+        } else {
+            minimum
+        },
+        if maximum < 0.0 {
+            cells(weapon.range_leptons)
+        } else {
+            maximum
+        },
+    )
 }
 
 impl Simulation {

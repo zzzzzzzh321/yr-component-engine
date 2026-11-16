@@ -48,7 +48,7 @@ pub(super) fn emit_projectile_shrapnel(
     let Some(parent_projectile) = detonation
         .payload
         .projectile_type()
-        .and_then(|kind| rules.projectile(world.interner.resolve(kind)))
+        .and_then(|kind| world.interner.projectile_type(kind, rules))
     else {
         return;
     };
@@ -58,11 +58,7 @@ pub(super) fn emit_projectile_shrapnel(
     let Some(child_weapon) = rules.weapon_by_handle(child_weapon_handle) else {
         return;
     };
-    let Some(child_projectile) = child_weapon
-        .projectile
-        .as_deref()
-        .and_then(|name| rules.projectile(name))
-    else {
+    let Some(child_projectile) = rules.weapon_projectile(child_weapon) else {
         return;
     };
     let Some(child_warhead_name) = child_weapon.warhead.as_deref() else {
@@ -238,6 +234,7 @@ pub(super) fn emit_projectile_shrapnel(
                 gravity: child_projectile.gravity(),
                 elasticity_bits: child_projectile.elasticity.to_bits(),
                 arcing: child_projectile.arcing,
+                subject_to_solid: rules.ares() && child_projectile.bullet_type_ext.subject_to_solid,
             },
         };
         world.admit_projectile_spawns([spawn], rules);

@@ -243,7 +243,7 @@ pub fn delete_saved_seed(path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_map))]
 mod tests {
     use super::*;
 
@@ -337,18 +337,23 @@ mod tests {
             tiberium_layout: 19,
             vegetation: 29,
             urban_presence: 13,
+            urban_enabled: false,
+            fair_starts: false,
+            extras: Default::default(),
             width: 2,
             height: 1,
             accessibility: 89,
             region_size: 83,
             seed: 42,
             description: "Prior map".into(),
+            #[cfg(feature = "ares")]
+            urban_areas: true,
         };
         let loaded = load_saved_seed(&path, &current, "Localized random map").unwrap();
         let expected = RmgOptions {
             seed: 4660,
             water_amount: 73,
-            num_players: 8,
+            num_players: 30,
             description: "Localized random map".into(),
             ..current.clone()
         };

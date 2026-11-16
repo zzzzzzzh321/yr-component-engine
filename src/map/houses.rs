@@ -359,7 +359,7 @@ fn parse_scenario_base_plan(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_map))]
 mod tests {
     use super::*;
 
@@ -487,7 +487,7 @@ mod tests {
         let alliances = roster.alliance_map();
         assert_eq!(
             is_allied_with(&alliances, &names[0], &names[17]),
-            crate::rules::ARES_ENABLED,
+            crate::rules::ARES_BUILD,
         );
         assert!(is_allied_with(&alliances, &names[17], &names[0]));
         assert!(is_allied_with(&alliances, &names[0], &names[1]));

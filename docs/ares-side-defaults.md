@@ -1,13 +1,10 @@
 # Ares fourth-side defaults
 
-An ordinary build with the 0.18 reference component selects the existing Side
-UI through `AresFaction` and the frozen `registered_side_ui` match policy.
-Explicit `AresFaction=no` selects retail; an absent policy preserves the older
-component/build profile. `--features ares` remains the legacy comparison path.
-The resource declarations are bound by actual Side ordinal, independently of
-that global dispatch choice. Menu, loading, audio and score state keep their
-original host owners. Score models retain the accepted resource snapshot before
-scenario retirement; render and playback consume that snapshot afterwards.
+A game that ships `ares.mix` reads these keys in every build ([Ares](ares.md)).
+Other games keep their three-side behavior.
+
+A compatible external component can provide Side resources and choose the
+registered Side interface through the Mod SDK.
 
 `[Sides]` already registers any number of Side identities; a Country's
 `Side=` selects one. Ares 3.0 attaches a `SideExt` to every allocated Side.
@@ -44,9 +41,7 @@ trampoline `0x1002F270`; they do not copy filenames over stock buffers.
 `SideExt::initialize` supplies medium names rather than the 640-wide `*SM.SHP`
 names. VERA preserves its existing per-name stock fallback when the retained
 name is `None`. **Residual:** explicit `none` clears the native filename and
-attempts an empty load, whereas this fallback reopens stock art. The migration
-retains that fixed-baseline behavior; it does not establish equivalence for this
-case. The SideExt reader also retains `HunterSeeker`, now consumed by the
+attempts an empty load, whereas this fallback reopens stock art. That is a residual of the external policy path. The SideExt reader also retains `HunterSeeker`, now consumed by the
 Hunter Seeker superweapon.
 `DialogBackground.*` feeds the shell dialog chrome: the hook at `0x622223`
 (body `0x1002FB50`) substitutes the side's image and palette for the three
@@ -115,24 +110,9 @@ same build as `tools/rules_oracle/ares_side_sidebar.py`):
   the three side slots and is dropped when a load resolves a different pair, so
   a side that changes its `DialogBackground.*` between matches rebuilds on the
   next paint. Slot 0 (`PUDLGBGN`) is process art and never rebuilt.
-- **HunterSeeker** is retained but the Hunter Seeker superweapon launch is
-  not ported, so it has no effect.
-- **Vehicle entries in `ParaDrop.Types`** are retained but the passenger
-  owner resolves InfantryType names only; such entries board no passenger.
 - A custom `AI.BaseDefenseCounts` vector shorter than the difficulty row is
   rejected by preflight as a missing difficulty; the native read past the
   vector is undefined data.
-- **Paradrop layers.** Ares replaces the paradrop launch
-  (`SuperClass_Launch` hook `0x6CC390` -> `0x10074350`) and reads the
-  Super's own `ParaDrop.*` keys, then the Country's (`0x1001BC20`/
-  `0x1001BCB0`), then the Side's. VERA keeps the stock launch with the
-  [Country](ares-country-paradrop.md) and Side layers but no per-Super
-  layer. Side lists for Soviet and any side >= 3 keep the stock unchecked
-  list pair, where the Ares sender (`0x100741A0`) sends nothing unless both
-  lists are equally long and nonempty.
-- **Canopy layers.** The Ares canopy hook (`0x5F5ADD` -> `0x10047C80`)
-  takes the dropped type's own `Parachute.Anim`, then the Country's, before
-  the Side's. VERA reads the Country and Side layers but not the type key.
 - The Ares save layout gained the new fields; saves made before this change
   do not load in Ares builds.
 - With Ares and NPatch compiled together, `Parachute.Anim` takes precedence
@@ -141,3 +121,6 @@ same build as `tools/rules_oracle/ares_side_sidebar.py`):
 - The fourth side's sidebar geometry uses the existing nonzero (Soviet)
   layout while its files come from `Sidebar.MixFileIndex` /
   `Sidebar.YuriFileNames`. Ares does not add a fourth geometry family.
+- A side without a retained sidebar configuration (a game Ares plays in by its
+  keys alone, read the stock way) draws the three stock sidebars instead of
+  stopping the match load (`build_sidebar_chrome_set`).

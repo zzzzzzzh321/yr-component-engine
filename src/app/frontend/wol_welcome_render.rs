@@ -127,6 +127,7 @@ pub(crate) fn presented_wol_page(state: &AppState) -> PresentedShell {
         Some(WolPage::Lobby) => PresentedShell::WolLobby,
         Some(WolPage::Options(page)) if page.sound.is_some() => PresentedShell::WolSoundOptions,
         Some(WolPage::Options(_)) => PresentedShell::WolOptions,
+        Some(WolPage::ChatTranslation(_)) => PresentedShell::WolChatTranslation,
         Some(WolPage::AutoLoginQuery(_)) => PresentedShell::WolAutoLoginQuery,
         Some(WolPage::Locale(_)) => PresentedShell::WolLocale,
         Some(WolPage::MyInformation(_)) => PresentedShell::WolMyInformation,
@@ -162,6 +163,7 @@ enum Painted {
     Lobby(crate::ui::wol_lobby::WolLobbyLayout),
     Options(crate::ui::wol_options::WolOptionsLayout),
     SoundOptions(crate::ui::shell::sound::ShellSoundLayout),
+    ChatTranslation(crate::ui::wol_chat_translation::WolChatTranslationLayout),
     /// `0x112` or `0xFE`.
     Persona(crate::ui::wol_persona::WolPersonaLayout),
     /// `0x114`.
@@ -182,6 +184,7 @@ impl Painted {
             Self::Lobby(_) => Some(ShellSlideKind::WolLobby),
             Self::Options(_) => Some(ShellSlideKind::WolOptions),
             Self::SoundOptions(_) => Some(ShellSlideKind::WolSoundOptions),
+            Self::ChatTranslation(_) => Some(ShellSlideKind::WolChatTranslation),
             Self::Persona(layout) if layout.dialog == crate::ui::wol_persona::LOCALE_DIALOG => {
                 Some(ShellSlideKind::WolLocale)
             }
@@ -203,6 +206,7 @@ impl Painted {
             Self::Lobby(_) => Some(WOL_LOBBY_TITLE_KEY),
             Self::Options(_) => Some(crate::ui::wol_options::PAGE.title_key),
             Self::SoundOptions(_) => Some(crate::ui::shell::sound::SHELL_SOUND_PAGE.title_key),
+            Self::ChatTranslation(_) => Some(crate::ui::wol_chat_translation::PAGE.title_key),
             // 0x122 has no heading.
             Self::Persona(layout) => {
                 Some(crate::ui::wol_persona::WolPersonaLayout::spec(layout.dialog).title_key)
@@ -268,6 +272,10 @@ pub(crate) fn render_wol_page(
                 Painted::Options(crate::app::shell_wol::options::layout(state))
             }
         }
+        WolPage::ChatTranslation(_) => {
+            crate::app::shell_wol::options::open_art(state);
+            Painted::ChatTranslation(crate::app::shell_wol::chat_translation::layout(state))
+        }
         WolPage::AutoLoginQuery(_) | WolPage::Locale(_) | WolPage::AddBuddyQuery(_) => {
             if matches!(
                 state.frontend.wol.as_ref().map(|visit| &visit.page),
@@ -300,6 +308,7 @@ pub(crate) fn render_wol_page(
         Painted::Lobby(layout) => &layout.page,
         Painted::Options(layout) => &layout.page,
         Painted::SoundOptions(layout) => &layout.page,
+        Painted::ChatTranslation(layout) => &layout.page,
         Painted::Persona(layout) => &layout.page,
         Painted::MyInfo(layout) => &layout.page,
         Painted::Buddy(layout) => &layout.page,
@@ -357,6 +366,10 @@ pub(crate) fn render_wol_page(
                 layout.status_help,
             ),
             Painted::SoundOptions(layout) => (None, layout.status_help),
+            Painted::ChatTranslation(layout) => (
+                crate::app::shell_wol::chat_translation::status_key(state),
+                layout.status_help,
+            ),
             Painted::MyInfo(layout) => (
                 crate::app::shell_wol::my_info::status_key(state),
                 layout.status_help,
@@ -410,7 +423,9 @@ pub(crate) fn render_wol_page(
         Painted::Welcome(_) => state.frontend.wol_welcome_art.as_ref(),
         Painted::Login(_) => state.frontend.wol_login_art.as_ref(),
         Painted::Lobby(_) => state.frontend.wol_lobby_art.as_ref(),
-        Painted::Options(_) => state.frontend.wol_options_art.as_ref(),
+        Painted::Options(_) | Painted::ChatTranslation(_) => {
+            state.frontend.wol_options_art.as_ref()
+        }
         Painted::SoundOptions(_) => state.frontend.wol_sound_options_art.as_ref(),
         Painted::Persona(layout) if layout.dialog == crate::ui::wol_persona::AUTO_LOGIN_DIALOG => {
             state.frontend.wol_auto_login_art.as_ref()
@@ -482,6 +497,9 @@ pub(crate) fn render_wol_page(
         for (text, rect) in &layout.texts {
             let caption = match filled.iter().find(|(id, _)| Some(*id) == text.id) {
                 Some((_, value)) => value.as_str().into(),
+                // An empty template caption is no label: the persona heading
+                // stays blank without a nickname.
+                None if text.key.is_empty() => continue,
                 None => resolve_csf(state, text.key),
             };
             if caption.is_empty() {
@@ -531,6 +549,16 @@ pub(crate) fn render_wol_page(
         (Painted::MyInfo(layout), true) => {
             crate::app::shell_wol::my_info::page(state).map(|page| {
                 crate::app::frontend::skirmish_shell_render::paint_wol_my_info_children(
+                    state, page, layout,
+                )
+            })
+        }
+        _ => None,
+    };
+    let chat_translation_children = match (&painted, children) {
+        (Painted::ChatTranslation(layout), true) => {
+            crate::app::shell_wol::chat_translation::page(state).map(|page| {
+                crate::app::frontend::skirmish_shell_render::paint_wol_chat_translation_children(
                     state, page, layout,
                 )
             })
@@ -635,14 +663,20 @@ pub(crate) fn render_wol_page(
     let player_card = match (&painted, children) {
         (Painted::Lobby(layout), true) => {
             crate::app::shell_wol::player_card::view(state).map(|view| {
+                let scale = layout.page.scale;
                 (
                     view.layout.dialog,
                     crate::app::frontend::skirmish_shell_render::paint_wol_player_card(
-                        state,
-                        &view,
-                        art,
-                        layout.page.scale,
+                        state, &view, art, scale,
                     ),
+                    view.countries.as_ref().map(|list| {
+                        (
+                            list.popup.rect,
+                            crate::app::frontend::skirmish_shell_render::paint_wol_card_countries(
+                                state, list, scale,
+                            ),
+                        )
+                    }),
                 )
             })
         }
@@ -737,6 +771,18 @@ pub(crate) fn render_wol_page(
                     .buttons
                     .iter()
                     .map(|button| (*button, page.ui.buttons.is_pressed(button.id), true))
+                    .collect();
+            }
+            None
+        }
+        (Painted::ChatTranslation(layout), None) => {
+            spec = Some(&crate::ui::wol_chat_translation::PAGE);
+            if let Some(page) = crate::app::shell_wol::chat_translation::page(state) {
+                painted_buttons = layout
+                    .page
+                    .buttons
+                    .iter()
+                    .map(|button| (*button, page.buttons.is_pressed(button.id), true))
                     .collect();
             }
             None
@@ -899,7 +945,7 @@ pub(crate) fn render_wol_page(
         labels.push(PaintLabel {
             text,
             rect: owner_draw_button_label_rect(button.rect, *pressed),
-            align: ShellAlign(ShellAlign::H_CENTER.0 | ShellAlign::V_CENTER.0),
+            align: ShellAlign::BUTTON_CAPTION,
             rgb: crate::app::frontend::skirmish_shell_render::wol_button_label_rgb(*enabled),
             path_a_reveal: None,
         });
@@ -908,7 +954,7 @@ pub(crate) fn render_wol_page(
         labels.push(PaintLabel {
             text: resolve_csf(state, key),
             rect: page.title,
-            align: ShellAlign::H_CENTER,
+            align: ShellAlign::PANEL_TITLE,
             rgb: SHELL_TEXT_RGB_ENABLED,
             path_a_reveal: Some(shell_reveal_path_a(window)),
         });
@@ -1043,6 +1089,24 @@ pub(crate) fn render_wol_page(
         text.extend(my_info.texts);
         text.extend(my_info.popup_texts);
     }
+    if let (Some(atlas), Some(mut page)) = (controls_atlas, chat_translation_children) {
+        draws.push(TexturedDraw {
+            texture: &atlas.texture,
+            instances: page.controls,
+        });
+        draws.push(TexturedDraw {
+            texture: &atlas.texture,
+            instances: page.popup,
+        });
+        if let Painted::ChatTranslation(layout) = &painted
+            && let Some(list) = crate::app::shell_wol::chat_translation::page(state)
+                .and_then(|open| open.popup_geometry(layout))
+        {
+            hide_glyphs_under(&mut page.texts, list.rect);
+        }
+        text.extend(page.texts);
+        text.extend(page.popup_texts);
+    }
     if let (Some(atlas), Some(options)) = (controls_atlas, options_children) {
         draws.push(TexturedDraw {
             texture: &atlas.texture,
@@ -1113,7 +1177,7 @@ pub(crate) fn render_wol_page(
         });
         text.extend(popup.texts);
     }
-    if let (Some(atlas), Some((dialog, card))) = (controls_atlas, player_card) {
+    if let (Some(atlas), Some((dialog, card, countries))) = (controls_atlas, player_card) {
         hide_glyphs_under(&mut text, dialog);
         draws.push(TexturedDraw {
             texture: &atlas.texture,
@@ -1126,6 +1190,14 @@ pub(crate) fn render_wol_page(
             });
         }
         text.extend(card.texts);
+        if let Some((list, countries)) = countries {
+            hide_glyphs_under(&mut text, list);
+            draws.push(TexturedDraw {
+                texture: &atlas.texture,
+                instances: countries.controls,
+            });
+            text.extend(countries.texts);
+        }
     }
     // 0xCF and 0x11E leave the page painting beneath them, over the lobby,
     // the buddy list or any other page.
@@ -1153,6 +1225,7 @@ pub(crate) fn render_wol_page(
             text: &text,
             cursor: software_cursor(state, CURSOR_DEPTH),
             effects: None,
+            smooth_art: state.smooth_online_menus(),
         },
     );
     state.platform.window.request_redraw();

@@ -189,7 +189,7 @@ pub(crate) struct StartupFiles {
 pub(crate) enum StartupProblem {
     /// config.toml could not be read or parsed.
     ConfigFile,
-    /// The settings folder, VERA.INI or VERARULES.INI could not be prepared;
+    /// The settings folder or VERA.INI could not be prepared;
     /// the folder, when it is known.
     Settings(Option<std::path::PathBuf>),
 }
@@ -214,9 +214,9 @@ fn startup_asset_or_error<T>(result: Result<T>, error: &mut Option<String>) -> O
     match result {
         Ok(asset) => Some(asset),
         Err(err) => {
-            // The log keeps the raw chain, which carries the host's localized
-            // OS text; the card gets an English description instead, because
-            // its in-repo face cannot draw a localised sentence.
+            // The log keeps the raw chain, with the host's own OS text; the
+            // card describes the failure in the language in use, which need
+            // not be the host's.
             log::warn!("{err:#}");
             error.get_or_insert_with(|| describe_startup_error(&err));
             None
@@ -224,12 +224,11 @@ fn startup_asset_or_error<T>(result: Result<T>, error: &mut Option<String>) -> O
     }
 }
 
-/// English description of a startup failure, for the error card.
+/// A startup failure in the language in use, for the error card.
 ///
-/// `std::io::Error`'s own message is localized by the host, so on a Chinese
-/// Windows the raw chain reads a localized sentence and the card could only
-/// draw boxes. This walks the `anyhow` chain and states each link in English:
-/// our own context strings already are, and I/O kinds are mapped here.
+/// `std::io::Error`'s own message is in the host's language, which need not
+/// be the player's. This walks the `anyhow` chain and states each I/O link
+/// from the language files, as our own context strings already are.
 fn describe_startup_error(err: &anyhow::Error) -> String {
     use crate::assets::error::AssetError;
 
@@ -254,23 +253,24 @@ fn describe_startup_error(err: &anyhow::Error) -> String {
     parts.join(": ")
 }
 
-/// One I/O failure in English, with the numeric code kept for the log search.
+/// One I/O failure in the language in use, with the numeric code kept for
+/// the log search.
 fn describe_io_error(err: &std::io::Error) -> String {
     use std::io::ErrorKind;
 
-    let text = match err.kind() {
-        ErrorKind::NotFound => "the file or path does not exist",
-        ErrorKind::PermissionDenied => "access was denied",
-        ErrorKind::AlreadyExists => "the target already exists",
-        ErrorKind::InvalidData => "the file is not a valid game archive",
-        ErrorKind::InvalidInput => "the file name or data is invalid",
-        ErrorKind::UnexpectedEof => "the file is truncated",
-        ErrorKind::WouldBlock => "the file is in use by another program",
-        _ => "the file could not be read",
-    };
+    let text = crate::i18n::tr(match err.kind() {
+        ErrorKind::NotFound => "VERA:IoNotFound",
+        ErrorKind::PermissionDenied => "VERA:IoPermissionDenied",
+        ErrorKind::AlreadyExists => "VERA:IoAlreadyExists",
+        ErrorKind::InvalidData => "VERA:IoInvalidData",
+        ErrorKind::InvalidInput => "VERA:IoInvalidInput",
+        ErrorKind::UnexpectedEof => "VERA:IoTruncated",
+        ErrorKind::WouldBlock => "VERA:IoInUse",
+        _ => "VERA:IoUnreadable",
+    });
     match err.raw_os_error() {
-        Some(code) => format!("{text} (os error {code})"),
-        None => text.to_owned(),
+        Some(code) => crate::i18n::tr_fill("VERA:IoOsError", &[("text", &text), ("code", &code)]),
+        None => text,
     }
 }
 
@@ -343,6 +343,7 @@ impl App {
         replay_retail_directory: Option<&Path>,
         // A `-SPAWN` test run's opt-in invisible window (tools/spawn/README.md).
         hidden_spawn_window: bool,
+        mod_switch: Option<&crate::app::mods::ModSwitch>,
     ) -> Result<InitializationStep> {
         // One parsed retail profile snapshot yields two ordered products: the
         // independent frontend size selected after the early Video read, and the later
@@ -360,26 +361,16 @@ impl App {
             .inspect_err(|error| startup_problem = Some(StartupProblem::of_config_load(error)))
             .and_then(|config| {
                 if capture_dimensions.is_none() {
-                    let prepared = (|| -> Result<crate::rules::personal_rules::PersonalRules> {
-                        crate::app::persistence::profile_file::import_legacy(&config.paths)
-                            .map_err(|error| {
-                                anyhow::Error::new(error).context("Could not prepare VERA.INI")
-                            })?;
-                        let bytes = crate::app::persistence::rules_profile::load_or_create(
-                            config.paths.settings_dir(),
-                        )
-                        .context("Could not prepare VERARULES.INI")?;
-                        crate::rules::personal_rules::PersonalRules::from_bytes(&bytes)
-                            .context("Could not read VERARULES.INI")
-                    })();
-                    match prepared {
-                        Ok(rules) => personal_rules = rules,
-                        Err(error) => {
-                            startup_problem = Some(StartupProblem::Settings(Some(
-                                config.paths.settings_dir().to_owned(),
-                            )));
-                            return Err(error);
-                        }
+                    let imported =
+                        crate::app::persistence::profile_file::import_legacy(&config.paths);
+                    if let Err(error) = imported {
+                        startup_problem = Some(StartupProblem::Settings(Some(
+                            config.paths.settings_dir().to_owned(),
+                        )));
+                        return Err(anyhow::Error::new(error).context(crate::i18n::tr_fill(
+                            "VERA:CannotPrepareFile",
+                            &[("file", &"VERA.INI")],
+                        )));
                     }
                 }
                 Ok(config)
@@ -400,17 +391,41 @@ impl App {
                 .map(|config| config.paths.settings_dir()),
             RetailOptionsLoad::from_settings,
         );
-        let profile_screen = options_load.startup_shell_screen;
-        let mut options_profile = options_load.retained_profile;
+        let profile_screen = crate::app::persistence::options_profile::player_launch_window_size(
+            options_load.startup_shell_screen,
+        );
+        let options_profile = options_load.retained_profile;
+        personal_rules.set_terrain_deformation(options_profile.terrain_deformation);
+        personal_rules.set_superweapon_limit(i32::from(options_profile.superweapon_limit));
         // Before the first CSF load below, which layers this language over it.
-        crate::i18n::select_language(&options_profile.language);
-        options_profile.render_interpolation =
-            crate::app::presentation::interpolation::startup_enabled(
-                options_profile.render_interpolation,
-                std::env::var("VERA20K_RENDER_INTERPOLATION")
-                    .ok()
-                    .as_deref(),
-            );
+        crate::i18n::init(
+            game_config
+                .as_ref()
+                .map(|config| config.paths.settings_dir()),
+            options_profile.language.as_deref(),
+        );
+        // The Developer page's String Keys box arms Ctrl+Alt+K; a saved choice
+        // still opens on the texts until the hotkey asks for keys.
+        crate::i18n::set_show_string_keys(options_profile.show_string_keys);
+        // After the language is known: a mod that cannot be used is refused
+        // in it. A sealed capture takes no mod from config.toml, as it takes
+        // no VERA.INI.
+        let mut mods = game_config
+            .as_ref()
+            .map(|config| {
+                crate::app::mods::begin(&config.paths, mod_switch, capture_dimensions.is_some())
+            })
+            .unwrap_or_default();
+        // VERARULES.INI is no longer read: a file that still holds settings
+        // is named once the main menu is up, in the language just chosen.
+        if capture_dimensions.is_none()
+            && let Some(config) = &game_config
+            && let Some(text) =
+                crate::app::persistence::rules_profile::retire(config.paths.settings_dir())
+        {
+            mods.add_rules_file_notice(text);
+        }
+        crate::map::source::set_mod_dir(mods.dir().map(std::path::Path::to_owned));
         let (window_width, window_height, window_visible) =
             startup_window_projection(profile_screen, capture_dimensions, external_launch);
         let window_visible = window_visible && !hidden_spawn_window;
@@ -422,12 +437,12 @@ impl App {
         // and the match zoom follows it. A sealed capture keeps its exact,
         // fixed, hidden physical surface.
         let capture = capture_dimensions.is_some();
-        // A player window reopens at the size it was last left at.
-        let placement = options_profile.window_placement.filter(|_| !capture);
+        // A player window opens at that size on every launch, however large it
+        // was left, as gamemd's shell does (`WinMain` 006BD9B5,
+        // `RetailOptionsLoad`); VERA opens it at 1024x768 where gamemd's shell
+        // is 800x600 (`player_launch_window_size`).
         let inner_size: winit::dpi::Size = if capture {
             PhysicalSize::new(window_width, window_height).into()
-        } else if let Some(placement) = placement {
-            winit::dpi::LogicalSize::new(placement.width, placement.height).into()
         } else {
             winit::dpi::LogicalSize::new(window_width, window_height).into()
         };
@@ -442,7 +457,6 @@ impl App {
         } else {
             crate::app::display_target::current_displays_for(event_loop)
         };
-        let wanted_display = super::display_target::screen_for(&displays, &options_profile.display);
         let fullscreen = (!capture && !hidden_spawn_window && options_profile.full_screen)
             .then(|| super::display_target::fullscreen_for(&displays, &options_profile.display));
         // A hidden run's window has a title of its own, so a second launch's
@@ -457,10 +471,6 @@ impl App {
             .with_inner_size(inner_size)
             .with_resizable(!capture)
             .with_fullscreen(fullscreen)
-            // A player window reopens maximised when it was left so.
-            .with_maximized(
-                window_visible && !options_profile.full_screen && options_profile.window_maximized,
-            )
             .with_visible(window_visible)
             .with_active(!capture && !hidden_spawn_window);
         if !capture {
@@ -498,37 +508,21 @@ impl App {
         if let Some(icon) = &window_icon {
             window_attrs = icon.apply(window_attrs);
         }
+        // Android's launcher icon is a compiled resource, so the same choice is
+        // applied through the two activity aliases instead.
+        #[cfg(target_os = "android")]
+        crate::util::app_icon::apply(options_profile.vera_icon);
         #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
         {
             use winit::platform::web::WindowAttributesExtWebSys;
             window_attrs = window_attrs.with_canvas(Some(crate::web::canvas()));
         }
         let window: Arc<Window> = Arc::new(event_loop.create_window(window_attrs)?);
-        // A windowed launch opens where the player last left the window, while
-        // that spot still shows its title bar on the chosen screen (any screen
-        // when none is chosen); otherwise it opens centred on the chosen
-        // screen. Full screen already covers it from the attributes above.
-        if !options_profile.full_screen {
-            let saved_corner = placement
-                .map(|placement| winit::dpi::PhysicalPosition::new(placement.x, placement.y))
-                .filter(|corner| {
-                    let screens = displays
-                        .iter()
-                        .map(|display| &display.handle)
-                        .filter(|screen| match &wanted_display {
-                            Some(wanted) => wanted == *screen,
-                            None => true,
-                        })
-                        .map(|screen| (screen.position(), screen.size()));
-                    super::display_target::title_bar_on_a_screen(*corner, screens)
-                });
-            if let Some(corner) = saved_corner {
-                window.set_outer_position(corner);
-            } else if let Some(monitor) = wanted_display.as_ref() {
-                window.set_outer_position(super::display_target::centered_outer_position(
-                    &window, monitor,
-                ));
-            }
+        // A windowed launch opens in the middle of the chosen screen, or of the
+        // one the system picked when none is chosen. Full screen already covers
+        // it from the attributes above.
+        if !capture && !options_profile.full_screen {
+            super::display_target::center_at_launch(&window, &displays, &options_profile.display);
         }
         // gamemd's WinMain builds WWMouse (`0x006BDF1C`), whose constructor hides
         // the cursor, before the startup splash; from the first frame after it,
@@ -556,6 +550,7 @@ impl App {
             let source = game_config
                 .as_ref()
                 .map(|config| (config.paths.ra2_dir.clone(), config.ini.clone()));
+            let mod_dir = mods.dir().map(Path::to_path_buf);
             let media = startup_options.media_archive_mode;
             InitializationStep::pending_cpu(
                 window.clone(),
@@ -563,9 +558,13 @@ impl App {
                 "startup-archives",
                 move || {
                     source.map(|(root, ini)| {
-                        crate::mod_sdk::open_active_assets(&root, media)
-                            .and_then(|assets| assets.with_ini_roots(&ini))
-                            .context("Could not load the game archives")
+                        crate::mod_sdk::open_active_assets_with_mod(
+                            &root,
+                            mod_dir.as_deref(),
+                            media,
+                        )
+                        .and_then(|assets| assets.with_ini_roots(&ini))
+                        .with_context(|| crate::i18n::tr("VERA:CannotLoadArchives"))
                     })
                 },
                 move |startup_assets| {
@@ -576,10 +575,12 @@ impl App {
                         main_menu_shell_error,
                         startup_files,
                         personal_rules,
+                        mods,
                         options_profile,
                         startup_options,
                         startup_audio,
                         capture_dimensions,
+                        profile_screen,
                         external_launch,
                         quickplay_allowed,
                         startup_assets,
@@ -604,10 +605,12 @@ impl App {
         mut main_menu_shell_error: Option<String>,
         startup_files: StartupFiles,
         personal_rules: crate::rules::personal_rules::PersonalRules,
+        mods: crate::app::mods::Mods,
         options_profile: RetailOptionsProfile,
         startup_options: RetailStartupOptions,
         startup_audio: StartupAudioDisposition,
         capture_dimensions: Option<(u32, u32)>,
+        launch_window_size: ScreenSize,
         external_launch: bool,
         quickplay_allowed: bool,
         startup_assets: Option<Result<crate::assets::asset_manager::AssetManager>>,
@@ -623,10 +626,15 @@ impl App {
             &batch_renderer,
         );
         terrain_draw_renderer.generate_ion_blast_frames(&gpu.device, &gpu.queue);
+        terrain_draw_renderer.set_gpu_timer(gpu.timer.clone());
         let combat_light_renderer = crate::render::combat_light::CombatLightRenderer::new(&gpu);
-        let mut bit_font = BitFont::fallback_5x7(&gpu.device, &gpu.queue, &batch_renderer);
-        let fps_overlay =
-            crate::app::diagnostics::fps_overlay::FpsOverlay::new(&gpu, &batch_renderer);
+        let performance_overlay =
+            crate::app::diagnostics::performance_overlay::PerformanceOverlay::new(
+                &gpu,
+                &batch_renderer,
+            );
+        let window_ui =
+            crate::app::presentation::window_ui::WindowUi::new(&gpu.device, &batch_renderer);
         let depth_view: wgpu::TextureView = gpu.create_depth_texture();
         let shell_surface_presenter =
             crate::render::shell_surface_present::ShellSurfacePresenter::new(&gpu)?;
@@ -670,9 +678,11 @@ impl App {
                     .ok()
             })
         });
-        if let Some(fnt) = startup_fnt.as_ref() {
-            bit_font = BitFont::from_fnt(&gpu.device, &gpu.queue, &batch_renderer, fnt);
-        }
+        let mut bit_font = match startup_fnt.as_ref() {
+            Some(fnt) => BitFont::from_fnt(&gpu.device, &gpu.queue, &batch_renderer, fnt),
+            None => BitFont::without_fnt(&gpu.device, &gpu.queue, &batch_renderer),
+        };
+        bit_font.set_locale(&crate::i18n::selected_language());
         let outcome_banner_art = startup_asset_manager.as_ref().and_then(|assets| {
             crate::app::presentation::outcome_banner::OutcomeBannerArt::build(
                 &gpu,
@@ -691,23 +701,20 @@ impl App {
         // The load then runs behind the black frame presented below.
         let play_startup = process_movies && !options_profile.skip_intro;
         let mut startup_splash = if play_startup {
-            startup_asset_manager
-                .as_ref()
-                .zip(startup_fnt.as_ref())
-                .and_then(|(assets, fnt)| {
-                    startup_splash::StartupSplashPresentation::build(
-                        &gpu,
-                        &batch_renderer,
-                        assets,
-                        startup_csf.as_ref(),
-                        fnt,
-                        gpu.config.width,
-                        gpu.config.height,
-                        options_profile.yr_original_style,
-                    )
-                    .map_err(|err| log::warn!("Could not build retail startup splash: {err:#}"))
-                    .ok()
-                })
+            startup_asset_manager.as_ref().and_then(|assets| {
+                startup_splash::StartupSplashPresentation::build(
+                    &gpu,
+                    &batch_renderer,
+                    assets,
+                    startup_csf.as_ref(),
+                    &bit_font,
+                    gpu.config.width,
+                    gpu.config.height,
+                    options_profile.yr_original_style,
+                )
+                .map_err(|err| log::warn!("Could not build retail startup splash: {err:#}"))
+                .ok()
+            })
         } else {
             None
         };
@@ -719,13 +726,20 @@ impl App {
             // Without it the splash goes up now and the load is spent inside
             // its hold. A present that did not reach the screen stays unarmed
             // for the frame loop to retry.
+            // No AppState exists yet, so publish the persisted mode here:
+            // the first splash must present through the same filter as the
+            // frame loop that follows.
+            gpu.set_color_vision_matrix(crate::app::state::color_vision_matrix_for(
+                options_profile.color_vision,
+            ));
             let splash = startup_splash.as_mut().filter(|_| !play_startup);
             match startup_splash::render_and_present(
                 &gpu,
                 &batch_renderer,
                 &shell_surface_presenter,
                 &depth_view,
-                &fps_overlay,
+                &performance_overlay,
+                &bit_font,
                 splash.as_deref(),
             ) {
                 Ok(true) => {
@@ -747,6 +761,7 @@ impl App {
             .map(|config| config.ini.clone())
             .unwrap_or_default();
         let direct_launch = external_launch && capture_dimensions.is_none();
+        let mod_dir = mods.dir().map(Path::to_path_buf);
         InitializationStep::pending_cpu(
             window.clone(),
             capture_dimensions.is_some(),
@@ -760,7 +775,8 @@ impl App {
                         load_audio_indices,
                         ini_config,
                     )
-                    .with_personal_rules(personal_rules);
+                    .with_personal_rules(personal_rules)
+                    .with_mod_dir(mod_dir);
                 process_assets.csf = startup_csf;
                 let (startup_rules, startup_rules_projection) = startup_asset_manager
                     .as_ref()
@@ -1048,320 +1064,353 @@ impl App {
                             )
                         });
                     let mut state = AppState {
-            platform: PlatformState::new(
-                window,
-                game_config,
-                capture_dimensions.map(|(w, h)| PhysicalSize::new(w, h)),
-            ),
-            match_state: crate::app::match_runtime::state::MatchState {
-                campaign_names: Default::default(),
-                session: Default::default(),
-                network_wait: Default::default(),
-                network_failure: None,
-                frame_stopped: false,
-                live_network: None,
-                lan_service: None,
-                startup: Default::default(),
-                sim_runtime: None,
-                input: crate::app::input::state::MatchInputState::new(hotkey_bindings),
-                match_presentation: crate::app::presentation::state::MatchPresentationState {
-                    interpolation:
-                        crate::app::presentation::interpolation::RenderInterpolation::new(
-                            options_profile.render_interpolation,
+                        platform: PlatformState::new(
+                            window,
+                            game_config,
+                            capture_dimensions.map(|(w, h)| PhysicalSize::new(w, h)),
+                            launch_window_size,
                         ),
-                    sinking_waterlines: Default::default(),
-                    voxel_images: Default::default(),
-                    building_zshape: None,
-                    power_bar_anim: crate::ui::sidebar::PowerBarAnimState::new(),
-                    sidebar_gadget_state: crate::ui::sidebar::gadget_flash::SidebarGadgetState::new(
-                    ),
-                    in_game_gadgets: crate::app::input::gadget_input::InGameGadgets::new(),
-                    sidebar_projection: Default::default(),
-                    active_sidebar_tab: SidebarTab::default_active_tab(),
-                    sidebar_layout_spec,
-                    tooltips: startup_tooltips,
-                    tooltip_epoch: Instant::now(),
-                    message_list: crate::ui::messages::MessageList::new(
-                        3,
-                        0,
-                        crate::ui::messages::MESSAGE_MAX_VISIBLE_RETAIL,
-                        0,
-                    ),
-                    chat: Default::default(),
-                    beacons: Default::default(),
-                    in_game_menu: crate::ui::pause_menu::InGameMenuState::default(),
-                    modal_latch: true,
-                    pause_menu_has_saves: false,
-                    pause_menu_interaction: Default::default(),
-                    pause_menu_template: Default::default(),
-                    internet_pause: Default::default(),
-                    display_pause: Default::default(),
-                    abort_secondary: Default::default(),
-                    sound_dialog: None,
-                    abort_buttons: Default::default(),
-                    surrender_buttons: Default::default(),
-                    diplomacy: Default::default(),
-                    restate: Default::default(),
-                    restate_text: String::new(),
-                    saved_game_browser: None,
-                    in_game_options: startup_in_game_options,
-                    in_game_options_anchor: None,
-                    combat_lights: Default::default(),
-                    screen_shake: Default::default(),
-                    line_trails: Default::default(),
-                    lasers: Default::default(),
-                    #[cfg(feature = "ares")]
-                    flying_credits: Default::default(),
-                    talk_bubble: Default::default(),
-                    electric_bolts: Default::default(),
-                    radiation_beams: Default::default(),
-                    tactical_composite: Default::default(),
-                    airstrike_shades: Default::default(),
-                    placement_range_pulse: Default::default(),
-                    superweapon_range_pulse: Default::default(),
-                    detail: Default::default(),
-                    hidden_super_anims: Default::default(),
-                    super_timer_blinks: Default::default(),
-                    super_timer_next_flip_ms: None,
-                    super_timer_dock: Default::default(),
-                    minimap: None,
-                    radar_anim: None,
-                    radar_movies: Default::default(),
-                    commander_feedback: Default::default(),
-                    chrono_screen: Default::default(),
-                    scenario_pause: Default::default(),
-                    radar_animation_source: None,
-                    radar_content_insets: None,
-                    has_radar: false,
-                    selection_overlay: None,
-                    #[cfg(feature = "phobos")]
-                    digital_display_enabled: phobos_client.digital_display_enabled,
-                    #[cfg(feature = "phobos")]
-                    show_placement_preview: phobos_client.show_placement_preview,
-                    #[cfg(feature = "phobos")]
-                    show_flash_on_selecting: phobos_client.show_flash_on_selecting,
-                    #[cfg(feature = "phobos")]
-                    center_pause_menu_background: false,
-                    #[cfg(feature = "phobos")]
-                    show_power_plant_enhancer_range: phobos_client
-                        .show_power_plant_enhancer_range,
-                    #[cfg(feature = "phobos")]
-                    placement_preview_art: Default::default(),
-                    #[cfg(feature = "phobos")]
-                    sw_sidebar: crate::app::presentation::sw_sidebar::SwSidebarState {
-                        required_significance: phobos_client
-                            .superweapon_sidebar_required_significance,
-                        ..Default::default()
-                    },
-                    #[cfg(feature = "phobos")]
-                    sw_sidebar_art: None,
-                    beacon_art: None,
-                    shroud_buffer: None,
-                    theater_name: "TEMPERATE".to_string(),
-                    theater_ext: "tem".to_string(),
-                    target_lines: startup_target_lines,
-                    cached_cell_body_instances: Vec::new(),
-                    terrain_grid: None,
-                    overlays: Default::default(),
-                    terrain_objects: Vec::new(),
-                    overlay_names: BTreeMap::new(),
-                    overlay_radar_colors: HashMap::new(),
-                    house_color_map: HashMap::new(),
-                    house_roster: HouseRoster::default(),
-                    lighting: Default::default(),
-                    tile_atlas: None,
-                    unit_atlas: None,
-                    palette_set: None,
-                    sprite_atlas: None,
-                    atlas_growth: Default::default(),
-                    overlay_atlas: None,
-                    bridge_atlas: None,
-                    sidebar_cameo_atlas: None,
-                    sidebar_chrome: None,
-                    outcome_banner_side_art: None,
-                    end_game_banner: None,
-                    software_cursor: startup_software_cursor,
-                },
-                match_audio: Default::default(),
-                match_diagnostics: Default::default(),
-                network_quality: Default::default(),
-                #[cfg(feature = "telemetry-dashboard")]
-                telemetry_timing: Default::default(),
-                #[cfg(feature = "telemetry-dashboard")]
-                telemetry_history: Default::default(),
-                #[cfg(feature = "telemetry-dashboard")]
-                report_history: Default::default(),
-                #[cfg(feature = "telemetry-dashboard")]
-                telemetry_tick_rate: Default::default(),
-                map_basic: BasicSection::default(),
-                map_ranking: crate::map::ranking::RankingSection::default(),
-                loaded_map_source: None,
-                loaded_map_hash: None,
-                scenario_outcome: None,
-                scenario_exit: None,
-                scenario_restart_requested: false,
-                scenario_elapsed_clock:
-                    crate::app::match_runtime::frame_pacer::ScenarioElapsedClock::new(),
-                configured_input_delay_ticks: input_delay_ticks,
-                sandbox_full_visibility: false,
-                debug_pause: false,
-                // KD-3: unify the two game-speed sources. `in_game_options.game_speed`
-                // (in the presentation owner) is the single source of truth; seed it
-                // from the skirmish-setup speed (internal 1) and derive
-                // `sim_speed_tps` from the same value, so the Options slider
-                // reflects the current pace (GS1 -> 63 tps).
-                sim_speed_tps: crate::app::types::tps_for_game_speed(
-                    crate::app::types::DEFAULT_YR_SKIRMISH_GAME_SPEED,
-                ),
-            },
-            frontend: crate::app::frontend::state::FrontendState {
-                shell_dialog_background: None,
-                campaign_speed_control: startup_options.campaign_speed_control,
-                external_launch: false,
-                external_launch_error: None,
-                match_result: None,
-                match_winners: None,
-                external_progress: Default::default(),
-                network_goodbye_deadline: None,
-                #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
-                browser_exit_pending: false,
-                screen: GameScreen::default(),
-                scenario_catalog,
-                skirmish_modes,
-                loading_session: None,
-                frontend_main_rng: crate::sim::rng::MainRng::new(u64::from(frontend_seed.value)),
-                startup_rng_seed: frontend_seed.value,
-                legacy_crt_rng: crate::util::legacy_crt_rng::LegacyCrtRng::default(),
-                next_match_correlation: 1,
-                random_map_generation: None,
-                random_map_retention: RandomMapGenerationRetention::default(),
-                skirmish_preview_texture: None,
-                preview_zoom: None,
-                loading_screen_atlas: None,
-                loading_progress:
-                    crate::app::loading::pump::LoadingProgressState::standard_skirmish(),
-                frontend_rules: startup_rules,
-                shell_preview_overlay_registry: None,
-                map_library: Default::default(),
-                login_info: Default::default(),
-                map_pictures: Default::default(),
-                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-                updater: Default::default(),
-                skirmish_shell_state,
-                choose_map_last_mode_row: None,
-                multiplayer_shell_runtime,
-                skirmish_shell_chrome,
-                main_menu_shell_state: crate::ui::main_menu_shell::MainMenuShellState::default(),
-                single_player_shell_state:
-                    crate::ui::single_player_shell::SinglePlayerShellState::default(),
-                shell_controller: crate::ui::shell::controller::DialogController::default(),
-                main_menu_shell_chrome,
-                main_menu_movie: None,
-                main_menu_movie_identity: None,
-                main_menu_movie_last_step: Instant::now(),
-                main_menu_shell_error,
-                startup_files,
-                status_screen_drawn: false,
-                shell_first_paint_slide: None,
-                shell_slide_active_shell: None,
-                shell_slide_generation: 0,
-                shell_monitor: Default::default(),
-                shell_page_title: crate::ui::shell::static_reveal::PresentedKind1Static::new(
-                    crate::ui::shell::static_reveal::HEADING_KIND1,
-                ),
-                shell_status_line: crate::ui::shell::static_reveal::PresentedKind1Static::new(
-                    crate::ui::shell::static_reveal::STATUS_LINE_KIND1,
-                ),
-                shell_exit: None,
-                quit_cascade: None,
-                startup_splash,
-                startup_intro_pending: false,
-                shell_message_box: None,
-                options_dialog: None,
-                options_reopen_at: None,
-                keyboard_dialog: None,
-                movie_list: None,
-                movie_list_selection: -1,
-                fullscreen_movie: None,
-                credits_roll: None,
-                campaign: None,
-                campaign_art: None,
-                load_saved_game: None,
-                wol: None,
-                online_cleanup: Default::default(),
-                wol_account: Default::default(),
-                wol_test_credentials: Vec::new(),
-                native_shell_ui: false,
-                lan: None,
-                multiplayer_setup: None,
-                room_limits: Default::default(),
-                wol_room_name: None,
-                wol_room_unranked: false,
-                lan_rematch: None,
-                network_setup_protocol: None,
-                wol_welcome_art: None,
-                wol_login_art: None,
-                wol_lobby_art: None,
-                wol_options_art: None,
-                wol_auto_login_art: None,
-                wol_my_info_art: None,
-                wol_buddy_art: None,
-                wol_quick_match_art: None,
-                wol_buddies: Default::default(),
-                wol_test_buddies: crate::app::shell_wol::test_service_buddies(),
-                wol_test_guest: Default::default(),
-                wol_sound_options_art: None,
-                wol_lobby_globals: Default::default(),
-                wol_preferences: Default::default(),
-                score_page: None,
-                campaign_score_page: None,
-                coop_score_page: None,
-                score_art: None,
-                campaign_score_art: None,
-                finished_game_count: 0,
-                shell_route: Default::default(),
-            },
-            renderer: crate::app::renderer_state::RendererState {
-                gpu,
-                batch_renderer,
-                fps_overlay,
-                combat_light_renderer,
-                screen_presentation:
-                    crate::render::screen_presentation::ScreenPresentationPass::new(),
-                terrain_draw_renderer,
-                instance_pool: crate::render::batch::InstanceBufferPool::new(),
-                depth_view,
-                shell_surface_presenter,
-                upscale_pass: None,
-                world_zoom_pass: None,
-                sidebar_surface: None,
-                in_game_shell_surface: None,
-                status_screen_fill,
-                status_card_glow,
-                bit_font,
-                status_font: crate::render::status_font::StatusFaceCache::new(),
-                outcome_banner_art,
-                vxl_pose_frame_cache: std::cell::RefCell::new(Default::default()),
-                retail_screenshot_frame_cache: Default::default(),
-            },
-            process_assets,
-            audio: startup_audio_runtime,
-            persistence: crate::app::persistence::PersistenceState::new(options_profile),
-            diag: crate::app::diagnostics::state::DiagnosticsState::new(
-                match crate::sim::parity_digest::ParityDigestSink::from_env() {
-                    Ok(sink) => {
-                        if let Some(sink) = sink.as_ref() {
-                            log::info!("parity digest capture -> {}", sink.path().display());
-                        }
-                        sink
-                    }
-                    Err(error) => {
-                        log::error!("parity digest sink could not be opened: {error}");
-                        None
-                    }
-                },
-            ),
-        };
+                        match_state: crate::app::match_runtime::state::MatchState {
+                            campaign_names: Default::default(),
+                            session: Default::default(),
+                            network_wait: Default::default(),
+                            network_failure: None,
+                            frame_stopped: false,
+                            live_network: None,
+                            lan_service: None,
+                            startup: Default::default(),
+                            sim_runtime: Default::default(),
+                            input: crate::app::input::state::MatchInputState::new(hotkey_bindings),
+                            match_presentation:
+                                crate::app::presentation::state::MatchPresentationState {
+                                    sinking_waterlines: Default::default(),
+                                    voxel_images: Default::default(),
+                                    building_zshape: None,
+                                    power_bar_anim: crate::ui::sidebar::PowerBarAnimState::new(),
+                                    sidebar_gadget_state:
+                                        crate::ui::sidebar::gadget_flash::SidebarGadgetState::new(),
+                                    in_game_gadgets:
+                                        crate::app::input::gadget_input::InGameGadgets::new(),
+                                    sidebar_projection: Default::default(),
+                                    active_sidebar_tab: SidebarTab::default_active_tab(),
+                                    sidebar_layout_spec,
+                                    match_layouts: crate::ui::match_layout::MatchLayoutFile::none(),
+                                    mod_layout_ini: None,
+                                    player_layout_text: Vec::new(),
+                                    layout_edit: None,
+                                    added_parts: Default::default(),
+                                    added_grid_scroll: Vec::new(),
+                                    tooltips: startup_tooltips,
+                                    tooltip_epoch: Instant::now(),
+                                    // The Constructor `0x005D39D0` (from Session's static
+                                    // constructor `0x00697256`) leaves an empty list that
+                                    // nothing posts to before Read_Scenario's Init.
+                                    message_list: crate::ui::messages::MessageList::scenario(),
+                                    chat: Default::default(),
+                                    beacons: Default::default(),
+                                    in_game_menu: crate::ui::pause_menu::InGameMenuState::default(),
+                                    modal_latch: true,
+                                    pause_menu_has_saves: false,
+                                    pause_menu_interaction: Default::default(),
+                                    pause_menu_template: Default::default(),
+                                    internet_pause: Default::default(),
+                                    options_page: None,
+                                    options_page_category: None,
+                                    abort_secondary: Default::default(),
+                                    sound_dialog: None,
+                                    abort_buttons: Default::default(),
+                                    surrender_buttons: Default::default(),
+                                    diplomacy: Default::default(),
+                                    restate: Default::default(),
+                                    restate_text: String::new(),
+                                    saved_game_browser: None,
+                                    in_game_options: startup_in_game_options,
+                                    combat_lights: Default::default(),
+                                    screen_shake: Default::default(),
+                                    line_trails: Default::default(),
+                                    lasers: Default::default(),
+                                    #[cfg(feature = "ares")]
+                                    flying_credits: Default::default(),
+                                    talk_bubble: Default::default(),
+                                    electric_bolts: Default::default(),
+                                    radiation_beams: Default::default(),
+                                    tactical_composite: Default::default(),
+                                    airstrike_shades: Default::default(),
+                                    placement_range_pulse: Default::default(),
+                                    superweapon_range_pulse: Default::default(),
+                                    detail: Default::default(),
+                                    pixel_fx: Default::default(),
+                                    hidden_super_anims: Default::default(),
+                                    super_timer_blinks: Default::default(),
+                                    super_timer_next_flip_ms: None,
+                                    super_timer_dock: Default::default(),
+                                    minimap: None,
+                                    radar_anim: None,
+                                    radar_movies: Default::default(),
+                                    commander_feedback: Default::default(),
+                                    chrono_screen: Default::default(),
+                                    scenario_pause: Default::default(),
+                                    radar_animation_source: None,
+                                    radar_content_insets: None,
+                                    has_radar: false,
+                                    loaded_radar_housing: None,
+                                    selection_overlay: None,
+                                    #[cfg(feature = "phobos")]
+                                    digital_display_enabled: phobos_client.digital_display_enabled,
+                                    #[cfg(feature = "phobos")]
+                                    show_placement_preview: phobos_client.show_placement_preview,
+                                    #[cfg(feature = "phobos")]
+                                    show_flash_on_selecting: phobos_client.show_flash_on_selecting,
+                                    #[cfg(feature = "phobos")]
+                                    center_pause_menu_background: false,
+                                    #[cfg(feature = "phobos")]
+                                    show_power_plant_enhancer_range: phobos_client
+                                        .show_power_plant_enhancer_range,
+                                    #[cfg(feature = "phobos")]
+                                    placement_preview_art: Default::default(),
+                                    #[cfg(feature = "phobos")]
+                                    sw_sidebar:
+                                        crate::app::presentation::sw_sidebar::SwSidebarState {
+                                            required_significance: phobos_client
+                                                .superweapon_sidebar_required_significance,
+                                            ..Default::default()
+                                        },
+                                    #[cfg(feature = "phobos")]
+                                    sw_sidebar_art: None,
+                                    beacon_art: None,
+                                    shroud_buffer: None,
+                                    theater_name: "TEMPERATE".to_string(),
+                                    theater_ext: "tem".to_string(),
+                                    target_lines: startup_target_lines,
+                                    cached_cell_body_instances: Vec::new(),
+                                    cached_terrain_instances: Vec::new(),
+                                    terrain_grid: None,
+                                    overlays: Default::default(),
+                                    terrain_objects: Vec::new(),
+                                    overlay_names: BTreeMap::new(),
+                                    overlay_radar_colors: HashMap::new(),
+                                    house_color_map: HashMap::new(),
+                                    house_roster: HouseRoster::default(),
+                                    relation_colors: false,
+                                    relation_color_map: None,
+                                    relation_color_generation: 0,
+                                    lighting: Default::default(),
+                                    tile_atlas: None,
+                                    unit_atlas: None,
+                                    palette_set: None,
+                                    surface_palette: Default::default(),
+                                    sprite_atlas: None,
+                                    atlas_growth: Default::default(),
+                                    atlas_check: Default::default(),
+                                    atlas_refresh_owed: false,
+                                    overlay_atlas: None,
+                                    bridge_atlas: None,
+                                    sidebar_cameo_atlas: None,
+                                    sidebar_chrome: None,
+                                    outcome_banner_side_art: None,
+                                    ares_status_texts: None,
+                                    end_game_banner: None,
+                                    software_cursor: startup_software_cursor,
+                                },
+                            match_audio: Default::default(),
+                            match_diagnostics: Default::default(),
+                            network_quality: Default::default(),
+                            #[cfg(feature = "telemetry-dashboard")]
+                            telemetry_timing: Default::default(),
+                            #[cfg(feature = "telemetry-dashboard")]
+                            telemetry_history: Default::default(),
+                            #[cfg(feature = "telemetry-dashboard")]
+                            report_history: Default::default(),
+                            #[cfg(feature = "telemetry-dashboard")]
+                            telemetry_tick_rate: Default::default(),
+                            map_basic: BasicSection::default(),
+                            map_ranking: crate::map::ranking::RankingSection::default(),
+                            loaded_map_source: None,
+                            loaded_map_hash: None,
+                            scenario_outcome: None,
+                            scenario_exit: None,
+                            scenario_restart_requested: false,
+                            scenario_elapsed_clock:
+                                crate::app::match_runtime::frame_pacer::ScenarioElapsedClock::new(),
+                            configured_input_delay_ticks: input_delay_ticks,
+                            sandbox_full_visibility: false,
+                            debug_pause: false,
+                            // KD-3: unify the two game-speed sources. `in_game_options.game_speed`
+                            // (in the presentation owner) is the single source of truth; seed it
+                            // from the skirmish-setup speed (internal 1) and derive
+                            // `sim_speed_tps` from the same value, so the Options slider
+                            // reflects the current pace (GS1 -> 63 tps).
+                            sim_speed_tps: crate::app::types::tps_for_game_speed(
+                                crate::app::types::DEFAULT_YR_SKIRMISH_GAME_SPEED,
+                            ),
+                        },
+                        frontend: crate::app::frontend::state::FrontendState {
+                            shell_dialog_background: None,
+                            asset_import: Default::default(),
+                            campaign_speed_control: startup_options.campaign_speed_control,
+                            external_launch: false,
+                            external_launch_error: None,
+                            match_result: None,
+                            match_result_at: None,
+                            match_winners: None,
+                            external_progress: Default::default(),
+                            network_goodbye_deadline: None,
+                            #[cfg(all(
+                                feature = "wasm",
+                                target_arch = "wasm32",
+                                target_os = "unknown"
+                            ))]
+                            browser_exit_pending: false,
+                            screen: GameScreen::default(),
+                            scenario_catalog,
+                            skirmish_modes,
+                            loading_session: None,
+                            frontend_main_rng: crate::sim::rng::MainRng::new(u64::from(
+                                frontend_seed.value,
+                            )),
+                            startup_rng_seed: frontend_seed.value,
+                            legacy_crt_rng: crate::util::legacy_crt_rng::LegacyCrtRng::default(),
+                            next_match_correlation: 1,
+                            random_map_generation: None,
+                            random_map_retention: RandomMapGenerationRetention::default(),
+                            skirmish_preview_texture: None,
+                            preview_zoom: None,
+                            loading_screen_atlas: None,
+                            loading_progress:
+                                crate::app::loading::pump::LoadingProgressState::standard_skirmish(),
+                            frontend_rules: startup_rules,
+                            shell_preview_overlay_registry: None,
+                            map_library: Default::default(),
+                            login_info: Default::default(),
+                            map_pictures: Default::default(),
+                            mods,
+                            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                            updater: Default::default(),
+                            skirmish_shell_state,
+                            choose_map_last_mode_row: None,
+                            multiplayer_shell_runtime,
+                            skirmish_shell_chrome,
+                            main_menu_shell_state:
+                                crate::ui::main_menu_shell::MainMenuShellState::default(),
+                            single_player_shell_state:
+                                crate::ui::single_player_shell::SinglePlayerShellState::default(),
+                            shell_controller:
+                                crate::ui::shell::controller::DialogController::default(),
+                            main_menu_shell_chrome,
+                            main_menu_movie: None,
+                            main_menu_movie_identity: None,
+                            main_menu_movie_last_step: Instant::now(),
+                            main_menu_shell_error,
+                            startup_files,
+                            status_screen_drawn: false,
+                            shell_first_paint_slide: None,
+                            shell_slide_active_shell: None,
+                            shell_slide_generation: 0,
+                            shell_monitor: Default::default(),
+                            shell_page_title:
+                                crate::ui::shell::static_reveal::PresentedKind1Static::new(
+                                    crate::ui::shell::static_reveal::HEADING_KIND1,
+                                ),
+                            shell_status_line:
+                                crate::ui::shell::static_reveal::PresentedKind1Static::new(
+                                    crate::ui::shell::static_reveal::STATUS_LINE_KIND1,
+                                ),
+                            shell_exit: None,
+                            quit_cascade: None,
+                            startup_splash,
+                            startup_intro_pending: false,
+                            shell_message_box: None,
+                            options_dialog: None,
+                            options_reopen_at: None,
+                            keyboard_dialog: None,
+                            movie_list: None,
+                            movie_list_selection: -1,
+                            fullscreen_movie: None,
+                            credits_roll: None,
+                            campaign: None,
+                            campaign_art: None,
+                            load_saved_game: None,
+                            wol: None,
+                            online_cleanup: Default::default(),
+                            wol_account: Default::default(),
+                            wol_test_credentials: Vec::new(),
+                            native_shell_ui: false,
+                            lan: None,
+                            multiplayer_setup: None,
+                            room_limits: Default::default(),
+                            wol_room_name: None,
+                            wol_room_unranked: false,
+                            lan_rematch: None,
+                            network_setup_protocol: None,
+                            wol_welcome_art: None,
+                            wol_login_art: None,
+                            wol_lobby_art: None,
+                            wol_options_art: None,
+                            wol_auto_login_art: None,
+                            wol_my_info_art: None,
+                            wol_buddy_art: None,
+                            wol_quick_match_art: None,
+                            wol_buddies: Default::default(),
+                            wol_test_buddies: crate::app::shell_wol::test_service_buddies(),
+                            wol_test_guest: Default::default(),
+                            wol_sound_options_art: None,
+                            wol_lobby_globals: Default::default(),
+                            wol_preferences: Default::default(),
+                            score_page: None,
+                            campaign_score_page: None,
+                            coop_score_page: None,
+                            score_art: None,
+                            campaign_score_art: None,
+                            finished_game_count: 0,
+                            shell_route: Default::default(),
+                        },
+                        renderer: crate::app::renderer_state::RendererState {
+                            gpu,
+                            batch_renderer,
+                            performance_overlay,
+                            combat_light_renderer,
+                            screen_presentation:
+                                crate::render::screen_presentation::ScreenPresentationPass::new(),
+                            terrain_draw_renderer,
+                            instance_pool: crate::render::batch::InstanceBufferPool::new(),
+                            depth_view,
+                            shell_surface_presenter,
+                            upscale_pass: None,
+                            world_zoom_pass: None,
+                            sidebar_surface: None,
+                            in_game_shell_surface: None,
+                            status_screen_fill,
+                            status_card_glow,
+                            bit_font,
+                            window_ui,
+                            outcome_banner_art,
+                            vxl_pose_frame_cache: std::cell::RefCell::new(Default::default()),
+                            retail_screenshot_frame_cache: Default::default(),
+                            terrain_picture: Default::default(),
+                        },
+                        process_assets,
+                        audio: startup_audio_runtime,
+                        persistence: crate::app::persistence::PersistenceState::new(
+                            options_profile,
+                        ),
+                        diag: crate::app::diagnostics::state::DiagnosticsState::new(
+                            match crate::sim::parity_digest::ParityDigestSink::from_env() {
+                                Ok(sink) => {
+                                    if let Some(sink) = sink.as_ref() {
+                                        log::info!(
+                                            "parity digest capture -> {}",
+                                            sink.path().display()
+                                        );
+                                    }
+                                    sink
+                                }
+                                Err(error) => {
+                                    log::error!("parity digest sink could not be opened: {error}");
+                                    None
+                                }
+                            },
+                        ),
+                    };
 
                     // The saved cursor-lock choice; the first focus applies it.
                     state.platform.cursor_confined = state.persistence.options_profile.lock_cursor;
@@ -1387,6 +1436,7 @@ impl App {
                         }
                     }
                     Self::sync_zoom_pass(&mut state);
+                    Self::sync_present_mode(&mut state);
                     #[cfg(feature = "telemetry-dashboard")]
                     attach_dashboard(&mut state);
 
@@ -1409,6 +1459,7 @@ impl App {
                         crate::app::loading::pump::begin_loading(&mut state, request);
                     }
 
+                    crate::app::mods::finish_start(&mut state, external_launch);
                     Ok(InitializationStep::Ready(Box::new(state), Vec::new()))
                 })
             },
@@ -1470,7 +1521,7 @@ pub(crate) fn quickplay_launch_session(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
 
@@ -1495,13 +1546,14 @@ mod tests {
     }
 
     #[test]
-    fn startup_errors_are_described_in_english_not_host_locale() {
+    fn startup_errors_are_described_in_the_language_in_use_not_the_hosts() {
         // A missing install surfaces as io::ErrorKind::NotFound inside the
-        // asset error. The card cannot draw the host's localized sentence, so
-        // the description must state the cause in English and keep the code.
+        // asset error. The host's sentence for it is in the host's language,
+        // so the description states the cause from the language files (here
+        // English) and keeps the code.
         let io = std::io::Error::from_raw_os_error(3);
         let asset = crate::assets::error::AssetError::Io(io);
-        let err = anyhow::Error::new(asset).context("Could not load the game archives");
+        let err = anyhow::Error::new(asset).context(crate::i18n::tr("VERA:CannotLoadArchives"));
         let text = describe_startup_error(&err);
         assert!(text.is_ascii(), "{text}");
         assert!(text.contains("Could not load the game archives"), "{text}");

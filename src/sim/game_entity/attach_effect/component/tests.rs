@@ -129,8 +129,8 @@ fn negotiated_empty_visit_preserves_the_counter_and_actor_gates() {
     context.control = api::EffectControl::Waiting(42);
     context.animations_hidden = true;
     let actor = sim.substrate.entities.get_mut(target).unwrap();
-    actor.attach_effects.self_effect = SelfEffectState::Pending(42);
-    actor.attach_effects.animations_hidden = true;
+    actor.ares.attach_effects.self_effect = SelfEffectState::Pending(42);
+    actor.ares.attach_effects.animations_hidden = true;
 
     assert!(
         standard_empty_visit_plan(&context, |_| Ok(true))
@@ -157,10 +157,10 @@ fn negotiated_empty_visit_preserves_the_counter_and_actor_gates() {
         .unwrap();
     let actor = sim.entities().get(target).unwrap();
     assert_eq!(
-        actor.attach_effects.self_effect,
+        actor.ares.attach_effects.self_effect,
         SelfEffectState::Disabled(42)
     );
-    assert!(actor.attach_effects.animations_hidden);
+    assert!(actor.ares.attach_effects.animations_hidden);
 }
 
 #[test]
@@ -173,17 +173,13 @@ fn zero_damage_bullet_updates_the_only_effect_store_and_resumes_after_save() {
         base.entities()
             .get(base_target)
             .unwrap()
+            .ares
             .attach_effects
             .entries
             .is_empty()
     );
     let (mut sim, rules, target, source) = scene(Some(&wasm), false);
-    let baseline = sim
-        .entities()
-        .get(target)
-        .unwrap()
-        .foot_speed
-        .effective_multiplier();
+    let baseline = sim.entities().get(target).unwrap().speed_multiplier();
     fire(&mut sim, &rules, source, target);
     let actor = sim.entities().get(target).unwrap();
     assert_eq!(
@@ -191,22 +187,25 @@ fn zero_damage_bullet_updates_the_only_effect_store_and_resumes_after_save() {
         1000,
         "zero damage still reaches the pre-effect slot"
     );
-    assert_eq!(actor.attach_effects.entries.len(), 1);
+    assert_eq!(actor.ares.attach_effects.entries.len(), 1);
     assert!(
         actor.mod_component.is_empty(),
         "there is no second guest instance vector"
     );
     // Numeric folding itself retains the existing native-kernel regressions;
     // this assertion checks the authored factors reach its actual scalar owners.
-    assert_eq!(actor.crate_multipliers.firepower().bits(), 2.0f64.to_bits());
-    assert_eq!(actor.crate_multipliers.armor().bits(), 2.0f64.to_bits());
-    assert_eq!(
-        actor.foot_speed.effective_multiplier().bits(),
-        2.0f64.to_bits()
-    );
+    assert_eq!(actor.firepower_multiplier().bits(), 2.0f64.to_bits());
+    assert_eq!(actor.armor_multiplier().bits(), 2.0f64.to_bits());
+    assert_eq!(actor.speed_multiplier().bits(), 2.0f64.to_bits());
     assert_eq!(actor.attached_rof_multiplier().bits(), 0.5f64.to_bits());
     visit(&mut sim, &rules, target);
-    let held = sim.entities().get(target).unwrap().attach_effects.clone();
+    let held = sim
+        .entities()
+        .get(target)
+        .unwrap()
+        .ares
+        .attach_effects
+        .clone();
     assert_eq!(held.entries[0].remaining, 4);
     let saved = crate::sim::snapshot::GameSnapshot::save(&sim, 0, 0, "SDK-EFFECT", 0);
     let mut restored = crate::sim::snapshot::GameSnapshot::load(&saved)
@@ -220,17 +219,17 @@ fn zero_damage_bullet_updates_the_only_effect_store_and_resumes_after_save() {
         .validate_attached_stats_after_restore(&restored_rules)
         .unwrap();
     assert_eq!(
-        restored.entities().get(target).unwrap().attach_effects,
+        restored.entities().get(target).unwrap().ares.attach_effects,
         held
     );
     for _ in 0..4 {
         visit(&mut restored, &restored_rules, target);
     }
     let actor = restored.entities().get(target).unwrap();
-    assert!(actor.attach_effects.entries.is_empty());
-    assert_eq!(actor.foot_speed.effective_multiplier(), baseline);
-    assert_eq!(actor.crate_multipliers.firepower(), NativeF64Bits::ONE);
-    assert_eq!(actor.crate_multipliers.armor(), NativeF64Bits::ONE);
+    assert!(actor.ares.attach_effects.entries.is_empty());
+    assert_eq!(actor.speed_multiplier(), baseline);
+    assert_eq!(actor.firepower_multiplier(), NativeF64Bits::ONE);
+    assert_eq!(actor.armor_multiplier(), NativeF64Bits::ONE);
     assert_eq!(actor.attached_rof_multiplier(), NativeF64Bits::ONE);
 }
 
@@ -240,7 +239,13 @@ fn animation_expiry_reapply_and_limbo_use_the_existing_reference_owners() {
     let wasm = component();
     let (mut sim, rules, target, source) = scene(Some(&wasm), true);
     fire(&mut sim, &rules, source, target);
-    let anim = sim.entities().get(target).unwrap().attach_effects.entries[0]
+    let anim = sim
+        .entities()
+        .get(target)
+        .unwrap()
+        .ares
+        .attach_effects
+        .entries[0]
         .animation
         .unwrap();
     assert_eq!(
@@ -249,25 +254,47 @@ fn animation_expiry_reapply_and_limbo_use_the_existing_reference_owners() {
     );
     sim.destroy_anim_with_context(anim, &rules);
     assert!(
-        sim.entities().get(target).unwrap().attach_effects.entries[0]
+        sim.entities()
+            .get(target)
+            .unwrap()
+            .ares
+            .attach_effects
+            .entries[0]
             .animation
             .is_none()
     );
     visit(&mut sim, &rules, target);
     assert!(
-        sim.entities().get(target).unwrap().attach_effects.entries[0]
+        sim.entities()
+            .get(target)
+            .unwrap()
+            .ares
+            .attach_effects
+            .entries[0]
             .animation
             .is_none(),
         "pointer expiry alone never recreates an animation"
     );
     sim.session.set_binary_frame_for_test(10);
     fire(&mut sim, &rules, source, target);
-    let replacement = sim.entities().get(target).unwrap().attach_effects.entries[0]
+    let replacement = sim
+        .entities()
+        .get(target)
+        .unwrap()
+        .ares
+        .attach_effects
+        .entries[0]
         .animation
         .unwrap();
     assert_ne!(replacement, anim);
     assert_eq!(
-        sim.entities().get(target).unwrap().attach_effects.entries[0].remaining,
+        sim.entities()
+            .get(target)
+            .unwrap()
+            .ares
+            .attach_effects
+            .entries[0]
+            .remaining,
         5
     );
     sim.techno_limbo_with_rules(target, &rules, None);
@@ -275,17 +302,14 @@ fn animation_expiry_reapply_and_limbo_use_the_existing_reference_owners() {
         sim.entities()
             .get(target)
             .unwrap()
+            .ares
             .attach_effects
             .entries
             .is_empty()
     );
     assert!(sim.pending_delete().contains_object(&replacement));
     assert_eq!(
-        sim.entities()
-            .get(target)
-            .unwrap()
-            .foot_speed
-            .effective_multiplier(),
+        sim.entities().get(target).unwrap().speed_multiplier(),
         NativeF64Bits::ONE
     );
     sim.uninit_with_rules(target, &rules);

@@ -69,7 +69,7 @@ fn cncnet_campaign_spawn_explicit_scenario_keeps_first_record_and_physical_ident
             let path = client.path().join("spawn.ini");
             assert_eq!(
                 SpawnRequest::read(&path).is_ok(),
-                crate::rules::ARES_ENABLED || side <= 1
+                crate::rules::ARES_BUILD || side <= 1
             );
             assert_eq!(
                 PendingSpawnRequest::read(&path)
@@ -199,7 +199,7 @@ fn cncnet_campaign_spawn_empty_catalog_fails_before_seed() {
         let parsed = SpawnRequest::parse(&format!(
             "[Settings]\nIsSinglePlayer=Yes\nScenario=UNKNOWN.MAP\nSide={side}\nCampaignID=1\n"
         ));
-        if !crate::rules::ARES_ENABLED && side > 1 {
+        if !crate::rules::ARES_BUILD && side > 1 {
             assert!(parsed.is_err());
             continue;
         }
@@ -212,7 +212,8 @@ fn cncnet_campaign_spawn_empty_catalog_fails_before_seed() {
     }
     for side in [-1, 256] {
         assert!(
-            PendingSpawnRequest::parse(&format!("[Settings]\nIsSinglePlayer=Yes\nSide={side}\n")).is_err()
+            PendingSpawnRequest::parse(&format!("[Settings]\nIsSinglePlayer=Yes\nSide={side}\n"))
+                .is_err()
         );
     }
 }

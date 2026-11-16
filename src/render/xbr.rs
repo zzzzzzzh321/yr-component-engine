@@ -1,7 +1,7 @@
 // Ported from FFmpeg's libavfilter/vf_xbr.c.
 // Copyright (c) 2011, 2012 Hyllian/Jararaca <sergiogdb@gmail.com>
 // Copyright (c) 2014 Arwa Arif <arwaarif1994@gmail.com>
-// Licensed LGPL-2.1-or-later. See LICENSES/LGPL-2.1-or-later.txt in the repo root.
+// Licensed GPL-3.0-or-later. See LICENSE-GPL in the repo root.
 
 //! xBR, Hyllian's pixel-art scaler, at 2x, 3x and 4x.
 //!
@@ -313,6 +313,6 @@ fn toward(a: u32, b: u32, m: u32, s: u32) -> u32 {
     channels(0x00FF_00FF) | channels(0x0000_FF00)
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_render_s_z))]
 #[path = "xbr_tests.rs"]
 mod tests;

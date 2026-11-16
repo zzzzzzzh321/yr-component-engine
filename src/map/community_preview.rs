@@ -436,10 +436,10 @@ pub(super) fn render(assets: &mut AssetManager, map: &MapFile) -> Result<Value> 
     }
     let references: HashMap<_, _> = processed
         .techno_reference_states()
-        .filter(|(category, _, _, _)| {
+        .filter(|(category, _, _, _, _)| {
             *category == crate::rules::object_type::ObjectCategory::Building
         })
-        .map(|(_, name, _, image)| (name, image))
+        .map(|(_, name, _, image, _)| (name, image))
         .collect();
     for object in &map.entities {
         if object.category != super::entities::EntityCategory::Structure {

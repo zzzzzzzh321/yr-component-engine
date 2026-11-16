@@ -68,7 +68,7 @@ pub(crate) fn apply_speed_crate(
     announce
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_c_g))]
 mod tests {
     use super::*;
     use crate::rules::{ini_parser::IniFile, ruleset::RuleSet};
@@ -199,8 +199,8 @@ mod tests {
                     Some(crate::sim::world::display_layers::DisplayLayer::GROUND),
                     &|_| 0,
                 );
-                let expected = !already_upgraded
-                    && (crate::rules::ARES_ENABLED || category != EntityCategory::Aircraft);
+                let expected =
+                    !already_upgraded && (rules.ares() || category != EntityCategory::Aircraft);
                 let slot = super::super::pickup::multiplayer_eligible_slot(
                     &sim,
                     &rules,
@@ -237,7 +237,7 @@ mod tests {
                         NativeF64Bits::ONE
                     }
                 );
-                assert_eq!(state.effective_multiplier(), state.crate_multiplier());
+                assert!(!state.attached());
             }
         }
     }

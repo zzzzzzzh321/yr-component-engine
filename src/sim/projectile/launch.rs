@@ -92,6 +92,9 @@ fn arc_angle(
 /// the sign: 70D590's return address occupies the residue's high DWORD.
 /// Every valid Acos-table angle exceeds every possible such tiny positive
 /// residue (minimum angle 7.549789948768648e-8, maximum residue <1.5e-306).
+/// The EMP cannon's four calls (43ECA7, 43ECFD, 44D293, 44D2ED) follow the
+/// same `PUSH distance; PUSH 0; CALL 70D590` sequence, so their residue is
+/// the same kind of code address.
 fn fireat_arc_pitch(
     table: &AcosTable,
     range: i32,
@@ -109,6 +112,61 @@ fn fireat_arc_pitch(
     } else {
         first
     }))
+}
+
+/// `Ballistics::SolveLaunchDirection @ 0x0048A8D0` as the EMP cannon calls
+/// it (`BuildingClass` vt+0x2C8 `0x0043ECA7`, Mission_Missile `0x0044D293`):
+/// the DirStruct pitch of a shell at `speed` leptons/frame to a point
+/// `height` leptons above and `range` leptons away under `gravity`, `None`
+/// where no arc reaches it.
+pub(crate) fn solve_launch_direction(
+    range: i32,
+    height: i32,
+    speed: i32,
+    gravity: NativeF64Bits,
+    high_root: bool,
+) -> Option<u16> {
+    fireat_arc_pitch(
+        AcosTable::retail(),
+        range,
+        height,
+        speed,
+        gravity,
+        high_root,
+    )
+}
+
+/// The heading of an EMP cannon's shot (`0x0044D017..0x0044D065`): the
+/// DirStruct of `atan2(flh.y - centre.y, centre.x - flh.x)`, each delta
+/// formed by FILD/FISUB.
+pub(crate) fn emp_cannon_heading(flh: ProjectileCoord, centre: (i32, i32)) -> u16 {
+    facing16_from_angle(atan(
+        round(X::sub(X::load_i32(flh.y), X::load_i32(centre.1))),
+        round(X::sub(X::load_i32(centre.0), X::load_i32(flh.x))),
+    ))
+}
+
+/// The velocity `BuildingClass::Mission_Missile` gives an EMP cannon's shot
+/// (`0x0044D0C3..0x0044D462`): the zeroed velocity's (100, 0, 0) turned to
+/// `heading` at its 2-D length (`Sqrt_Approx(10000)`), seeded again if zero,
+/// scaled to `speed` over its length `(x·x + z·z) + y·y`, then pitched to
+/// `pitch` over its length `(y·y + z·z) + x·x` (the inline pitch change).
+pub(crate) fn emp_cannon_launch_velocity(
+    heading: u16,
+    speed: i32,
+    pitch: u16,
+) -> ProjectileVelocity {
+    let trig = TrigTable::embedded();
+    let seed = turn_xy(ProjectileVelocity::new(100, 0, 0), heading, trig);
+    let scaled = scale_to_speed(seed.native().map(d), speed, |[x, y, z]| {
+        X::add(X::add(square(x), square(z)), square(y))
+    });
+    apply_pitch(
+        ProjectileVelocity::from_native(scaled.map(store)),
+        pitch,
+        [1, 2, 0],
+        trig,
+    )
 }
 
 /// World receiver results are resolved by the firing owner, before this scalar
@@ -289,16 +347,13 @@ pub fn high_arc_root(
 /// for an `Inaccurate=` `Arcing=` projectile: it moves the target delta by a
 /// drawn magnitude in a drawn direction, leaving Z. Two Scenario draws,
 /// magnitude then angle. The flak arm (`FlakScatter=` and not `Inviso=`;
-/// stock `FlakTProj`) scales `RandomRanged(0, BallisticScatter)` by the
-/// delta's length over the weapon's range (vt+0x168, `0x007012C0`); the plain
-/// arm draws the magnitude from `RandomRanged(BallisticScatter / 2,
-/// BallisticScatter)`. A zero range faults natively; here it scatters by zero.
-/// Installed Ares Fire_BallisticScatter1/2 (`10019930`/`10019980`, hooks at
-/// `6FE709`/`6FE7FE`) replace only these magnitude bounds. Unset overrides
-/// retain this caller's defaults, not Bullet::Fire's later placement bounds.
+/// stock `FlakTProj`) scales its `RandomRanged(bounds)` draw by the delta's
+/// length over the weapon's range (vt+0x168, `0x007012C0`); the plain arm
+/// draws the magnitude itself ([`fireat_scatter_bounds`]). A zero range
+/// faults natively; here it scatters by zero.
 pub(crate) fn fireat_launch_scatter(
     delta: ProjectileCoord,
-    ballistic_scatter: i32,
+    bounds: (i32, i32),
     weapon_range: i32,
     flak: bool,
     overrides: Option<BallisticScatterPolicy>,
@@ -307,7 +362,7 @@ pub(crate) fn fireat_launch_scatter(
     let trig = TrigTable::embedded();
     launch_scatter_with(
         delta,
-        ballistic_scatter,
+        bounds,
         weapon_range,
         flak,
         overrides,
@@ -316,10 +371,23 @@ pub(crate) fn fireat_launch_scatter(
     )
 }
 
+/// The magnitude draw's `RandomRanged` bounds: `0, BallisticScatter` for
+/// the flak arm (`0x006FE709`), `BallisticScatter / 2, BallisticScatter`
+/// for the plain arm (`0x006FE815..0x006FE81C`: the halving is CDQ/SUB/SAR,
+/// toward zero). Ares builds take the projectile's `BallisticScatter.Min`
+/// and `.Max` over these (`rules::ares_bullet_type`).
+pub(crate) fn fireat_scatter_bounds(flak: bool, ballistic_scatter: i32) -> (i32, i32) {
+    if flak {
+        (0, ballistic_scatter)
+    } else {
+        (ballistic_scatter / 2, ballistic_scatter)
+    }
+}
+
 /// The scatter with its two `Random__RandomRanged` draws supplied.
 fn launch_scatter_with(
     delta: ProjectileCoord,
-    ballistic_scatter: i32,
+    bounds: (i32, i32),
     weapon_range: i32,
     flak: bool,
     overrides: Option<BallisticScatterPolicy>,
@@ -329,10 +397,8 @@ fn launch_scatter_with(
     let overrides = overrides.unwrap_or_default();
     // 10019946..10019962 /10019997..100199B8: the two nullable fields
     // override independently. Plain's CDQ/SUB/SAR halving is toward zero.
-    let low = overrides
-        .min
-        .unwrap_or(if flak { 0 } else { ballistic_scatter / 2 });
-    let high = overrides.max.unwrap_or(ballistic_scatter);
+    let low = overrides.min.unwrap_or(bounds.0);
+    let high = overrides.max.unwrap_or(bounds.1);
     let magnitude = if flak {
         flak_magnitude(delta, (low, high), weapon_range, &mut random_ranged)
     } else {
@@ -395,7 +461,7 @@ fn flak_placement_with(
 }
 
 /// Both flak arms' magnitude (`0x006FE6AD..0x006FE73D`, again at
-/// `0x0046874E..0x004687E5`): the caller's magnitude draw times the delta's
+/// `0x0046874E..0x004687E5`): `RandomRanged(bounds)` times the delta's
 /// length ([`flak_scatter_distance`]), `IMUL` then `IDIV` by the range.
 /// Preserve the distance calculation before the magnitude RNG request.
 fn flak_magnitude(
@@ -533,6 +599,29 @@ fn airburst_launch_with(
     // Original469FEC/46A07D and Ares1001A74A..1001A768 both place the
     // cosine product in X and the sine product in Y, with explicit stores.
     ProjectileVelocity::from_native([x, y, z].map(store))
+}
+
+/// Ares BulletClass_DetonateAt_Splits (`1001A090`, hook `0x469EBA`) after
+/// each child's constructor: one Scenario `RandomRanged(0, 31)` as a 5-bit
+/// DirStruct (raw `n << 11`, signed), its radians `(raw - 0x3FFF) *
+/// -(2π / 65535)`, the game's sine and cosine (YRpp `Math::sin`/`cos`), then
+/// `(cos, sin) * Speed * cos(1.5π * 1.00001)` (the literal
+/// `-2.44921270764e-16`) and `-Speed`, which `MoveTo` takes.
+pub(crate) fn ares_airburst_launch_velocity(speed: i32, rng: &mut SimRng) -> ProjectileVelocity {
+    const TURN: NativeF64Bits = NativeF64Bits::from_bits(0xbf19_2214_7658_a371);
+    const ALMOST_DOWN: NativeF64Bits = NativeF64Bits::from_bits(0xbcb1_a5ff_ffff_da55);
+    let draw = rng.next_range_i32_inclusive(0, 31);
+    let raw = i32::from((draw << 11) as u16 as i16);
+    let radians = round(X::mul(X::load_i32(raw - 0x3fff), d(TURN)));
+    let trig = TrigTable::embedded();
+    let sine = round(trig.sin_from_table(radians));
+    let cosine = round(trig.cos_from_table(radians));
+    let flat = round(X::mul(X::load_i32(speed), d(ALMOST_DOWN)));
+    ProjectileVelocity::from_native([
+        store(X::mul(flat, cosine)),
+        store(X::mul(flat, sine)),
+        store(X::load_i32(speed.wrapping_neg())),
+    ])
 }
 
 /// `BulletClass::SpawnShrapnel`'s child launch velocity. Both branches turn
@@ -843,7 +932,7 @@ pub fn fireat_launch(input: FireAtLaunch) -> Option<FireAtLaunchResult> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_p_s))]
 mod tests {
     use super::*;
     use serde_json::Value;
@@ -1297,7 +1386,7 @@ mod tests {
             let mut bounds = Vec::new();
             let result = launch_scatter_with(
                 coord(&input["delta"]),
-                int("scatter"),
+                fireat_scatter_bounds(flak, int("scatter")),
                 int("range"),
                 flak,
                 None,

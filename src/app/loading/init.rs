@@ -98,7 +98,7 @@ fn connect_startup_crate_overlays(
     synced
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod map_wall_owner_candidate_tests {
     use super::*;
     use crate::map::entities::EntityCategory;
@@ -960,7 +960,7 @@ mod map_wall_owner_candidate_tests {
             &rules,
         );
         let mut rt = crate::sim::runtime::SimRuntime::from_simulation(sim);
-        rt.resources.rules = rules;
+        rt.resources_mut().rules = rules;
         let frame = rt
             .advance_frame(
                 &[],
@@ -1518,6 +1518,10 @@ pub struct PresentationLoadAssets {
     pub bridge_atlas: Option<BridgeAtlas>,
     pub sidebar_cameo_atlas: Option<SidebarCameoAtlas>,
     pub sidebar_chrome: Option<SidebarChromeSet>,
+    /// The game folder's `veraui.ini`, read for this match.
+    /// The mod's `veraui.ini`, parsed; the match lays the player's own over
+    /// it (`presentation::player_layout`).
+    pub match_layout_ini: Option<crate::rules::ini_parser::IniFile>,
     #[cfg(feature = "phobos")]
     pub sw_sidebar_ui: crate::rules::phobos_sw_sidebar::SuperWeaponSidebarUi,
     /// Phobos `uimd.ini [Sidebar] CenterPauseMenuBackground`, read from the
@@ -1767,7 +1771,7 @@ fn construction_trace_after_fill(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod fresh_transport_tests {
     use super::*;
 
@@ -2233,14 +2237,12 @@ impl MapLoadInitial {
             &overlay_registry,
             resolved_terrain.tile_animations(),
         );
-        rules
-            .bind_scheduler_anim_assets(
-                &scheduler_roots,
-                asset_manager,
-                theater_ext,
-                &map_data.header.theater,
-            )
-            .expect("retail scheduler animation closure");
+        rules.bind_scheduler_anim_assets(
+            &scheduler_roots,
+            asset_manager,
+            theater_ext,
+            &map_data.header.theater,
+        );
         // Every other AnimClass producer and the building animations: tolerant
         // pass, after the strict one, which rewrites the scheduler-owned set
         // wholesale.
@@ -2414,7 +2416,8 @@ impl MapLoadInitial {
             overlay_grid,
             &house_roster,
             Some(&match_launch_descriptor),
-        );
+        )
+        .expect("generated scenario post-map initialization");
         let crate_name_id =
             |name: Option<&str>| name.and_then(|name| overlay_registry.id_for_name(name));
         let mut presented = Vec::new();
@@ -2476,14 +2479,18 @@ impl MapLoadInitial {
 pub(crate) fn load_csf(
     asset_manager: &AssetManager,
 ) -> anyhow::Result<crate::assets::csf_file::CsfFile> {
-    let (mut csf, supplements) = asset_manager
-        .load_active_csf_with_sources()
-        .map_err(|err| match err {
+    let (mut csf, supplements) = asset_manager.load_active_csf_with_sources().map_err(
+        // The startup error card shows these, before any string table.
+        |err| match err {
             crate::assets::error::AssetError::AssetNotFound { .. } => {
-                anyhow::anyhow!("required retail string table ra2md.csf is missing")
+                anyhow::anyhow!(crate::i18n::tr("VERA:CsfMissing"))
             }
-            err => anyhow::anyhow!("could not parse required ra2md.csf: {err:#}"),
-        })?;
+            err => anyhow::anyhow!(crate::i18n::tr_fill(
+                "VERA:CsfUnreadable",
+                &[("error", &format!("{err:#}"))],
+            )),
+        },
+    )?;
     log::info!("Loaded CSF string table: ra2md.csf; supplements={supplements:?}");
     crate::i18n::apply(&mut csf);
     Ok(csf)
@@ -2543,6 +2550,7 @@ pub(crate) fn load_map_initial_with_assets(
     mode_rules_file: Option<&str>,
     full_init_entry_mode: crate::app::match_runtime::session::SessionMode,
     the_team_enabled: bool,
+    launch_seed: Option<u32>,
     progress: &mut dyn crate::app::loading::pump::LoadingProgressSink,
 ) -> Result<MapLoadInitial> {
     // Check RA2_QUICKPLAY env var: if it names a .map/.mpr file, load that directly.
@@ -2565,7 +2573,14 @@ pub(crate) fn load_map_initial_with_assets(
         .map(str::to_string)
         .or(quickplay_seed);
     if let Some(seed_name) = seed_selection.as_deref() {
+        let mut settings = crate::map::rmg::RmgSettings::load(asset_manager);
         let mut options = crate::map::rmg::RmgOptions::default();
+        // A seed without VERA's UrbanAreas= key regenerates with the urban
+        // switch the process's first RMGMD.INI read gives (Ares.dll 1006ABF0).
+        #[cfg(feature = "ares")]
+        {
+            options.urban_areas = settings.generate_urban_areas;
+        }
         // A received seed's name is already its cached path.
         let seed_path = crate::map::source::random_map_dir(&ra2_dir).join(seed_name);
         let mut seed_source = None;
@@ -2589,7 +2604,6 @@ pub(crate) fn load_map_initial_with_assets(
         }
         options.normalize();
 
-        let settings = crate::map::rmg::RmgSettings::load(asset_manager);
         let theater_name = crate::map::rmg::emit::theater_name(options.theater);
         let theater = crate::map::theater::load_theater(asset_manager, theater_name)
             .ok_or_else(|| anyhow::anyhow!("random map: theater {theater_name} unavailable"))?;
@@ -2612,7 +2626,7 @@ pub(crate) fn load_map_initial_with_assets(
             // Populate its Country sources before InitMap599825 uses array[0];
             // normal shell entry has already performed these same reads.
             owner.read_multiplayer_country(&crate::rules::ini_parser::IniFile::empty(), -1);
-            owner.refresh_multiplayer_country_bodies();
+            owner.refresh_multiplayer_country_bodies()?;
         }
         let synthetic_ini = generated_full_init_ini(&settings, &options, owner)?;
         let tmcj4f =
@@ -2626,8 +2640,17 @@ pub(crate) fn load_map_initial_with_assets(
             full_init_entry_mode != crate::app::match_runtime::session::SessionMode::Campaign,
         )?;
         let terrain_rules = &generated_rules.native.rules().terrain_rules;
-        let resolved =
-            crate::map::rmg::build::ResolvedTheaterInputs::from_theater(&theater, terrain_rules);
+        let resolved = crate::map::rmg::build::ResolvedTheaterInputs::from_theater(
+            &theater,
+            terrain_rules,
+            generated_rules.native.rules().overlay_registry(),
+            generated_rules
+                .native
+                .rules()
+                .general
+                .cliff_back_impassability,
+            &settings.extras,
+        );
 
         // Tile-block layouts (sub-cell height/terrain grids) from the theater's
         // real TMP data — the shore tiler and zone classifier read these.
@@ -2639,20 +2662,57 @@ pub(crate) fn load_map_initial_with_assets(
         // `[AI] NeutralTechBuildings` plus each type's `Foundation=`. The phase
         // runs for every map type except 0, so an empty list here would both
         // strip the buildings and skip the draws the original consumes.
+        let processed = owner
+            .saved_scenario_rules()
+            .expect("completed RMG Rules remain owned");
         let tech_types = crate::map::rmg::tech_catalog::resolve(
-            owner
-                .saved_scenario_rules()
-                .expect("completed RMG Rules remain owned")
-                .neutral_tech_buildings(),
+            processed.neutral_tech_buildings(),
             owner.fixed_art(),
         );
-        let mut generated = crate::map::rmg::build::generate_map(
-            &options,
+        // VERA: the theater's civilian buildings, for an opted-in Urban
+        // Presence; the same list the setup dialog's preview generated with.
+        if options.wants_vera_catalog() {
+            settings.vera_urban = crate::map::rmg::tech_catalog::resolve_vera_urban(
+                generated_rules.native.rules(),
+                owner.fixed_art(),
+                &tech_types,
+                &settings.extras,
+                theater.extension,
+                theater_name,
+                options.seed_u16(),
+                |file| asset_manager.contains(file),
+            );
+        }
+        #[cfg(not(feature = "ares"))]
+        let _ = launch_seed;
+        #[cfg(not(feature = "ares"))]
+        let objects = crate::map::rmg::build::GenerationObjects::tech(&tech_types);
+        // Ares' foot picks draw Main (Ares.dll 1006AAD0). The launch load
+        // seeds Main with the match seed (ScenarioBootstrapRng::new) before
+        // it regenerates the seed. RESIDUAL: that owner is built after this
+        // generation and does not continue past these draws.
+        #[cfg(feature = "ares")]
+        let urban_catalog = crate::map::rmg::tech_catalog::resolve_ares_urban(
             &settings,
-            &resolved,
-            &blocks,
-            &tech_types,
+            processed,
+            owner.fixed_art(),
         );
+        #[cfg(feature = "ares")]
+        let launch_main = std::cell::RefCell::new(crate::sim::rng::SimRng::new(u64::from(
+            launch_seed.unwrap_or_default(),
+        )));
+        #[cfg(feature = "ares")]
+        let main_draw = || launch_main.borrow_mut().next_u32();
+        #[cfg(feature = "ares")]
+        let objects = crate::map::rmg::build::GenerationObjects {
+            tech_types: &tech_types,
+            urban_areas: Some(crate::map::rmg::phases::urban_areas::UrbanInputs {
+                catalog: &urban_catalog,
+                main_draw: &main_draw,
+            }),
+        };
+        let mut generated =
+            crate::map::rmg::build::generate_map(&options, &settings, &resolved, &blocks, &objects);
         generated.map_file.ini = synthetic_ini;
         log::info!(
             "Random map generated: theater={}, {}x{}, seed={}, players={}",
@@ -2778,7 +2838,7 @@ fn generated_overlay_grid(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod generated_overlay_grid_tests {
     use super::*;
     use crate::map::rmg::{RmgGrid, RmgOptions, emit};
@@ -3389,8 +3449,8 @@ fn load_map_first_step(
                             let variant_table_draws = variant_selector.raw_draw_count();
                             drop(variant_draw);
                             // Bind the complete scheduler closure only after theater Tile##Anim rows
-                            // have resolved, but before any atlas or AnimClass construction. Missing
-                            // tile art is a load error rather than a silently invisible map feature.
+                            // have resolved, but before any atlas or AnimClass construction. A tile
+                            // name no AnimType holds becomes an unread type that draws nothing.
                             let roots = scheduler_anim_roots(
                                 &rules,
                                 &overlay_registry,
@@ -3625,7 +3685,7 @@ fn load_map_first_step(
                                                 map_data.header.width as u16,
                                                 map_data.header.height as u16,
                                             ),
-                                        );
+                                        )?;
                                                 if let Some(stats) = queue_stats {
                                                     log::info!(
                                                         "Initialized generated native tiberium queues before germination: {} growth, {} spread",
@@ -3640,7 +3700,7 @@ fn load_map_first_step(
                 &overlay_registry,
                 map_data.header.width as u16,
                 map_data.header.height as u16,
-            );
+            )?;
                                                 log::info!(
                                                     "Generated final InitCellAttributes(1): {} of {} real cells germinated (value total {})",
                                                     germination.germinated_cells,
@@ -3690,6 +3750,9 @@ fn load_map_first_step(
                                                                 &td.iso_palette,
                                                                 td.extension,
                                                                 &grid,
+                                                                rules
+                                                                    .combat_damage
+                                                                    .terrain_deformation,
                                                                 services.gpu,
                                                                 services.batch,
                                                             ),
@@ -3739,13 +3802,12 @@ fn load_map_first_step(
                                                                 staged_simulation
                                                                     .resolve_type_handles(&rules);
                                                                 staged_simulation
-        .install_team_ai_registry(
-            &team_ai_registry,
-            team_ai_rules_at_read.as_ref().unwrap_or(&rules),
-        )
-        .map_err(|refused| {
-            anyhow::anyhow!("active YR aimd.ini failed RuleSet resolution: {refused:?}")
-        })?;
+                                                                    .install_team_ai_registry(
+                                                                        &team_ai_registry,
+                                                                        team_ai_rules_at_read
+                                                                            .as_ref()
+                                                                            .unwrap_or(&rules),
+                                                                    );
 
                                                                 if let (
                                                                     Some(launch),
@@ -4025,7 +4087,7 @@ fn load_map_first_step(
             overlay_grid,
             &house_roster,
             match_launch_descriptor.as_ref(),
-        );
+        )?;
                                                                             if !output.navigation_published {
             log::error!("Initial navigation rebuild failed: resolved terrain is unavailable");
         }
@@ -4041,7 +4103,9 @@ fn load_map_first_step(
                                                                             (None, None)
                                                                         };
 
-                                                                    // Campaigns open on the shared post-map owner's HomeCell (684C30),
+                                                                    // Campaigns open on the shared post-map owner's HomeCell (684C30,
+                                                                    // through `RadarClass::SetTacticalPosition @ 0x00653F70`, a plain
+                                                                    // SetViewToCoordInstant, at `0x00684D42`),
                                                                     // other scenarios on its CenterCameraOnPlayerTechnos coordinate
                                                                     // (4AC4F0). Without either (no current player, or an observer
                                                                     // with nothing), a multiplayer waypoint or the playable centre.
@@ -4054,6 +4118,9 @@ fn load_map_first_step(
         if let Some([x, y, z]) = opening_view_coord {
             crate::util::lepton::absolute_leptons_to_screen(x, y, z)
         } else if let Some((rx, ry)) = opening_view_cell {
+            // RESIDUAL: native raises the HomeCell centre to its ground height
+            // (`0x00578080` at `0x00684D2F`), slope included; this takes the cell's
+            // base level, so on a ramp HomeCell the opening view sits a few pixels off.
             let z = resolved_terrain.cell(rx, ry).map_or(0, |cell| cell.level);
             crate::app::input::camera::cell_centre_world_point(rx, ry, z)
         } else if let Some(start_wp) = waypoints::first_multiplayer_start(&map_data.waypoints) {
@@ -4226,12 +4293,26 @@ pub(super) const fn should_read_tmcj4f(
     ) && the_team_enabled
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod full_init_rules_gate_tests {
     use super::*;
 
     #[test]
     fn generated_rules_are_read_before_generation_and_carried_once_through_failure() {
+        // The game loads a map on its main thread, which has 8 MiB on every
+        // platform (build.rs links `/STACK` on Windows), as the simulation
+        // thread has. Unoptimized, the frames from here to RuleSet::project
+        // hold about 2.2 MiB of Rules copies, past libtest's 2 MiB thread.
+        let test = std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(generated_rules_read_before_generation_and_carried)
+            .unwrap();
+        if let Err(panic) = test.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn generated_rules_read_before_generation_and_carried() {
         use crate::app::match_runtime::session::SessionMode;
         use crate::map::source::test_support::TestDirectory;
         use crate::rules::ini_parser::IniFile;
@@ -4296,6 +4377,7 @@ mod full_init_rules_gate_tests {
             Some("mode.ini"),
             SessionMode::Skirmish,
             true,
+            None,
             &mut Progress { fail: false },
         )
         .unwrap();
@@ -4352,6 +4434,7 @@ mod full_init_rules_gate_tests {
                 Some("mode.ini"),
                 SessionMode::Skirmish,
                 true,
+                None,
                 &mut Progress { fail: true },
             )
             .is_err()
@@ -4629,7 +4712,7 @@ mod full_init_rules_gate_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod random_map_retail_tests {
     //! Retail-input pass over the real `.SED` load path.
     //!
@@ -4738,6 +4821,7 @@ mod random_map_retail_tests {
                     None,
                     crate::app::match_runtime::session::SessionMode::Skirmish,
                     false,
+                    None,
                     &mut SilentProgress,
                 )
                 .unwrap_or_else(|err| panic!("{tag}: the .SED branch failed: {err}"));
@@ -4824,7 +4908,7 @@ mod random_map_retail_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod milestone_order_tests {
     /// A source-order guard. gamemd raises the bar in call order (45 -> 50 ->
     /// 55/58/60 -> 63/65/67 -> 68/69 -> 70, `0x00687847`,
@@ -4849,7 +4933,7 @@ mod milestone_order_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod network_seed_source_tests {
     use super::*;
     #[test]

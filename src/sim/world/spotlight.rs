@@ -1,8 +1,18 @@
 //! BuildingLightClass435820/4361D0/436BE0/436A00, RTTI19, VT7E3AD0.
+//! Members: Constructor435820, ScalarDeletingDestructor4370C0, Draw_It435BE0,
+//! AI4361D0, GetType4369E0, GetLayer4369F0, PointerExpired436A00,
+//! SetBehaviour436BE0, DistanceToIntensity436E80, Limbo437030, Unlimbo437050.
+//! RecalcArcPositions436A40 and the plain Destructor435B50 have no call, jump
+//! or data reference in the exe, so the game never runs them.
 //! Independent ObjectClass child of Building+600. The global8B4190 vector
-//! retains construction order; D8 is assigned from its constructor index and
-//! never recomputed after removal. No RNG or timer writes. Parent Limbo deletes
-//! immediately; an orphan's AI uses ObjectUnInit5F65F0/deferred destruction.
+//! retains construction order; D8 is its constructor index's parity
+//! (435B0F..435B3F), never recomputed after removal. No RNG or timer writes.
+//! Native parent Limbo (Building445D75..445D81, which the building destructor
+//! reaches at 43BD6E) calls the light's vt+0xF8, ObjectUnInit5F65F0 (VT slot
+//! 7E3BC8): expiry broadcast, Limbo437030, Object+90 cleared and a deferred
+//! delete, so the light stays in 8B4190 until that frame's drain (725C70)
+//! runs 4370C0; an orphan's AI (4368E1) retires the same way. gamemd deletes
+//! a light directly only at scenario teardown (5345A2).
 use super::display_layers::DisplayLayer;
 use super::{Simulation, UninitContext};
 use crate::map::entities::EntityCategory;
@@ -96,6 +106,8 @@ fn coords(entity: &crate::sim::game_entity::GameEntity, sim: &Simulation) -> [i3
     let c = ground_pose::object_get_coords(entity, sim.resolved_terrain.as_ref());
     [c.x, c.y, c.z]
 }
+/// BuildingLightClass::Constructor @ 0x00435820's BeamCoords/PivotCoords.
+/// The unreferenced RecalcArcPositions @ 0x00436A40 repeats this body.
 fn initial_endpoint(parent: [i32; 3], facing: u16, radius: i32) -> [i32; 3] {
     //435988..435AA9: signed facing minus3FFF; double spill before table calls.
     endpoint_for_facing(
@@ -177,6 +189,7 @@ fn advance_angle(light: &mut Spotlight, rules: SpotlightRules) {
         light.rate = save(X::sub(rate, d(rules.acceleration)));
     }
 }
+/// BuildingLightClass::DistanceToIntensity @ 0x00436E80; AI4361D0 inlines it.
 fn bucket(parent: [i32; 3], light: [i32; 3], rules: SpotlightRules) -> i32 {
     let dist = crate::util::native_x87::distance_3d_leptons(parent, light);
     if dist < rules.location_radius {
@@ -251,7 +264,7 @@ impl Simulation {
                     self.resolved_terrain.as_ref(),
                 ) < -10)
         {
-            // BuildingLightDraw_Start1004EB42..1004EB96 hides the beam,
+            // BuildingLightDraw_Start1004EB42..1004EB96 (hook 0x435BFA) hides the beam,
             // retaining its child through cloak, EMP and underground travel.
             return None;
         }
@@ -350,6 +363,7 @@ impl Simulation {
         }
         for entity in self.substrate.entities.values() {
             if entity
+                .building
                 .building_light
                 .light()
                 .is_some_and(|id| !self.substrate.spotlights.contains_key(id))
@@ -360,14 +374,18 @@ impl Simulation {
         Ok(())
     }
 
+    /// BuildingClass::Unlimbo @ 0x00441163..0x00441190 constructs one for a
+    /// HasSpotlight type (BuildingLightClass::Constructor @ 0x00435820).
     pub(crate) fn construct_spotlight(&mut self, parent_id: u64, rules: &RuleSet) {
         let Some(parent) = self.substrate.entities.get(parent_id).filter(|e| {
             (e.category() == EntityCategory::Structure
                 || (self.spotlight_uses_type_rules(e, rules) && e.category().is_foot()))
                 && self
                     .entity_object_type(e, rules)
-                    .map_or(e.building_light.spotlight_capable(), |o| o.has_spotlight())
-                && e.building_light.light().is_none()
+                    .map_or(e.building.building_light.spotlight_capable(), |o| {
+                        o.has_spotlight()
+                    })
+                && e.building.building_light.light().is_none()
         }) else {
             return;
         };
@@ -376,7 +394,7 @@ impl Simulation {
         let params = rules.general.spotlight;
         let coord = initial_endpoint(p, facing, params.location_radius);
         // ObjectUnlimbo5F4F34 queries the coordinate before entry1AC. This
-        // class inherits4264C0 (always0) and GetType4369E0 (null), so it
+        // class inherits4264C0 (always0) and GetType @ 0x004369E0 (null), so it
         // has no terrain placement rejection/height rewrite or cell footprint.
         if !self.object_placement_scope_active() {
             if let Some(terrain) = self.resolved_terrain.as_ref() {
@@ -411,6 +429,7 @@ impl Simulation {
             .entities
             .get_mut(parent_id)
             .unwrap()
+            .building
             .building_light
             .attach(id);
         Self::submit_object_display(
@@ -418,21 +437,61 @@ impl Simulation {
             &self.terrain_objects,
             &mut self.substrate,
             id,
+            // BuildingLightClass::GetLayer @ 0x004369F0 returns Air (3).
             DisplayLayer::AIR,
             rules,
         );
+        // BuildingLightClass::Unlimbo @ 0x00437050 registers it with Logic;
+        // Limbo @ 0x00437030 is `conceal_spotlight_logic`.
         self.register_spotlight_logic(id);
     }
+    /// BuildingClass::Limbo @ 0x00445D75..0x00445D81, in its not-yet-in-Limbo
+    /// block (0x004458C6): the light's vt+0xF8, ObjectClass::UnInit @
+    /// 0x005F65F0. The expiry broadcast clears Building+0x600
+    /// (BuildingClass::PointerExpired @ 0x0044E93A); the light leaves Display
+    /// and Logic, dies and keeps its 8B4190 slot until the drain deletes it.
+    /// A Foot's light is Ares' own and keeps its direct delete. So does a
+    /// building's while Ares plays: its hook 0x441163 skips the stock
+    /// construction that stores Building+0x600 and Ares owns the light, so
+    /// whether this stock arm still runs there is not established (Ares'
+    /// 1004EDE0 was not read). RESIDUAL only while Ares plays: the light is
+    /// deleted at once, which decides the sweep direction of a light
+    /// constructed before that frame's drain.
+    pub(super) fn uninit_spotlight_for_parent_limbo(
+        &mut self,
+        parent: u64,
+        context: UninitContext<'_>,
+    ) {
+        let Some(entity) = self.substrate.entities.get(parent) else {
+            return;
+        };
+        match entity.building.building_light.light() {
+            Some(id)
+                if entity.category() == EntityCategory::Structure && !context.rules().ares() =>
+            {
+                self.uninit_with_context(id, context)
+            }
+            Some(_) => self.destroy_spotlight_for_parent(parent, context),
+            None => {}
+        }
+    }
+    /// The direct delete of a parent's light: Ares' Deactivate and type
+    /// conversion, and a parent destroyed without its Limbo.
     pub(crate) fn destroy_spotlight_for_parent(&mut self, parent: u64, context: UninitContext<'_>) {
         if let Some(id) = self
             .substrate
             .entities
-            .get_mut(parent)
-            .and_then(|e| e.building_light.take())
+            .get_mut_if(parent, |e| e.building.building_light.light().is_some())
+            .and_then(|e| e.building.building_light.take())
         {
             self.destroy_spotlight(id, context);
         }
     }
+    /// BuildingLightClass::ScalarDeletingDestructor @ 0x004370C0 (it inlines
+    /// the unreferenced Destructor @ 0x00435B50): Limbo and Logic unregister
+    /// (nothing for a light UnInit already limboed), removal from the 8B4190
+    /// vector, then ObjectClass's destructor. The drain calls it for a dead
+    /// queued light (0x00725D7A).
     pub(super) fn destroy_spotlight(&mut self, id: u64, context: UninitContext<'_>) {
         let Some(parent) = self.substrate.spotlights.get(id).map(|s| s.parent) else {
             return;
@@ -444,9 +503,12 @@ impl Simulation {
         self.substrate
             .pending_delete
             .remove(super::substrate::DeferredDeleteTicket::Object(id));
+        // Ares BuildingLightClass_SDDTOR (1004EBE0, hook 0x4370C0) clears
+        // TechnoExt::Spotlight; BuildingLightClass_CTOR (1004EA20, hook
+        // 0x435820) set it. The parent's one owned pointer is both fields.
         if let Some(parent) = parent.and_then(|p| self.substrate.entities.get_mut(p)) {
-            if parent.building_light.light() == Some(id) {
-                parent.building_light.take();
+            if parent.building.building_light.light() == Some(id) {
+                parent.building.building_light.take();
             }
         }
     }
@@ -510,6 +572,7 @@ impl Simulation {
         self.substrate.spotlights.get(id).map(|l| l.coord)
     }
 
+    /// BuildingLightClass::SetBehaviour @ 0x00436BE0.
     pub(crate) fn set_spotlight_behavior(&mut self, id: u64, mode: i32) {
         let Some(light) = self.substrate.spotlights.get_mut(id) else {
             return;
@@ -543,6 +606,7 @@ impl Simulation {
             self.substrate.spotlights.get_mut(id).unwrap().target = target;
         }
     }
+    /// BuildingLightClass::AI @ 0x004361D0.
     pub(super) fn visit_spotlight(&mut self, id: u64, rules: &RuleSet, context: UninitContext<'_>) {
         let Some(mut light) = self.substrate.spotlights.get(id).cloned() else {
             return;
@@ -577,6 +641,7 @@ impl Simulation {
         {
             return;
         }
+        let mut lost_target = false;
         match light.mode {
             1 => {
                 let params = if use_type_rules && parent.category().is_foot() {
@@ -650,18 +715,21 @@ impl Simulation {
                     //436321 resets mode then submits uninitialized stack XYZ.
                     //Keep last coordinates for this transition; native undefined
                     //stack contents are not a portable gameplay contract.
-                    light.mode = 1;
-                    light.angle = NativeF64Bits::from_bits(0);
+                    lost_target = true;
                 }
             }
             _ => {}
         }
-        let scan = light.mode == 1
+        let scan = (light.mode == 1 || lost_target)
             && self.object_has_trigger_tag(parent_id)
             && (self.building_operational_state(parent_id, rules) == Some(true)
                 || (use_type_rules && parent.category().is_foot()));
         let coord = light.coord;
         self.substrate.spotlights.objects.insert(id, light);
+        if lost_target {
+            //436321: SetBehaviour(1), so the scan below sees behaviour 1.
+            self.set_spotlight_behavior(id, 1);
+        }
         if scan {
             let b = bucket(parent_coord, coord, params);
             let threshold = params.radius.wrapping_add(30).wrapping_add(integer(X::mul(
@@ -679,6 +747,18 @@ impl Simulation {
                 });
             if seen {
                 self.dispatch_object_tag_event(parent_id, 35, Some(parent_id), None, context);
+                // Ares 3.0 BuildingLightClass_Update_Trigger (10050550, hook
+                // 0x4368C9): then 66 (in spotlight) on the same object while
+                // it is alive.
+                if rules.ares()
+                    && self
+                        .substrate
+                        .entities
+                        .get(parent_id)
+                        .is_some_and(|parent| parent.lifecycle.object_alive())
+                {
+                    self.dispatch_object_tag_event(parent_id, 66, Some(parent_id), None, context);
+                }
             }
         }
     }
@@ -706,6 +786,6 @@ impl crate::sim::world::ObjectSubstrate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_world_p_s))]
 #[path = "spotlight_tests.rs"]
 mod tests;

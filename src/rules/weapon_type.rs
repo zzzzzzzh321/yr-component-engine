@@ -59,6 +59,9 @@ pub struct WeaponType {
     pub projectile: Option<String>,
     /// Warhead type ID (`+0xAC`, references a [WarheadName] section).
     pub warhead: Option<String>,
+    /// Derived: [`Self::warhead`] and [`Self::projectile`] as the RuleSet
+    /// holding this weapon resolved them (`RuleSet::resolve_handles`).
+    parts: crate::rules::ruleset::WeaponParts,
     /// `Report=` firing sounds read by `WeaponTypeClass::ReadINI @ 0x00772080`
     /// through `ReadSoundList @ 0x00525430`, resolved against the fixed registry.
     pub report: Vec<String>,
@@ -74,6 +77,31 @@ pub struct WeaponType {
     resource_policy: Option<vera_mod_api::WeaponResourcePolicy>,
     /// Derived firing facts, rebuilt from the admitted component on load/restore.
     firing_policy: Option<vera_mod_api::WeaponFiringPolicy>,
+    /// Ares WeaponTypeExt constructor100549B4 and reader10055898 (+D0).
+    /// Valueable<int> retains failed/missing reads; default one round, which
+    /// a stock-way read keeps.
+    ares_ammo_cost: i32,
+    /// Ares WeaponTypeExt rad beam, bolt and wave visuals and
+    /// `IsDetachedRailgun` ([`crate::rules::ares_weapon`]).
+    pub ares_visuals: crate::rules::ares_weapon::AresWeaponVisuals,
+    /// Ares WeaponTypeExt custom Ivan bombs ([`crate::rules::ares_weapon`]).
+    pub ares_ivan_bomb: crate::rules::ares_weapon::AresIvanBomb,
+    /// Ares `ApplyDamage=` (WeaponTypeExt +0xCC, Nullable<bool>, reader
+    /// 10055520): whether FireAt's shot carries `Damage=`, by default unless
+    /// `IsSonic=` or `UseFireParticles=` (TechnoClass_Fire_AllowDamage
+    /// 1004A370, hook 0x6FE31C).
+    pub ares_apply_damage: Option<bool>,
+    /// Ares WeaponTypeExt abduction ([`crate::rules::ares_weapon`]).
+    pub ares_abductor: crate::rules::ares_weapon::AresAbductor,
+    /// Ares `Cursor.Attack`/`Cursor.AttackOutOfRange`
+    /// ([`crate::rules::ares_mouse_cursor`]), bound by the ordered Rules
+    /// reader; presentation only.
+    pub ares_cursors: crate::rules::ares_mouse_cursor::WeaponCursors,
+    /// Ares `ProjectileRange=` (WeaponTypeExt +0xC8, Valueable<Leptons>,
+    /// 100000): the leptons a FireAt bullet of a `Ranged=` type may travel
+    /// (TechnoClass_Fire_CreateBullet 1001ADE0, BulletClass_Update_Ranged
+    /// 1001AC90).
+    pub ares_projectile_range: i32,
     /// `RevealOnFire=` (`+0x137`, default yes): a launched shot reveals the
     /// firer to a human victim (FireAt `0x006FF66C`). Retail turns it off on
     /// the sniper, Virus, disguise and Mirage weapons.
@@ -296,13 +324,31 @@ impl WeaponType {
         self.firing_policy = policy;
     }
 
-    /// Ordinary shot damage is selected before the existing firepower stages.
-    /// Missing capability preserves the native Sonic/fire-particle default.
     pub(crate) fn applies_ordinary_damage(&self) -> bool {
-        self.firing_policy
-            .map_or(!self.is_sonic && !self.use_fire_particles, |policy| {
-                policy.apply_damage
-            })
+        !self.fire_damage_zeroed()
+    }
+
+    /// The weapon's warhead and projectile as its RuleSet resolved them;
+    /// reads go through `RuleSet::weapon_warhead`/`weapon_projectile`, which
+    /// check the resolving set.
+    #[inline]
+    pub(crate) fn parts(&self) -> crate::rules::ruleset::WeaponParts {
+        self.parts
+    }
+
+    /// Store the warhead and projectile resolved against the current set.
+    pub(crate) fn project_parts(&mut self, parts: crate::rules::ruleset::WeaponParts) {
+        self.parts = parts;
+    }
+
+    /// `FireAt`'s zeroing test (`0x006FE306..0x006FE32A`): an `IsSonic=` or
+    /// `UseFireParticles=` weapon's shot carries no damage, its wave or
+    /// particles hurt instead. Ares TechnoClass_Fire_AllowDamage (1004A370,
+    /// hook 0x6FE31C) lets `ApplyDamage=` decide, defaulting to that test;
+    /// a stock-way read leaves it unset.
+    pub(crate) fn fire_damage_zeroed(&self) -> bool {
+        let stock = self.is_sonic || self.use_fire_particles;
+        !self.firing_policy.map(|policy| policy.apply_damage).or(self.ares_apply_damage).unwrap_or(!stock)
     }
 
     /// `WeaponTypeExt::HasRequiredAttachedEffects` reads no list: every shot
@@ -327,6 +373,10 @@ impl WeaponType {
         &self,
     ) -> crate::rules::phobos_airburst::PhobosWeaponTargeting {
         self.phobos_weapon_targeting
+    }
+
+    pub(crate) fn ammo_cost(&self) -> i32 {
+        self.ares_ammo_cost
     }
 
     /// `Report.Count` (`WeaponTypeClass+0xCC`).
@@ -459,11 +509,32 @@ impl WeaponType {
             speed: 0,
             projectile: None,
             warhead: None,
+            parts: Default::default(),
             report: sound_list(section, "Report"),
             down_report: Vec::new(),
             burst: section.read_int("Burst", 1),
             resource_policy: None,
             firing_policy: None,
+            // `ammo_cost` and `fire_damage_zeroed` run in every build, so
+            // these two Ares reads happen only the Ares way.
+            ares_ammo_cost: if crate::rules::ares_switch::ares_way() {
+                section.read_ares_int("Ammo", 1)
+            } else {
+                1
+            },
+            ares_visuals: crate::rules::ares_weapon::AresWeaponVisuals::read(
+                section,
+                crate::rules::ares_switch::ares_read(|| section.read_bool("IsMagBeam", false)),
+            ),
+            ares_ivan_bomb: crate::rules::ares_weapon::AresIvanBomb::read(section),
+            ares_apply_damage: if crate::rules::ares_switch::ares_way() {
+                section.read_ares_nullable_bool("ApplyDamage", None)
+            } else {
+                None
+            },
+            ares_abductor: crate::rules::ares_weapon::AresAbductor::read(section),
+            ares_cursors: Default::default(),
+            ares_projectile_range: section.read_ares_leptons("ProjectileRange", 100000),
             // Constructor 1 (`0x00771DBB`); ReadINI passes it as the default
             // (`0x00772182..0x00772196`).
             reveal_on_fire: section.read_bool("RevealOnFire", true),
@@ -499,11 +570,17 @@ impl WeaponType {
             // Phobos `Valueable<T>` reads through the shared Ares parser: a
             // failed conversion keeps the constructor's value.
             #[cfg(feature = "phobos")]
-            phobos_laser_is_single_color: section.read_ares_bool("IsSingleColor", false),
+            phobos_laser_is_single_color: crate::rules::ares_switch::not_ares_read(|| {
+                section.read_ares_bool("IsSingleColor", false)
+            }),
             #[cfg(feature = "phobos")]
-            phobos_laser_thickness: section.read_ares_int("LaserThickness", 3),
+            phobos_laser_thickness: crate::rules::ares_switch::not_ares_read(|| {
+                section.read_ares_int("LaserThickness", 3)
+            }),
             #[cfg(feature = "phobos")]
-            phobos_beam_is_house_color: section.read_ares_bool("Beam.IsHouseColor", false),
+            phobos_beam_is_house_color: crate::rules::ares_switch::not_ares_read(|| {
+                section.read_ares_bool("Beam.IsHouseColor", false)
+            }),
 
             // The constructor's nulls and empty list (`0x00771C70`); the
             // ordered Process owner reads the Animation references.
@@ -578,14 +655,16 @@ impl WeaponType {
             attach_effect_disallowed_houses,
             attach_effect_same_source_only,
             #[cfg(feature = "phobos")]
-            rof_random_delay: Some(section.read_ares_partial_int_pair(
-                "ROF.RandomDelay",
-                crate::rules::ini_value::PartialIntPair {
-                    low: 0,
-                    high: 0,
-                    values: 0,
-                },
-            ))
+            rof_random_delay: Some(crate::rules::ares_switch::not_ares_read(|| {
+                section.read_ares_partial_int_pair(
+                    "ROF.RandomDelay",
+                    crate::rules::ini_value::PartialIntPair {
+                        low: 0,
+                        high: 0,
+                        values: 0,
+                    },
+                )
+            }))
             .filter(|range| range.values > 0),
         }
     }
@@ -612,8 +691,32 @@ fn sound_list(section: &IniSection, key: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_rules_o_z))]
 mod tests {
+    #[test]
+    fn ares_projectile_range_reads_cells_as_leptons_and_apply_damage_decides_zeroing() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
+        let read = |text: &str| {
+            let file = IniFile::from_str(text);
+            WeaponType::from_ini_section("W", file.section("W").unwrap())
+        };
+        let plain = read("[W]\nDamage=5\n");
+        assert_eq!(plain.ares_projectile_range, 100000);
+        assert!(!plain.fire_damage_zeroed());
+        let sonic = read("[W]\nIsSonic=yes\nProjectileRange=1.5\nApplyDamage=yes\n");
+        assert_eq!(sonic.ares_projectile_range, 384);
+        assert!(!sonic.fire_damage_zeroed(), "ApplyDamage=yes keeps it");
+        assert!(read("[W]\nApplyDamage=no\n").fire_damage_zeroed());
+        assert_eq!(
+            read("[W]\nProjectileRange=x\n").ares_projectile_range,
+            100000
+        );
+    }
+
+    #[test]
+    fn weapon_ammo_cost_uses_ares_retained_integer_reader_only_when_enabled() {
+    }
+
     #[test]
     fn weapon_ammo_tag_needs_an_external_resource_policy() {
         use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};

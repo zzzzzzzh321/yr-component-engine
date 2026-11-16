@@ -5,6 +5,7 @@
 //! the real renderer, and publishes one transactional final readback. It does
 //! not focus the window, inject desktop input, or grant simulation state.
 
+use crate::app::match_runtime::sim_host::SimWrite;
 use crate::util::time::{Duration, Instant};
 use std::path::Path;
 
@@ -198,6 +199,7 @@ impl TacticalCaptureSession {
                     options.clone(),
                     None,
                     false,
+                    true,
                 );
                 modal.begin_generate();
                 state.frontend.skirmish_shell_state.random_map_setup_modal = Some(modal);
@@ -466,7 +468,7 @@ impl TacticalCaptureSession {
                     let sim = state
                         .match_state
                         .sim_runtime
-                        .as_mut()
+                        .write_sim(SimWrite::Debug)
                         .map(|rt| &mut rt.simulation)
                         .context("queue action requires live simulation")?;
                     sim.intern(&type_id)
@@ -490,7 +492,7 @@ impl TacticalCaptureSession {
                     let sim = state
                         .match_state
                         .sim_runtime
-                        .as_mut()
+                        .write_sim(SimWrite::Debug)
                         .map(|rt| &mut rt.simulation)
                         .context("placement action requires live simulation")?;
                     sim.intern(&choice.type_id)
@@ -576,7 +578,7 @@ impl TacticalCaptureSession {
         let sim = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .map(|rt| &rt.simulation)
             .context("Rust L0 requires live simulation")?;
         let rules = state.rules().context("Rust L0 requires live rules")?;
@@ -753,7 +755,7 @@ impl TacticalCaptureSession {
         let sim = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .map(|rt| &rt.simulation)
             .context("Rust L0 simulation is absent")?;
         ensure!(
@@ -858,7 +860,7 @@ impl TacticalCaptureSession {
         let sim = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .map(|rt| &rt.simulation)
             .context("tactical observation requires live simulation")?;
         let rules = state
@@ -1034,10 +1036,21 @@ impl TacticalCaptureSession {
         output: &GameRenderOutput,
     ) -> Result<(bool, Value)> {
         let profile = self.request.profile()?;
+        // The profile seals the original sidebar geometry, which a layout
+        // file in the game folder or a mod MIX would move.
+        ensure!(
+            state
+                .match_state
+                .match_presentation
+                .match_layouts
+                .is_original(),
+            "tactical capture requires the original interface: remove {} from the game files",
+            crate::ui::match_layout::FILE_NAME
+        );
         let sim = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .map(|rt| &rt.simulation)
             .context("render readiness requires live simulation")?;
         let owner = &profile.launch.player_name;
@@ -1084,9 +1097,12 @@ impl TacticalCaptureSession {
             && aperture.y >= 0.0
             && aperture.x + aperture.w <= sidebar.panel_rect.x + sidebar.panel_rect.w
             && aperture.y + aperture.h <= state.render_height() as f32;
-        let cursor_id = crate::app::input::cursor::current_cursor_feedback_kind(state)
-            .and_then(crate::app::input::cursor::cursor_id_for_feedback)
-            .unwrap_or(CursorId::Default);
+        let cursor_id = crate::app::input::cursor::current_cursor_feedback_kind(
+            state,
+            &crate::app::input::cursor::CursorTargets::read(state),
+        )
+        .and_then(crate::app::input::cursor::cursor_id_for_feedback)
+        .unwrap_or(CursorId::Default);
         let cursor_ready = state.use_software_cursor()
             && cursor_id == CursorId::Default
             && state.match_state.input.cursor_x == profile.capture.post_load_cursor.x as f32
@@ -1212,7 +1228,7 @@ impl TacticalCaptureSession {
         let sim = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .map(|rt| &rt.simulation)
             .context("structure readiness requires live simulation")?;
         let bindings = script.structure_bindings();
@@ -1278,7 +1294,7 @@ impl TacticalCaptureSession {
         let sim = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .map(|rt| &rt.simulation)
             .context("fingerprint requires live simulation")?;
         let owner_id = sim.interner().get(owner).unwrap_or_default();
@@ -1336,9 +1352,15 @@ impl TacticalCaptureSession {
             "cursor": {
                 "x": state.match_state.input.cursor_x,
                 "y": state.match_state.input.cursor_y,
-                "id": format!("{:?}", crate::app::input::cursor::current_cursor_feedback_kind(state)
+                "id": format!(
+                    "{:?}",
+                    crate::app::input::cursor::current_cursor_feedback_kind(
+                        state,
+                        &crate::app::input::cursor::CursorTargets::read(state),
+                    )
                     .and_then(crate::app::input::cursor::cursor_id_for_feedback)
-                    .unwrap_or(CursorId::Default)),
+                    .unwrap_or(CursorId::Default)
+                ),
             }
         }))
     }
@@ -1594,7 +1616,7 @@ fn validate_loaded_resources(state: &AppState) -> Result<()> {
     let sim = &state
         .match_state
         .sim_runtime
-        .as_ref()
+        .runtime()
         .context("simulation is absent")?
         .simulation;
     ensure!(
@@ -1765,7 +1787,7 @@ fn validate_houses_and_slots(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::derive_rate;
 

@@ -114,7 +114,7 @@ impl RuleSet {
     pub fn country_extended_veterancy_enabled(&self, country: &str) -> bool {
         self.external_country_faction(country)
             .map(|policy| policy.is_some())
-            .unwrap_or(crate::rules::ARES_ENABLED)
+            .unwrap_or(self.ares())
     }
 
     /// Same accepted receipt as gameplay; no loading-time INI read or parent replay.
@@ -158,20 +158,22 @@ impl RuleSet {
         if let Some(policy) = self.external_country_faction(country) {
             return policy.map(|p| &p.presentation);
         }
-        #[cfg(feature = "ares")]
-        return self.country_rules(country).map(|p| &p.presentation);
-        #[cfg(not(feature = "ares"))]
-        None
+        if self.ares() {
+            self.country_rules(country).map(|p| &p.presentation)
+        } else {
+            None
+        }
     }
 
     pub(super) fn country_drop_rules(&self, country: &str) -> Option<&AresCountryParadrop> {
         if let Some(policy) = self.external_country_faction(country) {
             return policy.map(|p| &p.paradrop);
         }
-        #[cfg(feature = "ares")]
-        return self.country_rules(country).map(|p| &p.paradrop);
-        #[cfg(not(feature = "ares"))]
-        None
+        if self.ares() {
+            self.country_rules(country).map(|p| &p.paradrop)
+        } else {
+            None
+        }
     }
 
     /// Global UI dispatch installed by InitSideMixFiles534FA0, EVA1002FB00
@@ -180,7 +182,7 @@ impl RuleSet {
     pub fn registered_side_ui_enabled(&self) -> bool {
         self.match_rules_policy
             .and_then(|policy| policy.registered_side_ui)
-            .unwrap_or(crate::rules::ARES_ENABLED)
+            .unwrap_or(self.ares())
     }
 
     /// Ares1002F2D0 selector; the AI owner still owns House state and evaluation.
@@ -188,7 +190,7 @@ impl RuleSet {
         let extended = self
             .match_rules_policy
             .and_then(|p| p.extended_ai_side_tokens)
-            .unwrap_or(crate::rules::ARES_ENABLED);
+            .unwrap_or(self.ares());
         if extended {
             trigger_side == 0 || trigger_side.checked_sub(1) == Some(house_side)
         } else {

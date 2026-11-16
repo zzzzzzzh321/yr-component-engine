@@ -47,7 +47,7 @@ fn render_side_dialog_art(
     render_shp_entry_labeled(assets, image, &label, &palette, 0)
 }
 
-/// Red Alert 2's own neutral mode-2 background, a Desolator in a burning city:
+/// Red Alert 2's own neutral mode-2 background, a Tesla Trooper in a burning city:
 /// `PUDLGBGN.SHP` through `DIALOG.PAL`, both from `ra2.mix -> local.mix`. Yuri's
 /// Revenge's copies of the name win the ordinary lookup. VERA's updater boxes
 /// draw it; gamemd has no updater.
@@ -173,6 +173,8 @@ pub struct SkirmishShellChromeAtlas {
     pub setup_backgrounds: [Option<SkirmishShellChromeEntry>; 2],
     lan_icons: [Option<SkirmishShellChromeEntry>; 4],
     wol_setup_icons: [Option<SkirmishShellChromeEntry>; 5],
+    /// VERA's online room: the lobby's badge PCX images by file name.
+    wol_badges: Vec<(&'static str, SkirmishShellChromeEntry)>,
     pub lower_side_640_lwscrns: Option<SkirmishShellChromeEntry>,
     pub lower_side_large_lwscrnl: Option<SkirmishShellChromeEntry>,
     mode_two_dialog_backgrounds: [Option<SkirmishShellChromeEntry>; 4],
@@ -323,6 +325,14 @@ impl SkirmishShellChromeAtlas {
         Option<SkirmishShellChromeEntry>,
     ) {
         (self.wol_setup_icons[3], self.wol_setup_icons[4])
+    }
+
+    /// VERA's online room: a player's badge ([`crate::ui::wol_lobby::badge`]).
+    pub fn wol_badge(&self, file: &str) -> Option<SkirmishShellChromeEntry> {
+        self.wol_badges
+            .iter()
+            .find(|(name, _)| *name == file)
+            .map(|(_, entry)| *entry)
     }
 
     /// BB5DAFE0 gives the host glyph precedence, then accepted, else no icon.
@@ -762,7 +772,11 @@ pub fn build_skirmish_shell_chrome_atlas(
     for name in &flag_names {
         push_optional(&mut rendered, render_flag_pcx_entry(assets, name), name);
     }
-    for name in LAN_PCX_NAMES.into_iter().chain(WOL_SETUP_PCX_NAMES) {
+    for name in LAN_PCX_NAMES
+        .into_iter()
+        .chain(WOL_SETUP_PCX_NAMES)
+        .chain(crate::ui::wol_lobby::badge_files())
+    {
         // 6B9D00 packs embedded PCX palette to display RGB565; list images
         // and kind-2 statics compare the same packed magenta key as flags.
         push_optional(&mut rendered, render_flag_pcx_entry(assets, name), name);
@@ -820,6 +834,9 @@ pub fn build_skirmish_shell_chrome_atlas(
         generic_background_large_mnscrnl_shell: by_label.get("mnscrnl.shp#shell").copied(),
         lan_icons: LAN_PCX_NAMES.map(|name| by_label.get(name).copied()),
         wol_setup_icons: WOL_SETUP_PCX_NAMES.map(|name| by_label.get(name).copied()),
+        wol_badges: crate::ui::wol_lobby::badge_files()
+            .filter_map(|name| by_label.get(name).map(|entry| (name, *entry)))
+            .collect(),
         lower_side_640_lwscrns: by_label.get("lwscrns.shp").copied(),
         lower_side_large_lwscrnl: by_label.get("lwscrnl.shp").copied(),
         mode_two_dialog_backgrounds: mode_two_dialog_labels(side_dialog_art.as_deref())
@@ -1318,7 +1335,7 @@ fn average_rgb(a: [u8; 3], b: [u8; 3]) -> [u8; 3] {
     ]
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_render_s_z))]
 mod tests {
     use super::{
         AssetManager, COOP_SETUP_PALETTE, COOP_SETUP_SHAPE, ChromePiece,

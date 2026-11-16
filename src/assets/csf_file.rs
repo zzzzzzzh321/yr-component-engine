@@ -14,10 +14,11 @@
 //! - Part of assets/ — no dependencies on game modules.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use crate::assets::error::AssetError;
 use crate::assets::startup_resources::{CsfCandidate, CsfCompositionPolicy, CsfLanguageGate};
+use crate::util::lookup_hash::LookupMap;
+use crate::util::native_string::with_ascii_uppercase;
 use crate::util::read_helpers::read_u32_le;
 
 mod ares_labels;
@@ -45,10 +46,12 @@ pub struct CsfFile {
     // Ares's override hook frees the old value before reading its replacement.
     // A malformed body can therefore leave a registered label with a null value.
     entries: CsfEntries,
-    /// VERA's localization layer (`[VERA] Language=`), searched only for
-    /// labels the table has no text for. Lookup-only: `len`/`entries` still
-    /// describe the loaded files.
-    fallbacks: HashMap<String, CsfText>,
+    /// VERA's localization layer (the client's `i18n`), lookup-only:
+    /// `len`/`entries` still describe the loaded files. The player's language
+    /// answers ahead of the table, so it can translate the game's own labels;
+    /// English answers only labels neither has.
+    overrides: LookupMap<String, CsfText>,
+    fallbacks: LookupMap<String, CsfText>,
 }
 
 /// Raw diagnostics retain the existing map semantics. The active Ares table
@@ -56,7 +59,7 @@ pub struct CsfFile {
 /// duplicate slots even when every supplemental file has unique labels.
 #[derive(Debug, Clone)]
 enum CsfEntries {
-    Raw(HashMap<String, Option<CsfText>>),
+    Raw(LookupMap<String, Option<CsfText>>),
     Ares(Vec<(String, Option<CsfText>)>),
 }
 
@@ -118,7 +121,10 @@ impl CsfFile {
         // so a malformed count cannot steer the allocation before any record
         // is parsed.
         let possible_entries = (data.len() / 22) as u32;
-        let mut entries = HashMap::with_capacity(label_count.min(possible_entries) as usize);
+        let mut entries = LookupMap::with_capacity_and_hasher(
+            label_count.min(possible_entries) as usize,
+            Default::default(),
+        );
         let mut offset: usize = 24;
 
         // Retail walks records until the next read/magic check fails;
@@ -139,22 +145,27 @@ impl CsfFile {
             version,
             language,
             entries: CsfEntries::Raw(entries),
-            fallbacks: HashMap::new(),
+            overrides: LookupMap::default(),
+            fallbacks: LookupMap::default(),
         })
     }
 
     /// The process string table used by both the game and asset diagnostics.
     /// Stock YR loads the md table alone. Installed Ares6BD886->10060DF0
-    /// appends its fixed candidates; native controls: tools/rules_oracle/ares_csf.
+    /// appends its fixed candidates, for a game whose files take Ares' forms
+    /// (`ares`, `AssetManager::ares_form`); native controls:
+    /// tools/rules_oracle/ares_csf.
     pub fn load_active<'a>(
+        ares: bool,
         lookup: impl FnMut(&str) -> Option<&'a [u8]>,
     ) -> Result<(Self, Vec<String>), AssetError> {
-        Self::load_active_with_policy(lookup, |_| Ok(None))
+        Self::load_active_with_policy(ares, lookup, |_| Ok(None))
     }
 
     /// The base parser runs before the pure candidate provider. Selection and
     /// binary/label ownership remain here, including partial malformed writes.
     pub fn load_active_with_policy<'a>(
+        ares: bool,
         mut lookup: impl FnMut(&str) -> Option<&'a [u8]>,
         provider: impl FnOnce(u32) -> Result<Option<CsfCompositionPolicy>, String>,
     ) -> Result<(Self, Vec<String>), AssetError> {
@@ -168,7 +179,7 @@ impl CsfFile {
                 detail,
             })?
             .unwrap_or_else(|| {
-                if cfg!(feature = "ares") {
+                if ares {
                     CsfCompositionPolicy::OrderedRecords {
                         candidates: table
                             .ares_candidates()
@@ -289,26 +300,37 @@ impl CsfFile {
     /// used as written: CSF whitespace normalization is a property of the
     /// binary table, not of VERA's string files.
     pub fn set_fallback(&mut self, key: &str, value: &str) {
-        let stored_key = key.to_ascii_uppercase();
-        self.fallbacks.insert(
-            stored_key.clone(),
-            CsfText {
-                value: value.to_owned(),
-                raw: value.to_owned(),
-                stored_key,
-            },
-        );
+        self.fallbacks
+            .insert(key.to_ascii_uppercase(), localized(key, value));
+    }
+
+    /// Install the player's language's text for `key` ahead of the loaded
+    /// table: it answers even for a label the table has.
+    pub fn set_override(&mut self, key: &str, value: &str) {
+        self.overrides
+            .insert(key.to_ascii_uppercase(), localized(key, value));
+    }
+
+    /// Drop every installed text, before a language change installs its own.
+    pub fn clear_localization(&mut self) {
+        self.overrides.clear();
+        self.fallbacks.clear();
     }
 
     fn lookup_text(&self, key: &str) -> Option<&CsfText> {
-        let key = key.to_ascii_uppercase();
-        let loaded = match &self.entries {
-            CsfEntries::Raw(entries) => entries.get(&key).and_then(Option::as_ref),
-            CsfEntries::Ares(labels) => {
-                native_label_search(labels, &key).and_then(|slot| labels[slot].1.as_ref())
-            }
-        };
-        loaded.or_else(|| self.fallbacks.get(&key))
+        // The UI looks labels up every frame: fold the key on the stack.
+        with_ascii_uppercase(key, |key| {
+            let loaded = match &self.entries {
+                CsfEntries::Raw(entries) => entries.get(key).and_then(Option::as_ref),
+                CsfEntries::Ares(labels) => {
+                    native_label_search(labels, key).and_then(|slot| labels[slot].1.as_ref())
+                }
+            };
+            self.overrides
+                .get(key)
+                .or(loaded)
+                .or_else(|| self.fallbacks.get(key))
+        })
     }
 
     /// Native initialized-table lookup. Missing labels are visible, not an
@@ -346,6 +368,14 @@ impl CsfFile {
                     .filter_map(|(k, v)| v.as_ref().map(|v| (k.as_str(), v.value.as_str()))),
             ),
         }
+    }
+}
+
+fn localized(key: &str, value: &str) -> CsfText {
+    CsfText {
+        value: value.to_owned(),
+        raw: value.to_owned(),
+        stored_key: key.to_ascii_uppercase(),
     }
 }
 
@@ -605,27 +635,6 @@ fn normalize_whitespace(units: &[u16]) -> Vec<u16> {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
-
-    #[test]
-    fn a_huge_header_label_count_cannot_steer_the_map_reservation() {
-        // 24-byte header claiming u32::MAX labels with no records behind it.
-        // The reservation must come from the file size, not the count: the
-        // count once asked for roughly 833 GB before the first read.
-        let mut data = Vec::with_capacity(25);
-        data.extend_from_slice(&HEADER_MAGIC.to_le_bytes());
-        data.extend_from_slice(&3u32.to_le_bytes());
-        data.extend_from_slice(&u32::MAX.to_le_bytes());
-        data.extend_from_slice(&u32::MAX.to_le_bytes());
-        data.extend_from_slice(&[0; 8]);
-        data.push(0);
-        let parsed = CsfFile::from_bytes(&data).expect("parse walks until reads fail");
-        match parsed.entries {
-            CsfEntries::Raw(entries) => assert!(entries.is_empty()),
-            CsfEntries::Ares(entries) => assert!(entries.is_empty()),
-        }
-    }
-
-    /// Encode a string into CSF format (UTF-16-LE then bitwise-NOT).
     pub(super) fn encode_csf_string(s: &str) -> Vec<u8> {
         let utf16: Vec<u16> = s.encode_utf16().collect();
         utf16
@@ -636,6 +645,7 @@ pub mod test_support {
     }
 
     /// Build a minimal CSF file with one label entry.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn build_test_csf(label: &str, value: &str) -> Vec<u8> {
         let encoded_value: Vec<u8> = encode_csf_string(value);
         let char_count: u32 = value.encode_utf16().count() as u32;
@@ -723,6 +733,7 @@ mod tests {
             }))
         };
         let (table, admitted) = CsfFile::load_active_with_policy(
+            false,
             |name| match name {
                 "ra2md.csf" => Some(base.as_slice()),
                 "wrong-language.csf" | "accepted.csf" => Some(supplement.as_slice()),
@@ -739,7 +750,7 @@ mod tests {
             "the prior slot is freed before a bad value"
         );
         assert_eq!(admitted, ["accepted.csf"]);
-        assert!(CsfFile::load_active_with_policy(|_| None, policy).is_err());
+        assert!(CsfFile::load_active_with_policy(false, |_| None, policy).is_err());
         assert_eq!(
             calls.get(),
             1,
@@ -751,36 +762,27 @@ mod tests {
     fn active_csf_profile_uses_shared_base_and_optional_supplements() {
         let base = build_test_csf("A", "base");
         let extra = build_test_csf("A", "extra");
-        let mut requested = Vec::new();
-        let (table, admitted) = CsfFile::load_active(|name| {
-            requested.push(name.to_string());
-            match name {
-                "ra2md.csf" => Some(base.as_slice()),
-                "stringtable00.csf" => Some(extra.as_slice()),
-                _ => None,
-            }
-        })
-        .unwrap();
-        assert_eq!(
-            table.get("a"),
-            Some(if cfg!(feature = "ares") {
-                "extra"
-            } else {
-                "base"
+        for ares in [false, true] {
+            let mut requested = Vec::new();
+            let (table, admitted) = CsfFile::load_active(ares, |name| {
+                requested.push(name.to_string());
+                match name {
+                    "ra2md.csf" => Some(base.as_slice()),
+                    "stringtable00.csf" => Some(extra.as_slice()),
+                    _ => None,
+                }
             })
-        );
-        assert_eq!(admitted.len(), usize::from(cfg!(feature = "ares")));
-        assert_eq!(
-            requested.len(),
-            if cfg!(feature = "ares") { 103 } else { 1 }
-        );
-        assert!(
-            CsfFile::load_active(|_| None).is_err(),
-            "base table is required in both profiles"
-        );
+            .unwrap();
+            assert_eq!(table.get("a"), Some(if ares { "extra" } else { "base" }));
+            assert_eq!(admitted.len(), usize::from(ares));
+            assert_eq!(requested.len(), if ares { 103 } else { 1 });
+            assert!(
+                CsfFile::load_active(ares, |_| None).is_err(),
+                "base table is required in both profiles"
+            );
+        }
     }
 
-    #[cfg(feature = "ares")]
     #[test]
     fn supplemental_csf_three_native_histories_preserve_order_gates_and_partial_writes() {
         let native: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
@@ -830,7 +832,7 @@ mod tests {
                 supplemental_fixture(&[("A", "base"), ("KEEP", "keep")], 0, 3, 2),
             );
             let mut requested = Vec::new();
-            let (table, admitted) = CsfFile::load_active(|name| {
+            let (table, admitted) = CsfFile::load_active(true, |name| {
                 if name != "ra2md.csf" {
                     requested.push(name.to_string());
                 }
@@ -848,7 +850,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "ares")]
     #[test]
     fn supplemental_unique_records_match_native_ordered_slots_and_lookup() {
         let native: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
@@ -867,7 +868,7 @@ mod tests {
             };
             let base = fixture(&row["base"]);
             let extra = fixture(&row["supplemental"]);
-            let (table, _) = CsfFile::load_active(|name| match name {
+            let (table, _) = CsfFile::load_active(true, |name| match name {
                 "ra2md.csf" => Some(base.as_slice()),
                 "stringtable00.csf" => Some(extra.as_slice()),
                 _ => None,

@@ -1,7 +1,6 @@
 //! Retained ordinary Ares EMP configuration. Installed Ares3.0 Bullet46920B
 //! and Techno6FAF0D consumers; Type suffix716132 and WH suffix75DEA0 own
 //! the actual reads. This module owns no gameplay timer or offline latch.
-#[cfg(feature = "ares")]
 use crate::rules::ini_parser::IniSection;
 use crate::util::native_x87::NativeF64Bits;
 
@@ -43,7 +42,9 @@ impl EmpTypeRules {
                 vera_mod_api::NullableResourceName::Clear => Some(None),
                 vera_mod_api::NullableResourceName::Named(name) => Some(Some(name)),
             },
+            #[cfg(not(feature = "ares"))]
             veteran_immune: policy.veteran_immune,
+            #[cfg(not(feature = "ares"))]
             elite_immune: policy.elite_immune,
         }
     }
@@ -59,8 +60,8 @@ impl EmpTypeRules {
     pub(crate) fn sparkles(&self) -> Option<Option<&str>> {
         self.sparkles.as_ref().map(|name| name.as_deref())
     }
-    #[cfg(feature = "ares")]
     pub(crate) fn read_pass(&mut self, section: &IniSection, sparkle: Option<Option<String>>) {
+        let _ares = crate::rules::ares_switch::ares_reads();
         self.immune = section.read_ares_nullable_bool("ImmuneToEMP", self.immune);
         self.modifier = section.read_ares_double_bits("EMP.Modifier", self.modifier);
         if let Some(sparkle) = sparkle {
@@ -127,8 +128,8 @@ impl EmpWarheadRules {
             self.affects_owner,
         )
     }
-    #[cfg(feature = "ares")]
     pub(crate) fn read_pass(&mut self, section: &IniSection, sparkle: Option<Option<String>>) {
+        let _ares = crate::rules::ares_switch::ares_reads();
         // Warhead suffix75DEA0 ->10051890 retains these fields per read.
         self.duration = section.read_ares_int("EMP.Duration", self.duration);
         self.cap = section.read_ares_int("EMP.Cap", self.cap);
@@ -140,7 +141,7 @@ impl EmpWarheadRules {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_rules_a_n))]
 mod tests {
     use super::*;
     use crate::rules::{
@@ -195,9 +196,9 @@ mod tests {
             }
         }
     }
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_emp_native_bool_and_ability_readers() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         for row in corpus()["flag_readers"].as_array().unwrap() {
             let kind = row["kind"].as_str().unwrap();
             let key = match kind {
@@ -251,7 +252,7 @@ mod tests {
         layers.push(RulesLayerKind::Scenario, IniFile::from_str(scenario));
         let rules = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
         let object = rules.object("TANK").unwrap();
-        if crate::rules::ARES_ENABLED {
+        if crate::rules::ARES_BUILD {
             let config = object.emp_rules().unwrap();
             assert_eq!(
                 config.modifier(),

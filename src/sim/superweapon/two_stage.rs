@@ -102,8 +102,29 @@ impl Simulation {
         Ok(())
     }
 
+    /// Paid selections are Ares state: saved ones load only into a game Ares
+    /// plays in (`Simulation::validate_ares_state_for_load`).
+    pub(crate) fn validate_paid_super_weapon_selections_for_load(
+        &self,
+        ares: bool,
+    ) -> Result<(), &'static str> {
+        if ares {
+            return Ok(());
+        }
+        for (_, weapons) in self.super_weapons.iter() {
+            for (_, instance) in weapons {
+                if instance.paid_sequence != 0 || instance.paid_selection.is_some() {
+                    return Err("paid selections require a game Ares plays in");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Read projection for command producers. No money or local cursor state is
     /// owned here. A completed/cancelled sequence is never reused after reload.
+    /// Only the Ares launch path stores one, so a game without Ares reads
+    /// `None`.
     pub fn paid_super_weapon_selection(
         &self,
         owner: InternedId,
@@ -203,7 +224,7 @@ pub(super) fn source_available(
     if !instance.is_active || instance.is_suspended {
         return false;
     }
-    let (provided, online) = super::provider_supers(sim, rules, owner);
+    let providers = super::provider_supers(sim, rules, owner);
     let low_power = sim
         .power_states
         .get(&owner)
@@ -214,8 +235,10 @@ pub(super) fn source_available(
             sw,
             house.is_defeated(),
             sim.session.game_options().super_weapons || !sw.disableable_from_shell,
-            provided.contains(&source),
-            !low_power && online.contains(&source),
+            providers.provided.contains(&source),
+            !low_power && providers.online.contains(&source),
+            providers.charging.contains(&source),
+            rules.ares_form(),
         ),
         super::SuperHold::Unchanged | super::SuperHold::Suspend(false)
     )

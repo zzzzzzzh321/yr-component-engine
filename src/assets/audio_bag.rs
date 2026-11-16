@@ -31,13 +31,15 @@
 //! - Compressed entries decode through `assets::ima_adpcm`, the crate's single
 //!   IMA ADPCM implementation, mirroring the single decoder in `gamemd.exe`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::util::read_helpers::read_u32_le;
 
 const IDX_HEADER_SIZE: usize = 12;
 /// V1 entries are 32 bytes, V2 entries are 36 bytes (extra chunk_size field).
 const IDX_ENTRY_SIZE_V1: usize = 32;
 
-#[cfg(test)]
+#[cfg(all(test, tests_assets))]
 #[path = "audio_bag_native_tests.rs"]
 mod native_tests;
 const IDX_ENTRY_SIZE_V2: usize = 36;
@@ -93,6 +95,8 @@ pub struct BagAudio {
 
 /// Parsed audio.idx index with the .bag data, providing name-based lookup.
 pub struct AudioIndex {
+    /// See [`Self::id`].
+    id: u64,
     /// Entries sorted by name (uppercase) for binary search.
     entries: Vec<AudioBagEntry>,
     /// Backing files, retained independently: offsets stay relative to their BAG.
@@ -198,6 +202,7 @@ impl AudioIndex {
             bag_data.len()
         );
         Some(Self {
+            id: next_index_id(),
             entries,
             bag_data: vec![bag_data],
             entry_bags: vec![0; entry_count],
@@ -220,6 +225,7 @@ impl AudioIndex {
         }
         let (entries, entry_bags) = winners.into_values().unzip();
         Self {
+            id: next_index_id(),
             entries,
             entry_bags,
             bag_data: files,
@@ -289,6 +295,13 @@ impl AudioIndex {
         Some((entry, &bag[start..end]))
     }
 
+    /// A number no other index in the process has, starting at 1. A cache of
+    /// samples decoded from an index keys on it, so it never plays one
+    /// index's sample for another's name.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Number of indexed entries.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -316,6 +329,12 @@ impl AudioIndex {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// The next [`AudioIndex::id`].
+fn next_index_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Decode raw audio data from a .bag entry based on its format flags.
@@ -375,7 +394,7 @@ pub mod test_support {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_assets))]
 mod tests {
     use super::test_support::build_idx;
     use super::*;

@@ -69,7 +69,9 @@ impl Simulation {
     /// block `0x004463F0..0x00446580`: for each of the owner's Supers
     /// matching the type's `SuperWeapon=`, construct slot 16 when its charge
     /// is (all but) complete, else slot 14, in the damaged or garrisoned
-    /// variant the opening's other slots take.
+    /// variant the opening's other slots take. Ares 3.0
+    /// BuildingClass_Place_SuperWeaponAnimsB 10034AE0 (hook `0x0044656D`)
+    /// skips the stock second loop to `0x00446580`, the end of this block.
     pub(crate) fn open_super_weapon_anims(
         &mut self,
         id: u64,
@@ -100,13 +102,14 @@ impl Simulation {
                 return;
             }
         } else {
+            let owner = entity.owner();
             let Some(index) = self
                 .object_type(entity.type_ref(), rules)
                 .and_then(|object| super_weapon_index(object, rules))
             else {
                 return;
             };
-            crate::sim::superweapon::supers_of_kind_remaining(self, rules, entity.owner(), index)
+            crate::sim::superweapon::supers_of_kind_remaining(self, rules, owner, index)
         };
         for remaining in remaining {
             let slot = if opens_charged(remaining) {
@@ -119,7 +122,9 @@ impl Simulation {
     }
 
     /// `BuildingClass::UpdateAnimation @ 0x004509D0`'s SuperAnim block
-    /// `0x00450F9E..0x00451145`, reached on every visit. Outside
+    /// `0x00450F9E..0x00451145`, reached on every visit (Ares 3.0
+    /// BuildingClass_ProcessAnims_SuperWeaponsB 10034B60, hook `0x00451132`,
+    /// skips the stock second pass to its end). Outside
     /// Construction and Selling, for a type with `ChargedAnimTime=` at most
     /// 990: for each of the owner's Supers matching the type's
     /// `SuperWeapon=`, a charge within `ChargedAnimTime` minutes of ready
@@ -133,6 +138,8 @@ impl Simulation {
         let Some(entity) = self.substrate.entities.get(id) else {
             return;
         };
+        let ares = rules.superweapon_semantics().definition_building_animation;
+        let owner = entity.owner();
         let health = entity.health;
         if matches!(
             entity.mission.current().known(),
@@ -143,12 +150,18 @@ impl Simulation {
         let Some(object) = self.object_type(entity.type_ref(), rules) else {
             return;
         };
+        // The stock pass leaves here without a `SuperWeapon=` index; Ares
+        // asks for the building's available Super below instead.
+        let index = super_weapon_index(object, rules);
+        if !ares && index.is_none() {
+            return;
+        }
         let charged_anim_time = object.charged_anim_time;
         if charged_anim_time > CHARGED_ANIM_TIME_LIMIT {
             return;
         }
         let strength = object.strength;
-        let remaining = if rules.superweapon_semantics().definition_building_animation {
+        let remaining = if ares {
             // Ares450F9E ->10034AF0: unavailable returns451145; only an
             // actual selected instance reaches the shared retail timer body.
             let Some(instance) =
@@ -158,10 +171,10 @@ impl Simulation {
             };
             vec![instance.charge_remaining(self.session.binary_frame() as i32)]
         } else {
-            let Some(index) = super_weapon_index(object, rules) else {
+            let Some(index) = index else {
                 return;
             };
-            crate::sim::superweapon::supers_of_kind_remaining(self, rules, entity.owner(), index)
+            crate::sim::superweapon::supers_of_kind_remaining(self, rules, owner, index)
         };
         for remaining in remaining {
             let (occupied, replacement) = if near_charged(remaining, charged_anim_time) {
@@ -183,7 +196,7 @@ impl Simulation {
     }
 }
 
-#[cfg(all(test, not(feature = "ares")))]
+#[cfg(all(test, tests_sim_a_b, not(feature = "ares")))]
 mod tests {
     //! Native comparisons (`tools/superweapon_oracle.py` sections
     //! `super_anim` and `opening_super_anim`; `--check` regenerates them).

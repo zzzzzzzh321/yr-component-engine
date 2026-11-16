@@ -47,6 +47,7 @@ impl SpotlightTypeRules {
     }
 
     pub(crate) fn read_pass(&mut self, section: &IniSection) {
+        let _ares = crate::rules::ares_switch::ares_reads();
         self.start_height = section.read_ares_int("Spotlight.StartHeight", self.start_height);
         self.distance = section.read_ares_int("Spotlight.Distance", self.distance);
         //1003E260..1003E2E7: lookup-only enum; invalid/empty retains it.

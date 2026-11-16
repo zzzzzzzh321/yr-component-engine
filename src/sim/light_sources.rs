@@ -317,8 +317,8 @@ impl Simulation {
 
     /// Installed GetLightingColor10032700: one selector for impact, updates
     /// and future Convert constructors. RGB selection is distinct from the
-    /// unchanged Cell Ground/Level selector below. Other redirected handler
-    /// source overrides remain with their not-yet-ported Ares effect owners.
+    /// unchanged Cell Ground/Level selector below. Native storm and Dominator
+    /// owners keep their own retained overrides.
     fn ares_lighting_selection(
         &self,
         rules: &RuleSet,
@@ -342,31 +342,45 @@ impl Simulation {
             rgb: base.alternate_rgb(),
             has_value: profile != ScenarioLightingProfile::Normal,
         };
-        if let Some(source) = explicit_source.or(source) {
-            if let Some(light) = rules.super_weapon_light(source) {
-                if !light.enabled {
-                    selected.has_value = false;
-                    return selected;
-                }
-                if let Some(ambient) = light.ambient.filter(|value| *value >= 0) {
-                    selected.ambient = ambient;
-                }
-                for (destination, value) in
-                    selected
-                        .rgb
-                        .iter_mut()
-                        .zip([light.red, light.green, light.blue])
-                {
-                    if let Some(value) = value.filter(|value| *value >= 0) {
-                        //10032849/63/7E LEA+ADD: no selector clamp.
-                        *destination = value.wrapping_mul(10);
-                    }
+        let light = if let Some(source) = explicit_source.or(source) {
+            Some(
+                rules
+                    .super_weapon_light(source)
+                    .map_or((true, [None; 4]), |light| {
+                        (
+                            light.enabled,
+                            [light.ambient, light.red, light.green, light.blue],
+                        )
+                    }),
+            )
+        } else {
+            self.retained_ares_light(profile)
+                .map(|light| (light.enabled(), light.overrides()))
+        };
+        if let Some((enabled, [ambient, red, green, blue])) = light {
+            selected.has_value = enabled;
+            if let Some(ambient) = ambient.filter(|value| *value >= 0) {
+                selected.ambient = ambient;
+            }
+            for (destination, value) in selected.rgb.iter_mut().zip([red, green, blue]) {
+                if let Some(value) = value.filter(|value| *value >= 0) {
+                    // 10032849/63/7E LEA+ADD: no selector clamp.
+                    *destination = value.wrapping_mul(10);
                 }
             }
-            // A nonnull enabled source sets HasValue even with no overrides.
-            selected.has_value = true;
         }
         selected
+    }
+
+    fn retained_ares_light(
+        &self,
+        profile: ScenarioLightingProfile,
+    ) -> Option<crate::rules::superweapon_type::AresSuperWeaponLighting> {
+        match profile {
+            ScenarioLightingProfile::Ion => self.lightning_storm.ares_light(),
+            ScenarioLightingProfile::Dominator => self.psychic_dominator.ares_light(),
+            _ => None,
+        }
     }
 
     pub fn lighting_palette(&self, rules: &RuleSet) -> PaletteUpdate {
@@ -447,7 +461,10 @@ impl Simulation {
         } else {
             ScenarioLightingProfile::Normal
         };
-        self.session.lighting_mut().select(profile);
+        // Ares hook 53C280 (10037B50) selects the current storm's or
+        // Dominator's Light.*. Stock games have neither current override.
+        let light = self.retained_ares_light(profile);
+        self.session.lighting_mut().select_ares(profile, light);
         self.publish_global_lighting(
             PaletteUpdate::from_scenario(&self.session.lighting()),
             rules,

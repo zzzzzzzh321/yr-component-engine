@@ -170,7 +170,7 @@ pub fn acquire_profile(directory: &std::path::Path) -> std::io::Result<SingleIns
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_util))]
 mod tests {
     use super::*;
     #[test]

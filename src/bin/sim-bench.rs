@@ -18,7 +18,7 @@
 //! `--scenario match` plays the middle of a multiplayer match instead (see
 //! `sim_bench_match`): the map loads as a Battle against `--computers`
 //! computer houses (by default the most the lobby admits on the map, at most
-//! 7), the other start waypoints get human players' houses, and every house
+//! 29), the other start waypoints get human players' houses, and every house
 //! has a finished base, harvesters, factories that keep building and a mixed
 //! army. Their own AI plays the computer houses; a script plays the human
 //! ones, sending their armies at the nearest bases in squads until those
@@ -58,9 +58,29 @@
 //! `--starts 30` the match map with ore and trees. Add `--size 500` for a
 //! literal `Size=0,0,500,500` map using the extended cell array.
 //!
+//! The standard battle benchmark is 1v29: a skirmish against 29 computer
+//! houses on the 30-start match map, timed at the client's step:
+//! `python -m tools.scale_map target/scale/match30.map --starts 30`, then
+//! `sim-bench --map target/scale/match30.map --scenario skirmish
+//! --client-timing --frame-profile`. The map's `MaxPlayers=30` lets the
+//! lobby seat them all.
+//!
+//! `--presentation-frame` brings the copy of the world without its objects
+//! up to date after every frame, as the client's simulation host does for
+//! drawing (docs/sim-thread.md), and counts it in the frame's time.
+//!
+//! Idle objects sleep as in a real match (`sim::world::idle_sleep`):
+//! `--no-sleep` runs every turn, which must give the same hashes, and
+//! `--sleep-check` runs every turn sleeping would skip and stops if one
+//! changed anything. The summary prints how many visits were counted.
+//!
 //! The simulation batches its path searches and target scans as a real
 //! match does; `--serial-paths` searches and `--serial-scans` scans in native
-//! order instead.
+//! order instead. The `path_batch` line sums the batch's passes over the
+//! measured frames ([`PathBatchStats`]): registrations waiting and answered,
+//! the ones the cap or a re-path budget left for a later pass, and the
+//! cells the searches expanded, with the code-2 re-paths' share at each
+//! urgency.
 //!
 //! Beside each frame's wall time, the CSV's `cpu_ms` column and the
 //! `main_thread_cpu_*` line give the main thread's CPU time (Unix only). On a
@@ -97,6 +117,7 @@ use vera20k_core::map::source::load_map_ini_by_name_or_path_with_assets;
 use vera20k_core::map::waypoints::skirmish_player_capacity;
 use vera20k_core::sim::command::{Command, CommandEnvelope};
 use vera20k_core::sim::intern::InternedId;
+use vera20k_core::sim::movement::PathBatchStats;
 use vera20k_core::sim::runtime::SimRuntime;
 use vera20k_core::sim::scenario_session::ScenarioGameMode;
 
@@ -134,10 +155,13 @@ struct Args {
     csv: Option<PathBuf>,
     serial_paths: bool,
     serial_scans: bool,
+    no_sleep: bool,
+    sleep_check: bool,
     frame_profile: bool,
     lan: bool,
     frame_hashes: Option<PathBuf>,
     client_timing: bool,
+    presentation_frame: bool,
 }
 
 impl Args {
@@ -174,10 +198,13 @@ fn parse_args_from(mut argv: impl Iterator<Item = String>) -> Result<Args, Strin
         csv: None,
         serial_paths: false,
         serial_scans: false,
+        no_sleep: false,
+        sleep_check: false,
         frame_profile: false,
         lan: false,
         frame_hashes: None,
         client_timing: false,
+        presentation_frame: false,
     };
     let mut march_flag = None;
     while let Some(flag) = argv.next() {
@@ -232,6 +259,9 @@ fn parse_args_from(mut argv: impl Iterator<Item = String>) -> Result<Args, Strin
             "--frame-hashes" => args.frame_hashes = Some(PathBuf::from(value()?)),
             "--client-timing" => args.client_timing = true,
             "--serial-scans" => args.serial_scans = true,
+            "--no-sleep" => args.no_sleep = true,
+            "--sleep-check" => args.sleep_check = true,
+            "--presentation-frame" => args.presentation_frame = true,
             other => return Err(format!("unrecognised argument {other}")),
         }
     }
@@ -256,8 +286,9 @@ fn parse_args_from(mut argv: impl Iterator<Item = String>) -> Result<Args, Strin
 
 /// `--computers`, by default the most the skirmish lobby admits on the map:
 /// it refuses more players than the map's capacity (`MapCapacityExceeded`,
-/// `TXT_SCENARIO_TOO_SMALL`), and a Battle has at most seven computer houses.
-/// More would seat houses the map has no start for.
+/// `TXT_SCENARIO_TOO_SMALL`). More would seat houses the map has no start
+/// for. A map's `[Basic] MaxPlayers` (9 to 30) raises it past the eight
+/// retail starts, up to 29 computer houses beside the local one.
 fn seated_computers(args: &Args) -> Result<usize, String> {
     let assets =
         AssetManager::new(&args.ra2_dir, MediaArchiveMode::STOCK_DIGITAL).map_err(|error| {
@@ -479,6 +510,42 @@ struct Bench<'a> {
     runtime: &'a mut SimRuntime,
     plan: &'a mut Plan,
     tick_ms: u32,
+    /// `--presentation-frame`: whether each frame keeps a copy of the world.
+    keep_frame: bool,
+    frame: Option<SimRuntime>,
+    paths: PathTotals,
+}
+
+/// The path batch's passes summed over the completed frames; no passes while
+/// the simulation searches serially.
+#[derive(Clone, Copy, Default)]
+struct PathTotals {
+    passes: u64,
+    waiting: u64,
+    answered: u64,
+    left_out: u64,
+    /// Passes that left any registration for a later one.
+    left_out_passes: u64,
+    peak_left_out: u32,
+    steps: u64,
+    urgency2_steps: u64,
+    urgency1_steps: u64,
+    peak_pass_ms: f64,
+}
+
+impl PathTotals {
+    fn add(&mut self, pass: PathBatchStats) {
+        self.passes += 1;
+        self.waiting += u64::from(pass.waiting);
+        self.answered += u64::from(pass.answered);
+        self.left_out += u64::from(pass.left_out);
+        self.left_out_passes += u64::from(pass.left_out > 0);
+        self.peak_left_out = self.peak_left_out.max(pass.left_out);
+        self.steps += pass.steps;
+        self.urgency2_steps += pass.urgency2_steps;
+        self.urgency1_steps += pass.urgency1_steps;
+        self.peak_pass_ms = self.peak_pass_ms.max(pass.last_ms);
+    }
 }
 
 impl Frames for Bench<'_> {
@@ -491,9 +558,20 @@ impl Frames for Bench<'_> {
     }
 
     fn advance(&mut self, commands: &[CommandEnvelope]) -> Result<Option<u32>, String> {
-        self.runtime
+        let checksum = self
+            .runtime
             .advance_frame_for_tooling(commands, self.tick_ms)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if self.keep_frame {
+            // As the client's simulation host does when it lends a tick: the
+            // world without its objects, with the local player's fog, replaces
+            // the previous tick's copy, inside the frame's time. The objects'
+            // draw records are the client's and are not counted here.
+            let viewer = self.runtime.simulation.session().current_house();
+            let reuse = self.frame.take().map(|frame| frame.simulation);
+            self.frame = Some(self.runtime.presentation_copy(viewer, reuse));
+        }
+        Ok(checksum)
     }
 
     fn state_hash(&self) -> u64 {
@@ -501,6 +579,9 @@ impl Frames for Bench<'_> {
     }
 
     fn completed(&mut self, tick: u64, times: &[Duration]) {
+        if let Some(pass) = self.runtime.simulation.path_batch_stats() {
+            self.paths.add(pass);
+        }
         if matches!(self.plan, Plan::March(_)) || (tick + 1) % PROGRESS_EVERY != 0 {
             return;
         }
@@ -654,7 +735,7 @@ fn main() -> Result<(), String> {
             eprintln!(
                 "usage: sim-bench [--ra2-dir <retail path>] [--map Death.mmx] \
                  [--scenario march|match|skirmish] [--seed S] [--units 20000] [--houses N] \
-                 [--computers N (match, skirmish; default the map's most, at most 7)] \
+                 [--computers N (match, skirmish; default the map's most, at most 29)] \
                  [--ticks 300 (match: 1800, skirmish: 9000)] \
                  [--types E1,E2,MTNK,HTNK] [--order-spread 30] [--return-at T] (march) \
                  [--hash-every N] [--frame-hash-every 15] [--csv <path>] [--serial-paths] [--serial-scans] \
@@ -692,6 +773,14 @@ fn main() -> Result<(), String> {
     if !args.serial_scans {
         scenario.runtime.simulation.batch_target_scans();
     }
+    scenario
+        .runtime
+        .simulation
+        .sleep_idle_objects(!args.no_sleep);
+    scenario
+        .runtime
+        .simulation
+        .check_idle_sleep(args.sleep_check);
     scenario
         .runtime
         .simulation
@@ -758,16 +847,23 @@ fn main() -> Result<(), String> {
     #[cfg(feature = "telemetry")]
     runtime.simulation.set_frame_profiling(args.frame_profile);
     // A failed frame still reports the frames before it, then fails the run.
-    let (measured, frames) = run_frames(
-        &mut Bench {
+    let (measured, frames, paths) = {
+        let mut bench = Bench {
             runtime: &mut *runtime,
             plan: &mut plan,
             tick_ms,
-        },
-        ticks,
-        args.hash_every,
-        args.frame_hashes.is_some(),
-    );
+            keep_frame: args.presentation_frame,
+            frame: None,
+            paths: PathTotals::default(),
+        };
+        let (measured, frames) = run_frames(
+            &mut bench,
+            ticks,
+            args.hash_every,
+            args.frame_hashes.is_some(),
+        );
+        (measured, frames, bench.paths)
+    };
     let live_at_end = runtime.simulation.entities().len();
     let csv_written = args.csv.as_ref().map_or(Ok(()), |path| {
         std::fs::write(path, csv(&measured)).map_err(|error| format!("{}: {error}", path.display()))
@@ -777,16 +873,38 @@ fn main() -> Result<(), String> {
             .map_err(|error| format!("{}: {error}", path.display()))
     });
     report(&mut std::io::stdout().lock(), &measured, warmup).map_err(|error| error.to_string())?;
+    if paths.passes > 0 {
+        println!(
+            "path_batch passes={} waiting={} answered={} left_out={} left_out_passes={} \
+             peak_left_out={} steps={} urgency2_steps={} urgency1_steps={} \
+             peak_pass_ms={:.2}",
+            paths.passes,
+            paths.waiting,
+            paths.answered,
+            paths.left_out,
+            paths.left_out_passes,
+            paths.peak_left_out,
+            paths.steps,
+            paths.urgency2_steps,
+            paths.urgency1_steps,
+            paths.peak_pass_ms,
+        );
+    }
     #[cfg(feature = "telemetry")]
     if args.frame_profile {
         print_frame_profile(runtime);
     }
     println!("live_objects start={live_at_start} end={live_at_end}");
+    // Whether the game's data turned Ares on (`RuleSet::ares`).
+    let ares = runtime.resources.rules.ares();
+    println!("ares={}", if ares { "on" } else { "off" });
     frames?;
     csv_written?;
     frame_hashes_written?;
     let final_hash = runtime.simulation.state_hash();
     println!("final_hash={final_hash:016x}");
+    let (asleep, counted) = runtime.simulation.idle_sleep_counts();
+    println!("idle_sleep asleep_now={asleep} visits_counted={counted}");
     Ok(())
 }
 

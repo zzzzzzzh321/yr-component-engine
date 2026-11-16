@@ -86,6 +86,7 @@ pub(crate) fn eva<'a>(
                 rules.super_weapon_eva(sw)?.impatient()
             } else if view.ares_refusal
                 == Some(crate::sim::superweapon::AresCameoRefusal::InsufficientFunds)
+                || (!rules.ares_form() && view.can_fire && !view.can_afford)
             {
                 crate::sim::superweapon::financial_type(rules, sw)
                     .insufficient_funds_eva
@@ -94,15 +95,15 @@ pub(crate) fn eva<'a>(
                 None
             }
         }
-        SuperWeaponClick::Target => rules
-            .super_weapon_eva(sw)
-            .map_or(Some(super::sidebar_eva::EVA_SELECT_TARGET), |eva| {
-                eva.select_target()
-            }),
+        SuperWeaponClick::Target => match rules.super_weapon_eva(sw) {
+            Some(eva) => eva.select_target(),
+            None if rules.ares_form() => sw.select_target_eva.as_deref(),
+            None => Some(super::sidebar_eva::EVA_SELECT_TARGET),
+        },
         _ => None,
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 #[path = "superweapon_cameo_tests.rs"]
 mod tests;

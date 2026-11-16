@@ -8,10 +8,10 @@ use crate::rules::superweapon_targeting::{
     HouseMask, SuperWeaponTargeting, TargetConstraints, TargetMask, TargetRequirements,
 };
 use crate::rules::superweapon_type::{
-    AresSuperWeaponAvailability, AresSuperWeaponCharge, AresSuperWeaponEva,
-    AresSuperWeaponMetadata, AresSuperWeaponPresentation, DeliveryOwner, DeliveryType,
-    GenericWarheadAiTargeting, GenericWarheadSettings, NuclearSettings,
-    SuperWeaponBuildingRequirements, SuperWeaponKind, SuperWeaponType, UnitDeliveryRules,
+    AresSuperWeaponAvailability, AresSuperWeaponEva, AresSuperWeaponMetadata,
+    AresSuperWeaponPresentation, DeliveryOwner, DeliveryType, GenericWarheadAiTargeting,
+    GenericWarheadSettings, NuclearSettings, SuperWeaponBuildingRequirements, SuperWeaponKind,
+    SuperWeaponType, UnitDeliveryRules,
 };
 use crate::util::native_x87::NativeF64Bits;
 use std::collections::{BTreeMap, HashMap};
@@ -164,7 +164,7 @@ impl RuleSet {
     /// hook presence nor individual nonempty lists establish this selection.
     pub fn superweapon_semantics(&self) -> SuperWeaponSemantics {
         self.external_superweapons.as_ref().map_or_else(
-            crate::rules::superweapon_type::profile_semantics,
+            || crate::rules::superweapon_type::profile_semantics(self.ares_form()),
             |catalog| catalog.policy.semantics,
         )
     }
@@ -181,7 +181,7 @@ impl RuleSet {
     pub fn superweapon_eva_providers_enabled(&self) -> bool {
         self.external_superweapons
             .as_ref()
-            .map_or(cfg!(feature = "ares"), |catalog| {
+            .map_or(self.ares_form(), |catalog| {
                 catalog
                     .policy
                     .definitions
@@ -190,16 +190,20 @@ impl RuleSet {
             })
     }
 
-    /// Historical external configurations never inherit the compiled profile's
-    /// influence rules. Domain presence is admitted with the immutable batch.
+    /// A component that publishes an SW catalog owns its targeting cohort.
+    /// Unrelated component hooks leave the game's native SW profile in charge.
+    pub(crate) fn uses_native_superweapon_targeting(&self) -> bool {
+        self.ares_form() && self.external_superweapons.is_none()
+    }
+
+    /// An older external SW catalog without influence keeps its original
+    /// behavior. Otherwise the native profile can supply its own influence.
     pub(crate) fn superweapon_influence_enabled(&self) -> bool {
-        if self.external_mod.is_none() {
-            cfg!(feature = "ares")
-        } else {
-            self.external_superweapons
-                .as_ref()
-                .is_some_and(|catalog| catalog.policy.techno_influence.is_some())
-        }
+        self.external_superweapons
+            .as_ref()
+            .map_or(self.ares_form(), |catalog| {
+                catalog.policy.techno_influence.is_some()
+            })
     }
 
     /// Some(empty) suppresses the old profile vector for this Building. None
@@ -439,7 +443,16 @@ impl RuleSet {
                     .map(|&index| building_name(index))
                     .collect::<Result<_, _>>()?,
             };
-            let mut candidate = stock_type(source);
+            let native = self.native_super_weapon_metadata(&source.projected_id);
+            // A component's Retail payload leaves the normal definition in
+            // charge. Preserve upstream redirects in a game that read Ares.
+            let mut candidate = if self.ares_form()
+                && matches!(definition.payload, SuperWeaponPayloadPolicy::Retail)
+            {
+                source.profile.clone().unwrap_or_else(|| stock_type(source))
+            } else {
+                stock_type(source)
+            };
             candidate.building_requirements = Some(buildings.clone());
             candidate.target_constraints =
                 TargetConstraints::from_bits(u32::from(definition.constraints))
@@ -599,10 +612,13 @@ impl RuleSet {
                 definition.availability.forbidden_houses,
                 definition.availability.shots,
             );
-            let charge = AresSuperWeaponCharge {
-                initial_ready: definition.charge.initial_ready,
-                virtual_charge: definition.charge.virtual_charge,
-            };
+            let charge = native
+                .map(|metadata| metadata.charge().clone())
+                .unwrap_or_default()
+                .with_guest_flags(
+                    definition.charge.initial_ready,
+                    definition.charge.virtual_charge,
+                );
             let mut influence =
                 crate::rules::superweapon_influence::SuperWeaponInfluence::default();
             if let Some(declaration) = &definition.influence {
@@ -618,9 +634,7 @@ impl RuleSet {
                 influence.inhibitors = declaration.inhibitors.clone();
                 influence.any_inhibitor = declaration.any_inhibitor;
             }
-            metadata_by_ordinal.insert(
-                definition.ordinal,
-                AresSuperWeaponMetadata::project(
+            let metadata = AresSuperWeaponMetadata::project(
                     &availability,
                     candidate.aux_building.as_deref(),
                     Some(&buildings),
@@ -636,8 +650,13 @@ impl RuleSet {
                             )
                         }),
                     definition.eva.as_ref().map(AresSuperWeaponEva::from_external),
-                ),
-            );
+                );
+            let metadata = if let Some(native) = native {
+                metadata.with_launch(native.launch())
+            } else {
+                metadata
+            };
+            metadata_by_ordinal.insert(definition.ordinal, metadata);
             definitions.insert(definition.ordinal, candidate);
         }
         let mut provider_declarations = BTreeMap::new();
@@ -718,7 +737,7 @@ impl RuleSet {
         &mut self,
         bindings: SuperWeaponResourceBindings,
     ) {
-        for warhead in self.warheads.values_mut() {
+        for warhead in &mut self.warhead_types {
             let settings = bindings
                 .warhead_impacts
                 .as_ref()

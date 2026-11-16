@@ -165,14 +165,12 @@ pub struct AresCountryLoading {
     color: i32,
 }
 
-#[cfg(feature = "ares")]
 impl Default for AresCountryLoading {
     fn default() -> Self {
         Self::for_country_id("")
     }
 }
 
-#[cfg(feature = "ares")]
 impl AresCountryLoading {
     /// Constructor1001B767 and initializer1001C0F0 compare stored ID literals,
     /// regardless of the current registry position or Side.
@@ -241,12 +239,12 @@ impl AresCountryLoading {
     }
 }
 
-#[cfg(feature = "ares")]
 impl AresCountryLoading {
     /// CountryExt1001C770: only the actual primary Rules pass calls this.
     /// ReadString2048 is followed by a byte-preserving 31-character copy.
     /// INI storage represents native bytes as characters, not UTF-8 bytes.
     pub(crate) fn read_primary(&mut self, section: &crate::rules::ini_parser::IniSection) {
+        let _ares = crate::rules::ares_switch::ares_reads();
         for (key, field, file) in [
             ("File.LoadScreen", &mut self.file, true),
             ("File.LoadScreenPAL", &mut self.palette, true),
@@ -271,6 +269,7 @@ impl AresCountryLoading {
         section: &crate::rules::ini_parser::IniSection,
         find: impl Fn(&str) -> Option<i32>,
     ) {
+        let _ares = crate::rules::ares_switch::ares_reads();
         self.color = section.read_ares_color_scheme_index("LoadScreenText.Color", self.color, find);
     }
 

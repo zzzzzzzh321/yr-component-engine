@@ -43,6 +43,16 @@ const CHECKPOINT_MOVIE_LIST_0X129_SELECTED: &str = "movie-list-0x129-selected";
 const CHECKPOINT_MOVIE_LIST_0X129_FULL: &str = "movie-list-0x129-full";
 const CHECKPOINT_MOVIE_LIST_0X129_FULL_DOWN2: &str = "movie-list-0x129-full-down2";
 const CHECKPOINT_MOVIE_LIST_0X129_BACK_FIRST_FRAME: &str = "movie-list-0x129-back-first-frame";
+/// VERA's Mods page (`ui::mods_shell`), settled, with what the run plays
+/// selected. `--mod <folder>` before `--shell-capture` gives the run a mod.
+const CHECKPOINT_MODS_STEADY: &str = "mods-steady";
+/// The same after a press on a row the run does not play and on Use This
+/// Mod: the restart question over the page.
+const CHECKPOINT_MODS_RESTART_QUESTION: &str = "mods-restart-question";
+/// The same after a press on a mod's row and on Check Files, once the files
+/// are read: what the check found, over the page.
+const CHECKPOINT_MODS_CHECK_FILES: &str = "mods-check-files";
+const CHECKPOINT_MODS_NEW_MOD: &str = "mods-new-mod";
 const CHECKPOINT_CAMPAIGN_0X94_STEADY: &str = "campaign-0x94-steady";
 const CHECKPOINT_CAMPAIGN_0X94_SLIDER_LEFT: &str = "campaign-0x94-slider-left";
 const CHECKPOINT_CAMPAIGN_0X94_SLIDER_RIGHT: &str = "campaign-0x94-slider-right";
@@ -91,7 +101,7 @@ const OPTIONS_SETTINGS_CHECKPOINTS: [(&str, Category); 6] = [
     ("options-0xd5-settings-interface", Category::Interface),
     ("options-0xd5-settings-audio", Category::Audio),
     ("options-0xd5-settings-controls", Category::Controls),
-    ("options-0xd5-settings-developer", Category::Developer),
+    ("options-0xd5-settings-general", Category::General),
 ];
 const CHECKPOINT_MAIN_MENU_0XE2_NETWORK_BOUNCE: &str = "main-menu-0xe2-network-bounce";
 const CHECKPOINT_WOL_0X10E_STEADY: &str = "wol-0x10e-steady";
@@ -109,12 +119,12 @@ const OPTIONS_0XD5_HOVER_CHECKPOINTS: [(&str, Category, (i32, i32)); 3] = [
     (
         "options-0xd5-hover-difficulty",
         Category::Gameplay,
-        (224, 157),
+        (224, 97),
     ),
     (
         "options-0xd5-hover-tooltips",
         Category::Interface,
-        (160, 158),
+        (160, 206),
     ),
     ("options-0xd5-hover-music", Category::Audio, (200, 97)),
 ];
@@ -220,6 +230,13 @@ pub enum ShellCaptureCheckpoint {
     /// Back on the movie list: the first frame after its teardown slide,
     /// which must already be the recreated `0x101`'s entry slide at tick 0.
     MovieList0x129BackFirstFrame,
+    /// Main Menu -> Options -> Mods: VERA's Mods page settled.
+    ModsSteady,
+    /// The Mods page's restart question, after a row and Use This Mod.
+    ModsRestartQuestion,
+    /// The Mods page's Check Files answer, after a mod's row and Check Files.
+    ModsCheckFiles,
+    ModsNewMod,
     /// Single Player -> New Campaign: campaign selection `0x94` settled.
     Campaign0x94Steady,
     /// The same after a press on the difficulty slider's left or right end.
@@ -614,6 +631,10 @@ impl ShellCaptureCheckpoint {
             CHECKPOINT_MOVIE_LIST_0X129_FULL => Ok(Self::MovieList0x129Full),
             CHECKPOINT_MOVIE_LIST_0X129_FULL_DOWN2 => Ok(Self::MovieList0x129FullDown2),
             CHECKPOINT_MOVIE_LIST_0X129_BACK_FIRST_FRAME => Ok(Self::MovieList0x129BackFirstFrame),
+            CHECKPOINT_MODS_STEADY => Ok(Self::ModsSteady),
+            CHECKPOINT_MODS_RESTART_QUESTION => Ok(Self::ModsRestartQuestion),
+            CHECKPOINT_MODS_CHECK_FILES => Ok(Self::ModsCheckFiles),
+            CHECKPOINT_MODS_NEW_MOD => Ok(Self::ModsNewMod),
             CHECKPOINT_CAMPAIGN_0X94_STEADY => Ok(Self::Campaign0x94Steady),
             CHECKPOINT_CAMPAIGN_0X94_SLIDER_LEFT => Ok(Self::Campaign0x94SliderLeft),
             CHECKPOINT_CAMPAIGN_0X94_SLIDER_RIGHT => Ok(Self::Campaign0x94SliderRight),
@@ -794,6 +815,10 @@ impl ShellCaptureCheckpoint {
             Self::MovieList0x129Full => CHECKPOINT_MOVIE_LIST_0X129_FULL,
             Self::MovieList0x129FullDown2 => CHECKPOINT_MOVIE_LIST_0X129_FULL_DOWN2,
             Self::MovieList0x129BackFirstFrame => CHECKPOINT_MOVIE_LIST_0X129_BACK_FIRST_FRAME,
+            Self::ModsSteady => CHECKPOINT_MODS_STEADY,
+            Self::ModsRestartQuestion => CHECKPOINT_MODS_RESTART_QUESTION,
+            Self::ModsCheckFiles => CHECKPOINT_MODS_CHECK_FILES,
+            Self::ModsNewMod => CHECKPOINT_MODS_NEW_MOD,
             Self::Campaign0x94Steady => CHECKPOINT_CAMPAIGN_0X94_STEADY,
             Self::Campaign0x94SliderLeft => CHECKPOINT_CAMPAIGN_0X94_SLIDER_LEFT,
             Self::Campaign0x94SliderRight => CHECKPOINT_CAMPAIGN_0X94_SLIDER_RIGHT,
@@ -1022,6 +1047,18 @@ impl ShellCaptureCheckpoint {
             Self::MovieList0x129Full => movies::MoviesTarget::FullList { down_presses: 0 },
             Self::MovieList0x129FullDown2 => movies::MoviesTarget::FullList { down_presses: 2 },
             Self::MovieList0x129BackFirstFrame => movies::MoviesTarget::ListBackFirstFrame,
+            Self::ModsSteady => movies::MoviesTarget::Mods {
+                press: movies::ModsPress::Nothing,
+            },
+            Self::ModsRestartQuestion => movies::MoviesTarget::Mods {
+                press: movies::ModsPress::Use,
+            },
+            Self::ModsCheckFiles => movies::MoviesTarget::Mods {
+                press: movies::ModsPress::Check,
+            },
+            Self::ModsNewMod => movies::MoviesTarget::Mods {
+                press: movies::ModsPress::New,
+            },
             Self::Campaign0x94Steady => movies::MoviesTarget::Campaign0x94 {
                 press: None,
                 hold_over: None,
@@ -1177,6 +1214,9 @@ pub struct ShellCaptureRequest {
     timeout: Option<Duration>,
     live_lan: Option<LiveLanConfig>,
     live_online: Option<LiveOnlineConfig>,
+    /// `--language <tag>`: VERA's interface language, such as `zh-CN` or the
+    /// pseudo-language `qps-ploc`; English otherwise, whatever the system's.
+    language: Option<String>,
 }
 
 /// Nonsecret username and match inputs for an ordinary online UI run.
@@ -1307,9 +1347,13 @@ impl ShellCaptureRequest {
                         movies::WolTarget::ModernLobby
                             | movies::WolTarget::ModernCreate
                             | movies::WolTarget::ModernPlayerCard
+                            | movies::WolTarget::ModernChangeCountry
                             | movies::WolTarget::ModernRoomOptions
+                            | movies::WolTarget::ModernTeams
                             | movies::WolTarget::ModernSpectators
                             | movies::WolTarget::ModernOptions
+                            | movies::WolTarget::ModernChatTranslation
+                            | movies::WolTarget::ModernChatTranslationList
                     )
             }
             Some(movies::MoviesTarget::WolWelcome {
@@ -1426,6 +1470,7 @@ where
     let mut online_loading_cancel_checkpoint = None;
     let mut observe_loading = false;
     let mut profile_check = false;
+    let mut language = None;
 
     while let Some(flag) = args.next() {
         let flag = flag
@@ -1613,6 +1658,11 @@ where
                 ensure!(!profile_check, "duplicate --network-profile-check");
                 profile_check = true;
             }
+            "--language" => set_once(
+                &mut language,
+                next_utf8(&mut args, "value after --language")?,
+                "--language",
+            )?,
             "--online-exit-checkpoint" => set_once(
                 &mut online_exit_checkpoint,
                 next_utf8(&mut args, "value after --online-exit-checkpoint")?,
@@ -1640,17 +1690,30 @@ where
     let cursor_y = cursor_y.context("missing required --cursor-y")?;
     let output_dir = output_dir.context("missing required --output")?;
 
+    // The settled main menu also captures in any larger window, to compare
+    // its scaled drawing, with the pointer resting at the window's centre.
+    let scaled_main_menu = checkpoint == ShellCaptureCheckpoint::MainMenu0xE2Steady
+        && (width, height) != (EXPECTED_WIDTH, EXPECTED_HEIGHT)
+        && width >= 640
+        && height >= 480;
     ensure!(
         (width == EXPECTED_WIDTH && height == EXPECTED_HEIGHT)
-            || (online_latency && width == 640 && height == 480),
-        "checkpoint {} requires exactly {EXPECTED_WIDTH}x{EXPECTED_HEIGHT} (640x480 also allowed for --online-latency), got {width}x{height}",
+            || (online_latency && width == 640 && height == 480)
+            || scaled_main_menu,
+        "checkpoint {} requires exactly {EXPECTED_WIDTH}x{EXPECTED_HEIGHT} (640x480 also allowed for --online-latency, a larger window for the main menu), got {width}x{height}",
         checkpoint.as_str()
     );
+    let neutral = if scaled_main_menu {
+        (width / 2, height / 2)
+    } else {
+        (EXPECTED_CURSOR_X, EXPECTED_CURSOR_Y)
+    };
     ensure!(
-        cursor_x == EXPECTED_CURSOR_X && cursor_y == EXPECTED_CURSOR_Y,
-        "checkpoint {} requires neutral cursor ({EXPECTED_CURSOR_X},{EXPECTED_CURSOR_Y}), got \
-         ({cursor_x},{cursor_y})",
-        checkpoint.as_str()
+        (cursor_x, cursor_y) == neutral,
+        "checkpoint {} requires neutral cursor ({},{}), got ({cursor_x},{cursor_y})",
+        checkpoint.as_str(),
+        neutral.0,
+        neutral.1
     );
     validate_new_output_dir(&output_dir)?;
     let online = matches!(checkpoint, ShellCaptureCheckpoint::Lan(target) if target.online());
@@ -2107,6 +2170,7 @@ where
         timeout,
         live_lan,
         live_online,
+        language,
     }))
 }
 
@@ -2557,6 +2621,18 @@ impl ShellCaptureSession {
         state.match_state.input.cursor_x = self.request.cursor_x as f32;
         state.match_state.input.cursor_y = self.request.cursor_y as f32;
         state.frontend.native_shell_ui = self.request.native_shell_ui();
+        // As the Language list applies a pick; a language no file provides
+        // fails the capture instead of drawing English under its name.
+        let language = self
+            .request
+            .language
+            .clone()
+            .unwrap_or_else(|| crate::i18n::DEFAULT_LANGUAGE.to_owned());
+        if !state.use_language(&language) {
+            self.fail(format!(
+                "--language {language}: no language file provides it"
+            ));
+        }
         self.started_at = Some(Instant::now());
     }
 
@@ -2638,7 +2714,23 @@ impl ShellCaptureSession {
         }
         match &self.skirmish {
             Some(capture) => capture.ready(state),
-            None => steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(state)),
+            None => {
+                let mut snapshot = MainMenuCaptureSnapshot::from_state(state);
+                let window = (self.request.width, self.request.height);
+                // A scaled main-menu capture: its own window and centred
+                // pointer stand for the reference surface and neutral point.
+                if window != (EXPECTED_WIDTH, EXPECTED_HEIGHT)
+                    && (snapshot.width, snapshot.height) == window
+                    && (snapshot.cursor_x, snapshot.cursor_y)
+                        == ((window.0 / 2) as f32, (window.1 / 2) as f32)
+                {
+                    snapshot.width = EXPECTED_WIDTH;
+                    snapshot.height = EXPECTED_HEIGHT;
+                    snapshot.cursor_x = EXPECTED_CURSOR_X as f32;
+                    snapshot.cursor_y = EXPECTED_CURSOR_Y as f32;
+                }
+                steady_main_menu_capture_ready(snapshot)
+            }
         }
     }
 
@@ -3367,7 +3459,7 @@ struct EntrySequenceFrameManifest {
     byte_length: u64,
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
 
@@ -4182,6 +4274,25 @@ mod tests {
             assert_eq!(checkpoint.as_str(), name);
         }
         assert!(ShellCaptureCheckpoint::parse("options-0xd5-hover-nothing").is_err());
+        // Each point rests on the control its name gives.
+        use crate::ui::main_menu_dialogs::options::shell::LauncherOptionsLayout;
+        use crate::ui::main_menu_dialogs::options::{LauncherCheckboxId, LauncherTrackbarId};
+        let [difficulty, tooltips, music] = OPTIONS_0XD5_HOVER_CHECKPOINTS
+            .map(|(_, category, (x, y))| (LauncherOptionsLayout::new(800, 600, category), x, y));
+        let slider = |(layout, x, y): &(LauncherOptionsLayout, i32, i32), id| {
+            layout
+                .trackbar_rect(id)
+                .is_some_and(|rect| rect.contains(*x, *y))
+        };
+        assert!(slider(&difficulty, LauncherTrackbarId::Difficulty));
+        assert!(slider(&music, LauncherTrackbarId::Score));
+        let (layout, x, y) = &tooltips;
+        assert!(
+            layout
+                .checkboxes
+                .iter()
+                .any(|(id, rect)| { *id == LauncherCheckboxId::Tooltips && rect.contains(*x, *y) })
+        );
         for (name, category) in OPTIONS_SETTINGS_CHECKPOINTS {
             let checkpoint = ShellCaptureCheckpoint::parse(name).expect("settings checkpoint");
             assert_eq!(
@@ -5046,9 +5157,29 @@ mod tests {
             .iter()
             .position(|value| value == "--width")
             .expect("width");
-        values[width + 1] = OsString::from("1024");
+        values[width + 1] = OsString::from("600");
         let err = parse_launch_args(values).expect_err("must reject");
         assert!(err.to_string().contains("requires exactly 800x600"));
+    }
+
+    #[test]
+    fn a_scaled_main_menu_capture_rests_the_pointer_at_the_window_centre() {
+        let set = |values: &mut Vec<OsString>, flag: &str, value: &str| {
+            let at = values.iter().position(|v| v == flag).expect("flag");
+            values[at + 1] = OsString::from(value);
+        };
+        let output = new_output_path("scaled");
+        let mut values = valid_args(&output);
+        set(&mut values, "--width", "1440");
+        set(&mut values, "--height", "1080");
+        let err = parse_launch_args(values.clone()).expect_err("off-centre pointer");
+        assert!(
+            err.to_string()
+                .contains("requires neutral cursor (720,540)")
+        );
+        set(&mut values, "--cursor-x", "720");
+        set(&mut values, "--cursor-y", "540");
+        assert!(parse_launch_args(values).is_ok());
     }
 
     #[test]

@@ -172,6 +172,42 @@ pub fn downloaded_maps_dir() -> Option<&'static Path> {
     DOWNLOADED_MAPS_DIR.get().map(PathBuf::as_path)
 }
 
+static MOD_DIR: std::sync::RwLock<Option<&'static Path>> = std::sync::RwLock::new(None);
+
+/// VERA: the mod folder in use (`app::mods`), set at each start. Its maps
+/// read as if they had been copied on top of the game folder: a lookup finds
+/// a mod's file first, and Choose Map's scan lists it in place of a
+/// game-folder file of the same name. A desktop run starts once; the browser
+/// build starts again in one page, perhaps with another mod or none, so each
+/// start sets it anew. The path is leaked to hand out `&'static`: a few bytes
+/// a start.
+pub fn set_mod_dir(dir: Option<PathBuf>) {
+    let dir = dir.map(|dir| &*Box::leak(dir.into_boxed_path()));
+    *MOD_DIR
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+}
+
+pub fn mod_dir() -> Option<&'static Path> {
+    *MOD_DIR
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The folders a listing of the game folder reads, for
+/// `case_insensitive_path::native_listing_over`: `ra2_dir`, then the mod's.
+pub fn game_folders(ra2_dir: &Path) -> Vec<&Path> {
+    std::iter::once(ra2_dir).chain(mod_dir()).collect()
+}
+
+/// The file `name` of the game folder: the mod's when it has one.
+pub fn game_folder_file(ra2_dir: &Path, name: &str) -> PathBuf {
+    mod_dir()
+        .map(|dir| dir.join(name))
+        .filter(|path| crate::util::file_system::exists(path))
+        .unwrap_or_else(|| ra2_dir.join(name))
+}
+
 /// Where the random-map dialog's files live: `RandMap.Sed`, its `RandMap.img`
 /// preview and the saved seeds. VERA: gamemd keeps them in its own folder
 /// (`RandomMapSetupDialog__Run` 0x00595BC0 writes `RandMap.img`, its accepted
@@ -181,13 +217,18 @@ pub fn random_map_dir(root: &Path) -> &Path {
     downloaded_maps_dir().unwrap_or(root)
 }
 
-/// A map file by name: the game folder first, then VERA's downloaded maps.
-/// A seed is only looked for in [`random_map_dir`].
+/// A map file by name: the mod folder in use, then the game folder, then
+/// VERA's downloaded maps. A seed is only looked for in [`random_map_dir`].
 pub fn local_map_path(ra2_dir: &Path, map_name: &str) -> Result<PathBuf> {
-    local_map_path_in(ra2_dir, downloaded_maps_dir(), map_name)
+    local_map_path_in(mod_dir(), ra2_dir, downloaded_maps_dir(), map_name)
 }
 
-fn local_map_path_in(ra2_dir: &Path, downloaded: Option<&Path>, map_name: &str) -> Result<PathBuf> {
+fn local_map_path_in(
+    mod_dir: Option<&Path>,
+    ra2_dir: &Path,
+    downloaded: Option<&Path>,
+    map_name: &str,
+) -> Result<PathBuf> {
     let direct = PathBuf::from(map_name);
     if direct.is_absolute() && crate::util::file_system::exists(&direct) {
         return Ok(direct);
@@ -199,7 +240,12 @@ fn local_map_path_in(ra2_dir: &Path, downloaded: Option<&Path>, map_name: &str) 
     } else {
         ra2_dir
     };
-    for root in std::iter::once(first).chain(downloaded.filter(|_| !seed)) {
+    let roots = mod_dir
+        .filter(|_| !seed)
+        .into_iter()
+        .chain(std::iter::once(first))
+        .chain(downloaded.filter(|_| !seed));
+    for root in roots {
         let exact = root.join(map_name);
         if crate::util::file_system::exists(&exact) {
             return Ok(exact);
@@ -826,8 +872,9 @@ pub fn keep_received_map(
     let sha256 = sha256_hex(bytes);
     let stem = name.strip_suffix(".yrm").unwrap_or(&name);
     for name in [name.clone(), format!("{stem}-{}.yrm", &sha256[..8])] {
-        if let Some(path) = [ra2_dir, maps_dir]
+        if let Some(path) = mod_dir()
             .into_iter()
+            .chain([ra2_dir, maps_dir])
             .find_map(|dir| held_file(dir, &name))
         {
             let same = read_loose_map_input_bounded(&path, Some(MAX_TRANSFER_MAP_BYTES))
@@ -1080,7 +1127,7 @@ pub mod test_support {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_map))]
 mod tests {
     use super::test_support::{TestDirectory, make_new_format_mix_bytes};
 
@@ -1098,7 +1145,7 @@ mod tests {
         );
         // Found by name after the game folder, as every map lookup does.
         assert_eq!(
-            local_map_path_in(game.path(), Some(&maps), "FrozenLakes.yrm").unwrap(),
+            local_map_path_in(None, game.path(), Some(&maps), "FrozenLakes.yrm").unwrap(),
             maps.join("FrozenLakes.yrm")
         );
         let record =
@@ -1136,19 +1183,31 @@ mod tests {
         // An older seed the original game left in its folder is never the
         // random-map dialog's: not even when VERA's folder has none yet.
         game.write("RandMap.Sed", b"[RandomMap]\nSeed=1\n");
-        assert!(local_map_path_in(game.path(), Some(vera.path()), "RandMap.Sed").is_err());
+        assert!(local_map_path_in(None, game.path(), Some(vera.path()), "RandMap.Sed").is_err());
         vera.write("RandMap.Sed", b"[RandomMap]\nSeed=2\n");
         assert_eq!(
-            local_map_path_in(game.path(), Some(vera.path()), "RandMap.Sed").unwrap(),
+            local_map_path_in(None, game.path(), Some(vera.path()), "RandMap.Sed").unwrap(),
             vera.path().join("RandMap.Sed")
         );
         // Maps still come from the game folder first.
         game.write("Lakes.map", b"[Basic]\n");
         vera.write("Lakes.map", b"[Basic]\n");
         assert_eq!(
-            local_map_path_in(game.path(), Some(vera.path()), "Lakes.map").unwrap(),
+            local_map_path_in(None, game.path(), Some(vera.path()), "Lakes.map").unwrap(),
             game.path().join("Lakes.map")
         );
+        // A mod folder in use reads as if copied on top of the game folder:
+        // its map first, the game folder's where it has none, never its seed.
+        let mod_dir = TestDirectory::new("seed-lookup-mod");
+        mod_dir.write("Lakes.map", b"[Basic]\n");
+        mod_dir.write("RandMap.Sed", b"[RandomMap]\nSeed=3\n");
+        game.write("Hills.map", b"[Basic]\n");
+        let found = |name| {
+            local_map_path_in(Some(mod_dir.path()), game.path(), Some(vera.path()), name).unwrap()
+        };
+        assert_eq!(found("Lakes"), mod_dir.path().join("Lakes.map"));
+        assert_eq!(found("Hills.map"), game.path().join("Hills.map"));
+        assert_eq!(found("RandMap.Sed"), vera.path().join("RandMap.Sed"));
     }
     use super::*;
     use crate::assets::mix_hash::mix_hash;
@@ -1648,15 +1707,15 @@ mod tests {
         assert_eq!(
             effective_network_map_digest(&first.ini, false)
                 != effective_network_map_digest(&second.ini, false),
-            crate::rules::ARES_ENABLED
+            crate::rules::ARES_BUILD
         );
         std::fs::remove_file(root.path().join("child.ini")).unwrap();
         let c = AssetManager::from_loose_root_for_test(root.path());
         assert_eq!(
             load_network_map_ini(root.path(), "Shared.map", &c).is_err(),
-            crate::rules::ARES_ENABLED
+            crate::rules::ARES_BUILD
         );
-        if crate::rules::ARES_ENABLED {
+        if crate::rules::ARES_BUILD {
             root.write("child.ini", SOURCE_TEST_MAP);
             let bytes = b"[#include]\n0=child.ini\n".to_vec();
             let loaded = install_received_map(
@@ -1838,7 +1897,7 @@ mod tests {
         let metadata =
             load_map_ini_by_name_or_path_with_assets(dir.path(), "Arena.map", &assets).unwrap();
         assert_eq!(loaded.map.ini.content_hash(), metadata.ini.content_hash());
-        let ares_include = crate::rules::ARES_ENABLED;
+        let ares_include = crate::rules::ARES_BUILD;
         assert_eq!(
             loaded
                 .map

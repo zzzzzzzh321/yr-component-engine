@@ -762,6 +762,9 @@ impl LiveCommandSession {
                 context,
                 now_wall_bucket.wrapping_shl(4),
             );
+            if let Err(error) = &result {
+                session.record_failure(error);
+            }
             self.sequenced_failed = result.is_err();
             return result;
         }
@@ -1163,6 +1166,6 @@ fn probe_due(start: u32, now: u32, interval: i32) -> bool {
     (now.wrapping_sub(start) as i32) >= interval
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_net))]
 #[path = "live_commands_tests.rs"]
 mod tests;

@@ -41,14 +41,10 @@ impl Simulation {
         let Some(weapon) = rules.weapon("ChemLauncher") else {
             return false;
         };
-        let Some(warhead) = weapon.warhead.as_deref().and_then(|id| rules.warhead(id)) else {
+        let Some(warhead) = rules.weapon_warhead(weapon) else {
             return false;
         };
-        let Some(projectile) = weapon
-            .projectile
-            .as_deref()
-            .and_then(|id| rules.projectile(id))
-        else {
+        let Some(projectile) = rules.weapon_projectile(weapon) else {
             return false;
         };
         let target = self.direct_strike_target(location);

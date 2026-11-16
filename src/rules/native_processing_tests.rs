@@ -353,6 +353,167 @@ fn faction_pointer_reader_uses_the_reached_family_prefix() {
 }
 
 #[test]
+fn weapon_types_register_before_animation_reads_each_rules_layer() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[Animations]\n0=AURA\n1=UNKNOWN\n\
+         [WeaponTypes]\n0=EARLY\n\
+         [EARLY]\nDamage=1\n[LATE]\nDamage=2\n[UNLISTED]\nDamage=3\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[WeaponTypes]\n0=LATE\n[LATE]\nDamage=4\n"),
+    );
+    let art = IniFile::from_str("[AURA]\nWeapon=LATE\n[UNKNOWN]\nWeapon=UNLISTED\n");
+    let processed = layers.process_with_fixed_art(&art).unwrap();
+    let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
+    rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art));
+    assert!(rules.weapon("EARLY").is_some());
+    assert!(rules.weapon("LATE").is_some());
+    assert!(rules.weapon("UNLISTED").is_none());
+    assert_eq!(
+        rules
+            .art()
+            .anim_runtime_config("AURA")
+            .unwrap()
+            .ares_weapon
+            .as_deref(),
+        Some("LATE")
+    );
+    assert!(
+        rules
+            .art()
+            .anim_runtime_config("UNKNOWN")
+            .unwrap()
+            .ares_weapon
+            .is_none()
+    );
+}
+
+#[test]
+fn civilian_type_reads_preserve_physical_layers_save_and_reset() {
+    // InfantryType5237A1/52455F: own-ID bool, false only at construction.
+    let root = |civilian: &str| {
+        IniFile::from_str(&format!(
+            "[InfantryTypes]\n0=PROBE\n1=ALIAS\n2=COLD\n[AircraftTypes]\n0=PROBE\n\
+             [PROBE]\nImage=ALIAS\nCivilian={civilian}\n[ALIAS]\nCivilian=no\n",
+        ))
+    };
+    let mut layers = RulesLayerStack::new(root("yes"));
+    layers.push(
+        RulesLayerKind::LangRule,
+        IniFile::from_str("[PROBE]\nCivilian=?\n"),
+    );
+    layers.push(
+        RulesLayerKind::GameMode,
+        IniFile::from_str("[InfantryTypes]\n3=LATE\n[LATE]\nStrength=50\n"),
+    );
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[PROBE]\ncivilian=no\nCivilian=\n"),
+    );
+    let processed = layers.process().unwrap();
+    let rules = RuleSet::from_processed_rules(&processed).unwrap();
+    for object in rules.all_objects() {
+        assert_eq!(
+            object.civilian,
+            object.category == ObjectCategory::Infantry && object.id == "PROBE",
+            "{} {:?}",
+            object.id,
+            object.category
+        );
+    }
+    let saved: ProcessedRulesLayers =
+        save_codec::deserialize(&save_codec::serialize(&processed).unwrap()).unwrap();
+    let (_, trace) = saved.into_ini_and_native_type_construction_trace();
+    let state = trace.into_registry_state_discarding_events();
+    let resumed = save_codec::deserialize(&save_codec::serialize(&state).unwrap()).unwrap();
+    let next = RulesLayerStack::new(IniFile::from_str(
+        "[InfantryTypes]\n0=PROBE\n[PROBE]\nName=Retained\n",
+    ));
+    let retained = RuleSet::from_processed_rules(
+        &next
+            .process_with_fixed_art_and_registry_state(&IniFile::empty(), resumed)
+            .unwrap(),
+    )
+    .unwrap();
+    let reset = RuleSet::from_processed_rules(
+        &next
+            .process_with_fixed_art_and_registry_state(&IniFile::empty(), state.destructive_reset())
+            .unwrap(),
+    )
+    .unwrap();
+    let is_civilian = |rules: &RuleSet| {
+        rules
+            .object_in_category(ObjectCategory::Infantry, "PROBE")
+            .unwrap()
+            .civilian
+    };
+    assert!(is_civilian(&retained));
+    assert!(!is_civilian(&reset));
+    let mut control = RulesLayerStack::new(root("no"));
+    for (kind, ini) in layers.iter_passes().skip(1) {
+        control.push(kind, ini.clone());
+    }
+    let (_, trace) = control
+        .process()
+        .unwrap()
+        .into_ini_and_native_type_construction_trace();
+    let control = RuleSet::from_processed_rules(
+        &next
+            .process_with_fixed_art_and_registry_state(
+                &IniFile::empty(),
+                trace.into_registry_state_discarding_events(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!is_civilian(&control));
+    assert_eq!(retained.source_ini_hash(), control.source_ini_hash());
+    assert_ne!(
+        retained.simulation_config_hash(),
+        control.simulation_config_hash()
+    );
+
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_rulesmd_rules() else {
+        return;
+    };
+    let mut actual: Vec<_> = retail
+        .all_objects()
+        .filter(|object| object.civilian)
+        .map(|object| object.id.as_str())
+        .collect();
+    actual.sort_unstable();
+    let mut expected = [
+        "COW", "CIV1", "CIV2", "CIV3", "CIVA", "CIVB", "CIVC", "CIVBBP", "CIVBFM", "CIVBF",
+        "CIVBTM", "CIVSFM", "CIVSF", "CIVSTM", "CLNT", "ARND", "STLN", "EINS", "MUMY", "WWLF",
+        "RMNV", "PRES", "CTECH",
+    ];
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+    let Some((_, assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+        return;
+    };
+    let map = IniFile::from_bytes(assets.get_ref("ALL02UMD.MAP").unwrap()).unwrap();
+    let early = assets
+        .get_ref("ALL02UMD.INI")
+        .map(IniFile::from_bytes)
+        .transpose()
+        .unwrap();
+    let mut owner = crate::rules::retail_ini_fixture::retail_rules_owner(&assets);
+    let campaign = owner
+        .load_scenario(
+            crate::rules::process_owner::NativeScenarioRulesPrefix::Campaign(early.as_ref()),
+            &map,
+        )
+        .unwrap();
+    for name in ["CLNT", "ARND", "STLN"] {
+        assert!(!campaign.rules().object(name).unwrap().civilian, "{name}");
+    }
+    assert!(campaign.rules().object("CIV1").unwrap().civilian);
+}
+
+#[test]
 fn powerup_animation_lookup_does_not_bind_later_type_allocations() {
     let root =
         IniFile::from_str("[General]\nDropZoneAnim=LATE\n[Powerups]\nMoney=20,LATE,yes,2000\n");
@@ -561,9 +722,9 @@ fn airburst_retained_flag_changes_effective_rules_hash() {
     );
 }
 
-#[cfg(feature = "ares")]
 #[test]
 fn ares_emp_ai_named_mission_reader_matches_native_histories() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let corpus = crate::test_fixture::json("tools/rules_oracle/ares_emp.json");
     for row in corpus["ai_mission_readers"].as_array().unwrap() {
         let mut controls = AresGlobalControls::default();
@@ -1691,6 +1852,8 @@ fn building_foundation_survives_registry_handoff_and_resets_with_owner() {
 /// Each row is the next original ReadGeneral call on the same RulesClass.
 /// Exercise the production pass owner and its RuleSet publication, not a second
 /// list parser. The native corpus also checks ctor emptiness and factory order.
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn bridge_animation_lists_match_original_retained_vectors() {
     use crate::rules::ruleset::RuleSet;
@@ -1757,7 +1920,8 @@ fn bridge_animation_lists_match_original_retained_vectors() {
 fn bridge_animation_vectors_survive_a_continued_process_with_their_types() {
     use crate::rules::ruleset::RuleSet;
     let processed = RulesLayerStack::new(IniFile::from_str(
-        "[General]\nMetallicDebris=ONE,ONE\nBridgeExplosions=TWO\n",
+        // TWO is registered for Ares's Find-only BridgeExplosions read.
+        "[Animations]\n0=TWO\n[General]\nMetallicDebris=ONE,ONE\nBridgeExplosions=TWO\n",
     ))
     .process()
     .unwrap();
@@ -2518,6 +2682,8 @@ fn native_type_event_oracle_hash(events: &[NativeTypeConstructionEvent]) -> u64 
     extend_native_type_event_oracle_hash(0xcbf29ce484222325_u64, events)
 }
 
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn retail_rulesmd_artmd_constructor_trace_matches_verified_base_oracle() {
     let Some((rules, fixed_art)) = crate::rules::retail_ini_fixture::retail_rules_and_art() else {
@@ -2532,7 +2698,26 @@ fn retail_rulesmd_artmd_constructor_trace_matches_verified_base_oracle() {
     // stream. The count and FNV hash first appear in 2df8bef0e without a
     // producer (#745).
     assert_eq!(events.len(), 1_975);
-    assert_eq!(native_type_event_oracle_hash(events), 0x24516fbd1a096a12);
+    // Installed Ares's SW_NuclearMissile::Initialize (10073360), run at the end
+    // of NukeSpecial's ReadINI (hook 6CEE43), allocates NukePayload right after
+    // the NukeCarrier that read allocated; the stream is otherwise the same.
+    #[cfg(feature = "ares")]
+    {
+        let carrier = events
+            .iter()
+            .position(|event| {
+                event.family() == NativeTypeConstructorFamily::WeaponType
+                    && event.native_stored_id() == "NukeCarrier"
+            })
+            .unwrap();
+        assert_eq!(events[carrier + 1].native_stored_id(), "NukePayload");
+    }
+    let pinned = if cfg!(feature = "ares") {
+        0xff7ef335ba26c6c8
+    } else {
+        0x24516fbd1a096a12
+    };
+    assert_eq!(native_type_event_oracle_hash(events), pinned);
 
     let explicit_boundary = events[1_699..1_704]
         .iter()
@@ -2619,6 +2804,8 @@ fn retail_rulesmd_artmd_constructor_trace_matches_verified_base_oracle() {
     }));
 }
 
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn retail_cold_start_and_noncampaign_prepass_match_verified_native_oracles() {
     let Some((rules, fixed_art)) = crate::rules::retail_ini_fixture::retail_rules_and_art() else {
@@ -2833,7 +3020,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
     assert_eq!(prepass.registry_state().rules_tree_strength, 375);
     assert_eq!(
         prepass_boundaries,
-        if crate::rules::ARES_ENABLED {
+        if crate::rules::ARES_BUILD {
             [1, 2, 3]
         } else {
             [1, 2, 6]
@@ -2845,7 +3032,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
             .iter()
             .map(|event| (event.family(), event.native_stored_id()))
             .collect::<Vec<_>>(),
-        if crate::rules::ARES_ENABLED {
+        if crate::rules::ARES_BUILD {
             vec![
                 (NativeTypeConstructorFamily::HouseType, "HOUSE"),
                 (NativeTypeConstructorFamily::AnimType, "PREANIM"),
@@ -2942,6 +3129,8 @@ fn an_animation_keeps_the_rules_body_of_a_warhead_of_the_same_name() {
     assert_eq!(warhead.prone_damage_f64.to_bits(), 0x3fe6_6666_6666_6666);
 }
 
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn fixed_art_and_member_major_type_data_follow_live_native_order() {
     let rules = IniFile::from_str(
@@ -3463,6 +3652,39 @@ fn techno_weapon_bank_uses_effective_native_gates_and_elite_slot_order() {
     );
 }
 
+/// Only a read the Ares way grows the weapon arrays past the eighteen (Ares
+/// loader 10040020), and a build restores only Rules read a way it reads: a
+/// saved stock registry holding extension slots is refused before projection.
+#[test]
+fn saved_rules_refuse_ares_weapon_slots_and_modes_this_build_never_reads() {
+    let processed = RulesLayerStack::new(IniFile::from_str(
+        "[VehicleTypes]\n0=UNIT\n[UNIT]\nPrimary=GUN\n",
+    ))
+    .process()
+    .unwrap();
+    let mut saved = serde_json::to_value(processed).unwrap();
+    let registry = &mut saved["native_type_construction_trace"]["registry_state"];
+    registry["reads_ares_way"] = false.into();
+    registry["ares_armors"] = serde_json::Value::Null;
+    registry["ares_prerequisites"] = serde_json::Value::Null;
+    let validate = |saved: &serde_json::Value| {
+        serde_json::from_value::<ProcessedRulesLayers>(saved.clone())
+            .unwrap()
+            .validate_saved_state()
+    };
+    // A build with the `ares` feature reads only the Ares way.
+    assert_eq!(
+        validate(&saved).is_ok(),
+        !crate::rules::ares_switch::reading_mode(false)
+    );
+    saved["native_type_construction_trace"]["registry_state"]["families"]["Vehicle"][0]["weapon_slots"]
+        ["extra_base"] = serde_json::json!(["GUN"]);
+    assert!(matches!(
+        validate(&saved),
+        Err(crate::rules::error::RulesError::InvalidSavedState(_))
+    ));
+}
+
 /// TiberiumRead721B20..721C1E, RulesRead66BC37..66BC51 and Process668F65:
 /// retain read-time Color/list answers while later passes add Colors and admit
 /// the late-created Debris types' ART bodies. A Type reset keeps the Rules scalar.
@@ -3476,6 +3698,7 @@ fn mineral_start_inputs_retain_native_reader_state_across_process_and_reset() {
          [CombatDamage]\nTiberiumExplosionDamage=-7\nC4Warhead=Super\n\
          [Tiberiums]\n0=TIB\n[TIB]\nImage=1\nColor=Later\nDebris=A,A,<none>, B\n",
     );
+    let root = crate::rules::tiberium_type::with_tiberium_image_slots(&root);
     let first = RulesLayerStack::new(root)
         .process_with_fixed_art(&art)
         .unwrap();
@@ -3546,10 +3769,18 @@ fn mineral_start_inputs_retain_native_reader_state_across_process_and_reset() {
         .unwrap();
     let rules = RuleSet::from_processed_rules(&reset).unwrap();
     assert_eq!(rules.combat_damage.tiberium_explosion_damage, -7);
-    assert!(rules.tiberium_types.is_empty());
+    let retained = rules.tiberium_types.get(TiberiumTypeId(0)).unwrap();
+    assert_eq!(retained.section, "TIB");
+    assert!(retained.debris().is_empty());
+    assert_eq!(retained.image().base_overlay(), None);
+    assert_eq!(retained.image().density_levels(), 12);
+    assert_eq!(retained.image().primary_count(), 12);
+    assert_eq!(retained.image().slope_count(), 8);
     assert!(rules.bridge_warheads.c4_name.is_empty());
 }
 
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn post_type_readers_preserve_crate_through_tiberium_constructor_order() {
     let processed = RulesLayerStack::new(IniFile::from_str(
@@ -3646,6 +3877,8 @@ fn post_type_readers_preserve_crate_through_tiberium_constructor_order() {
     );
 }
 
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn ai_and_general_constructor_sites_cover_the_verified_20_and_89_order() {
     use std::fmt::Write as _;
@@ -3827,6 +4060,8 @@ fn ai_and_general_constructor_sites_cover_the_verified_20_and_89_order() {
     assert!(actual.iter().all(|(_, id)| id != "SHOULD_NOT_EXIST"));
 }
 
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn warhead_particle_system_and_voxel_children_obey_passed_family_timing() {
     let processed = RulesLayerStack::new(IniFile::from_str(
@@ -4162,10 +4397,15 @@ fn existing_type_keeps_prior_fields_and_applies_current_body() {
 
 #[test]
 fn tiberium_pass_reuses_numeric_slot_and_ignores_replacement_identity() {
-    let processed = process_rules_passes(
+    let root = crate::rules::tiberium_type::with_tiberium_image_slots(&IniFile::from_str(
         "[Tiberiums]\n0=Riparius\n[Riparius]\nImage=1\nValue=25\n",
-        "[Tiberiums]\n0=Cruentus\n[Riparius]\nImage=4\n[Cruentus]\nImage=2\n",
+    ));
+    let mut layers = RulesLayerStack::new(root);
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[Tiberiums]\n0=Cruentus\n[Riparius]\nImage=4\n[Cruentus]\nImage=2\n"),
     );
+    let processed = layers.process().unwrap();
 
     assert_eq!(
         processed.ini().section("Tiberiums").unwrap().registry_ids(),
@@ -4179,11 +4419,12 @@ fn tiberium_pass_reuses_numeric_slot_and_ignores_replacement_identity() {
 
 #[test]
 fn tiberium_out_of_range_slot_appends_one_live_type() {
-    let processed = RulesLayerStack::new(IniFile::from_str(
+    let root = crate::rules::tiberium_type::with_tiberium_image_slots(&IniFile::from_str(
         "[Tiberiums]\n7=Riparius\n0=Cruentus\n[Riparius]\nImage=1\n[Cruentus]\nImage=2\n",
-    ))
-    .process()
-    .expect("Tiberium pass processes");
+    ));
+    let processed = RulesLayerStack::new(root)
+        .process()
+        .expect("Tiberium pass processes");
 
     assert_eq!(
         processed.ini().section("Tiberiums").unwrap().registry_ids(),
@@ -4416,6 +4657,8 @@ fn special_weapons_created_projectile_waits_for_next_pass_body_sweep() {
     );
 }
 
+// Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn combat_damage_allocates_late_smudge_and_animation_references() {
     let processed = RulesLayerStack::new(IniFile::from_str(
@@ -5009,7 +5252,7 @@ fn ares_palette_requests_use_retained_names_and_resolve_each_loaded_group() {
         .unwrap();
     assert_eq!(first_name, "first");
     let second = rules.load_extra_building_palette(&assets, "tem", Some("second"));
-    assert_eq!(second.is_some(), crate::rules::ARES_ENABLED);
+    assert_eq!(second.is_some(), crate::rules::ARES_BUILD);
     if let Some((name, palette)) = second {
         assert_eq!(name, "second");
         assert_ne!(palette.to_rgba_bytes(), first.to_rgba_bytes());
@@ -5026,4 +5269,97 @@ fn ares_palette_requests_use_retained_names_and_resolve_each_loaded_group() {
             .0,
         "first"
     );
+}
+
+/// RulesExt LoadBeforeTypeData (1002AB60) and LoadAfterTypeData (1002A800)
+/// over the 1002A360 defaults and two passes: invalid values keep the
+/// earlier read, the CSF label is kept, and InfantryElectrocuted is a
+/// Find-only pointer an unknown later name does not clear.
+#[test]
+fn ares_general_rules_read_before_and_after_type_data() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    use crate::rules::ruleset::RuleSet;
+    let defaults = AresGeneralRules::default();
+    assert!(defaults.enemy_wrench() && !defaults.team_retaliate);
+    assert!(!defaults.can_make_stuff_up && !defaults.units_unsellable);
+    assert_eq!(defaults.ai_friendly_distance(8), 8);
+    assert_eq!(defaults.start_in_multiplayer_unit_cost(), None);
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[Animations]\n0=ZAP\n\
+         [General]\nCanMakeStuffUp=yes\nTeamRetaliate=yes\nMessage.SilosNeeded=MSG:Silos\n\
+         UnitsUnsellable=yes\nStartInMultiplayerUnitCost=250\nAIFriendlyDistance=3\n\
+         EnemyWrench=no\nHunterSeekerDetonateProximity=1\nHunterSeekerEmergeSpeed=5\n\
+         [AudioVisual]\nDiskLaserAnimEnabled=yes\nInfantryElectrocuted=zap\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str(
+            "[General]\nAIFriendlyDistance=bad\nTeamRetaliate=no\nHunterSeekerAscentSpeed=4\n\
+             [AudioVisual]\nInfantryElectrocuted=Missing\n",
+        ),
+    );
+    let rules = RuleSet::from_rules_layers(&layers).unwrap();
+    let general = rules.ares_general();
+    assert!(general.can_make_stuff_up && general.units_unsellable);
+    assert!(!general.team_retaliate && !general.enemy_wrench());
+    assert_eq!(general.message_silos_needed, "MSG:Silos");
+    assert!(general.disk_laser_anim_enabled());
+    assert_eq!(general.start_in_multiplayer_unit_cost(), Some(250));
+    assert_eq!(general.ai_friendly_distance(8), 3);
+    assert_eq!(general.hunter_seeker, [1, 0, 4, 0, 5]);
+    assert_eq!(general.infantry_electrocuted(), Some("ZAP"));
+}
+
+/// The InfDeath=5 anim under Ares (InfantryClass_ReceiveDamage_ElectricDeath
+/// 1002C930, hook 0x518744): InfantryElectrocuted, else the registered
+/// `ELECTRO`, else the second AnimType.
+#[test]
+fn ares_electric_death_takes_infantry_electrocuted_then_electro() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    use crate::rules::ruleset::RuleSet;
+    let death = |ini: &str| {
+        RuleSet::from_ini(&IniFile::from_str(ini))
+            .unwrap()
+            .general
+            .infantry_death_anim(5)
+            .map(str::to_owned)
+    };
+    let anims = "[Animations]\n0=FIRST\n1=SECOND\n2=ELECTRO\n3=ZAP\n";
+    assert_eq!(death(anims).as_deref(), Some("ELECTRO"));
+    assert_eq!(
+        death(&format!("{anims}[AudioVisual]\nInfantryElectrocuted=ZAP\n")).as_deref(),
+        Some("ZAP")
+    );
+    assert_eq!(
+        death("[Animations]\n0=FIRST\n1=SECOND\n").as_deref(),
+        Some("SECOND")
+    );
+}
+
+/// HouseTypeExt LoadFromINIFile (1001C5D0) reads
+/// `StartInMultiplayer.WithConst` (Valueable<bool>, constructor false) right
+/// before GivesBounty; the parent copy (1001BDC0) does not copy it.
+#[test]
+fn ares_country_reads_start_in_multiplayer_with_const() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let processed = RulesLayerStack::new(IniFile::from_str(
+        "[Countries]\n0=PARENT\n1=CHILD\n2=PLAIN\n\
+         [PARENT]\nStartInMultiplayer.WithConst=yes\n\
+         [CHILD]\nParentCountry=PARENT\n[PLAIN]\nStartInMultiplayer.WithConst=bad\n",
+    ))
+    .process()
+    .unwrap();
+    let (_, trace) = processed.into_ini_and_native_type_construction_trace();
+    let state = trace.into_registry_state_discarding_events();
+    let with_const = |name: &str| {
+        state.families[&RulesTypeFamily::Country]
+            .iter()
+            .find(|member| member.native_stored_id.eq_ignore_ascii_case(name))
+            .unwrap()
+            .country_veterancy
+            .ares
+            .start_in_multiplayer_with_const
+    };
+    assert!(with_const("PARENT"));
+    assert!(!with_const("CHILD") && !with_const("PLAIN"));
 }

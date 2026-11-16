@@ -95,11 +95,11 @@ impl Scene {
         let terrain_template = sim.resolved_terrain().cloned();
         let mut scene = Self(SimRuntime {
             simulation: sim,
-            resources: SimResources {
+            resources: std::sync::Arc::new(SimResources {
                 rules,
                 overlay_registry: registry,
                 terrain_template,
-            },
+            }),
         });
         scene.spawn("GAPOWR", "Americans", (4, 24));
         scene.spawn("NAPOWR", "Russians", (28, 28));
@@ -138,7 +138,7 @@ impl Scene {
         // Observe the actual serialized clock without depending on a new API:
         // the same test source compiles against the pre-fix production tree.
         let entity = serde_json::to_value(self.actor(id)).unwrap();
-        serde_json::from_value(entity["ammo_reload_timer"].clone())
+        serde_json::from_value(entity["seldom"]["ammo_reload_timer"].clone())
             .expect("authoritative saved reload clock")
     }
 
@@ -978,16 +978,16 @@ fn finite_infantry_reloads_and_resumes_fire_only_with_ares() {
     );
     let first = scene.shot(infantry, target);
     assert_eq!(scene.count(infantry), 0);
-    #[cfg(feature = "ares")]
-    assert_eq!(
-        (
-            scene.reload(infantry).start_frame(),
-            scene.reload(infantry).duration()
-        ),
-        (first, 12)
-    );
-    #[cfg(not(feature = "ares"))]
-    let _ = first;
+    let ares = scene.0.resources.rules.ares();
+    if ares {
+        assert_eq!(
+            (
+                scene.reload(infantry).start_frame(),
+                scene.reload(infantry).duration()
+            ),
+            (first, 12)
+        );
+    }
     let mut fired_again = false;
     for _ in 0..100 {
         if fired(&scene.frame(), infantry) {
@@ -996,8 +996,7 @@ fn finite_infantry_reloads_and_resumes_fire_only_with_ares() {
         }
     }
     assert_eq!(
-        fired_again,
-        cfg!(feature = "ares"),
+        fired_again, ares,
         "Ares adds the Infantry reload visit; stock does not"
     );
 }
@@ -1392,6 +1391,37 @@ fn finite_building_fires_a_rapid_pair_refills_zero_and_keeps_last_round_rearm() 
     let third = scene.shot(gun, target);
     assert!(third >= rearm.start_frame() + rearm.duration());
     assert_eq!(scene.count(gun), 1);
+}
+
+/// Ares 3.0 BuildingClass_Update_Reload (100478E0, hook 0x43FE8E): a
+/// building other than a Hospital or Armory reloads through
+/// TechnoClass::Reload, by `ReloadAmount` on its reload clock, where the
+/// stock visit refills an empty magazine at once.
+#[test]
+fn ares_building_reloads_by_reload_amount_on_its_clock() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let Some(mut scene) = Scene::new(
+        "[GAPILL]\nAmmo=4\nInitialAmmo=0\nReloadAmount=3\nReload=10\nEmptyReload=10\n\
+         CanPassiveAquire=no\n",
+    ) else {
+        return;
+    };
+    let gun = scene.spawn("GAPILL", "Americans", (16, 20));
+    for _ in 0..3 {
+        if scene.count(gun) != 0 {
+            break;
+        }
+        scene.frame();
+    }
+    assert_eq!(scene.count(gun), 3);
+    let reload = scene.reload(gun);
+    assert_eq!(reload.duration(), 10);
+    while scene.now() < reload.start_frame() + reload.duration() {
+        scene.frame();
+        assert_eq!(scene.count(gun), 3, "the clock holds the next round");
+    }
+    scene.frame();
+    assert_eq!(scene.count(gun), 4, "ReloadAmount is capped by Ammo=");
 }
 
 #[test]

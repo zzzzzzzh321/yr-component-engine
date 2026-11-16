@@ -857,15 +857,10 @@ fn snapshot_roundtrip(
     // Simulate a freshly projected RuleSet, whose module binding starts empty.
     // Otherwise an implementation that only validates and forgets to rebind
     // would pass by retaining the outgoing world's constructor hook.
-    scenario.runtime.resources.rules.external_mod = None;
-    scenario
-        .runtime
-        .resources
-        .rules
-        .bind_resource_policies()
-        .map_err(anyhow::Error::msg)?;
-    super::adopt_saved_program(&mut scenario.runtime.resources.rules, &loaded.sim, assets)
-        .map_err(anyhow::Error::msg)?;
+    let rules = &mut scenario.runtime.resources_mut().rules;
+    rules.external_mod = None;
+    rules.bind_resource_policies().map_err(anyhow::Error::msg)?;
+    super::adopt_saved_program(rules, &loaded.sim, assets).map_err(anyhow::Error::msg)?;
     ensure!(
         scenario
             .runtime

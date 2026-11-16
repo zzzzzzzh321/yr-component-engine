@@ -1,8 +1,10 @@
 # Ares GenericWarhead
 
-Ordinary builds execute the externally admitted subset when a compatible
-`vera20k-ares.wasm` is installed. The older built-in implementation requires
-`--features ares`; distinguish these routes when using [build capability](ares.md).
+A game that ships `ares.mix` reads and plays these keys in every build
+([Ares](ares.md)); other games keep the original superweapons.
+
+A compatible `vera20k-ares.wasm` can also supply its supported subset
+through the Mod SDK.
 
 VERA supports an initial, INI-selected `Type=GenericWarhead` implementation.
 It detonates an existing warhead at the selected cell without creating a

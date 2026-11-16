@@ -52,7 +52,7 @@ pub enum RulesCompatibility {
 impl Default for RulesCompatibility {
     fn default() -> Self {
         Self::from_capabilities(
-            super::ARES_ENABLED,
+            super::ARES_BUILD,
             super::PHOBOS_ENABLED,
             super::NPATCH_ENABLED,
             super::VERAX_ENABLED,
@@ -225,6 +225,6 @@ impl RulesCompatibility {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_rules_a_n))]
 #[path = "compatibility_tests.rs"]
 mod tests;

@@ -4,6 +4,12 @@
 
 use super::*;
 use crate::assets::pal_file::Color;
+use crate::util::ini_roots::IniRoots;
+
+/// The retail (YR profile) theater INI name, e.g. `snowmd.ini`.
+fn stock_theater_ini(theater_name: &str) -> String {
+    IniRoots::default().theater_ini(theater_def(theater_name).unwrap().control_name)
+}
 
 fn make_test_ini() -> String {
     "[TileSet0000]\nSetName=Grass\nFileName=clear\nTilesInSet=1\n\n\
@@ -55,7 +61,7 @@ fn active_theater_names_and_archive_order_match_retail() {
 
     for (name, ini_name, archives) in expected {
         let def = theater_def(name).expect("active theater definition");
-        assert_eq!(def.ini_name, ini_name);
+        assert_eq!(IniRoots::default().theater_ini(def.control_name), ini_name);
         assert_eq!(def.mix_archives, archives);
     }
 }
@@ -517,7 +523,7 @@ fn active_retail_tile_shadow_route_is_dormant() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["file"].as_str() == Some(theater_def(name).unwrap().ini_name))
+            .find(|row| row["file"].as_str() == Some(stock_theater_ini(name).as_str()))
             .expect("physical theater provenance");
         assert_eq!(
             crate::util::sha256::sha256_hex(&theater.ini_data),
@@ -599,7 +605,7 @@ fn retail_theaters_read_signed_bridge_pieces_once() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["file"].as_str() == Some(theater_def(name).unwrap().ini_name))
+            .find(|row| row["file"].as_str() == Some(stock_theater_ini(name).as_str()))
             .expect("physical theater provenance")["values"];
         let pair = |key: &str| {
             [1, 2].map(|n| i32::try_from(values[format!("{key}{n}")].as_i64().unwrap()).unwrap())
@@ -719,6 +725,11 @@ fn general_helpers_match_original_reader_and_signed_repair_keys() {
             .as_str()
             .or_else(|| case["file"].as_str())
             .unwrap();
+        // Ares's `INIClass_Parse_Override` (`0x5260D9`) keeps only the later
+        // of two equal keys; this control records the vanilla reader.
+        if cfg!(feature = "ares") && matches!(name, "duplicate_key" | "duplicate_key_reversed") {
+            continue;
+        }
         let text = case["input_text"]
             .as_str()
             .or_else(|| case["general_text"].as_str())
@@ -898,7 +909,7 @@ fn active_retail_automatic_shell_corpus_is_exact() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["file"].as_str() == Some(theater_def(theater_name).unwrap().ini_name))
+            .find(|row| row["file"].as_str() == Some(stock_theater_ini(theater_name).as_str()))
             .unwrap();
         let mut digest = crate::util::sha256::Sha256::new();
         digest.update(&theater.ini_data);
@@ -1058,6 +1069,24 @@ fn gsi_04_03a_rmg_tile_keys_parse_ramp_smooth_and_resolve_ordinals() {
     );
     assert_eq!(keys.sand_tile, None, "absent key must stay None, not 0");
     assert_eq!(keys.shore_pieces, None);
+}
+
+/// Ares MediansFix (Ares.dll 1006A920, hook 0x545904): a theater without
+/// `Medians=` (retail SNOWMD.INI) reads ordinal 71; an authored key is kept.
+/// In every build: VERA's opted-in urban pass stamps these tiles without Ares.
+#[test]
+fn missing_medians_key_reads_ordinal_71() {
+    let mut lookup = parse_tileset_ini(b"", "sno").unwrap();
+    lookup.tileset_bounds = vec![TilesetBounds { start: 0, count: 0 }; 72];
+    lookup.tileset_bounds[40].start = 400;
+    lookup.tileset_bounds[71].start = 710;
+    let medians = |text: &str| {
+        let ini = IniFile::from_str(text);
+        super::resolve_rmg_tile_keys(&lookup, ini.section("General"), None).medians
+    };
+    assert_eq!(medians("[General]\nPavedRoads=20\n"), Some(710));
+    assert_eq!(medians(""), Some(710), "no [General] section reads -1 too");
+    assert_eq!(medians("[General]\nMedians=40\n"), Some(400));
 }
 
 #[test]
@@ -1317,6 +1346,16 @@ fn gsi_13_04_tile_anims_come_from_the_setname_section() {
 
     // A tileset whose SetName names no section has no animations at all.
     assert_eq!(lookup.tile_anim(0), None);
+
+    // `none` and `<none>` get no type from FindOrAllocate (`0x00546538`), so
+    // the block is skipped (issue 4493).
+    let none = parse_tileset_ini(
+        b"[TileSet0000]\nSetName=Falls\nFileName=wf\nTilesInSet=2\n\
+          [Falls]\nTile01Anim=none\nTile02Anim=<None>\n",
+        "tem",
+    )
+    .unwrap();
+    assert_eq!((none.tile_anim(0), none.tile_anim(1)), (None, None));
 }
 
 #[test]
@@ -1372,4 +1411,34 @@ fn atlas_growth_reads_the_published_theater_palettes() {
     generic.write("isotem.pal", &magenta);
     let assets = AssetManager::from_loose_root_for_test(generic.path());
     assert!(load_theater_unit_and_iso_palettes(&assets, "TEMPERATE").is_none());
+}
+
+/// `Read_Theater_TileSets_INI` (`0x00545150`) formats the theater INI with
+/// `"%sMD.INI"` (`0x005454FE`); a profile with another suffix reads its own
+/// file first and, when that is absent, the stock one.
+#[test]
+fn load_theater_prefers_the_profile_theater_ini_then_the_stock_name() {
+    use crate::map::source::test_support::TestDirectory;
+    use crate::util::ini_roots::{IniProfile, IniRootConfig};
+    let mo = IniRootConfig {
+        profile: IniProfile::Mo,
+        ..Default::default()
+    }
+    .resolve(|_| true)
+    .unwrap();
+    let dir = TestDirectory::new("theater-profile-ini");
+    dir.write("isotem.pal", &[0; 768]);
+    dir.write("unittem.pal", &[0; 768]);
+    let stock_ini = b"[TileSet0000]\nFileName=clear\nTilesInSet=1\n";
+    dir.write("temperatmd.ini", stock_ini);
+    let mut assets =
+        AssetManager::from_loose_root_for_test(dir.path()).with_selected_ini_roots(mo.clone());
+    let theater = load_theater(&mut assets, "TEMPERATE").expect("stock fallback");
+    assert_eq!(theater.ini_data, stock_ini);
+
+    let profile_ini = b"[TileSet0000]\nFileName=clear\nTilesInSet=2\n";
+    dir.write("temperatmo.ini", profile_ini);
+    let mut assets = AssetManager::from_loose_root_for_test(dir.path()).with_selected_ini_roots(mo);
+    let theater = load_theater(&mut assets, "TEMPERATE").expect("profile theater INI");
+    assert_eq!(theater.ini_data, profile_ini);
 }

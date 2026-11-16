@@ -1,6 +1,7 @@
 //! Real repair System/children, free Anim and building-slot emission share one
 //! retained Display query history. Atlas markers are declared presence inputs;
 //! the separate physical GAPOWR test owns source geometry, not pixel output.
+#![cfg_attr(feature = "ares", allow(dead_code, unused_imports))]
 
 use super::*;
 use crate::app::presentation::detail::DetailState;
@@ -14,6 +15,9 @@ use crate::sim::world::display_layers::DisplayLayer;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+// Ares simulates WeldingSys itself (hooks 0x62DF05, 0x62FD60) and builds no
+// ParticleClass children for this stock draw path.
+#[cfg(not(feature = "ares"))]
 #[test]
 fn retail_building_slot_preserves_mixed_display_detail_query_order() {
     let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
@@ -106,7 +110,7 @@ fn retail_building_slot_preserves_mixed_display_detail_query_order() {
             HashMap::from([(
                 ShpSpriteKey {
                     palette_context: ShpPaletteContext::AnimScheme,
-                    type_id: "GAPOWR_A".to_owned(),
+                    type_id: "GAPOWR_A".into(),
                     facing: 0,
                     frame: 0,
                     house_color: HouseColorIndex(0),
@@ -131,7 +135,8 @@ fn retail_building_slot_preserves_mixed_display_detail_query_order() {
         let atlas = SpriteAtlas::from_test_entries(entries);
         let before = (sim.state_hash(), sim.rng_state());
         let mut prepared = Vec::new();
-        let building = sim.entities().get(plant).unwrap();
+        let frame = crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules);
+        let building = frame.object(plant).unwrap();
         emit_building_anims(
             &mut prepared,
             &order,
@@ -145,16 +150,19 @@ fn retail_building_slot_preserves_mixed_display_detail_query_order() {
             &lighting,
             (building.position.rx(), building.position.ry()),
             &sim,
+            &frame,
             Some(building.owner()),
             building,
-            &|anim| {
-                super::super::overlays::slot_anim_admissible(
-                    &sim,
-                    anim,
-                    camera,
-                    [size[0] as f32, size[1] as f32],
-                )
-            },
+            &super::admitted_slot_anims(
+                &sim,
+                &frame,
+                building,
+                crate::app::presentation::instances::TacticalAdmission {
+                    corner: camera,
+                    size: [size[0] as f32, size[1] as f32],
+                },
+            ),
+            &mut super::super::overlays::AnimTypeArts::new(&rules, &atlas),
             &|_| 0,
             0.,
             10000.,
@@ -182,8 +190,8 @@ fn retail_building_slot_preserves_mixed_display_detail_query_order() {
         let mut parents = Vec::new();
         build_display_effect_instances(
             &DisplayEffectInputs {
-                interpolation: None,
                 sim: &sim,
+                frame: &frame,
                 rules: &rules,
                 camera,
                 render_size: size,

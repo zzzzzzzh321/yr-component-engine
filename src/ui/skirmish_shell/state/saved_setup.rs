@@ -19,7 +19,7 @@ use super::combos::{apply_combo_selection, combo_open};
 use super::player_name::selected_player_rows;
 use super::{
     SkirmishAiRowType, SkirmishComboId, SkirmishComboItem, SkirmishCountryChoice,
-    SkirmishShellState, combo_items, game_speed_visual_position, selected_combo_item,
+    SkirmishShellState, combo_items, selected_combo_item,
 };
 
 /// One row's Side, Color, Start and Team picks.
@@ -116,11 +116,12 @@ impl SkirmishSavedSetup {
             let range = bounds.range(id);
             (range.min..=range.max).contains(&value)
         };
-        let speed = game_speed_visual_position(self.game_speed);
+        let speed =
+            crate::ui::shell::game_speed::SpeedContext::Offline.visual_position(self.game_speed);
         if fits(SkirmishTrackbarId::GameSpeed0x529, speed) {
             state.game_speed = self.game_speed;
         }
-        if fits(SkirmishTrackbarId::Credits0x511, self.credits) {
+        if bounds.accepts_credits(self.credits) {
             state.starting_credits = self.credits;
         }
         if fits(SkirmishTrackbarId::UnitCount0x50c, self.unit_count) {
@@ -135,14 +136,14 @@ impl SkirmishSavedSetup {
 }
 
 /// The computer rows the selected map seats, as `opponents` indices.
-fn computer_rows(state: &SkirmishShellState, maps: &[MapMenuEntry]) -> Range<usize> {
+pub(super) fn computer_rows(state: &SkirmishShellState, maps: &[MapMenuEntry]) -> Range<usize> {
     0..selected_player_rows(state, maps)
         .saturating_sub(1)
         .min(state.opponents.len())
 }
 
 /// What the row's Side, Color, Start and Team combos show.
-fn seat_shown(state: &SkirmishShellState, row: usize) -> SkirmishSetupSeat {
+pub(super) fn seat_shown(state: &SkirmishShellState, row: usize) -> SkirmishSetupSeat {
     let shown = |id| selected_combo_item(state, id);
     SkirmishSetupSeat {
         country: match shown(SkirmishComboId::Side(row)) {
@@ -195,7 +196,7 @@ fn pick_seat(
 
 /// Pick `item` as a click on the combo's list would: only on an open combo
 /// that lists it.
-fn pick(
+pub(super) fn pick(
     state: &mut SkirmishShellState,
     maps: &[MapMenuEntry],
     id: SkirmishComboId,

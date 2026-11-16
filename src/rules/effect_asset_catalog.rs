@@ -294,6 +294,7 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
             roots.insert(name.to_ascii_uppercase());
         }
     };
+    let ares_way = rules.ares_form();
     for name in gameplay_effect_anim_roots(rules) {
         insert(&name);
     }
@@ -304,17 +305,31 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
         // AttachedEffect 100586E0 constructs the registered AnimClass with
         // flags 0x600 and then attaches it to the victim. It needs physical
         // bounds through this same loader closure before construction.
-        #[cfg(feature = "ares")]
-        if !rules.external_effects_enabled()
+        if ares_way
+            && !rules.external_effects_enabled()
             && let Some(name) = warhead
                 .ares_rules()
                 .and_then(|wh| wh.attach_effect().animation())
         {
             insert(name);
         }
+        // Ares `InfDeathAnim=` replaces the death-table arm with a literal
+        // AnimClass built at the victim's cell, so it is an ordinary
+        // construction root and needs the same physical bounds. Nothing else
+        // names these animations: Mental Omega's GBION warheads set only
+        // `InfDeathAnim` (`FREEZE`, `MELTDIEE`, `PLASMDIE`) with no `InfDeath=`,
+        // and without this root the constructor refuses with
+        // `animation type [X] has no bound SHP frame count` and the kill plays
+        // no death animation at all.
+        if ares_way
+            && let Some(name) = warhead
+                .ares_combat()
+                .and_then(|combat| combat.inf_death_anim())
+        {
+            insert(name);
+        }
     }
-    #[cfg(feature = "ares")]
-    {
+    if ares_way {
         for object in rules.all_objects() {
             // Self effects reach the same Anim constructor as Warhead effects
             // (Ares Update10058E00, self-attach10058FC5 -> Attach10058520
@@ -331,9 +346,15 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
         }
     }
     // Muzzle animations `TechnoClass::Fire_At` constructs
-    // (`sim::world::damage_consequences`, `combat::fire_coord`).
+    // (`sim::world::damage_consequences`, `combat::fire_coord`), and the
+    // assault anim at each occupant KillOccupants (`0x004586B7`) kills.
     for weapon in rules.weapons_iter() {
-        for name in weapon.anim.iter().chain(&weapon.occupant_anim) {
+        for name in weapon
+            .anim
+            .iter()
+            .chain(&weapon.occupant_anim)
+            .chain(&weapon.assault_anim)
+        {
             insert(name);
         }
     }
@@ -342,6 +363,13 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     // as every other producer, including in headless matches.
     for projectile in rules.projectiles_iter() {
         if let Some(name) = projectile.trailer.as_deref() {
+            insert(name);
+        }
+    }
+    // AircraftAI414ED0..414F42 constructs this retained fixed-ART AnimType
+    // through ordinary Anim421EA0, including dynamically allocated aliases.
+    for object in rules.all_objects() {
+        if let Some(name) = object.aircraft_trailer().animation() {
             insert(name);
         }
     }
@@ -366,6 +394,12 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     // General list. The completion owner must find bound physical shapes
     // even when no warhead or other producer names these corpse animations.
     for name in &rules.general.dead_bodies {
+        insert(name);
+    }
+    // BuildingReceiveDamage442832..4428F4 constructs an OnFire Anim before
+    // attaching it. Keep each resolved slot key, including unread late AV
+    // allocations, in the ordinary AnimClass asset-binding closure.
+    for name in &rules.general.on_fire {
         insert(name);
     }
     for name in &rules.general.metallic_debris {
@@ -420,6 +454,13 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     // physical animation bounds before the simulator creates it.
     for name in rules.faction_parachute_animations() {
         insert(name);
+    }
+    // Ares Type/Country/Side `Parachute.Anim=`: an attached canopy needs the same
+    // physical animation bounds before the simulator creates it.
+    if rules.ares() {
+        for name in rules.parachute_animations() {
+            insert(name);
+        }
     }
     // Techno70F1D0 attaches [General] Behind= to an obscured object. Its
     // AnimClass must have physical frame bounds before the AI can create it.
@@ -547,6 +588,19 @@ pub fn tolerant_anim_class_roots(rules: &RuleSet) -> Vec<String> {
             .into_iter()
             .filter(|name| rules.anim_type_names.contains(name)),
     );
+    // Slot 9's names are on the rules section (`0x00464450..0x004644FD`), so
+    // no art row above reaches them. Unbound, the constructor is refused and
+    // Grand_Opening (`0x00446662`) leaves the turret undrawn.
+    roots.extend(
+        rules
+            .all_objects()
+            .filter_map(crate::rules::art_data::shp_turret_anim_config)
+            .flat_map(|row| {
+                let damaged = row.damaged_variant.map(|variant| variant.anim_type);
+                std::iter::once(row.anim_type).chain(damaged)
+            })
+            .filter(|name| rules.anim_type_names.contains(name)),
+    );
     roots
 }
 
@@ -630,7 +684,7 @@ fn canonical_asset_id(name: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_ascii_uppercase())
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_rules_a_n))]
 mod tests {
     use std::hash::{Hash, Hasher};
     use std::path::{Path, PathBuf};
@@ -794,6 +848,152 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ares_canopy_key_alone_activates_its_reader_and_asset_root() {
+        let _stock = crate::rules::ares_switch::read_ares_way(false);
+        let art = IniFile::from_str("[TYPECHUTE]\nLoopCount=-1\n");
+        let processed = crate::rules::native_processing::RulesLayerStack::new(IniFile::from_str(
+            "[Animations]\n0=TYPECHUTE\n[InfantryTypes]\n0=E1\n\
+             [E1]\nParachute.Anim=TYPECHUTE\n",
+        ))
+        .process_with_fixed_art(&art)
+        .unwrap();
+        let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
+        assert!(rules.ares());
+        assert_eq!(
+            rules
+                .object("E1")
+                .unwrap()
+                .techno_combat()
+                .presentation()
+                .parachute_anim(),
+            Some("TYPECHUTE")
+        );
+        assert!(
+            anim_class_roots(&rules)
+                .iter()
+                .any(|name| name == "TYPECHUTE")
+        );
+        rules.install_art_fixture(ArtRegistry::from_ini(&art));
+        rules.bind_anim_frame_count_for_test("TYPECHUTE", 6);
+        let mut sim = crate::sim::world::Simulation::new();
+        sim.substrate.entities.insert(
+            crate::sim::game_entity::GameEntity::test_default_of_category(
+                1,
+                "E1",
+                "Americans",
+                10,
+                11,
+                crate::map::entities::EntityCategory::Infantry,
+            ),
+        );
+        sim.interner = crate::sim::intern::test_interner();
+        let anim = sim.attach_parachute_anim(&rules, 1).unwrap();
+        assert_eq!(
+            sim.interner.resolve(sim.anim(anim).unwrap().type_id()),
+            "TYPECHUTE"
+        );
+    }
+
+    #[test]
+    fn ares_canopy_type_and_country_bind_through_the_production_load() {
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::sim::game_entity::GameEntity;
+        use crate::sim::world::Simulation;
+
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("TYPECHUTE.SHP"),
+            shp_with_undecodable_pixels(6),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("COUNTRYCHUTE.SHP"),
+            shp_with_undecodable_pixels(8),
+        )
+        .unwrap();
+        let assets = AssetManager::from_loose_root_for_test(root.path());
+        let art = IniFile::from_str("[TYPECHUTE]\nLoopCount=-1\n[COUNTRYCHUTE]\nLoopCount=-1\n");
+        let mut stack = RulesLayerStack::new(IniFile::from_str(
+            "[Animations]\n0=TYPECHUTE\n1=PARACH\n2=COUNTRYCHUTE\n\
+             [InfantryTypes]\n0=E1\n[E1]\nParachute.Anim=TYPECHUTE\n\
+             [Countries]\n0=Americans\n[Americans]\nSide=GDI\nParachute.Anim=COUNTRYCHUTE\n",
+        ));
+        let processed = stack.process_with_fixed_art(&art).unwrap();
+        let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
+        rules.install_art_data(ArtRegistry::from_ini(&art));
+        let roots = anim_class_roots(&rules);
+        assert!(roots.iter().any(|name| name == "TYPECHUTE"));
+        assert!(roots.iter().any(|name| name == "COUNTRYCHUTE"));
+        rules.bind_anim_class_assets(&roots, &assets, "TEM", "TEMPERATE");
+        assert_eq!(
+            rules
+                .art()
+                .anim_runtime_config("TYPECHUTE")
+                .unwrap()
+                .raw_shp_frame_count,
+            Some(6)
+        );
+        assert_eq!(
+            rules
+                .art()
+                .anim_runtime_config("COUNTRYCHUTE")
+                .unwrap()
+                .raw_shp_frame_count,
+            Some(8)
+        );
+
+        let mut sim = Simulation::new();
+        sim.substrate
+            .entities
+            .insert(GameEntity::test_default_of_category(
+                1,
+                "E1",
+                "Americans",
+                10,
+                11,
+                crate::map::entities::EntityCategory::Infantry,
+            ));
+        sim.interner = crate::sim::intern::test_interner();
+        let owner = sim.entities().get(1).unwrap().owner();
+        sim.houses
+            .register(crate::sim::house_state::HouseState::new(
+                owner,
+                0,
+                Some(owner),
+                true,
+                0,
+                10,
+            ));
+        let attach = |sim: &mut Simulation, rules: &RuleSet| {
+            let anim = sim.attach_parachute_anim(rules, 1).unwrap();
+            Simulation::wind_down_parachute_anim(&mut sim.substrate, 1);
+            assert_eq!(sim.anim(anim).unwrap().owner_entity(), Some(1));
+            assert_eq!(sim.anim(anim).unwrap().runtime().loop_remaining, 0);
+            sim.interner
+                .resolve(sim.anim(anim).unwrap().type_id())
+                .to_owned()
+        };
+        assert_eq!(attach(&mut sim, &rules), "TYPECHUTE");
+        stack.push(
+            RulesLayerKind::GameMode,
+            IniFile::from_str("[E1]\nParachute.Anim=UNKNOWN\n"),
+        );
+        let processed = stack.process_with_fixed_art(&art).unwrap();
+        let mut retained = RuleSet::from_processed_rules(&processed).unwrap();
+        retained.install_art_fixture(rules.art().clone());
+        assert_eq!(attach(&mut sim, &retained), "TYPECHUTE");
+        stack.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[E1]\nParachute.Anim=<none>\n"),
+        );
+        let processed = stack.process_with_fixed_art(&art).unwrap();
+        let mut cleared = RuleSet::from_processed_rules(&processed).unwrap();
+        cleared.install_art_fixture(rules.art().clone());
+        assert_eq!(attach(&mut sim, &cleared), "COUNTRYCHUTE");
+    }
+
     /// A root whose SHP is missing stays a real null-image Anim, and a bound root's
     /// `Next=` chain is bound with it. Retail art names building animations
     /// (`[CAARAY] ActiveAnim=CAARAY_A`) whose sprites never shipped.
@@ -858,7 +1058,7 @@ mod tests {
                 row["fixture"]["raw"].as_str().unwrap()
             ));
             let rules = RuleSet::from_ini(&IniFile::from_str(&source)).unwrap();
-            let expected = if crate::rules::ARES_ENABLED {
+            let expected = if crate::rules::ARES_BUILD {
                 row["result"]["reference"].as_str()
             } else {
                 None
@@ -911,7 +1111,7 @@ mod tests {
         for name in names {
             assert_eq!(
                 roots.iter().any(|root| root == name),
-                crate::rules::ARES_ENABLED,
+                crate::rules::ARES_BUILD,
                 "{name}"
             );
         }
@@ -920,7 +1120,7 @@ mod tests {
         rules.bind_anim_class_assets(&roots, &assets, "TEM", "TEMPERATE");
         let mut sim = Simulation::with_seed(17);
         for name in names {
-            let expected = crate::rules::ARES_ENABLED.then_some(6);
+            let expected = crate::rules::ARES_BUILD.then_some(6);
             assert_eq!(
                 rules
                     .art()
@@ -932,7 +1132,7 @@ mod tests {
             );
             assert_eq!(
                 rules.art().scheduler_anim_types().contains(name),
-                crate::rules::ARES_ENABLED
+                crate::rules::ARES_BUILD
             );
             let type_name = sim.intern(name);
             let world = AnimWorldCoord {
@@ -951,7 +1151,7 @@ mod tests {
             );
             assert_eq!(
                 spawned.is_ok(),
-                crate::rules::ARES_ENABLED,
+                crate::rules::ARES_BUILD,
                 "{name}: {spawned:?}"
             );
         }
@@ -991,7 +1191,7 @@ mod tests {
                 .anim_runtime_config("PULSE")
                 .unwrap()
                 .raw_shp_frame_count,
-            crate::rules::ARES_ENABLED.then_some(6),
+            crate::rules::ARES_BUILD.then_some(6),
         );
         let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 17);
         sim.intern_rule_type_ids(&rules);
@@ -1009,10 +1209,10 @@ mod tests {
             .entities()
             .get(helper)
             .is_some_and(|entity| entity.is_object_alive());
-        assert_eq!(alive, !crate::rules::ARES_ENABLED);
+        assert_eq!(alive, !crate::rules::ARES_BUILD);
         assert_eq!(
             sim.entities().get(victim).unwrap().health.current() < 1000,
-            crate::rules::ARES_ENABLED,
+            crate::rules::ARES_BUILD,
             "the self animation must reach the real death-weapon receiver",
         );
     }
@@ -1066,7 +1266,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_rules_a_n))]
 mod anim_class_root_tests {
     use super::anim_class_roots;
     use crate::rules::ini_parser::IniFile;
@@ -1075,7 +1275,9 @@ mod anim_class_root_tests {
     #[test]
     fn bridge_roots_preserve_literal_factory_tokens_and_unread_types() {
         let rules = RuleSet::from_ini(&IniFile::from_str(
-            "[General]\nMetallicDebris=ONE, FX, none, ,D,ONE\n\
+            // FX is registered: Ares reads BridgeExplosions Find-only
+            // (Buf_General 1005BB00, hook 0x66D55E).
+            "[Animations]\n0=FX\n[General]\nMetallicDebris=ONE, FX, none, ,D,ONE\n\
              BridgeExplosions=FX, FX,none,<none>\n",
         ))
         .unwrap();
@@ -1092,7 +1294,9 @@ mod anim_class_root_tests {
     #[test]
     fn roots_cover_teleport_superweapon_and_lightning_producers() {
         let rules = RuleSet::from_ini(&IniFile::from_str(
-            "[General]\nBehind=MYBEHIND\nWarpOut=MYWARP\nIronCurtainInvokeAnim=MYIRON\n\
+            // The weather anims are registered for Ares's Find-only lists.
+            "[Animations]\n0=MYCLOUD1\n1=MYCLOUD2\n2=MYBOLT\n\
+             [General]\nBehind=MYBEHIND\nWarpOut=MYWARP\nIronCurtainInvokeAnim=MYIRON\n\
              ForceShieldInvokeAnim=MYSHIELD\nIonBlast=MYRING\n\
              DominatorFirstAnim=MYHEAD\nDominatorSecondAnim=MYLOC\n\
              WeatherConClouds=MYCLOUD1,MYCLOUD2\nWeatherConBolts=MYBOLT\n\

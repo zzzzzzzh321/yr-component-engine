@@ -8,7 +8,6 @@
 //! The target and house masks are read with Ares's own readers, not the
 //! donor's alias parser.
 
-#[cfg(feature = "ares")]
 use crate::rules::ini_parser::IniSection;
 use crate::util::native_x87::NativeF64Bits;
 
@@ -40,9 +39,9 @@ impl TargetMask {
 
     /// Ares SuperWeaponTarget reader10034430, tokens1009BC40; same
     /// comma-only list and keep-on-failure rules as [`HouseMask::read_ares`].
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares(section: &IniSection, key: &str) -> Option<Self> {
-        section.read_comma_mask(key, &TARGET_TOKENS).map(Self)
+        let _ares = crate::rules::ares_switch::ares_reads();
+        read_native_mask(section, key, &TARGET_TOKENS).map(Self)
     }
 }
 
@@ -68,14 +67,13 @@ impl HouseMask {
 
     /// Ares household-mask reader100341D0, tokens1009BCE0: successful
     /// native comma-only lists replace; absent or unknown keeps the prior.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares(section: &IniSection, key: &str) -> Option<Self> {
-        section.read_comma_mask(key, &HOUSE_TOKENS).map(Self)
+        let _ares = crate::rules::ares_switch::ares_reads();
+        read_native_mask(section, key, &HOUSE_TOKENS).map(Self)
     }
 }
 
 /// Ares AffectedHouse names1009BCE0..1009BD20, read by100341D0.
-#[cfg(feature = "ares")]
 const HOUSE_TOKENS: [(&str, u8); 8] = [
     ("owner", 1),
     ("allies", 2),
@@ -88,7 +86,6 @@ const HOUSE_TOKENS: [(&str, u8); 8] = [
 ];
 
 /// Ares SuperWeaponTarget names1009BC40..1009BC80, read by10034430.
-#[cfg(feature = "ares")]
 const TARGET_TOKENS: [(&str, u8); 8] = [
     ("land", 1),
     ("water", 2),
@@ -100,9 +97,27 @@ const TARGET_TOKENS: [(&str, u8); 8] = [
     ("none", 0),
 ];
 
+/// Both Ares mask readers: ReadString into the shared 0x800 buffer
+/// (10007860), then a comma-only strtok (10007920) whose tokens keep their
+/// spaces and must each `_strcmpi` (7C8D20) a table name. An empty read or
+/// any unknown token writes nothing (100341E8/10034231), so the caller keeps
+/// its prior mask; a present list without tokens stores 0.
+fn read_native_mask<T>(section: &IniSection, key: &str, tokens: &[(&str, T)]) -> Option<T>
+where
+    T: Copy + Default + std::ops::BitOr<Output = T>,
+{
+    section
+        .read_list(key, 0x800)?
+        .into_iter()
+        .try_fold(T::default(), |bits, name| {
+            tokens.iter().find_map(|(token, value)| {
+                token.eq_ignore_ascii_case(name).then_some(bits | *value)
+            })
+        })
+}
+
 /// Ares targeting-constraint names1009B9A0..1009B9F0, read by10034290 with
 /// the same comma-only list and keep-on-failure rules as the masks above.
-#[cfg(feature = "ares")]
 const CONSTRAINT_TOKENS: [(&str, u16); 10] = [
     ("none", 0),
     ("offensive_cell_clear", OFFENSIVE_CELL_CLEAR),
@@ -273,7 +288,6 @@ const AI_TARGETING_MODES: [(&str, AiTargetingMode, u16, u8, u8, u8); 21] = {
     ]
 };
 
-#[cfg(feature = "ares")]
 const OFFENSIVE_MODE: u8 = 8;
 
 /// The mode each Ares type handler's Initialize (vtable +0x14) stores at
@@ -281,7 +295,6 @@ const OFFENSIVE_MODE: u8 = 8;
 /// the section, for a new Type or the stock Type's handler (1006CFB0).
 /// ChronoSphere's (1006EF10) and ChronoWarp's (100700B0) store nothing and
 /// EMPulse's stores 0 (1007146B), so they keep the constructor's 0.
-#[cfg(feature = "ares")]
 fn handler_initial_mode(type_name: &str) -> u8 {
     const MODES: [(&str, u8); 17] = [
         ("MultiMissile", 1),                // 100733BC
@@ -335,6 +348,11 @@ pub(crate) struct AresSuperWeaponTargetingState {
     ai_house: Option<HouseMask>,
     range_minimum: NativeF64Bits,
     range_maximum: NativeF64Bits,
+    /// `Chronosphere.AffectsBuildings` (+0x108, ctor false): SW_ChronoSphere's
+    /// LoadFromINI (1006EF90) splits the Building bit of `SW.AffectsTarget`
+    /// off into it, then keeps the bit set.
+    #[serde(default)]
+    chrono_affect_buildings: bool,
 }
 
 impl Default for AresSuperWeaponTargetingState {
@@ -364,6 +382,7 @@ impl Default for AresSuperWeaponTargetingState {
             ai_house: None,
             range_minimum: unbounded,
             range_maximum: unbounded,
+            chrono_affect_buildings: false,
         }
     }
 }
@@ -413,13 +432,33 @@ impl AresSuperWeaponTargetingState {
     /// (100343C0) readers need the whole value to `_strcmpi` a name; anything
     /// else keeps the prior value. The Nullable wrappers set their flag only
     /// on a successful read.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_pass(&mut self, section: &IniSection, type_name: Option<&str>) -> bool {
+        let _ares = crate::rules::ares_switch::ares_reads();
         let initialize = !self.initialized;
+        let is =
+            |name: &str| type_name.is_some_and(|type_name| type_name.eq_ignore_ascii_case(name));
         if initialize {
             self.mode = type_name.map_or(0, handler_initial_mode);
+            // SW_ChronoSphere::Initialize1006EF10 and SW_PsychicDominator's
+            // (10070990): infantry and units (0x18).
+            if is("ChronoSphere") || is("PsychicDominator") {
+                self.affects_target = TargetMask(0x18);
+            }
             if type_name.is_some_and(|name| name.eq_ignore_ascii_case("HunterSeeker")) {
                 self.affects_house = HouseMask::ENEMIES;
+            }
+            // SW_EMPulse::Initialize10071440: SW.RangeMaximum -1.0 and
+            // SW.RangeMinimum 0.0 (+0x468/+0x460).
+            if is("EMPulse") {
+                self.range_minimum = NativeF64Bits::from_bits(0.0_f64.to_bits());
+                self.range_maximum = NativeF64Bits::from_bits((-1.0_f64).to_bits());
+            }
+            // SW_SonarPulse::Initialize100756D0: enemies on water.
+            if type_name.is_some_and(|name| name.eq_ignore_ascii_case("SonarPulse")) {
+                self.affects_house = HouseMask::ENEMIES;
+                self.affects_target = TargetMask::WATER;
+                self.manual.target = TargetMask::WATER;
+                self.ai_target = Some(TargetMask::WATER);
             }
         }
         self.initialized = true;
@@ -474,12 +513,35 @@ impl AresSuperWeaponTargetingState {
         // 10033942/10033958
         self.range_minimum = section.read_ares_double_bits("SW.RangeMinimum", self.range_minimum);
         self.range_maximum = section.read_ares_double_bits("SW.RangeMaximum", self.range_maximum);
+        if is("ChronoSphere") {
+            // SW_ChronoSphere::LoadFromINI1006EF90 after the common reads:
+            // rebuild the authored mask (clear Building unless buildings are
+            // affected), re-read it, take the Building bit as
+            // AffectsBuildings and set the bit again, so a later pass
+            // without SW.AffectsTarget keeps its earlier answer.
+            if !self.chrono_affect_buildings {
+                self.affects_target = TargetMask(self.affects_target.0 & !TargetMask::BUILDING.0);
+            }
+            if let Some(mask) = TargetMask::read_ares(section, "SW.AffectsTarget") {
+                self.affects_target = mask;
+            }
+            self.chrono_affect_buildings = self.affects_target.intersects(TargetMask::BUILDING);
+            self.affects_target = TargetMask(self.affects_target.0 | TargetMask::BUILDING.0);
+        }
+        // SW_GeneticMutator::LoadFromINI10072100: always every Techno.
+        if is("GeneticConverter") {
+            self.affects_target = TargetMask(self.affects_target.0 | TargetMask::ALL_TECHNOS.0);
+        }
         initialize
+    }
+
+    /// `Chronosphere.AffectsBuildings`.
+    pub(crate) fn chrono_affect_buildings(self) -> bool {
+        self.chrono_affect_buildings
     }
 
     /// A pass without this type's section still ends the first call
     /// (10033284 -> 10033347), so a later pass never runs Initialize.
-    #[cfg(feature = "ares")]
     pub(crate) fn skip_pass(&mut self) {
         self.initialized = true;
     }
@@ -565,7 +627,6 @@ pub struct SuperWeaponTargeting {
 impl SuperWeaponTargeting {
     /// The masks start as a freshly initialized GenericWarhead's; RuleSet
     /// installs the ordered [`AresSuperWeaponTargetingState`] reads.
-    #[cfg(feature = "ares")]
     pub fn from_ini(section: &IniSection) -> Self {
         let range = |key| {
             let value = if section.is_present(key) {
@@ -642,6 +703,12 @@ impl LaunchSite {
         (minimum < 0.0 || distance_squared >= minimum * minimum)
             && (maximum < 0.0 || distance_squared <= maximum * maximum)
     }
+}
+
+fn valid_range((minimum, maximum): (f64, f64)) -> bool {
+    minimum.is_finite()
+        && maximum.is_finite()
+        && (minimum < 0.0 || maximum < 0.0 || minimum <= maximum)
 }
 
 /// The House fields `IsTargetConstraintsEligible`10032110 reads before its
@@ -744,7 +811,7 @@ pub fn evaluate_target(input: &TargetPreflightInput<'_>) -> Result<(), TargetRej
     Ok(())
 }
 
-#[cfg(all(test, feature = "ares"))]
+#[cfg(all(test, tests_rules_o_z))]
 #[path = "superweapon_targeting_tests.rs"]
 mod tests;
 

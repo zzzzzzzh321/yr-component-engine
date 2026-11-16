@@ -297,7 +297,7 @@ pub(super) fn is_random_map_sentinel_file_name(file_name: &str) -> bool {
     name.eq_ignore_ascii_case(RANDMAP_SENTINEL_FILE_NAME)
 }
 
-pub(super) fn is_random_map_sentinel_entry(entry: &MapMenuEntry) -> bool {
+pub(crate) fn is_random_map_sentinel_entry(entry: &MapMenuEntry) -> bool {
     is_random_map_sentinel_file_name(&entry.file_name)
 }
 
@@ -949,11 +949,22 @@ pub(super) fn draw_zoom<'a>(
 pub(super) fn should_draw_start_marker_overlays(
     fitted_preview_rect: Option<RectPx>,
     projected_start_positions: &[(i32, i32)],
-    preview_has_baked_start_markers: bool,
 ) -> bool {
-    fitted_preview_rect.is_some()
-        && !projected_start_positions.is_empty()
-        && !preview_has_baked_start_markers
+    fitted_preview_rect.is_some() && !projected_start_positions.is_empty()
+}
+
+/// The header `DrawStartPositions 0x00640710` numbers the box's starts from:
+/// a random map's preview takes the last Generate's (`generated`, the
+/// `0x0058B820` globals), drawn only when `1 <= count <= 8`; any other map
+/// its own.
+pub(in crate::app::frontend) fn start_marker_bounds(
+    generated: Option<crate::map::preview::ScenarioStartStaging>,
+    own: Option<&PreviewSourceBounds>,
+) -> Option<PreviewSourceBounds> {
+    match generated {
+        Some(header) => header.preview_source_bounds(),
+        None => own.cloned(),
+    }
 }
 
 /// Whether `picture` has `own`'s proportions, each side rounded to within a
@@ -1005,7 +1016,7 @@ pub(super) fn build_preview_surface_instance(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_frontend))]
 mod tests {
     use super::*;
 

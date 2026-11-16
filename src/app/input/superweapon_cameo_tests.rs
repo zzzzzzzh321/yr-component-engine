@@ -91,11 +91,23 @@ fn native_superweapon_cameo_controls_match_modes_and_requests() {
         if supplied["granted"] == false {
             continue;
         }
+        // Installed Ares hands MultiMissile to SW_NuclearMissile, whose custom
+        // action ignores Action=; an unredirected stock type keeps the read.
+        let kind = if cfg!(feature = "ares") {
+            "PsychicReveal"
+        } else {
+            "MultiMissile"
+        };
         let rules = RuleSet::from_ini(&IniFile::from_str(&format!(
-            "[SuperWeaponTypes]\n0=SUPER\n[SUPER]\nType=MultiMissile\nAction={}\nUseChargeDrain={}\n",
-            if supplied["action"] == 0 { "None" } else { "Nuke" },
+            "[SuperWeaponTypes]\n0=SUPER\n[SUPER]\nType={kind}\nAction={}\nUseChargeDrain={}\n",
+            if supplied["action"] == 0 {
+                "None"
+            } else {
+                "Nuke"
+            },
             supplied["drain"].as_bool().unwrap_or(false)
-        ))).unwrap();
+        )))
+        .unwrap();
         let mut sim = Simulation::new();
         let owner = sim.intern("Americans");
         sim.houses_mut_for_test()
@@ -197,9 +209,9 @@ fn native_superweapon_cameo_controls_match_modes_and_requests() {
 #[path = "superweapon_cameo_retail_tests.rs"]
 mod retail_tests;
 
-#[cfg(feature = "ares")]
 #[test]
 fn use_ai_targeting_cameo_launches_immediately_through_the_normal_press_owner() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     for automatic in [false, true] {
         let rules = RuleSet::from_ini(&IniFile::from_str(&format!(
             "[SuperWeaponTypes]\n0=Strike\n[Strike]\nType=GenericWarhead\n\
@@ -247,9 +259,9 @@ fn use_ai_targeting_cameo_launches_immediately_through_the_normal_press_owner() 
     }
 }
 
-#[cfg(feature = "ares")]
 #[test]
 fn delivery_missing_or_custom_action_arms_the_real_cameo_targeting_path() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     for action in ["", "Action=Custom\n"] {
         let rules = RuleSet::from_ini(&IniFile::from_str(&format!(
             "[SuperWeaponTypes]\n0=Delivery\n[Delivery]\nType=UnitDelivery\n{action}"
@@ -289,9 +301,9 @@ fn delivery_missing_or_custom_action_arms_the_real_cameo_targeting_path() {
     }
 }
 
-#[cfg(feature = "ares")]
 #[test]
 fn superweapon_money_cameo_refuses_before_target_or_direct_launch_but_allows_right_cancel() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     for action in ["PsychicReveal", "None"] {
         let rules = RuleSet::from_ini_with_fixed_art_for_test(
             &IniFile::from_str(&format!(

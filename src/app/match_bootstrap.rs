@@ -514,6 +514,18 @@ pub enum LoadingStartup {
 }
 
 impl LoadingStartup {
+    /// The match seed of a typed startup, which `ScenarioBootstrapRng::new`
+    /// seeds the load's Scenario and Main streams with.
+    pub(crate) fn match_seed(&self) -> Option<u32> {
+        match self {
+            Self::Network(startup) => Some(startup.seed.value),
+            Self::Replay { seed, .. } | Self::UnverifiedLegacy { seed, .. } => Some(seed.value),
+            Self::Campaign(startup) => Some(startup.seed.value),
+            Self::Accepted(startup) => Some(startup.seed.value),
+            Self::Generic { .. } => None,
+        }
+    }
+
     pub(crate) fn native_id_prefix(&self) -> Option<u32> {
         match self {
             Self::Network(startup) => startup.native_id_prefix(),
@@ -882,7 +894,7 @@ pub fn accepted_tick_is_admitted(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
     use crate::skirmish_launch::{

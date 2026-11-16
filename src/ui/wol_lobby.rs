@@ -41,6 +41,8 @@ pub(crate) const PAGE_BUTTON: u16 = 0x5C2;
 /// The online page's Quick Match: the welcome's control.
 pub(crate) const QUICK_MATCH: u16 = crate::ui::wol_shell::QUICK_MATCH;
 pub(crate) const BACK: u16 = 0x686;
+/// VERA's sidebar button under Options; no retail control has this id.
+pub(crate) const CHAT_TRANSLATION: u16 = 0x7E00;
 pub(crate) const REFRESH: u16 = 0x55D;
 pub(crate) const EMOTE: u16 = 0x3ED;
 pub(crate) const LOBBIES: u16 = 0x53D;
@@ -106,8 +108,9 @@ pub(crate) const PAGE: MenuPageSpec = MenuPageSpec {
 
 /// The normal VERA lobby keeps core play and Options. It has no welcome
 /// `0x10E`, so its third row is that page's Quick Match (`0x6E0`, its caption
-/// and tooltip) and Options moves to the fourth. The retail page above remains
-/// the owner for legacy service diagnostics.
+/// and tooltip) and Options moves to the fourth, with VERA's Chat Translation
+/// under it. The retail page above remains the owner for legacy service
+/// diagnostics.
 const ONLINE_PAGE: MenuPageSpec = MenuPageSpec {
     stacked: &[
         button(CREATE, 111, "GUI:CreateGame", "STT:LobbyButtonNew"),
@@ -119,6 +122,12 @@ const ONLINE_PAGE: MenuPageSpec = MenuPageSpec {
             "STT:WOLWelcomeQuickMatch",
         ),
         button(OPTIONS, 193, "GUI:WOLOptions", "STT:WOLLobbyOptions"),
+        button(
+            CHAT_TRANSLATION,
+            222,
+            crate::ui::wol_chat_translation::TITLE_KEY,
+            crate::ui::wol_chat_translation::BUTTON_HELP_KEY,
+        ),
     ],
     ..PAGE
 };
@@ -414,20 +423,40 @@ pub(crate) struct PlayerScore {
     pub(crate) coop: u32,
 }
 
+/// `0x00783B80`'s badges, highest first: the high-score points each starts
+/// at, its PCX and VERA's name for it, as the game names none.
+const BADGES: [(u32, &str, &str); 10] = [
+    (2001, "comchief.pcx", "VERA:LobbyBadgeCommanderInChief"),
+    (1501, "stargen.pcx", "VERA:LobbyBadgeFiveStarGeneral"),
+    (1001, "general.pcx", "VERA:LobbyBadgeGeneral"),
+    (501, "briggenr.pcx", "VERA:LobbyBadgeBrigadierGeneral"),
+    (251, "colonel.pcx", "VERA:LobbyBadgeColonel"),
+    (151, "major.pcx", "VERA:LobbyBadgeMajor"),
+    (81, "lieutena.pcx", "VERA:LobbyBadgeLieutenant"),
+    (61, "sergeant.pcx", "VERA:LobbyBadgeSergeant"),
+    (32, "corporal.pcx", "VERA:LobbyBadgeCorporal"),
+    (0, "private.pcx", "VERA:LobbyBadgePrivate"),
+];
+
 /// `0x00783B80`: the badge of the high-score points.
-fn badge(points: u32) -> &'static str {
-    match points {
-        2001.. => "comchief.pcx",
-        1501.. => "stargen.pcx",
-        1001.. => "general.pcx",
-        501.. => "briggenr.pcx",
-        251.. => "colonel.pcx",
-        151.. => "major.pcx",
-        81.. => "lieutena.pcx",
-        61.. => "sergeant.pcx",
-        32.. => "corporal.pcx",
-        _ => "private.pcx",
-    }
+pub(crate) fn badge(points: u32) -> &'static str {
+    BADGES
+        .iter()
+        .find(|(from, ..)| points >= *from)
+        .map_or("private.pcx", |(_, file, _)| file)
+}
+
+/// Every badge's PCX, highest first.
+pub(crate) fn badge_files() -> impl Iterator<Item = &'static str> {
+    BADGES.iter().map(|(_, file, _)| *file)
+}
+
+/// The text key of the badge drawn from `file`.
+pub(crate) fn badge_name_key(file: &str) -> Option<&'static str> {
+    BADGES
+        .iter()
+        .find(|(_, pcx, _)| *pcx == file)
+        .map(|(.., key)| *key)
 }
 
 /// `0x00783C80`'s high-score cells (`0x007845A8..0x007847F0`): the rank's
@@ -516,6 +545,8 @@ pub(crate) enum WolLobbyAction {
     ObserverChanged(bool),
     /// `0x61F`: WOL Options `0x2BC`.
     Options,
+    /// The online page's Chat Translation page.
+    ChatTranslation,
     /// `0x5C2`: the page dialog `0xCF` (`0x0078BA3E`).
     Page,
     /// The online page's Quick Match: the Quick Match runner `0x0079FC40`.
@@ -704,6 +735,7 @@ impl WolLobbyState {
         }
         if let Some(card) = self.card.as_mut() {
             card.buttons = ShellButtonInteraction::default();
+            card.country_list.cancel_pointer();
         }
     }
 
@@ -864,6 +896,7 @@ impl WolLobbyState {
                 WolLobbyAction::ObserverChanged(self.observer)
             }
             OPTIONS => WolLobbyAction::Options,
+            CHAT_TRANSLATION if self.modern => WolLobbyAction::ChatTranslation,
             PAGE_BUTTON => WolLobbyAction::Page,
             QUICK_MATCH if self.modern => WolLobbyAction::QuickMatch,
             BUDDY | CLAN | TOURNAMENT | NEWS => WolLobbyAction::Unported(control),
@@ -892,7 +925,7 @@ impl WolLobbyState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_ui))]
 mod tests {
     use super::*;
 
@@ -965,7 +998,10 @@ mod tests {
         let mut lobby = WolLobbyState::new(false, true);
         let layout = WolLobbyLayout::new(800, 600, lobby.page_spec());
         let controls: Vec<_> = layout.page.buttons.iter().map(|button| button.id).collect();
-        assert_eq!(controls, [CREATE, JOIN, QUICK_MATCH, OPTIONS, BACK]);
+        assert_eq!(
+            controls,
+            [CREATE, JOIN, QUICK_MATCH, OPTIONS, CHAT_TRANSLATION, BACK]
+        );
         let retail = WolLobbyLayout::new(800, 600, &PAGE);
         assert_eq!(layout.control_rect(QUICK_MATCH), retail.control_rect(BUDDY));
         assert_eq!(layout.control_rect(OPTIONS), retail.control_rect(CLAN));
@@ -1192,5 +1228,21 @@ mod tests {
             [("comchief.pcx", 0x3D)]
         );
         assert_eq!(score_icons(score(32, 1000, 0), 4), [("corporal.pcx", 0x3D)]);
+    }
+
+    /// The hover help names every badge the list draws, in each language.
+    #[test]
+    fn every_badge_the_list_draws_has_a_name() {
+        let mut csf = crate::assets::csf_file::test_csf(&[("GUI:Ok", "OK")]);
+        crate::i18n::apply(&mut csf);
+        for points in [0, 31, 32, 60, 61, 1500, 1501, 2000, 2001] {
+            let key = badge_name_key(badge(points)).expect("a named badge");
+            assert!(!csf.text(key).starts_with("MISSING:"), "{key}");
+        }
+        assert_eq!(
+            badge_name_key(badge(2001)),
+            Some("VERA:LobbyBadgeCommanderInChief")
+        );
+        assert_eq!(badge_name_key("number1.pcx"), None);
     }
 }

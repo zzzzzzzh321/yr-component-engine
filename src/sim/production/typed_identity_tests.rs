@@ -94,7 +94,7 @@ fn world_with_rules(rules: RuleSet, vat: bool) -> (SimRuntime, InternedId) {
     (
         SimRuntime {
             simulation: sim,
-            resources: SimResources::new(rules),
+            resources: std::sync::Arc::new(SimResources::new(rules)),
         },
         owner,
     )
@@ -832,7 +832,7 @@ fn typed_duplicate_snapshot_rebind_continues_paid_queue_and_rejects_wrong_identi
         }
         let mut restored = SimRuntime {
             simulation: restored,
-            resources: SimResources::new(rules.clone()),
+            resources: std::sync::Arc::new(SimResources::new(rules.clone())),
         };
         let mut finished = false;
         for _ in 0..2048 {

@@ -6,9 +6,11 @@ mod hit_test;
 mod launch;
 mod opponent_scroll;
 mod player_name;
+mod random_map_extras;
 mod random_map_setup;
 mod saved_seed_browser;
 mod saved_setup;
+mod team_starts;
 mod trackbars;
 
 #[cfg(test)]
@@ -38,34 +40,38 @@ pub use opponent_scroll::{
 pub use choose_map::{
     ChooseMapContext, ChooseMapListPress, ChooseMapModalState, ChooseMapPrompt,
     ChooseMapPromptAnswer, ChooseMapPromptButton, ChooseMapPromptKind, ChooseMapSelection,
-    ONLINE_MAPS_ROW,
-    SEARCH_MAX_CHARS, ai_rows_beyond_limit_occupied,
+    FAVORITES_ROW, ONLINE_MAPS_ROW, SEARCH_MAX_CHARS, ai_rows_beyond_limit_occupied, favorite_key,
 };
 pub(crate) use player_name::CountryMenuCatalog;
 pub use player_name::{
     PLAYER_NAME_CARET_MARGIN_PX, PLAYER_NAME_DEFAULT, PLAYER_NAME_EDIT_LIMIT_BYTES,
     PlayerNameEditState, SkirmishShellDialog, SkirmishShellState, accept_selected_map,
-    blur_player_name_edit, clear_status_help_text, combo_dropdown_open, dismiss_validation_modal,
-    drain_pending_ui_sounds, focus_player_name_edit, handle_player_name_backspace,
-    handle_player_name_delete, handle_player_name_end, handle_player_name_home,
-    handle_player_name_left, handle_player_name_right, handle_player_name_tab,
-    initialize_rows_for_selected_map, insert_player_name_text, player_name_caret_prefix,
-    player_name_edit_rect_hit, player_row_visible, repair_teams_for_selected_mode,
-    set_status_help_text, update_player_name_scroll_for_caret,
+    blur_player_name_edit, clear_status_help_text, close_combo_dropdown, combo_dropdown_open,
+    dismiss_validation_modal, drain_pending_ui_sounds, focus_player_name_edit,
+    handle_player_name_backspace, handle_player_name_delete, handle_player_name_end,
+    handle_player_name_home, handle_player_name_left, handle_player_name_right,
+    handle_player_name_tab, initialize_rows_for_selected_map, insert_player_name_text,
+    player_name_caret_prefix, player_name_edit_rect_hit, player_row_visible,
+    repair_teams_for_selected_mode, selected_player_rows, set_status_help_text,
+    update_player_name_scroll_for_caret,
+};
+pub use random_map_extras::{
+    EXTRAS_ROWS, ExtrasAction, ExtrasOutcome, ExtrasRow, ExtrasValue, extras_page_count,
 };
 pub use random_map_setup::{
-    AcceptOutcome, MainRngRanged, PLAYERS_RANGE, RandomMapSetupModalState, SETUP_COMBO_ROWS,
-    SetupCombo, SetupComboItem, setup_combo_items,
+    ADVANCED_RANGE, AcceptOutcome, CUSTOM_PRESET_SLOTS, MainRngRanged, PLAYERS_RANGE,
+    RandomMapPreset, RandomMapSetupModalState,
+    SETUP_COMBO_ROWS, SetupCombo, SetupComboItem, setup_combo_items,
 };
 pub use saved_seed_browser::{
     SAVED_SEED_DESCRIPTION_MAX_UNITS, SavedSeedBrowserRow, SavedSeedBrowserState,
     SavedSeedDescriptionEdit, SavedSeedOutcome, SavedSeedPrompt, SavedSeedPromptPurpose,
 };
 pub use saved_setup::{SkirmishSavedSetup, SkirmishSetupComputer, SkirmishSetupSeat};
+pub use team_starts::{apply_team_starts, starts_by_team};
 pub use trackbars::{
-    SkirmishTrackbarBounds, game_speed_from_visual_position, game_speed_visual_position,
-    handle_option_mouse_down, handle_option_mouse_move, handle_option_mouse_up,
-    handle_option_mouse_wheel, trackbar_visual_value,
+    SkirmishTrackbarBounds, handle_option_mouse_down, handle_option_mouse_move,
+    handle_option_mouse_up, handle_option_mouse_wheel, trackbar_visual_value,
 };
 
 use crate::skirmish_launch::{
@@ -84,6 +90,8 @@ pub enum OwnerDrawButton {
     /// VERA's Save Setup and Load Setup ([`SkirmishSavedSetup`]).
     SaveSetup,
     LoadSetup,
+    /// VERA's Team Starts ([`apply_team_starts`]).
+    TeamStarts,
     Back0x5c0,
 }
 
@@ -95,6 +103,7 @@ pub enum SkirmishShellAction {
     ChooseMap,
     SaveSetup,
     LoadSetup,
+    TeamStarts,
     SelectColor(ColorComboId),
     SelectMap(usize),
 }
@@ -335,5 +344,5 @@ fn default_opponents(first_country: LaunchCountry) -> Vec<SkirmishShellOpponent>
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_ui))]
 mod tests;

@@ -23,7 +23,7 @@ use crate::skirmish_launch::{
 use crate::skirmish_modes::{SkirmishGameMode, mode_by_id};
 use crate::ui::skirmish_shell::{
     PlayerNameEditState, SkirmishAiRowType, SkirmishSavedSetup, SkirmishShellState,
-    SkirmishTrackbarId, game_speed_from_visual_position, game_speed_visual_position,
+    SkirmishTrackbarId,
 };
 use cooperative::{
     CooperativeCountryRole, CooperativeCountryRosterEntry, CooperativeError,
@@ -44,6 +44,22 @@ const MULTIPLAYER_HANDLE_UNITS: usize = 0x14;
 const MULTIPLAYER_HANDLE_LIMIT_BYTES: usize = 19;
 const DEFAULT_MULTIPLAYER_HANDLE: &[u8] = b"[New Player]";
 const DEFAULT_MULTIPLAYER_GAME_MODE: i32 = 1;
+
+/// The handle a new install starts with.
+///
+/// Native starts every install at `[New Player]` (`WriteMultiPlayerSettings`
+/// writes the same default back), and a LAN visit drops advertisements whose
+/// name matches the local one, so two peers left at the default never see each
+/// other. Android has no text input yet, so the platform appends the last three
+/// hex digits of the Android ID there (`util::device_identity`); every other
+/// platform keeps the stock bytes.
+fn stock_handle_bytes() -> Vec<u8> {
+    crate::util::device_identity::suffixed_handle(
+        DEFAULT_MULTIPLAYER_HANDLE,
+        crate::util::device_identity::handle_suffix().as_deref(),
+        MULTIPLAYER_HANDLE_LIMIT_BYTES,
+    )
+}
 
 /// VERA HTTPS account names also become persona INI section names. Keep their
 /// admission shared by the HTTP response, login continuation and handle owner.
@@ -123,7 +139,7 @@ impl Default for SessionToggles {
 impl Default for LocalMultiplayerPreferences {
     fn default() -> Self {
         Self {
-            handle_bytes: DEFAULT_MULTIPLAYER_HANDLE.to_vec(),
+            handle_bytes: stock_handle_bytes(),
             handle_source: HandleSource::Native,
             side: 0,
             side_ex: 0,
@@ -146,8 +162,9 @@ impl LocalMultiplayerPreferences {
         let handle = encode_multiplayer_handle(
             &self.handle_bytes[..self.handle_bytes.len().min(MULTIPLAYER_HANDLE_LIMIT_BYTES)],
         );
-        let color = self.color_index.to_string();
-        let color_ex = self.color_ex.to_string();
+        let (color, color_ex) = saved_color_pick(self.color_index, self.color_ex);
+        let color = color.to_string();
+        let color_ex = color_ex.to_string();
         let side_ex = self.side_ex.to_string();
         let game_mode = self.game_mode.to_string();
         let updates = [
@@ -195,6 +212,9 @@ pub(crate) struct MultiplayerShellRuntime {
     settings_ini: Vec<u8>,
     /// Observer preference AC10C8, read as an integer by 5EE190.
     lan_observer_mode: i32,
+    /// The handle's bytes when the LAN lobby's name box opened on them
+    /// ([`Self::open_lan_name_box`]). Not saved.
+    lan_name_opened: Vec<u8>,
     /// The taunt command's process-static rate clock `[0x00825C88]`.
     taunt_clock: crate::app::input::taunt::TauntClock,
     scenario_start_header: crate::map::preview::ScenarioStartHeader,
@@ -204,6 +224,10 @@ pub(crate) struct MultiplayerShellRuntime {
     /// Process-persistent native MapSeed options. The setup dialog edits a
     /// working copy, but closing it does not reconstruct this global record.
     random_map_options: crate::map::rmg::RmgOptions,
+    /// Ares MapSeedClass_LoadFromINI's latch (Ares.dll DAT_100c2151): the
+    /// first RMGMD.INI read sets the urban switch, later ones leave it.
+    #[cfg(feature = "ares")]
+    urban_areas_read: bool,
     ini_path: Option<PathBuf>,
     /// VERA's per-map Skirmish setups, by `SkirmishSetups.ini` section; read
     /// once at startup like the profile.
@@ -224,9 +248,20 @@ pub(crate) struct MultiplayerShellRuntime {
     /// reads whatever an earlier setup left.
     scenario_index: usize,
     gameplay_scenario_return_pending: bool,
+    /// The colours the loaded rules list for a lobby, refreshed with the
+    /// country catalog before each setup dialog: a random colour is drawn
+    /// from them and a saved row keeps only a colour they list.
+    lobby_colors: crate::rules::skirmish_colors::SkirmishColorMode,
 }
 
 impl MultiplayerShellRuntime {
+    pub(crate) fn set_lobby_colors(
+        &mut self,
+        colors: crate::rules::skirmish_colors::SkirmishColorMode,
+    ) {
+        self.lobby_colors = colors;
+    }
+
     pub(crate) fn read_multiplayer_settings(
         &mut self,
         process_assets: &mut crate::app::process_assets::ProcessAssets,
@@ -393,17 +428,56 @@ impl MultiplayerShellRuntime {
         });
     }
 
+    /// The local player of a network game. Its name is the handle `[0xA8B380]`
+    /// widened one byte to a character (`0x735120`): LAN BB names a hosted game
+    /// that way (`0x005DCB0E..0x005DCB1E`) and its packets copy the handle's
+    /// bytes (`0x005DC6A6`), so every player, this one too, reads the same name.
+    /// Beyond ASCII it is not the text the name boxes show
+    /// ([`Self::handle_text`]), which on Windows went through a code page.
     pub(crate) fn local_participant(&self) -> crate::skirmish_launch::SkirmishHumanSlot {
         let preferences = &self.local_preferences;
         crate::skirmish_launch::SkirmishHumanSlot {
             raw_slot_index: Some(0),
-            name: crate::util::native_string::acp_decode(&preferences.handle_bytes),
+            name: crate::util::native_string::widen_bytes(&preferences.handle_bytes),
             slot: picked_seat(
                 (preferences.side, preferences.side_ex),
                 (preferences.color_index, preferences.color_ex),
             ),
             role: crate::skirmish_launch::LaunchHumanRole::from_observer(self.lan_observer()),
         }
+    }
+
+    /// The handle as the name boxes show it: the text a code page stored
+    /// (`acp_decode`), where [`Self::local_participant`] reads its bytes.
+    pub(crate) fn handle_text(&self) -> String {
+        crate::util::native_string::acp_decode(&self.local_preferences.handle_bytes)
+    }
+
+    /// The handle a name box saves for `text`. gamemd's name boxes hold the
+    /// handle's own bytes, one per character (`0x735120`, then `0x4B2`: BB at
+    /// `0x5DE0F2..0x5DE113`, Skirmish at `0x6AE716..0x6AE729`), so a name
+    /// nobody changed, or whose edits were undone, keeps them. VERA's boxes
+    /// hold text: while one shows `opened_text`, the name it opened with, the
+    /// handle gets back `opened`, the bytes it opened on, even ones this code
+    /// page cannot spell. Other text is saved through the code page.
+    fn name_box_bytes(text: &str, opened_text: &str, opened: &[u8]) -> Vec<u8> {
+        let mut bytes = if text == opened_text {
+            opened.to_vec()
+        } else {
+            crate::util::native_string::acp_encode(text)
+        };
+        bytes.truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
+        bytes
+    }
+
+    /// The handle the skirmish name box saves for `text`; the box opened on
+    /// the handle as [`Self::hydrate_shell`] put it there.
+    fn handle_bytes_for(&self, text: &str) -> Vec<u8> {
+        Self::name_box_bytes(
+            text,
+            &PlayerNameEditState::with_name(&self.handle_text()).text,
+            &self.local_preferences.handle_bytes,
+        )
     }
 
     fn network_snapshot(&self, profile: SetupProfile) -> &MultiplayerSetupSnapshot {
@@ -444,11 +518,15 @@ impl MultiplayerShellRuntime {
             .ok_or_else(|| anyhow::anyhow!("network setup has no game mode"))?;
         // Modern online setup starts on a computer-capable mode. Select on
         // this working launch only; the retained native profile stays intact.
-        if prefer_computer_mode && !mode.class.lists_in_skirmish() {
+        if prefer_computer_mode && !mode.class.policy().lists_in_skirmish {
             mode = modes
                 .iter()
                 .find(|mode| mode.class == crate::skirmish_modes::MpModeClass::Battle)
-                .or_else(|| modes.iter().find(|mode| mode.class.lists_in_skirmish()))
+                .or_else(|| {
+                    modes
+                        .iter()
+                        .find(|mode| mode.class.policy().lists_in_skirmish)
+                })
                 .ok_or_else(|| {
                     anyhow::anyhow!("network setup has no computer-capable game mode")
                 })?;
@@ -456,7 +534,7 @@ impl MultiplayerShellRuntime {
         // 0x5ED5E7..0x5ED628: a WOL tournament or clan room refuses a mode
         // whose vtable+4 holds (Cooperative) for the default mode 5D5E10.
         let room_only = room.tournament_or_clan();
-        if room_only && mode.class.permits_all_allied() {
+        if room_only && mode.class.policy().permits_all_allied {
             mode = modes.first().expect("checked above");
         }
         // 0x5ED69C..0x5ED6E0: a saved map IsValidMap refuses gives way to
@@ -492,13 +570,13 @@ impl MultiplayerShellRuntime {
             .or_else(|| (0..records.len()).find(|index| valid(mode, *index)))
             .and_then(|index| records.get(index))
             .ok_or_else(|| anyhow::anyhow!("network game mode has no eligible map"))?;
-        options.game_speed = game_speed_from_visual_position(
-            bounds
-                .range(SkirmishTrackbarId::GameSpeed0x529)
-                .set_up(game_speed_visual_position(snapshot.game_speed)),
+        options.game_speed = crate::ui::shell::game_speed::SpeedContext::Offline.stored_speed(
+            bounds.range(SkirmishTrackbarId::GameSpeed0x529).set_up(
+                crate::ui::shell::game_speed::SpeedContext::Offline
+                    .visual_position(snapshot.game_speed),
+            ),
         );
-        let credits = bounds.range(SkirmishTrackbarId::Credits0x511);
-        options.starting_credits = credits.stepped(credits.set_up(snapshot.credits));
+        options.starting_credits = bounds.credits_value(bounds.set_up_credits(snapshot.credits));
         options.unit_count = bounds
             .range(SkirmishTrackbarId::UnitCount0x50c)
             .set_up(snapshot.unit_count);
@@ -544,12 +622,12 @@ impl MultiplayerShellRuntime {
                     country: menu_country_from_item_data(persisted.country)
                         .unwrap_or(LaunchCountry::America),
                     country_random: persisted.country == RANDOM_ITEM_DATA,
-                    color_index: if (0..8).contains(&persisted.colour) {
+                    color_index: if self.lobby_colors.is_lobby_priority(persisted.colour) {
                         persisted.colour as u8
                     } else {
                         0
                     },
-                    color_random: !(0..8).contains(&persisted.colour),
+                    color_random: !self.lobby_colors.is_lobby_priority(persisted.colour),
                     start_position: LaunchStartPosition::Auto,
                     team: if mode.allies_allowed {
                         LaunchTeam::Team(3)
@@ -706,8 +784,24 @@ impl MultiplayerShellRuntime {
         });
     }
 
-    /// Session handle `[0xA8B380]`: BB's name edit, and the WOL nickname
-    /// after a successful login (`0x007864C0`).
+    /// The LAN lobby's name box opens on the handle: the text it shows. The
+    /// handle's bytes stay here for [`Self::set_lan_name`].
+    pub(crate) fn open_lan_name_box(&mut self) -> String {
+        self.lan_name_opened = self.local_preferences.handle_bytes.clone();
+        self.handle_text()
+    }
+
+    /// Session handle `[0xA8B380]` from the LAN lobby's name box, which BB
+    /// copies there on each change (`0x5DDE4A..0x5DDE78`).
+    pub(crate) fn set_lan_name(&mut self, name: &str) {
+        let opened = &self.lan_name_opened;
+        let opened_text = crate::util::native_string::acp_decode(opened);
+        self.local_preferences.handle_bytes = Self::name_box_bytes(name, &opened_text, opened);
+        self.local_preferences.handle_source = HandleSource::Native;
+    }
+
+    /// Session handle `[0xA8B380]`: the WOL nickname after a successful login
+    /// (`0x007864C0`).
     pub(crate) fn set_handle(&mut self, name: &str) {
         self.local_preferences.handle_source = HandleSource::Native;
         self.local_preferences.handle_bytes = crate::util::native_string::acp_encode(name);
@@ -823,7 +917,9 @@ impl MultiplayerShellRuntime {
         let handle_bytes = if handle_source == HandleSource::AuthenticatedOnline {
             self.local_preferences.handle_bytes.clone()
         } else {
-            let mut bytes = crate::util::native_string::acp_encode(&player.name);
+            // A network name is the handle widened byte by byte
+            // (`local_participant`); narrowing it gives those bytes back.
+            let mut bytes = crate::util::native_string::narrow_widened(&player.name);
             bytes.truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
             bytes
         };
@@ -880,7 +976,7 @@ impl MultiplayerShellRuntime {
                 banned,
             )
         };
-        let mut assignments = ShellRandomAssignmentState::new(session);
+        let mut assignments = ShellRandomAssignmentState::new(session, self.lobby_colors);
         assignments.resolve_humans(&mut self.scenario_rng, &mut draw_country)?;
         assignments.resolve_ai(&mut self.scenario_rng, &mut draw_country)?;
         let resolved = assignments.finish();
@@ -937,9 +1033,12 @@ impl MultiplayerShellRuntime {
             local_preferences,
             settings_ini,
             lan_observer_mode,
+            lan_name_opened: Vec::new(),
             taunt_clock: Default::default(),
             scenario_rng,
             random_map_options: crate::map::rmg::RmgOptions::default(),
+            #[cfg(feature = "ares")]
+            urban_areas_read: false,
             ini_path,
             saved_setups,
             last_setup,
@@ -952,6 +1051,7 @@ impl MultiplayerShellRuntime {
             scenario_start_header: crate::map::preview::ScenarioStartHeader::default(),
             scenario_start_staging: Default::default(),
             gameplay_scenario_return_pending: false,
+            lobby_colors: Default::default(),
         };
         // The retained VERA.INI bytes are the process INI, so the cache has to
         // carry the whole `ReadMultiPlayer6980C0` read from the start: native
@@ -1035,12 +1135,14 @@ impl MultiplayerShellRuntime {
         // slider through `TBM_SETRANGE` and `TBM_SETPOS`.
         let bounds = state.trackbar_bounds;
         let speed = bounds.range(SkirmishTrackbarId::GameSpeed0x529);
-        let credits = bounds.range(SkirmishTrackbarId::Credits0x511);
         let units = bounds.range(SkirmishTrackbarId::UnitCount0x50c);
-        state.game_speed = game_speed_from_visual_position(
-            speed.set_up(game_speed_visual_position(self.snapshot.game_speed)),
+        state.game_speed = crate::ui::shell::game_speed::SpeedContext::Offline.stored_speed(
+            speed.set_up(
+                crate::ui::shell::game_speed::SpeedContext::Offline
+                    .visual_position(self.snapshot.game_speed),
+            ),
         );
-        state.starting_credits = credits.set_up(self.snapshot.credits);
+        state.starting_credits = bounds.set_up_credits(self.snapshot.credits);
         state.unit_count = units.set_up(self.snapshot.unit_count);
         state.short_game = self.snapshot.short_game;
         state.super_weapons = self.snapshot.super_weapons_allowed;
@@ -1048,14 +1150,24 @@ impl MultiplayerShellRuntime {
         state.mcv_redeploy = self.snapshot.mcv_repacks;
         state.crates = self.snapshot.crates_appear;
 
-        state.player_name_edit = PlayerNameEditState::with_name(
-            &crate::util::native_string::acp_decode(&self.local_preferences.handle_bytes),
-        );
+        state.player_name_edit = PlayerNameEditState::with_name(&self.handle_text());
         state.player_country =
             LaunchCountry::from_country_index(self.local_preferences.side.max(0) as u32);
         state.player_country_random = self.local_preferences.side_ex == RANDOM_ITEM_DATA;
         state.player_color_index = usize::try_from(self.local_preferences.color_index).unwrap_or(0);
         state.player_color_claimed = self.local_preferences.color_ex != RANDOM_ITEM_DATA;
+        // A saved extra colour these rules do not list (another mod's, say)
+        // would stop Start; it comes back as Random instead. Values gamemd
+        // could save keep its handling.
+        if self.local_preferences.color_index
+            > i32::from(crate::rules::skirmish_colors::OBSERVER_PRIORITY)
+            && !state
+                .lobby_colors()
+                .is_lobby_priority(self.local_preferences.color_index)
+        {
+            state.player_color_index = 0;
+            state.player_color_claimed = false;
+        }
 
         for (opponent, persisted) in state.opponents.iter_mut().zip(self.snapshot.slots) {
             opponent.row_type = ai_row_type_from_persisted(persisted.row_type);
@@ -1070,8 +1182,7 @@ impl MultiplayerShellRuntime {
                 opponent.country_random = false;
             }
 
-            opponent.color_claimed =
-                (0..crate::skirmish_launch::HOUSE_COLOR_COUNT as i32).contains(&persisted.colour);
+            opponent.color_claimed = state.lobby_colors.is_lobby_priority(persisted.colour);
             if opponent.color_claimed {
                 opponent.color_index = persisted.colour as usize;
             }
@@ -1129,7 +1240,7 @@ impl MultiplayerShellRuntime {
         // no campaign record takes part here.
         let registry = &self.cooperative_registry;
         let roster = &self.cooperative_country_roster;
-        let mut assignments = ShellRandomAssignmentState::new(&staged_session);
+        let mut assignments = ShellRandomAssignmentState::new(&staged_session, self.lobby_colors);
         let mut draw_country = |role, rng: &mut SimRng| {
             draw_shell_country(
                 registry,
@@ -1155,8 +1266,7 @@ impl MultiplayerShellRuntime {
         // the unconditional writer at 0x006990A0. Keep the resolved concrete
         // values behind the raw -1/-2 markers so reopening the shell can show
         // Random without discarding the value selected for this launch.
-        let mut handle_bytes = crate::util::native_string::acp_encode(&state.player_name_edit.text);
-        handle_bytes.truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
+        let handle_bytes = self.handle_bytes_for(&state.player_name_edit.text);
         self.local_preferences = LocalMultiplayerPreferences {
             toggles: self.local_preferences.toggles,
             handle_bytes,
@@ -1193,9 +1303,7 @@ impl MultiplayerShellRuntime {
         pack_snapshot_selection(&mut self.snapshot, state, maps, modes);
         pack_snapshot_slots(&mut self.snapshot, state);
         pack_snapshot_options(&mut self.snapshot, state);
-        let mut handle_bytes = crate::util::native_string::acp_encode(&state.player_name_edit.text);
-        handle_bytes.truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
-        self.local_preferences.handle_bytes = handle_bytes;
+        self.local_preferences.handle_bytes = self.handle_bytes_for(&state.player_name_edit.text);
         self.local_preferences.handle_source = HandleSource::Native;
         self.local_preferences.game_mode = self.snapshot.game_mode;
         if state.player_country_random {
@@ -1326,7 +1434,7 @@ impl MultiplayerShellRuntime {
         self.scenario_start_staging
     }
 
-    /// The accepted random map's staging (`0x0058B830`).
+    /// The accepted random map's staging (`0x0058B820`).
     pub(crate) fn stage_generated_starts(
         &mut self,
         staging: crate::map::preview::ScenarioStartStaging,
@@ -1632,6 +1740,21 @@ impl MultiplayerShellRuntime {
         self.random_map_options.clone()
     }
 
+    /// `RandomMapSetupDialog::Run @ 0x00595BC0` reads RMGMD.INI before the
+    /// dialog opens; Ares' MapSeedClass_LoadFromINI (Ares.dll 1006ABF0, hook
+    /// 0x5982D5) takes `[General] GenerateUrbanAreas=` into the urban switch
+    /// on the process's first read only.
+    #[cfg(feature = "ares")]
+    pub(crate) fn read_generate_urban_areas_once(
+        &mut self,
+        settings: &crate::map::rmg::RmgSettings,
+    ) {
+        if !self.urban_areas_read {
+            self.random_map_options.urban_areas = settings.generate_urban_areas;
+            self.urban_areas_read = true;
+        }
+    }
+
     /// Persist the dialog's working record back into the process MapSeed owner.
     pub(crate) fn remember_random_map_options(&mut self, options: &crate::map::rmg::RmgOptions) {
         self.random_map_options = options.clone();
@@ -1904,11 +2027,18 @@ fn read_local_preference_fields(ini: &IniFile, preferences: &mut LocalMultiplaye
     if preferences.handle_source == HandleSource::Native && !handle_bytes.is_empty() {
         preferences.handle_bytes = handle_bytes;
     }
+    // An install that stored the stock default keeps it unique per device, so an
+    // upgrade reaches the same name the fresh-install path starts with.
+    if preferences.handle_bytes == DEFAULT_MULTIPLAYER_HANDLE {
+        preferences.handle_bytes = stock_handle_bytes();
+    }
     //6982E2 supplies the retained raw field as ReadInt default;6982FD stores
     //it without a display-range clamp. Projection never rewrites this cache.
     preferences.color_index = section.read_int("Color", preferences.color_index);
     preferences.side_ex = section.read_int("SideEx", preferences.side_ex);
     preferences.color_ex = section.read_int("ColorEx", preferences.color_ex);
+    (preferences.color_index, preferences.color_ex) =
+        loaded_color_pick(preferences.color_index, preferences.color_ex);
     preferences.game_mode = section.read_int("GameMode", DEFAULT_MULTIPLAYER_GAME_MODE);
     // 0x00698366..0x006983E4: ReadBool 0x005295F0 over the held values,
     // WOL first, taunts then scroll text. WriteMultiPlayerSettings does not
@@ -1963,6 +2093,39 @@ fn persona_pick(value: i32) -> (i32, i32) {
     } else {
         (value, CONCRETE_ITEM_DATA)
     }
+}
+
+/// `[MultiPlayer] Color=` and `ColorEx=` as VERA.INI holds a colour pick.
+///
+/// A game from before VERA's extra lobby colours reads `Color` as one of
+/// gamemd's eight and cannot start a Skirmish with any other, and reads
+/// `ColorEx` only as "Random or not". So an extra colour is saved in
+/// `ColorEx`, beside the first of the eight: that game plays the first colour
+/// and its own next save drops the extra one. A Random pick saves none of it.
+fn saved_color_pick(color: i32, color_ex: i32) -> (i32, i32) {
+    if !is_extra_color(color) {
+        (color, color_ex)
+    } else if color_ex == RANDOM_ITEM_DATA {
+        (0, RANDOM_ITEM_DATA)
+    } else {
+        (0, color)
+    }
+}
+
+/// [`saved_color_pick`] read back: an extra colour in `ColorEx` is the pick.
+fn loaded_color_pick(color: i32, color_ex: i32) -> (i32, i32) {
+    if is_extra_color(color_ex) {
+        (color_ex, CONCRETE_ITEM_DATA)
+    } else {
+        (color, color_ex)
+    }
+}
+
+/// Whether `color` can be one of VERA's extra lobby colours (9..=30).
+fn is_extra_color(color: i32) -> bool {
+    use crate::rules::skirmish_colors::{FIRST_EXTRA_PRIORITY, MAX_EXTRA_COLORS};
+    let first = i32::from(FIRST_EXTRA_PRIORITY);
+    (first..first + MAX_EXTRA_COLORS as i32).contains(&color)
 }
 
 /// A node's seat from its side and colour picks (item data, Ex).
@@ -2054,7 +2217,7 @@ fn controlled_ten_country_roster() -> Vec<CooperativeCountryRosterEntry> {
 
 const _: [(); SKIRMISH_PERSISTED_SLOT_COUNT] = [(); crate::skirmish_launch::SKIRMISH_AI_SLOT_COUNT];
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_frontend))]
 mod tests {
     use super::*;
     use crate::map::preview::PreviewSection;
@@ -2172,9 +2335,12 @@ mod tests {
             local_preferences: LocalMultiplayerPreferences::default(),
             settings_ini: Vec::new(),
             lan_observer_mode: 0,
+            lan_name_opened: Vec::new(),
             taunt_clock: Default::default(),
             scenario_rng,
             random_map_options: crate::map::rmg::RmgOptions::default(),
+            #[cfg(feature = "ares")]
+            urban_areas_read: false,
             ini_path: None,
             saved_setups: HashMap::new(),
             last_setup: None,
@@ -2187,6 +2353,7 @@ mod tests {
             scenario_start_header: crate::map::preview::ScenarioStartHeader::default(),
             scenario_start_staging: Default::default(),
             gameplay_scenario_return_pending: false,
+            lobby_colors: Default::default(),
         }
     }
 
@@ -2204,9 +2371,12 @@ mod tests {
             local_preferences: LocalMultiplayerPreferences::default(),
             settings_ini: Vec::new(),
             lan_observer_mode: 0,
+            lan_name_opened: Vec::new(),
             taunt_clock: Default::default(),
             scenario_rng: SimRng::new(u64::from(seed)),
             random_map_options: crate::map::rmg::RmgOptions::default(),
+            #[cfg(feature = "ares")]
+            urban_areas_read: false,
             ini_path: None,
             saved_setups: HashMap::new(),
             last_setup: None,
@@ -2219,6 +2389,7 @@ mod tests {
             scenario_start_header: crate::map::preview::ScenarioStartHeader::default(),
             scenario_start_staging: Default::default(),
             gameplay_scenario_return_pending: false,
+            lobby_colors: Default::default(),
         }
     }
 
@@ -2476,7 +2647,7 @@ mod tests {
     /// A room reopened after its game keeps VERA's room options, as it keeps
     /// the native checkboxes.
     #[test]
-    fn a_reopened_room_keeps_its_bans_bridges_and_allying() {
+    fn a_reopened_room_keeps_its_bans_bridges_allying_and_teams() {
         use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
         let mut owner = runtime(
             MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
@@ -2514,6 +2685,8 @@ mod tests {
                 stolen_tech: true,
                 ..Default::default()
             },
+            teams: Some(3),
+            auto_balance: false,
         };
         assert_ne!(launch.options.room_options(), room);
         launch.options.set_room_options(room);
@@ -2531,7 +2704,9 @@ mod tests {
     fn network_profiles_retain_extended_rows_without_extending_the_ini_format() {
         use crate::app::match_runtime::session::NetworkVacancy;
         use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
-        use crate::skirmish_launch::{AiDifficulty, LaunchStartPosition, LaunchTeam, SkirmishAiSlot};
+        use crate::skirmish_launch::{
+            AiDifficulty, LaunchStartPosition, LaunchTeam, SkirmishAiSlot,
+        };
         let mut map_ini = "[Basic]\nGameMode=standard\nMaxPlayers=30\n[Waypoints]\n".to_owned();
         for row in 0..30 {
             map_ini.push_str(&format!("{row}={}\n", 10010 + row));
@@ -2895,6 +3070,8 @@ mod tests {
             );
         for ((credits, units, speed), expected) in [
             ((7549, 4, 2), (7549, 7500, 4, 2)),
+            ((30000, 4, 8), (30000, 30000, 4, 8)),
+            ((100000, 4, 0), (100000, 100000, 4, 0)),
             ((20000, 15, 9), (10000, 10000, 0, 6)),
             ((4999, -1, -1), (10000, 10000, 0, 6)),
         ] {
@@ -3443,6 +3620,32 @@ WOLTaunts=junk
         assert_eq!(shell.selected_mode_id, 9, "unknown mode falls to first row");
     }
 
+    #[test]
+    fn an_extra_colour_is_saved_where_an_older_game_still_starts() {
+        let mut preferences = LocalMultiplayerPreferences {
+            color_index: 12,
+            color_ex: CONCRETE_ITEM_DATA,
+            ..Default::default()
+        };
+        // The older game needs Color within gamemd's eight; it reads ColorEx
+        // only as "not Random".
+        let text = String::from_utf8(preferences.update_ini_bytes(b"", "Americans")).unwrap();
+        assert!(
+            text.contains("Color=0") && text.contains("ColorEx=12"),
+            "{text}"
+        );
+        let read = read_local_multiplayer_preferences(text.as_bytes());
+        assert_eq!((read.color_index, read.color_ex), (12, CONCRETE_ITEM_DATA));
+
+        // Random with an extra colour last shown: none of it reaches the file.
+        preferences.color_ex = RANDOM_ITEM_DATA;
+        let text = String::from_utf8(preferences.update_ini_bytes(b"", "Americans")).unwrap();
+        assert!(
+            text.contains("Color=0") && text.contains("ColorEx=-2"),
+            "{text}"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn gsi_03_10_multiplayer_preferences_non_identity_acp_byte_round_trips() {
@@ -3472,6 +3675,63 @@ WOLTaunts=junk
         let mut reopened_shell = SkirmishShellState::default();
         reopened.hydrate_shell(&mut reopened_shell, &[map()], &[mode()]);
         assert_eq!(reopened_shell.player_name_edit.text, "\u{20ac}");
+    }
+
+    /// A code page stored the name box's text (`玩家` in GBK, `€` in
+    /// Windows-1252). The network sends those bytes and reads back the name it
+    /// sent (`0x735120`, `0x005DC6A6`), and a setup's write-back keeps them.
+    #[test]
+    fn network_name_is_the_handle_bytes_and_writes_back_unchanged() {
+        let mut runtime = runtime(
+            MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
+            3,
+        );
+        for handle in [vec![0xcd, 0xe6, 0xbc, 0xd2], vec![0x80]] {
+            runtime.local_preferences.handle_bytes = handle.clone();
+            let local = runtime.local_participant();
+            let sent = crate::net::lan_messages::LanMessage::presence(&local.name, 0, 0).unwrap();
+            assert_eq!(sent.name_bytes(), handle.as_slice());
+            assert_eq!(sent.name(), local.name);
+            runtime.update_local_preferences(&local, 1);
+            assert_eq!(runtime.local_preferences.handle_bytes, handle);
+        }
+    }
+
+    /// The name boxes read the handle as its code page wrote it, and while one
+    /// shows that name again the handle gets its own bytes back, as gamemd's
+    /// byte boxes keep them, even bytes another code page wrote (`玩家` in
+    /// GBK). An edited name is encoded anew.
+    #[test]
+    fn name_boxes_give_back_the_handle_bytes_of_an_unchanged_name() {
+        use crate::util::native_string::{acp_encode, acp_round_trip};
+        let gbk = vec![0xcd, 0xe6, 0xbc, 0xd2];
+        let mut runtime = runtime(
+            MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
+            5,
+        );
+        // Skirmish: a visit that leaves the name alone.
+        let mut visit = |handle: Vec<u8>| {
+            runtime.local_preferences.handle_bytes = handle.clone();
+            let mut shell = SkirmishShellState::default();
+            runtime.hydrate_shell(&mut shell, &[map()], &[mode()]);
+            runtime.pack_durable_state(&shell, &[map()], &[mode()]);
+            assert_eq!(runtime.local_preferences.handle_bytes, handle);
+            shell.player_name_edit.text
+        };
+        assert_eq!(visit(acp_encode("Hélène")), acp_round_trip("Hélène"));
+        visit(gbk.clone());
+        // LAN lobby: a letter typed, then deleted.
+        let name = runtime.open_lan_name_box();
+        let typed = format!("{name}x");
+        runtime.set_lan_name(&typed);
+        assert_eq!(runtime.local_preferences.handle_bytes, acp_encode(&typed));
+        runtime.set_lan_name(&name);
+        assert_eq!(runtime.local_preferences.handle_bytes, gbk);
+        // Skirmish: an edited name.
+        let mut shell = SkirmishShellState::default();
+        shell.player_name_edit = PlayerNameEditState::with_name("Zoë");
+        runtime.pack_durable_state(&shell, &[map()], &[mode()]);
+        assert_eq!(runtime.local_preferences.handle_bytes, acp_encode("Zoë"));
     }
 
     #[test]

@@ -73,6 +73,18 @@ fn message_box_layout_for_screen(
     crate::ui::shell::modal::message_box_layout_on(kind, size.0 as i32, size.1 as i32, scale)
 }
 
+/// The settings in VERA's Esc menu, on its message box's mapping.
+pub(crate) fn shell_menu_settings_layout(
+    state: &AppState,
+) -> crate::ui::main_menu_dialogs::options::shell::LauncherOptionsLayout {
+    let size = shell_screen_size(state);
+    crate::ui::main_menu_dialogs::options::shell::LauncherOptionsLayout::esc_menu(
+        size.0 as i32,
+        size.1 as i32,
+        shell_scale_for_screen(size),
+    )
+}
+
 pub(crate) fn shell_scale_for_screen(size: (u32, u32)) -> crate::ui::shell::geom::ShellScale {
     crate::ui::shell::geom::ShellScale::for_window(size.0 as i32, size.1 as i32)
 }
@@ -88,13 +100,28 @@ pub(crate) fn menu_page_layout(state: &AppState, spec: &MenuPageSpec) -> MenuPag
     }
 }
 
-/// The skirmish dialog `0x102`, the page behind its modals.
+/// The skirmish dialog `0x102`, the page behind its modals, for the selected
+/// map's player rows: VERA's longer list past eight. The unscaled 640x480
+/// page has no room for it under its options, so there a longer list takes
+/// the scaled 800x600 page every other window size already gets.
 pub(crate) fn skirmish_layout(state: &AppState) -> SkirmishShellLayout {
+    use crate::ui::skirmish_shell::{
+        SKIRMISH_ROW_COUNT, compute_layout_for_rows, compute_responsive_layout_for_rows,
+        selected_player_rows,
+    };
     let (width, height) = (state.render_width(), state.render_height());
-    if fills_window(state) {
-        crate::ui::skirmish_shell::compute_responsive_layout(width, height)
+    let rows = selected_player_rows(
+        &state.frontend.skirmish_shell_state,
+        state.frontend.scenario_catalog.shell_maps(),
+    );
+    let layout = compute_layout_for_rows(width, height, rows);
+    if fills_window(state)
+        || (layout.shown_rows > SKIRMISH_ROW_COUNT
+            && layout.authored_width() < crate::ui::shell::geom::SHELL_BASE_W)
+    {
+        compute_responsive_layout_for_rows(width, height, rows)
     } else {
-        crate::ui::skirmish_shell::compute_layout(width, height)
+        layout
     }
 }
 
@@ -162,6 +189,16 @@ pub(crate) fn movie_list_layout(
     }
 }
 
+/// VERA's Mods page, behind the Mods button of Options.
+pub(crate) fn mods_layout(state: &AppState) -> crate::ui::mods_shell::ModsLayout {
+    let (width, height) = shell_screen_size(state);
+    if fills_window(state) {
+        crate::ui::mods_shell::compute_responsive_layout(width, height)
+    } else {
+        crate::ui::mods_shell::compute_layout(width, height)
+    }
+}
+
 /// End-of-match score screen `0x108`.
 pub(crate) fn score_layout(state: &AppState) -> crate::ui::score_shell::ScoreLayout {
     let (width, height) = shell_screen_size(state);
@@ -225,7 +262,7 @@ pub(crate) fn keyboard_layout(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_frontend))]
 mod tests {
     use super::window_takes_fitted_shell;
 

@@ -382,6 +382,10 @@ pub struct ProjectileCollisionPolicy {
     /// (`0x00468ECF`) skips the detector-reference arm for it.
     #[serde(default)]
     pub arcing: bool,
+    /// Ares BulletTypeExt `SubjectToBuildings` (`+0x8`): the shared probe's
+    /// GetObstacle also stops at a solid building (`0x468BE2`).
+    #[serde(default)]
+    pub subject_to_solid: bool,
 }
 
 impl ProjectileCollisionPolicy {
@@ -401,6 +405,7 @@ impl ProjectileCollisionPolicy {
         gravity: None,
         elasticity_bits: 0x3fe8_0000_0000_0000,
         arcing: false,
+        subject_to_solid: false,
     };
 
     /// `0x468D80`'s airburst gate, with the pre-feature fallback.
@@ -457,6 +462,9 @@ pub enum ProjectileCollisionResponse {
     },
     /// The world's answer to [`ProjectileCollisionPhase::ImpactLadder`].
     ImpactLadder(ImpactLadderWorld),
+    /// The world's answer to [`ProjectileCollisionPhase::AresFirestorm`]:
+    /// the bullet burns.
+    AresFirestorm,
 }
 
 /// The target virtual requested at a Bullet AI boundary. Object410540
@@ -480,6 +488,10 @@ pub enum ProjectileCollisionPhase {
     /// `0x00468D80` asks the target and the warhead for
     /// [`resolve_impact_coord`]; the candidate is the bullet's Location.
     ImpactLadder,
+    /// Ares BulletClass_Update_Ranged (`1001AC90`, hook `0x467B94`) asks,
+    /// after the commit, whether the candidate cell holds an active
+    /// firestorm wall that burns the bullet.
+    AresFirestorm,
 }
 
 /// The Target facts `BulletClass` impact resolution (`0x00468D80`) reads.
@@ -985,6 +997,14 @@ pub struct ProjectilePayload {
     /// (`0x004697FC..0x0046980C`, not ported: dormant in retail, see
     /// [`SpecialDetonationAction::DirectRocker`]).
     damage_multiplier: i32,
+    /// Ares BulletClass Range: the leptons left to a FireAt bullet of a
+    /// `Ranged=` type, from its weapon's `ProjectileRange=`
+    /// (TechnoClass_Fire_CreateBullet 1001ADE0, hook 0x6FE53F). `None` for
+    /// every other bullet, whose Range starts at INT_MAX
+    /// (BulletClass_Initialize_Ranged 1001A920, hook 0x4664FB) and never runs
+    /// out. Not part of the world hash.
+    #[serde(default)]
+    ares_range: Option<i32>,
 }
 
 #[cfg(feature = "phobos")]
@@ -1014,6 +1034,7 @@ impl ProjectilePayload {
             firepower_multiplier: crate::util::native_x87::NativeF64Bits::ONE,
             #[cfg(feature = "phobos")]
             source_house: None,
+            ares_range: None,
         }
     }
 
@@ -1027,6 +1048,11 @@ impl ProjectilePayload {
 
     pub fn bright(&self) -> bool {
         self.bright
+    }
+
+    /// The FireAt bullet's Ares Range ([`Self::ares_range`]).
+    pub(crate) fn with_ares_range(self, ares_range: Option<i32>) -> Self {
+        Self { ares_range, ..self }
     }
 
     /// The sole +130 mutation, corresponding to SetWeaponType46B260.
@@ -1234,6 +1260,12 @@ pub struct Projectile {
     #[cfg(feature = "phobos")]
     #[serde(default)]
     phobos_firer_house: Option<InternedId>,
+    /// Ares BulletExt `+0x8` NukeSW: the superweapon type whose nuke this
+    /// bullet is, set by SW_NuclearMissile::Activate (10072FF0), the silo's
+    /// take-off hook (44CB4C, 10036660) and NukeMaker's propagation (46B423,
+    /// 10036930); read by NukeMaker (46B371) and the impact hook (467E59).
+    #[serde(default)]
+    ares_nuke_sw: Option<InternedId>,
     /// Bullet `+0x158`: set at a `NUKE` impact (`0x00467F3C`), cleared when
     /// the wait ends (`0x0046676A`).
     #[serde(default)]
@@ -1465,6 +1497,11 @@ impl Projectile {
         self.phobos_firer_house
     }
 
+    /// Ares BulletExt NukeSW.
+    pub(crate) fn ares_nuke_sw(&self) -> Option<InternedId> {
+        self.ares_nuke_sw
+    }
+
     /// Waiting on its anim after a `NUKE` impact (`+0x158`); the draw skips
     /// such a bullet (`BulletClass::DrawSHPOrVoxel`, `0x004680F6`).
     pub fn awaiting_anim(&self) -> bool {
@@ -1498,6 +1535,35 @@ impl Projectile {
         } else {
             None
         };
+        // Ares hook 467E59 (10036960) replaces the `NUKE` test for every
+        // bullet: a superweapon's bullet whose warhead is no NukeMaker rises
+        // to the ground; a flash or a PreImpactAnim makes the impact.
+        if !nuke
+            .rules
+            .is_some_and(|rules| rules.warhead_impact_enabled())
+            && let Some(ares) = nuke.ares
+        {
+            let ball = ares(self.payload.warhead, self.ares_nuke_sw);
+            if !ball.sw_bullet && ball.flash.is_none() && !ball.pre_impact_anim {
+                return None;
+            }
+            if ball.sw_bullet {
+                self.position =
+                    raise_to_ground(self.position, terrain, shared_cell_dummy, self.on_bridge);
+            }
+            let waits = ball.pre_impact_anim;
+            if waits {
+                self.awaiting_anim = true;
+                self.awaited_anim = None;
+                self.previous_cell = ((candidate.x / 256) as i16, (candidate.y / 256) as i16);
+            }
+            return Some(ProjectileNukeImpact {
+                projectile_id: self.id,
+                waits,
+                ares: Some(ball),
+                extension: None,
+            });
+        }
         if extension.is_none()
             && !nuke
                 .interner
@@ -1528,6 +1594,7 @@ impl Projectile {
             projectile_id: self.id,
             waits,
             extension,
+            ares: None,
         })
     }
 
@@ -1591,6 +1658,7 @@ pub(crate) struct ProjectileNukeImpact {
     projectile_id: u64,
     waits: bool,
     extension: Option<WarheadImpactPresentation>,
+    ares: Option<AresNukeBall>,
 }
 
 /// Immutable receipt from the single Bullet impact admission. These are not
@@ -1603,6 +1671,22 @@ pub(crate) struct WarheadImpactPresentation {
     pub flash_enabled: bool,
     pub flash_duration: i32,
     pub pre_impact: Option<u32>,
+}
+
+/// What Ares's BulletClass impact hook (467E59, 10036960) decides for one
+/// bullet: `sw_bullet` for a superweapon's nuke (BulletExt NukeSW) whose
+/// warhead is no `NukeMaker=` (rise to the ground, the type's radar event
+/// while `SW.CreateRadarEvent`), the flash's frames (the warhead's
+/// `NukeFlash.Duration`, else 30 for a superweapon's bullet and none for
+/// another, kept only above 0 and while the type's `Light.Enabled`), and the
+/// warhead's `PreImpactAnim` to wait on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AresNukeBall {
+    pub(crate) sw_bullet: bool,
+    pub(crate) radar: bool,
+    pub(crate) flash: Option<i32>,
+    pub(crate) pre_impact_anim: bool,
+    pub(crate) nuke_sw: Option<InternedId>,
 }
 
 impl ProjectileNukeImpact {
@@ -1618,6 +1702,11 @@ impl ProjectileNukeImpact {
     pub(crate) fn waits(self) -> bool {
         self.waits
     }
+
+    /// The Ares impact hook's decision.
+    pub(crate) fn ares(self) -> Option<AresNukeBall> {
+        self.ares
+    }
 }
 
 /// What `BulletClass::AI`'s `NUKE` block and the wait it starts read
@@ -1626,6 +1715,7 @@ pub struct NukeImpactContext<'a> {
     interner: &'a StringInterner,
     nuke_ball_type: &'a dyn Fn() -> bool,
     rules: Option<&'a crate::rules::ruleset::RuleSet>,
+    ares: Option<&'a dyn Fn(InternedId, Option<InternedId>) -> AresNukeBall>,
 }
 
 impl<'a> NukeImpactContext<'a> {
@@ -1642,6 +1732,18 @@ impl<'a> NukeImpactContext<'a> {
             interner,
             nuke_ball_type,
             rules,
+            ares: None,
+        }
+    }
+
+    /// The Ares impact hook's decision for (warhead, BulletExt NukeSW).
+    pub(crate) fn with_ares(
+        self,
+        ares: &'a dyn Fn(InternedId, Option<InternedId>) -> AresNukeBall,
+    ) -> Self {
+        Self {
+            ares: Some(ares),
+            ..self
         }
     }
 
@@ -1670,7 +1772,7 @@ impl<'a> NukeImpactContext<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_p_s))]
 #[path = "projectile/trailer_tests.rs"]
 mod trailer_tests;
 
@@ -1717,9 +1819,14 @@ impl ProjectileStore {
         } else {
             kind.spawn_delay
         };
-        let remainder = (binary_frame as i32)
-            .checked_rem(delay)
-            .expect("Bullet Trailer native IDIV requires a nonzero, nonoverflowing SpawnDelay");
+        // gamemd's signed IDIVs of the frame (0x00466844 by the scaled
+        // delay, 0x0046687C by the type's) trap on `SpawnDelay=0` and on
+        // frame i32::MIN with a delay of -1, values only a map or mod can
+        // set. VERA carries on without a trailer for that visit.
+        let Some(remainder) = (binary_frame as i32).checked_rem(delay) else {
+            log::warn!("Bullet Trailer [{name}] not spawned: SpawnDelay={delay} cannot divide");
+            return None;
+        };
         (remainder == 0).then_some((name, position))
     }
 }
@@ -1730,6 +1837,9 @@ pub struct ProjectileAdvanceResult {
     pub detonations: Vec<ProjectileDetonation>,
     pub expired: Vec<u64>,
     nuke_impacts: Vec<ProjectileNukeImpact>,
+    /// A firestorm wall burnt the bullet (Ares hook `0x467B94`); it is in
+    /// `expired` too.
+    pub(crate) ares_firestormed: bool,
 }
 
 impl ProjectileAdvanceResult {
@@ -1886,6 +1996,16 @@ impl ProjectileStore {
     /// Re-read the authoritative fields at a DetonateAtCoord callback
     /// boundary. The explicit impact and reason belong to the caller;
     /// source/target may have changed during synchronous receiver callbacks.
+    /// Ares BulletClass_Detonate's neutering of an abducting bullet
+    /// (100536E0, hook 0x46920B): Health (`+0x6C`) and DamageMultiplier
+    /// (`+0x150`) zeroed, so the vanilla arms that follow deal nothing.
+    pub(crate) fn neuter(&mut self, id: u64) {
+        if let Some(bullet) = self.get_mut(id) {
+            bullet.payload.base_damage = 0;
+            bullet.payload.damage_multiplier = 0;
+        }
+    }
+
     pub(crate) fn current_detonation(&self, request: ProjectileDetonation) -> ProjectileDetonation {
         self.get(request.projectile_id).map_or(request, |bullet| {
             detonation(bullet, request.impact, request.reason)
@@ -2050,6 +2170,7 @@ impl ProjectileStore {
                 firer_house: None,
                 #[cfg(feature = "phobos")]
                 phobos_firer_house: None,
+                ares_nuke_sw: None,
                 awaiting_anim: false,
                 awaited_anim: None,
             },
@@ -2152,6 +2273,31 @@ impl ProjectileStore {
         }
     }
 
+    /// Ares hook 46670F (1001AC10): while a bullet waits on its anim, a
+    /// `PreImpactAnim.Moves` warhead's bullet takes the anim's coordinates as
+    /// its Location (written directly) and the cell there as its target.
+    pub(crate) fn follow_awaited_anim(
+        &mut self,
+        id: u64,
+        at: ProjectileCoord,
+        target: ProjectileTarget,
+    ) {
+        if let Some(projectile) = self.get_mut(id)
+            && projectile.awaiting_anim
+            && projectile.awaited_anim.is_some()
+        {
+            projectile.position = at;
+            projectile.target = target;
+        }
+    }
+
+    /// Ares BulletExt NukeSW's writers.
+    pub(crate) fn set_ares_nuke_sw(&mut self, id: u64, sw_type: Option<InternedId>) {
+        if let Some(projectile) = self.get_mut(id) {
+            projectile.ares_nuke_sw = sw_type;
+        }
+    }
+
     /// Phobos `BulletExt::FirerHouse` at bullet initialization.
     #[cfg(feature = "phobos")]
     pub(crate) fn set_phobos_firer_house(&mut self, id: u64, house: Option<InternedId>) {
@@ -2173,6 +2319,14 @@ impl ProjectileStore {
                 == crate::util::native_x87::NativeF64Bits::ONE
         {
             projectile.payload.firepower_multiplier = value;
+        }
+    }
+
+    /// Ares TechnoClass_Fire_FSW (`10024C00`) replaces only the Target
+    /// (`+0x10C`) of a bullet whose path crosses a firestorm wall.
+    pub(crate) fn ares_firestorm_retarget(&mut self, id: u64, target: ProjectileTarget) {
+        if let Some(projectile) = self.get_mut(id) {
+            projectile.target = target;
         }
     }
 
@@ -2261,6 +2415,7 @@ impl ProjectileStore {
                     ProjectileCollisionPhase::Ordinary { .. } => None,
                     ProjectileCollisionPhase::Shared => collides_at(projectile, candidate),
                     ProjectileCollisionPhase::ImpactLadder => None,
+                    ProjectileCollisionPhase::AresFirestorm => None,
                 },
                 None,
             ) else {
@@ -2591,10 +2746,10 @@ impl ProjectileStore {
         // 467B9E commits the selected candidate before the shared probe.
         // Every admitted impact bypasses 468BB0, irrespective of ROT.
         let selected_candidate = snap_impact.unwrap_or(candidate);
-        // Ares Update_Ranged1001AC90, installed467B94 before SetLocation:
-        // only BulletType.Ranged spends the actual 3D step. Exhaustion sets
-        // the existing impact flag, bypassing the probe but retaining ground,
-        // Arm/proximity, JumpJet and the ordinary detonation/cleanup tail.
+        // Ares BulletClass_Update_Ranged (1001AC90, hook 0x467B94), before
+        // that commit: a `Ranged=` bullet spends `F2I(DistanceFrom)` from its
+        // Location to the new one, and impacts once none is left. Only a
+        // game read the Ares way gives a bullet a Range, so no other asks.
         if ranged && let Some(fuel) = projectile.fuel_remaining.as_mut() {
             let step = crate::util::native_x87::true_distance_3d_leptons(
                 [
@@ -2610,8 +2765,38 @@ impl ProjectileStore {
             );
             *fuel = fuel.wrapping_sub(step);
             impact_flag |= *fuel <= 0;
+        } else if let Some(range) = projectile.payload.ares_range.as_mut() {
+            let square = |a: i32, b: i32| {
+                let delta = f64::from(a.wrapping_sub(b));
+                delta * delta
+            };
+            let distance = (square(selected_candidate.x, projectile.position.x)
+                + square(selected_candidate.y, projectile.position.y)
+                + square(selected_candidate.z, projectile.position.z))
+            .sqrt();
+            *range = range.wrapping_sub(crate::util::native_x87::X87Chop53::ftol_f64_low_masked(
+                distance,
+            ));
+            if *range <= 0 {
+                impact_flag = true;
+            }
         }
         projectile.position = selected_candidate;
+        // Ares BulletClass_Update_Ranged (1001AC90, hook 0x467B94), after
+        // the replicated SetLocation: a bullet the world burns in a firestorm
+        // wall's cell is UnInit'ed there, before any impact (0x467FBA). Only
+        // Ares code raises a firestorm, so the world answers no without one.
+        if collides_at(
+            projectile,
+            selected_candidate,
+            ProjectileCollisionPhase::AresFirestorm,
+        )
+        .is_some()
+        {
+            result.ares_firestormed = true;
+            result.expired.push(id);
+            return Some(result);
+        }
         let collision_impact = (!impact_flag)
             .then(|| {
                 collides_at(
@@ -2623,6 +2808,9 @@ impl ProjectileStore {
             .flatten()
             .map(|response| match response {
                 ProjectileCollisionResponse::TargetZClamp(impact) => impact,
+                ProjectileCollisionResponse::AresFirestorm => {
+                    unreachable!("only the shared probe answers here")
+                }
                 ProjectileCollisionResponse::Ordinary { .. }
                 | ProjectileCollisionResponse::ImpactLadder(_) => {
                     unreachable!("only the shared probe answers here")
@@ -3143,37 +3331,64 @@ fn bridge_surface_z(
         .then(|| floor.wrapping_add(crate::util::lepton::BRIDGE_DECK_HEIGHT_LEPTONS))
 }
 
-/// YR `BulletClass_GetAnimFrame` @ 0x00468000.
+/// YR `BulletClass_GetAnimFrame` @ 0x00468000; `frame` is the frame counter
+/// (`Unsorted::CurrentFrame`).
 pub fn projectile_shp_frame(
     projectile: &Projectile,
     projectile_type: &crate::rules::projectile_type::ProjectileType,
-) -> u8 {
-    projectile_shp_frame_with_velocity(projectile, projectile_type, projectile.velocity)
+    frame: u32,
+) -> u16 {
+    // Still on the feature: the draw that asks holds no Rules, the owner
+    // passes it `RuleSet::ares_form`.
+    projectile_shp_frame_by_form(projectile, projectile_type, frame, cfg!(feature = "ares"))
 }
 
-/// Read-only directional frame selection, also used with client-sampled
-/// velocity. Animation counters stay authoritative; only direction varies.
-pub fn projectile_shp_frame_with_velocity(
+/// [`projectile_shp_frame`] for a game read the Ares way (`ares`) or not.
+fn projectile_shp_frame_by_form(
     projectile: &Projectile,
     projectile_type: &crate::rules::projectile_type::ProjectileType,
-    velocity: ProjectileVelocity,
-) -> u8 {
+    frame: u32,
+    ares: bool,
+) -> u16 {
+    let velocity = projectile.velocity;
     if projectile.visual.anim_low != 0 || projectile.visual.anim_high != 0 {
-        return projectile.visual.runtime_frame;
+        return u16::from(projectile.visual.runtime_frame);
     }
     // 46800C..468014 uses the retained inverse ART Rotates byte. The
     // animation override above wins even when the shape does not rotate.
     if projectile_type.rotates {
         return 0;
     }
-    use crate::util::direction_tables::{DRAGON_FRAME_TABLE, facing16_from_angle, step32_from_facing16};
+    use crate::util::direction_tables::DRAGON_FRAME_TABLE;
+    use crate::util::direction_tables::{facing16_from_angle, step32_from_facing16};
     use crate::util::native_x87::X87Chop53 as X;
     use native_math::{atan, d};
-    // FCHS of the velocity Y, `Math::atan2 @ 0x004CAE30`, then the DirStruct
-    // word conversion (FSUB pi/2, FMUL, ftol).
-    let word = facing16_from_angle(atan(X::neg(d(velocity.y)), d(velocity.x)));
-    // 46805D: the 32-step bucket of the angle word indexes the 0x007F4890 table.
-    DRAGON_FRAME_TABLE[usize::from(step32_from_facing16(word))] as u8
+    // FCHS of the velocity Y, `Math::atan2 @ 0x004CAE30`.
+    let angle = atan(X::neg(d(velocity.y)), d(velocity.x));
+    let facing = if ares {
+        // Ares BulletClass_GetAnimFrame (1001A840, hook 0x468000) replaces
+        // the body with its own word, 0x3FFF less the truncated angle times
+        // 65535/2pi (1001A894..1001A8BB, constant 10097DB8), whose bucket can
+        // differ at the edges; then AnimLength gives each facing its frames.
+        const ARES_FACING_SCALE: crate::util::native_x87::NativeF64Bits =
+            crate::util::native_x87::NativeF64Bits::from_bits(0x40c4_5f1c_0e99_5ab9);
+        let scaled = X::mul(
+            angle,
+            X::load_f64(ARES_FACING_SCALE).expect("finite Ares facing scale"),
+        );
+        let word = 0x3fff_i32.wrapping_sub(X::ftol_i32_low_masked(scaled)) as u16;
+        let bucket = ((usize::from(word >> 10) + 1) >> 1) & 0x1f;
+        projectile_type.bullet_type_ext.rotating_frame(
+            DRAGON_FRAME_TABLE[bucket],
+            frame as i32,
+            projectile_type.anim_rate,
+        )
+    } else {
+        // The DirStruct word conversion (FSUB pi/2, FMUL, ftol); 46805D: its
+        // 32-step bucket indexes the 0x007F4890 table.
+        DRAGON_FRAME_TABLE[usize::from(step32_from_facing16(facing16_from_angle(angle)))]
+    };
+    facing as u16
 }
 
 // YR BulletClass::AI linkage: this is the bounded ordinary-flight rung; exact trajectory kernels remain separate.
@@ -3253,7 +3468,7 @@ fn detonation(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_p_s))]
 mod tests {
     use super::*;
 
@@ -3481,6 +3696,30 @@ mod tests {
             target_expiry: TargetExpiryPolicy::DetonateAtLastKnown,
             collision: ProjectileCollisionPolicy::NONE,
         }
+    }
+
+    /// Ares BulletClass_Update_Ranged (1001AC90, hook 0x467B94): a FireAt
+    /// bullet of a `Ranged=` type spends its ProjectileRange along its
+    /// flight and impacts once none is left, short of its target.
+    #[test]
+    fn ares_a_ranged_bullet_impacts_when_its_projectile_range_runs_out() {
+        let mut store = ProjectileStore::new();
+        let mut shot = spawn(ProjectileTarget::Cell { rx: 20, ry: 0 });
+        shot.payload = shot.payload.with_ares_range(Some(100));
+        store.spawn(1, shot);
+        let advance = |store: &mut ProjectileStore, frame| {
+            store.advance(
+                frame,
+                &BTreeMap::new(),
+                None,
+                &SharedCellDummy::fresh(),
+                |_, _| None,
+            )
+        };
+        assert!(advance(&mut store, 0).detonations.is_empty(), "64 spent");
+        let result = advance(&mut store, 1);
+        assert_eq!(result.detonations.len(), 1, "128 spent of 100");
+        assert!(result.detonations[0].impact.x < 256);
     }
 
     #[test]
@@ -3789,7 +4028,7 @@ mod tests {
             ini.section("P").unwrap(),
             ini.section("P"),
         );
-        assert_eq!(projectile_shp_frame(store.get(id).unwrap(), &kind), 20);
+        assert_eq!(projectile_shp_frame(store.get(id).unwrap(), &kind, 0), 20);
 
         let projectile = store.projectiles.get_mut(&id).unwrap();
         projectile.visual = ProjectileVisualState {
@@ -3802,6 +4041,27 @@ mod tests {
         projectile.visual.advance();
         assert_eq!(projectile.visual.runtime_frame, 2);
         assert_eq!(projectile.visual.runtime_countdown, 3);
+    }
+
+    /// Ares BulletClass_GetAnimFrame (1001A840, hook 0x468000): with
+    /// `AnimLength=3` facing 20 owns frames 60..62, stepped every `AnimRate`
+    /// frames of the frame counter.
+    #[test]
+    fn ares_anim_length_steps_each_facing_through_its_frames() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
+        let mut store = ProjectileStore::new();
+        let id = store.spawn(1, spawn(ProjectileTarget::Cell { rx: 0, ry: 0 }));
+        let ini = crate::rules::ini_parser::IniFile::from_str(
+            "[P]\nImage=P\nRotates=yes\nAnimRate=2\nAnimLength=3\n",
+        );
+        let kind = crate::rules::projectile_type::ProjectileType::from_ini_section(
+            "P",
+            ini.section("P").unwrap(),
+            ini.section("P"),
+        );
+        let frame =
+            |counter| projectile_shp_frame_by_form(store.get(id).unwrap(), &kind, counter, true);
+        assert_eq!([frame(0), frame(3), frame(5), frame(6)], [60, 61, 62, 60]);
     }
 
     #[test]
@@ -3838,7 +4098,7 @@ mod tests {
             projectile.visual.anim_low = input["anim_low"].as_u64().unwrap_or(0) as u8;
             projectile.visual.anim_high = input["anim_high"].as_u64().unwrap_or(0) as u8;
             projectile.visual.runtime_frame = input["runtime_frame"].as_u64().unwrap_or(0) as u8;
-            let frame = projectile_shp_frame(projectile, &kind);
+            let frame = projectile_shp_frame(projectile, &kind, 0);
             for draw in row["draws"].as_array().unwrap() {
                 assert_eq!(u64::from(frame), draw["frame"].as_u64().unwrap(), "{input}");
             }
@@ -4275,7 +4535,7 @@ mod tests {
 
         let scattered = launch::fireat_launch_scatter(
             ProjectileCoord::new(1024, 0, 77),
-            256,
+            launch::fireat_scatter_bounds(false, 256),
             1280,
             false,
             None,
@@ -4299,7 +4559,7 @@ mod tests {
         let _ = flak_reference.next_range_u32_inclusive(0, 0x7fff_fffe);
         let flak = launch::fireat_launch_scatter(
             ProjectileCoord::new(1280, 0, 0),
-            256,
+            launch::fireat_scatter_bounds(true, 256),
             1280,
             true,
             None,

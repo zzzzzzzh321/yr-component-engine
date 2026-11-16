@@ -65,6 +65,10 @@ pub(crate) enum FrameStep {
     /// Publish the terrain navigation and smudge changes the object pass left
     /// pending.
     TerrainNavigation,
+    /// The local anims' AI (`0x0055B61B..0x0055B649`, AnimClass vt+0x5C):
+    /// gamemd walks its local list (`0x00A83E00`) after the LogicClass
+    /// vector in LAN and online games, the only ones that fill it.
+    LocalAnims,
     /// `IonBlastClass::UpdateAll @ 0x0053D310` (`0x0055B64B`), then
     /// `AlphaShapeClass::PurgeDisabled @ 0x00420E90` (`0x0055B650`).
     IonBlasts,
@@ -81,7 +85,7 @@ pub(crate) enum FrameStep {
 }
 
 /// The master frame's steps before its tail, in the order they run.
-pub(crate) const LOGIC_STEPS: [FrameStep; 19] = [
+pub(crate) const LOGIC_STEPS: [FrameStep; 20] = [
     FrameStep::SessionCommands,
     FrameStep::AdmitCommands,
     FrameStep::Triggers,
@@ -98,6 +102,7 @@ pub(crate) const LOGIC_STEPS: [FrameStep; 19] = [
     FrameStep::Wakes,
     FrameStep::Vision,
     FrameStep::TerrainNavigation,
+    FrameStep::LocalAnims,
     FrameStep::IonBlasts,
     FrameStep::CrateRegen,
     FrameStep::Factories,
@@ -106,7 +111,6 @@ pub(crate) const LOGIC_STEPS: [FrameStep; 19] = [
 impl FrameStep {
     /// The profile ledger slot this step's time folds into; a step without
     /// one folds into the next step that has one.
-    #[cfg(feature = "telemetry")]
     fn profile_slot(self) -> Option<usize> {
         use crate::sim::frame_profile::phase;
         Some(match self {
@@ -116,12 +120,12 @@ impl FrameStep {
             Self::Shroud => phase::SHROUD,
             Self::Lighting => phase::LIGHTING,
             Self::OreGrowth => phase::ORE_GROWTH,
-            Self::BombList => return None,
+            Self::BombList | Self::LocalAnims => return None,
             Self::Kamikaze | Self::DiskLasers => phase::BOMBS,
             Self::TeamScript => phase::TEAM_AI,
             Self::LightningStorm => phase::SUPERWEAPONS,
             Self::Radiation => phase::RADIATION,
-            Self::LogicVector => phase::OBJECTS,
+            Self::LogicVector => phase::UNIT_AI,
             Self::Wakes => phase::WAKES,
             Self::Vision => phase::VISION,
             Self::TerrainNavigation => phase::COMBAT,
@@ -221,7 +225,6 @@ impl Simulation {
             ));
         }
         // The disabled path reads no clock and does not construct a ledger.
-        #[cfg(feature = "telemetry")]
         let mut frame_clock = self
             .frame_profiling
             .then(crate::sim::frame_profile::FrameClock::start);
@@ -262,14 +265,16 @@ impl Simulation {
         };
         for step in LOGIC_STEPS {
             self.enter_frame_step(step);
-            self.run_logic_step(step, inputs, request, &mut frame)?;
-            #[cfg(feature = "telemetry")]
+            match frame_clock.as_mut() {
+                Some(clock) if step == FrameStep::LogicVector => clock
+                    .split_object_pass(|| self.run_logic_step(step, inputs, request, &mut frame))?,
+                _ => self.run_logic_step(step, inputs, request, &mut frame)?,
+            }
             if let (Some(clock), Some(slot)) = (frame_clock.as_mut(), step.profile_slot()) {
                 clock.stamp(slot);
             }
         }
         let tail_result = self.run_late_region(inputs, &mut frame, None)?;
-        #[cfg(feature = "telemetry")]
         if let Some(clock) = frame_clock.as_mut() {
             clock.stamp(crate::sim::frame_profile::phase::LATE_AI);
         }
@@ -277,13 +282,7 @@ impl Simulation {
             .trigger_effects
             .iter()
             .any(|effect| matches!(effect, TriggerEffect::BridgeStateChanged));
-        Ok(self.complete_or_suspend_frame(
-            frame,
-            tail_result,
-            inputs,
-            #[cfg(feature = "telemetry")]
-            frame_clock,
-        ))
+        Ok(self.complete_or_suspend_frame(frame, tail_result, inputs, frame_clock))
     }
 
     /// Run one step before the tail. Each arm calls the step's owner.
@@ -327,6 +326,11 @@ impl Simulation {
                 self.lifecycle_outputs.emit(LifecycleOutput::LogicVisit);
             }
             FrameStep::Triggers => {
+                // Ares LogicClass_Update_1000 100680F0 heads Logic55AFB0
+                // (hook 0x55AFB3), before its trigger poll.
+                if rules.ares() {
+                    self.ares_make_stuff_up_logic(rules);
+                }
                 if request.poll_triggers {
                     self.poll_triggers_for_master_frame(rules, overlay_registry, effects);
                 }
@@ -345,7 +349,7 @@ impl Simulation {
                 );
             }
             FrameStep::Lighting => self.tick_scenario_lighting_transition(rules),
-            FrameStep::OreGrowth => self.tick_ore_growth_rungs(rules, overlay_registry),
+            FrameStep::OreGrowth => self.tick_ore_growth_rungs(rules, overlay_registry, effects)?,
             // `BombListClass::UpdateAll` follows growth and spread (0x0055B4E1).
             FrameStep::BombList => Self::bomb_list_update(
                 &self.interner,
@@ -459,11 +463,31 @@ impl Simulation {
                 // Override inline (`TechnoClass::ReceiveDamage 0x00702A43`),
                 // and passengers board in their class PerCellProcess.
             }
+            FrameStep::LocalAnims => {
+                for id in self.substrate.anims.local_ids() {
+                    frame.bridge_state_changed |= self
+                        .visit_anim(id, rules, overlay_registry, effects)
+                        .map_err(|error| {
+                            FrameAdvanceError::new(
+                                self.session.tick(),
+                                self.session.binary_frame(),
+                                id,
+                                error.to_string(),
+                            )
+                        })?;
+                }
+            }
             // Follows the object loop.
             FrameStep::IonBlasts => {
                 frame.bridge_state_changed |=
                     self.update_ion_blasts(rules, overlay_registry, effects);
                 self.alpha_shapes.purge_disabled();
+                // Ares' `ObjectClass_Update_AlphaLight` (`0x005F3E70`) places
+                // each surviving glow from its object's live GetCoords ahead
+                // of the Tactical's draw.
+                if rules.ares() {
+                    self.update_alpha_shape_screens(rules);
+                }
             }
             FrameStep::CrateRegen => {
                 // Called between `AlphaShapeClass::PurgeDisabled` and the
@@ -476,8 +500,20 @@ impl Simulation {
                 // registry, and `crate_regen_rung_runs_in_every_production_frame`
                 // pins that.
                 if let Some(overlay_registry) = overlay_registry {
-                    let regen =
-                        crate::sim::crates::tick_crate_regeneration(self, rules, overlay_registry);
+                    let regen = crate::sim::crates::tick_crate_regeneration(
+                        self,
+                        rules,
+                        overlay_registry,
+                        effects,
+                    )
+                    .map_err(|error| {
+                        FrameAdvanceError::new(
+                            self.session.tick(),
+                            self.session.binary_frame(),
+                            0,
+                            error.to_string(),
+                        )
+                    })?;
                     if regen.visible != 0 {
                         // Native Mark mutates live CellClass land/zone/bridge
                         // state synchronously. Rust's BridgeRuntimeState
@@ -510,6 +546,9 @@ impl Simulation {
                 // visit, so every factory observes the wallet after that
                 // object's repair. The tank-bunker install runs in the
                 // bunker's Repair mission.
+                if rules.ares() {
+                    self.ares_refresh_temporal_factories(rules, effects);
+                }
                 production::step_factories(self);
                 #[cfg(any(test, feature = "test-support"))]
                 self.trace_house_ai_activation_order(
@@ -915,13 +954,7 @@ impl Simulation {
         };
         let inputs = FrameInputs::new(rules, overlay_registry, pending.tick_ms, effects);
         let result = self.run_late_region(inputs, &mut pending.frame, Some(pending.cursor))?;
-        let output = self.complete_or_suspend_frame(
-            pending.frame,
-            result,
-            inputs,
-            #[cfg(feature = "telemetry")]
-            None,
-        );
+        let output = self.complete_or_suspend_frame(pending.frame, result, inputs, None);
         self.unit_voice_visit_interest.clear();
         Ok(self.collect_frame_output(output, inputs.effects))
     }
@@ -1027,13 +1060,7 @@ impl Simulation {
         inputs: FrameInputs<'_>,
     ) -> Result<SimFrameOutput, FrameAdvanceError> {
         let committed = self.commit_frame_tail(inputs, frame.execute_tick)?;
-        let mut frame = self.finish_master_frame(
-            frame,
-            committed,
-            inputs,
-            #[cfg(feature = "telemetry")]
-            None,
-        );
+        let mut frame = self.finish_master_frame(frame, committed, inputs, None);
         // This is the terminal match frame even when its native commit ran.
         frame.tick.state_hash = Some(self.state_hash());
         self.unit_voice_visit_interest.clear();
@@ -1070,13 +1097,7 @@ impl Simulation {
                 return Err(error);
             }
         };
-        let output = self.complete_or_suspend_frame(
-            pending.frame,
-            result,
-            inputs,
-            #[cfg(feature = "telemetry")]
-            None,
-        );
+        let output = self.complete_or_suspend_frame(pending.frame, result, inputs, None);
         Ok(self.collect_frame_output(output, inputs.effects))
     }
 
@@ -1167,11 +1188,11 @@ impl Simulation {
         mut frame: FrameCompletion,
         result: FrameTailResult,
         inputs: FrameInputs<'_>,
-        #[cfg(feature = "telemetry")] frame_clock: Option<crate::sim::frame_profile::FrameClock>,
+        frame_clock: Option<crate::sim::frame_profile::FrameClock>,
     ) -> MasterFrameOutput {
         let tick_ms = inputs.tick_ms;
-        // A MindControl shot changes an existing SHP's house-colour key.
-        // Publish the atlas invalidation before the next draw, even with no spawn.
+        // An owner change outside the object pass (a MindControl shot)
+        // reaches the tick's report too.
         frame.ownership_changed |= std::mem::take(&mut self.ownership_changed_since_output);
         let frame_committed = if let FrameTailResult::Complete(committed) = result {
             committed
@@ -1235,13 +1256,7 @@ impl Simulation {
                 outcome_waiting,
             };
         };
-        self.finish_master_frame(
-            frame,
-            frame_committed,
-            inputs,
-            #[cfg(feature = "telemetry")]
-            frame_clock,
-        )
+        self.finish_master_frame(frame, frame_committed, inputs, frame_clock)
     }
 
     /// Finish the same frame after the single commit/pending-delete tail.
@@ -1250,9 +1265,7 @@ impl Simulation {
         frame: FrameCompletion,
         frame_committed: bool,
         inputs: FrameInputs<'_>,
-        #[cfg(feature = "telemetry")] mut frame_clock: Option<
-            crate::sim::frame_profile::FrameClock,
-        >,
+        mut frame_clock: Option<crate::sim::frame_profile::FrameClock>,
     ) -> MasterFrameOutput {
         let FrameInputs {
             rules,
@@ -1270,7 +1283,6 @@ impl Simulation {
         } = frame;
         macro_rules! profile_phase {
             ($phase:ident) => {
-                #[cfg(feature = "telemetry")]
                 if let Some(clock) = frame_clock.as_mut() {
                     clock.stamp(crate::sim::frame_profile::phase::$phase);
                 }
@@ -1343,7 +1355,6 @@ impl Simulation {
                 .is_some_and(|frames| self.session.tick().is_multiple_of(frames.get())))
         .then(|| self.state_hash());
         profile_phase!(HASH);
-        #[cfg(feature = "telemetry")]
         if let Some(clock) = frame_clock {
             let (phases, total) = clock.finish();
             self.frame_profile.record(phases, total);

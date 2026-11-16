@@ -372,6 +372,9 @@ fn money_pickup_matches_original_reentrant_owner_alive_and_notification_controls
         let other = sim.interner.intern("Russians");
         sim.houses
             .register(HouseState::new(other, 1, Some(other), false, 200, 10));
+        // crate_pickup.py writes PlayerPtr ([0x00A83D4C]) as House 0, the
+        // collector's: mode 0 Money pays PlayerPtr for a human collector.
+        sim.session.set_current_house_for_test(Some(owner));
         let mutation = input["mutation"].as_str().unwrap_or("none");
         let action = match mutation {
             "kill" => "32,0,0,0,0,0,0,A",
@@ -556,7 +559,7 @@ fn crate_predicates_match_all_original_controls_and_registration_classes() {
         assert_eq!(case["state_a"], 1);
         assert_eq!(case["state_b"], 1);
         assert_eq!(
-            event_classification(integer(&case["kind"]), crate::rules::ARES_ENABLED),
+            event_classification(integer(&case["kind"])),
             if case["kind"] == 49 { 2 } else { 16 }
         );
     }

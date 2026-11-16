@@ -13,14 +13,13 @@ use crate::sim::conversion_health::ConversionHealth;
 use crate::sim::house_tracking::HouseTracking;
 use crate::sim::movement::locomotor::LocomotorState;
 use crate::sim::movement::{FacingClass, ground_pose};
-use crate::sim::world::{FrameEffects, LifecycleOutput, Simulation, UninitContext};
+use crate::sim::world::{FrameEffects, Simulation, UninitContext};
 
 impl Simulation {
     /// Installed Ares TechnoClass_Update1004B320..1004B39C, hooked at6F9E50:
     /// sample Object+8C before GetCell5F6960 and Cell+EC, then reuse the one
     /// in-place conversion owner. A self pointer must not reset health,
     /// attachments, spotlight or tracking on every AI visit.
-    #[cfg(feature = "ares")]
     pub(crate) fn update_ares_surface_conversion(
         &mut self,
         id: u64,
@@ -59,6 +58,29 @@ impl Simulation {
         }
         let target = target.clone();
         self.convert_techno_type(id, &target, rules, effects);
+    }
+
+    /// A bare Type store (Unit `+0x6C4`), unlike [`Self::convert_techno_type`]:
+    /// team script actions 44 and 45 (`0x006E94AA`, `0x006E9511`) write
+    /// nothing else, and Ares' visceroid merge
+    /// (`UnitClass_UpdatePosition_Visceroid @ 1004C530`) only Health besides.
+    /// The Type facts VERA caches, which native reads from the Type, follow;
+    /// house tracking and Health are left as native leaves them.
+    pub(crate) fn store_techno_type(
+        &mut self,
+        id: u64,
+        destination: &crate::rules::object_type::ObjectType,
+        rules: &RuleSet,
+    ) {
+        let new_type = self.interner.intern(&destination.id);
+        // The new type is a new look for the presentation's atlas check.
+        self.substrate.entities.note_look(id);
+        let Some(actor) = self.substrate.entities.get_mut(id) else {
+            return;
+        };
+        actor.type_ref = new_type;
+        actor.is_voxel = GameEntity::object_uses_voxel(&destination.id, destination, rules);
+        actor.refresh_type_projection(Some(destination), rules);
     }
 
     pub(crate) fn convert_techno_type(
@@ -111,6 +133,9 @@ impl Simulation {
         };
         let health = ConversionHealth::capture_in_place(actor, source, destination);
         let new_type = self.interner.intern(&destination.id);
+        // Native draw readers follow the new Type pointer at once; the
+        // presentation's atlas check reads the look log for the new model.
+        self.substrate.entities.note_look(id);
         let actor = self
             .substrate
             .entities
@@ -152,7 +177,6 @@ impl Simulation {
         // Ext+9D is IsOperated's no-operator fast-path cache (10045440),
         // not Deactivated or DriverKilled. VERA has no such cache to clear.
         self.reset_component_effects_for_type_change(id, old_type, rules);
-        #[cfg(feature = "ares")]
         if !rules.external_effects_enabled() {
             self.reset_self_attach_effect_for_type_change(id, old_type, rules);
             if let Some(actor) = self.substrate.entities.get_mut(id) {
@@ -208,13 +232,6 @@ impl Simulation {
                 },
                 rules,
             );
-        }
-        if old_type != new_type {
-            // Native draw readers immediately follow the new Type pointer.
-            // VERA's derived atlas cache must observe the same change even
-            // though the entity ID, count and Display membership stay fixed.
-            self.lifecycle_outputs
-                .emit(LifecycleOutput::ObjectTypeChanged { stable_id: id });
         }
         true
     }

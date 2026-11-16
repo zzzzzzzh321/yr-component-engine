@@ -8,11 +8,15 @@
 //! paint their caption only; their owner-draw face is not traced.
 
 use super::chrome::*;
-use super::controls::{ControlPaint, list_controls, paint_control, push_new_edit};
+use super::controls::{
+    ControlPaint, dropdown_scroll_part, list_controls, paint_control, push_new_edit,
+    push_popup_instances,
+};
 use super::text::rect_to_text_rect;
 use super::{
     OWNERDRAW_SELECTED_RGB_FROM_DAT_00AC4604_PACKED_000000FF, SHELL_CONTROL_DEPTH,
-    SHELL_CONTROL_TEXT_DEPTH, SHELL_LABEL_TEXT_RGB,
+    SHELL_CONTROL_TEXT_DEPTH, SHELL_DROPDOWN_DEPTH, SHELL_DROPDOWN_TEXT_DEPTH,
+    SHELL_LABEL_TEXT_RGB,
 };
 use crate::app::AppState;
 use crate::render::batch::SpriteInstance;
@@ -188,7 +192,7 @@ pub(crate) fn paint_wol_lobby_children(
             None => {
                 if let Some((_, key)) = SORT_BUTTONS.iter().find(|(known, _)| *known == id) {
                     let caption = if modern && matches!(id, SORT_ALPHA | PLAYER_SORT_ALPHA) {
-                        "Name".to_owned()
+                        crate::i18n::tr("VERA:SortName")
                     } else {
                         label(state, key)
                     };
@@ -493,7 +497,6 @@ pub(crate) fn paint_wol_lobby_children(
 /// VERA's Players trackbar and Allow spectators box in a Create Game box,
 /// painted after the box as its other checkboxes are.
 pub(super) fn paint_room_limits(
-    state: &AppState,
     atlas: &crate::render::skirmish_shell_chrome::SkirmishShellChromeAtlas,
     controls: &mut Vec<SpriteInstance>,
     labels: &mut Vec<PaintLabel<'_>>,
@@ -536,7 +539,7 @@ pub(super) fn paint_room_limits(
     };
     labels.extend([
         caption(
-            "Max players".to_owned(),
+            crate::i18n::tr("VERA:MaxPlayers"),
             layout.players_label,
             ShellAlign::H_RIGHT | ShellAlign::V_CENTER,
         ),
@@ -546,7 +549,7 @@ pub(super) fn paint_room_limits(
             ShellAlign::H_CENTER | ShellAlign::V_CENTER,
         ),
         caption(
-            "Allow spectators".to_owned(),
+            crate::i18n::tr("VERA:AllowSpectators"),
             crate::ui::skirmish_shell::checkbox_text_rect(layout.spectators, scale),
             ShellAlign::V_CENTER,
         ),
@@ -647,15 +650,7 @@ pub(crate) fn paint_wol_lobby_popup(
                 ));
             }
             if let (Some(picker), Some(room)) = (&create.room, &layout.room) {
-                paint_room_limits(
-                    state,
-                    atlas,
-                    &mut paint.controls,
-                    &mut labels,
-                    picker,
-                    room,
-                    scale,
-                );
+                paint_room_limits(atlas, &mut paint.controls, &mut labels, picker, room, scale);
             }
             if let (Some(ranked), Some(rect)) = (create.ranked, layout.ranked) {
                 paint_control(
@@ -668,7 +663,7 @@ pub(crate) fn paint_wol_lobby_popup(
                     scale,
                 );
                 labels.push(PaintLabel {
-                    text: "Ranked game".to_owned().into(),
+                    text: crate::i18n::tr("VERA:RankedGame").into(),
                     rect: crate::ui::skirmish_shell::checkbox_text_rect(rect, scale),
                     align: ShellAlign::V_CENTER,
                     rgb: SHELL_LABEL_TEXT_RGB,
@@ -677,7 +672,7 @@ pub(crate) fn paint_wol_lobby_popup(
             }
             if let (Some(edit), Some((label, rect))) = (&create.name, layout.name) {
                 labels.push(PaintLabel {
-                    text: "Room name".to_owned().into(),
+                    text: crate::i18n::tr("VERA:RoomName").into(),
                     rect: label,
                     align: ShellAlign::H_RIGHT,
                     rgb: SHELL_LABEL_TEXT_RGB,
@@ -885,5 +880,47 @@ pub(crate) fn paint_wol_player_card(
     );
     paint.controls = draw.sprites;
     paint.texts = draw.text;
+    paint
+}
+
+/// Your own card's open country list in the shared drop list, over the card.
+pub(crate) fn paint_wol_card_countries(
+    state: &AppState,
+    list: &crate::app::shell_wol::player_card::CountryListView,
+    scale: ShellScale,
+) -> WolLobbyPaint {
+    let mut paint = WolLobbyPaint::default();
+    let Some(atlas) = state.frontend.skirmish_shell_chrome.as_ref() else {
+        return paint;
+    };
+    let popup = &list.popup;
+    push_popup_instances(
+        &mut paint.controls,
+        atlas,
+        popup.rect,
+        list.hot_row.and_then(|row| popup.row_rect(row)),
+        std::iter::empty(),
+        popup.scrollbar().zip(popup.thumb()),
+        list.pressed.map(dropdown_scroll_part),
+        scale,
+        SHELL_DROPDOWN_DEPTH - 0.00002,
+    );
+    for index in popup.first..popup.first + popup.visible_rows {
+        let (Some(row), Some(text)) = (popup.row_rect(index), list.rows.get(index)) else {
+            continue;
+        };
+        paint.texts.push(shell_text::draw_in_rect_scaled(
+            &state.renderer.bit_font,
+            text,
+            rect_to_text_rect(scale.derive_rect(row, |rect| {
+                RectPx::new(rect.x + 3, rect.y, rect.w - 6, rect.h)
+            })),
+            SHELL_LABEL_TEXT_RGB,
+            ShellAlign::V_CENTER,
+            [0.0; 2],
+            SHELL_DROPDOWN_TEXT_DEPTH,
+            scale.factor(),
+        ));
+    }
     paint
 }

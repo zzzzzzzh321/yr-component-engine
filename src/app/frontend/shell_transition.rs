@@ -55,6 +55,8 @@ pub(crate) enum ShellSlideKind {
     MoviesAndCredits,
     /// Dialog 0x129 — movie list (Play Movie and Back).
     MovieList,
+    /// VERA's Mods page, from the Mods button of Options.
+    Mods,
     /// Dialog 0x102 — offline skirmish setup.
     Skirmish,
     /// Dialog 0x94 — campaign selection.
@@ -73,6 +75,8 @@ pub(crate) enum ShellSlideKind {
     WolOptions,
     /// Dialog 0xD6 — the shell's Sound Options, run from WOL Options.
     WolSoundOptions,
+    /// VERA's Chat Translation page, over the hidden lobby.
+    WolChatTranslation,
     /// Dialog 0x112 — the WOL auto-login query after a dialog login.
     WolAutoLoginQuery,
     /// Dialog 0xFE — the WOL locale page during the connect.
@@ -122,6 +126,7 @@ impl ShellSlideKind {
             ShellSlideKind::SinglePlayer => 0x0100,
             ShellSlideKind::MoviesAndCredits => 0x0101,
             ShellSlideKind::MovieList => 0x0129,
+            ShellSlideKind::Mods => crate::ui::mods_shell::DIALOG.0,
             ShellSlideKind::Skirmish => 0x0102,
             ShellSlideKind::Campaign => 0x0094,
             ShellSlideKind::LoadSavedGame => 0x00B7,
@@ -131,6 +136,7 @@ impl ShellSlideKind {
             ShellSlideKind::WolLobby => 0x0113,
             ShellSlideKind::WolOptions => 0x02BC,
             ShellSlideKind::WolSoundOptions => 0x00D6,
+            ShellSlideKind::WolChatTranslation => crate::ui::wol_chat_translation::DIALOG.0,
             ShellSlideKind::WolAutoLoginQuery => 0x0112,
             ShellSlideKind::WolLocale => 0x00FE,
             ShellSlideKind::WolMyInformation => 0x0114,
@@ -150,7 +156,8 @@ impl ShellSlideKind {
 
     /// The dialog's slide column with the panel's `rows` tile rows. Every
     /// rendered shell has a `slide` table entry, so a miss is a programming
-    /// error. Options slides VERA's page buttons under retail's Keyboard.
+    /// error. Options slides VERA's page buttons and its Mods button under
+    /// retail's Keyboard.
     /// Skirmish slides VERA's Save Setup and Load Setup under Choose Map.
     pub(crate) fn column(self, rows: u32, page: Option<&MenuPageSpec>) -> SlideColumn {
         let spec = crate::ui::shell::slide::slide_spec_for(self.dialog_id())
@@ -237,6 +244,9 @@ pub(crate) enum ShellExitThen {
     PlayMovie,
     /// Movie list Back (state `0xE` result -1).
     MovieListBack,
+    /// VERA's Mods page Back: Options is built again, on the page it was
+    /// left from.
+    ModsBack,
     /// Skirmish Start Game (result `0x617`) with the session packed and
     /// resolved when it was pressed.
     SkirmishStart(Box<crate::skirmish_launch::SkirmishLaunchSession>),
@@ -252,6 +262,9 @@ pub(crate) enum ShellExitThen {
     /// commits and writes (Main Menu `0x5CB`; state 0x12 recreates `0xE2`) or
     /// commits and runs the Keyboard page (`0x5CE`).
     Options(crate::ui::main_menu_dialogs::options::LauncherParentResult),
+    /// VERA's Esc menu chose Options: the page it asked over slides out and
+    /// `0xD5` runs, as for the Main Menu's own Options.
+    ShellMenuOptions(ShellSlideKind),
     /// Keyboard `0xA3` Back or Cancel: `0x005FBEF0` tears it down with its
     /// slide, then the bindings save or reload and a new `0xD5` is built.
     KeyboardClose(crate::app::input::keyboard::KeyboardExit),
@@ -315,6 +328,11 @@ pub(crate) enum ShellExitThen {
     WolOptionsOpen,
     /// `0x2BC` closed with OK (the staged values) or Cancel (`None`).
     WolOptionsClose(Option<crate::ui::wol_options::WolPreferences>),
+    /// The online lobby's Chat Translation: it slides out and the page opens.
+    WolChatTranslationOpen,
+    /// The Chat Translation page closed with OK (its settings) or Cancel
+    /// (`None`).
+    WolChatTranslationClose(Option<crate::ui::chat_translation::ChatTranslationSettings>),
     /// `0x2BC` Sound Options (`0x63A`): it slides out and `0xD6` runs.
     WolSoundOptionsOpen,
     /// `0xD6` Back (`0x686`): `0x2BC` shows again.
@@ -346,10 +364,12 @@ impl ShellExitThen {
             Self::SinglePlayer(_) => ShellSlideKind::SinglePlayer,
             Self::MoviesCredits(_) => ShellSlideKind::MoviesAndCredits,
             Self::PlayMovie | Self::MovieListBack => ShellSlideKind::MovieList,
+            Self::ModsBack => ShellSlideKind::Mods,
             Self::SkirmishStart(_) | Self::SkirmishBack => ShellSlideKind::Skirmish,
             Self::CampaignBack | Self::CampaignStart(_) => ShellSlideKind::Campaign,
             Self::LoadSavedGameBack => ShellSlideKind::LoadSavedGame,
             Self::Options(_) => ShellSlideKind::Options,
+            Self::ShellMenuOptions(page) => *page,
             Self::KeyboardClose(_) => ShellSlideKind::Keyboard,
             Self::LanBack | Self::LanCreate { .. } | Self::LanJoinAccepted(_) => {
                 ShellSlideKind::LanLobby
@@ -368,7 +388,9 @@ impl ShellExitThen {
             | Self::WolLobbyRunner(_)
             | Self::WolLobbyHide
             | Self::WolCreateAccepted { .. }
-            | Self::WolOptionsOpen => ShellSlideKind::WolLobby,
+            | Self::WolOptionsOpen
+            | Self::WolChatTranslationOpen => ShellSlideKind::WolLobby,
+            Self::WolChatTranslationClose(_) => ShellSlideKind::WolChatTranslation,
             Self::WolOptionsClose(_) | Self::WolSoundOptionsOpen => ShellSlideKind::WolOptions,
             Self::WolSoundOptionsBack => ShellSlideKind::WolSoundOptions,
             Self::WolAutoLoginClose(_) => ShellSlideKind::WolAutoLoginQuery,
@@ -653,6 +675,7 @@ impl<'a> ShellLifecycleReducer<'a> {
             ShellSlideKind::SinglePlayer
             | ShellSlideKind::MoviesAndCredits
             | ShellSlideKind::MovieList
+            | ShellSlideKind::Mods
             | ShellSlideKind::Campaign
             | ShellSlideKind::LoadSavedGame
             | ShellSlideKind::Options
@@ -661,6 +684,7 @@ impl<'a> ShellLifecycleReducer<'a> {
             | ShellSlideKind::WolLobby
             | ShellSlideKind::WolOptions
             | ShellSlideKind::WolSoundOptions
+            | ShellSlideKind::WolChatTranslation
             | ShellSlideKind::WolAutoLoginQuery
             | ShellSlideKind::WolLocale
             | ShellSlideKind::WolMyInformation
@@ -871,13 +895,20 @@ pub(crate) fn current_shell_slide_target(state: &AppState) -> Option<ShellSlideK
     // `0x0052DDAB`); state 0x12 builds a new `0xE2` when it closes. Its
     // Keyboard page `0xA3` runs after `0xD5` is destroyed (`0x0055FD06`) and
     // slides like it. The Exit confirmation (state 6) and the quit after it
-    // (state 7) run without a family dialog.
+    // (state 7) run without a family dialog. VERA's Esc menu asks over the
+    // showing dialog, which stays the target.
     if let Some(dialog) = state.frontend.keyboard_dialog.as_ref() {
         return (dialog.parent == crate::ui::shell::keyboard::KeyboardParent::Launcher)
             .then_some(ShellSlideKind::Keyboard)
             .filter(|kind| crate::ui::shell::slide::is_slide_eligible(kind.dialog_id()));
     }
-    if state.frontend.shell_message_box.is_some() || state.frontend.quit_cascade.is_some() {
+    if state
+        .frontend
+        .shell_message_box
+        .as_ref()
+        .is_some_and(|message_box| !message_box.keeps_page())
+        || state.frontend.quit_cascade.is_some()
+    {
         return None;
     }
     // Only the native page slides; the assetless fallback does not.
@@ -907,6 +938,8 @@ pub(crate) fn current_shell_slide_target(state: &AppState) -> Option<ShellSlideK
         ShellSlideKind::MoviesAndCredits
     } else if state.frontend.shell_route.movie_list() {
         ShellSlideKind::MovieList
+    } else if state.frontend.shell_route.mods() {
+        ShellSlideKind::Mods
     } else if state.frontend.shell_route.campaign() {
         ShellSlideKind::Campaign
     } else if state.frontend.shell_route.load_saved_game() {
@@ -932,6 +965,11 @@ pub(crate) fn current_shell_slide_target(state: &AppState) -> Option<ShellSlideK
             _ => return None,
         }
     } else if state.frontend.shell_route.wol_lobby() {
+        // VERA's page, like 0x2BC, runs over the hidden lobby.
+        if crate::app::shell_wol::chat_translation::page(state).is_some() {
+            let kind = ShellSlideKind::WolChatTranslation;
+            return crate::ui::shell::slide::is_slide_eligible(kind.dialog_id()).then_some(kind);
+        }
         // 0x2BC and its 0xD6 run over the hidden lobby.
         if let Some(crate::app::shell_wol::WolPage::Options(page)) =
             state.frontend.wol.as_ref().map(|visit| &visit.page)
@@ -1120,6 +1158,9 @@ pub(crate) fn render_shell_first_paint_slide(
                 destination,
             )?
         }
+        ShellSlideKind::Mods => {
+            crate::app::frontend::mods_render::render_mods_page(state, encoder, destination)?
+        }
         ShellSlideKind::Campaign => {
             crate::app::frontend::campaign_shell_render::render_campaign_page(
                 state,
@@ -1139,6 +1180,7 @@ pub(crate) fn render_shell_first_paint_slide(
         | ShellSlideKind::WolLobby
         | ShellSlideKind::WolOptions
         | ShellSlideKind::WolSoundOptions
+        | ShellSlideKind::WolChatTranslation
         | ShellSlideKind::WolAutoLoginQuery
         | ShellSlideKind::WolLocale
         | ShellSlideKind::WolMyInformation
@@ -1319,7 +1361,7 @@ pub(crate) fn render_shell_first_paint_slide(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_frontend))]
 mod tests {
     use super::*;
     use crate::ui::shell::static_reveal::{Kind1PaintWindow, Kind1StaticReveal};
@@ -1389,7 +1431,8 @@ mod tests {
             seed: 1,
             ..Default::default()
         };
-        shell.random_map_setup_modal = Some(RandomMapSetupModalState::open(options, None, false));
+        shell.random_map_setup_modal =
+            Some(RandomMapSetupModalState::open(options, None, false, true));
         assert_eq!(
             skirmish_slide_target(&shell),
             Some(ShellSlideKind::RandomMap)
@@ -1496,6 +1539,7 @@ mod tests {
             (column.top_buttons, column.bottom_button, column.map_button)
         };
         assert_eq!(top_and_bottom(ShellSlideKind::MainMenu), (5, true, false));
+        assert_eq!(top_and_bottom(ShellSlideKind::Mods), (2, true, false));
         assert_eq!(
             top_and_bottom(ShellSlideKind::SinglePlayer),
             (3, true, false)
@@ -1509,14 +1553,19 @@ mod tests {
         // and Load Setup slide under them.
         assert_eq!(top_and_bottom(ShellSlideKind::Skirmish), (4, true, true));
         // Retail `0xD5` slides Keyboard and Network; VERA leaves Network out
-        // and slides its six page buttons under Keyboard.
+        // and slides its six page buttons under Keyboard, then its Mods
+        // button where the build has mods.
         assert_eq!(
             crate::ui::shell::slide::slide_spec_for(DialogId(0x00D5))
                 .unwrap()
                 .top_buttons,
             2
         );
-        assert_eq!(top_and_bottom(ShellSlideKind::Options), (7, true, false));
+        let mods = u32::from(crate::ui::main_menu_dialogs::options::HAS_MODS);
+        assert_eq!(
+            top_and_bottom(ShellSlideKind::Options),
+            (7 + mods, true, false)
+        );
     }
 
     #[test]
@@ -1525,7 +1574,7 @@ mod tests {
         let column = ShellSlideKind::WolLobby.column(9, Some(lobby.page_spec()));
         assert_eq!(
             (column.top_buttons, column.bottom_button, column.top_panel),
-            (4, true, false)
+            (5, true, false)
         );
         assert_eq!(ShellSlideKind::WolWelcome.column(9, None).top_buttons, 6);
         let retail = ShellSlideKind::WolLobby.column(9, None);

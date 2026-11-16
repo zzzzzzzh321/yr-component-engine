@@ -119,7 +119,7 @@ fn build_type_events_match_native_house_selection_persistence_and_rng() {
         assert_eq!(row["state_a"], 1);
         assert_eq!(row["state_b"], 1);
         assert_eq!(
-            event_classification(integer(&row["kind"]), crate::rules::ARES_ENABLED),
+            event_classification(integer(&row["kind"])),
             8
         );
     }

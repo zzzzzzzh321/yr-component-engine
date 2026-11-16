@@ -24,7 +24,7 @@ const CATEGORIES: [ObjectCategory; 4] = [
 /// Keys retain the native category-local Type ordinal, independently of name
 /// aliases (TechnoType71181D / Execute1066DF5D1). Maps give save/hash order and allow
 /// allocation-free reads; only the trigger and retirement owners mutate them.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TypeTechLevels {
     changed: [BTreeMap<i32, i32>; 4],
 }

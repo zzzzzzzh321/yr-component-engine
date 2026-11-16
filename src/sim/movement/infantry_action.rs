@@ -496,6 +496,12 @@ impl Simulation {
         {
             self.team_script_vm.mark_member_team_leaving_map(id);
         }
+        // Not ported: 51BE59..51BEBE removes a teamless infantryman on Guard
+        // whose Location fails MapClass::CoordinatesLegal 568350 (vt+0x3A0,
+        // then UnInit, returning before the thief capture). UNREACHABLE: the
+        // test is the map Size diamond that every cell lies in, as for the
+        // Unit's Guard map exit (movement/per_cell.rs), and an infantryman
+        // running AI always stands or flies over a map cell.
         // InfantryClass::AI51BEC0 calls TryThiefVehicleCapture5202F0 before
         // the second Ready/Commence. Success returns before Fear/Fire/Doing.
         let capture = self.infantry_try_thief_capture(id, rules, registry, effects)?;
@@ -1147,13 +1153,13 @@ impl crate::sim::world::ObjectSubstrate {
     /// Health 0; a death whose `Do_Action` was refused (a sequence with no
     /// frames, `0x0051D70F`) left the previous action, and is raised here.
     pub(crate) fn infantry_health_reset(&mut self, id: u64) {
-        let Some(actor) = self.entities.get_mut(id) else {
-            return;
-        };
-        let Some(doing) = actor.mission_leaf.as_infantry().map(|leaf| leaf.doing()) else {
-            return;
-        };
-        if actor.health.current() <= 0 && !in_death_sequence(doing) {
+        if let Some(actor) = self.entities.get_mut_if(id, |actor| {
+            actor.health.current() <= 0
+                && actor
+                    .mission_leaf
+                    .as_infantry()
+                    .is_some_and(|leaf| !in_death_sequence(leaf.doing()))
+        }) {
             actor.health.set(1);
         }
     }
@@ -1191,14 +1197,14 @@ impl DoActionType {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_movement))]
 #[path = "infantry_action_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_movement))]
 #[path = "infantry_water_action_tests.rs"]
 mod water_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_movement))]
 #[path = "infantry_unreachable_navcom_tests.rs"]
 mod unreachable_navcom_tests;

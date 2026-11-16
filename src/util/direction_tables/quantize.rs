@@ -52,6 +52,7 @@ pub(crate) fn muzzle_anim_index_for_facings(f16: u16, facings: u32) -> u32 {
 }
 
 #[cfg(test)]
+#[cfg(all(test, tests_util))]
 mod tests {
     use super::*;
 

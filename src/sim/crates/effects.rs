@@ -42,22 +42,17 @@ pub(crate) enum Multiplier {
 /// separately from derived Techno+158/+160. The constructor seeds both baselines
 /// to 1.0; only the Armor and Firepower arms ([`apply_multiplier_crate`]) write
 /// these permanent baselines. Each arm skips a baseline that is not exactly 1.0.
-/// The attachment owner separately recomputes effective values. The receiver's
-/// damage build reads the armor multiplier;
-/// `FireAt`'s damage build folds in the firepower one
-/// (`0x006FE33D..0x006FE34D`).
+/// The attachment owner separately recomputes effective values, which live in
+/// the object's Ares part. The receiver's damage build reads the effective
+/// armor multiplier (`GameEntity::armor_multiplier`); `FireAt`'s damage build
+/// folds in the firepower one (`GameEntity::firepower_multiplier`,
+/// `0x006FE33D..0x006FE34D`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CrateMultipliers {
     #[serde(default = "one")]
     armor: NativeF64Bits,
     #[serde(default = "one")]
     firepower: NativeF64Bits,
-    /// Ares derived Techno+160; None retains the permanent Ext+80 baseline.
-    #[serde(default)]
-    attached_firepower: Option<NativeF64Bits>,
-    /// Ares derived Techno+158; None retains the permanent Ext+88 baseline.
-    #[serde(default)]
-    attached_armor: Option<NativeF64Bits>,
 }
 
 fn one() -> NativeF64Bits {
@@ -70,36 +65,14 @@ impl Default for CrateMultipliers {
         Self {
             armor: NativeF64Bits::ONE,
             firepower: NativeF64Bits::ONE,
-            attached_firepower: None,
-            attached_armor: None,
         }
     }
 }
 
 impl CrateMultipliers {
-    /// `Techno+0x158`.
-    pub(crate) const fn armor(self) -> NativeF64Bits {
-        if let Some(value) = self.attached_armor {
-            return value;
-        }
-        self.armor
-    }
-
     /// Permanent armor crate baseline (Ares Ext+88), never an AE product.
     pub(crate) const fn crate_armor(self) -> NativeF64Bits {
         self.armor
-    }
-
-    pub(crate) fn set_attached_armor(&mut self, value: NativeF64Bits) {
-        self.attached_armor = (value != self.armor).then_some(value);
-    }
-
-    /// Effective Techno+160, read by both FireAt and EstimateDamage.
-    pub(crate) const fn firepower(self) -> NativeF64Bits {
-        if let Some(value) = self.attached_firepower {
-            return value;
-        }
-        self.firepower
     }
 
     /// Permanent firepower crate baseline (Ares Ext+80), never an AE product.
@@ -107,22 +80,16 @@ impl CrateMultipliers {
         self.firepower
     }
 
-    pub(crate) fn set_attached_firepower(&mut self, value: NativeF64Bits) {
-        self.attached_firepower = (value != self.firepower).then_some(value);
-    }
-
     /// Install a fixture's armor multiplier.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_armor_multiplier_for_test(&mut self, value: NativeF64Bits) {
         self.armor = value;
-        self.attached_armor = None;
     }
 
     /// Install a fixture's firepower multiplier.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_firepower_multiplier_for_test(&mut self, value: NativeF64Bits) {
         self.firepower = value;
-        self.attached_firepower = None;
     }
 }
 
@@ -331,6 +298,7 @@ pub(super) fn apply_heal_base_crate(
 /// the Scenario RNG. `HouseClass::Add_Credits @ 0x004F9950` then adds it.
 pub(super) fn money_crate_amount(
     scenario_rng: &mut SimRng,
+    rules: &RuleSet,
     solo_money: i32,
     magnitude: NativeF64Bits,
 ) -> i32 {
@@ -338,6 +306,13 @@ pub(super) fn money_crate_amount(
         return solo_money;
     }
     let base = magnitude_amount(magnitude);
+    // Ares 3.0 1002C8A0 (hook 0x48248D): `base + RandomRanged(0,
+    // [CrateRules] RandomCrateMoney)`; its default 900 draws the same span.
+    if rules.ares_form() {
+        return base.wrapping_add(
+            scenario_rng.next_range_i32_inclusive(0, rules.ares_random_crate_money()),
+        );
+    }
     scenario_rng.next_range_i32_inclusive(base, base.wrapping_add(900))
 }
 
@@ -417,7 +392,8 @@ pub(super) fn apply_tiberium_crate(
     registry: &crate::rules::overlay_types::OverlayTypeRegistry,
     cell: (i16, i16),
     base: DriveCoord,
-) {
+    frame_effects: FrameEffects<'_>,
+) -> Result<(), crate::sim::crates::RuntimeOverlayError> {
     // `0x00481EAD..0x00481ED1`: `RandomRanged(0, Tiberiums.Count - 1)` picks
     // the ore type, and a drawn 1 clamps it to 0 (`cmp edi,1`/`jne`/`xor
     // edi,edi` at `0x00481ECC..0x00481ED1`) — both paths fall into the same
@@ -429,7 +405,7 @@ pub(super) fn apply_tiberium_crate(
         // Unpinned defensive edge: with no registered ore type native would
         // draw `RandomRanged(0, -1)` and index an empty array; VERA leaves
         // the arm (and its RNG) alone instead.
-        return;
+        return Ok(());
     }
     let drawn = sim
         .scenario_rng
@@ -437,99 +413,68 @@ pub(super) fn apply_tiberium_crate(
     // Unpinned: past 256 ore types `u8::try_from` fails where native keeps
     // indexing the type array with the raw value; VERA drops the arm there.
     let Ok(type_index) = u8::try_from(if drawn == 1 { 0 } else { drawn }) else {
-        return;
+        return Ok(());
     };
     let type_id = crate::rules::tiberium_type::TiberiumTypeId(type_index);
     let (Ok(pickup_x), Ok(pickup_y)) = (u16::try_from(cell.0), u16::try_from(cell.1)) else {
-        return;
+        return Ok(());
     };
     // `CellClass::IncreaseTiberium @ 0x00487190` runs on the live map: the
     // shared placement owner already consumes the exact native draw order —
     // the twelve-image flat variant pick, the growth-queue priority draw and
     // the spread feeds — so the arm drives it with the scenario RNG and never
     // draws around it (see `place_tiberium`).
-    let binary_frame = sim.session.binary_frame();
-    let growth_enabled = sim.ore_growth_config.grows();
-    let spread_enabled = sim.ore_growth_config.spreads();
-    let Some(terrain) = sim.resolved_terrain.as_ref() else {
-        // Native always increases tiberium through the map owner; a mapless
-        // fixture has no Cell to write and stops after its Draw1.
-        return;
-    };
-    let live_objects = crate::sim::tiberium::TiberiumPlacementObjectContext::new(
-        &sim.substrate.entities,
-        &sim.substrate.occupancy,
-        &sim.substrate.raw_cell_occupation,
-        rules,
-        &sim.interner,
-        sim.terrain_objects.cell_index(),
-    );
-    let admission = crate::sim::tiberium::NewTiberiumAdmission::runtime(terrain, live_objects);
-    let Some(grid) = sim.overlay_grid.as_mut() else {
-        return;
-    };
-    let mut context = crate::sim::tiberium::PlaceTiberiumContext {
-        overlay_grid: grid,
-        ore_growth_state: &mut sim.ore_growth_state,
-        overlay_registry: registry,
-        tiberium_types: &rules.tiberium_types,
-        resolved_terrain: Some(terrain),
-        source_object_cells: sim.terrain_objects.spawning_cells(),
-        new_cell_admission: Some(admission),
-        live_objects: Some(admission.live_objects().object_view()),
-        rng: &mut sim.scenario_rng,
-        binary_frame,
-        growth_enabled,
-        spread_enabled,
-        dirty_cells: Some(&mut sim.dirty_cells),
-    };
-    let mut receipts = Vec::new();
     let mut placed_cells = Vec::new();
-    if let Some(placement) =
-        crate::sim::tiberium::place_tiberium(&mut context, (pickup_x, pickup_y), type_id, 1)
-    {
-        placed_cells.push(placement.cell());
-        receipts.extend(placement.into_overlay_construction());
-    }
-    // `0x00481EDD..0x00481F68`: the loop count, then per pass one
-    // `RandomRanged(0, 0x300)` distance and the one raw draw inside 0x49F420
-    // (the snap-1 CellCentre mask applies after the 512-cell fallback).
-    let count = context.rng.next_range_i32_inclusive(10, 20);
-    for _ in 0..count.max(0) {
-        let distance = context.rng.next_range_i32_inclusive(0, 0x300);
-        let (x, y) = crate::sim::combat::inviso_scatter::random_direction_coord(
-            cell_grid,
-            context.rng,
-            base.x,
-            base.y,
-            distance,
-            crate::sim::combat::inviso_scatter::RandomDirectionSnap::CellCenter,
-        );
-        let target = (
-            crate::util::lepton::lepton_to_cell(x)
-                .try_into()
-                .unwrap_or(u16::MAX),
-            crate::util::lepton::lepton_to_cell(y)
-                .try_into()
-                .unwrap_or(u16::MAX),
-        );
-        if let Some(placement) =
-            crate::sim::tiberium::place_tiberium(&mut context, target, type_id, 1)
-        {
+    let result = (|| {
+        if let Some(placement) = crate::sim::tiberium::place_tiberium(
+            sim,
+            rules,
+            registry,
+            (pickup_x, pickup_y),
+            type_id,
+            1,
+            frame_effects,
+        )? {
             placed_cells.push(placement.cell());
-            receipts.extend(placement.into_overlay_construction());
         }
-    }
-    drop(context);
-    // Place487190's overlay constructor joins the runtime registries and its
-    // Mark republishes the cell's land, as the ore drivers publish theirs.
-    Simulation::publish_overlay_constructions(
-        &mut sim.native_unique_ids,
-        &mut sim.load_objects,
-        &mut sim.substrate,
-        receipts,
-    );
+        //481EDD..481F68 keeps every distance/direction draw on refused cells.
+        let count = sim.scenario_rng.next_range_i32_inclusive(10, 20);
+        for _ in 0..count.max(0) {
+            let distance = sim.scenario_rng.next_range_i32_inclusive(0, 0x300);
+            let (x, y) = crate::sim::combat::inviso_scatter::random_direction_coord(
+                cell_grid,
+                &mut sim.scenario_rng,
+                base.x,
+                base.y,
+                distance,
+                crate::sim::combat::inviso_scatter::RandomDirectionSnap::CellCenter,
+            );
+            let target = (
+                crate::util::lepton::lepton_to_cell(x)
+                    .try_into()
+                    .unwrap_or(u16::MAX),
+                crate::util::lepton::lepton_to_cell(y)
+                    .try_into()
+                    .unwrap_or(u16::MAX),
+            );
+            if let Some(placement) = crate::sim::tiberium::place_tiberium(
+                sim,
+                rules,
+                registry,
+                target,
+                type_id,
+                1,
+                frame_effects,
+            )? {
+                placed_cells.push(placement.cell());
+            }
+        }
+        Ok(())
+    })();
+    // Keep the existing batch publication even when malformed input stops a
+    // later selection. Completed constructor writes remain authoritative.
     sim.publish_tiberium_cells(rules, registry, &placed_cells);
+    result
 }
 
 /// The Explosion arm `0x00482565..0x0048271E`: the picker first takes
@@ -773,9 +718,11 @@ pub(super) enum UnitCrateOutcome {
 /// MCV pre-empt flag; `bases` the lobby Bases byte (`0x00A8B258`).
 ///
 /// A pre-empted pickup asks for the first ownable `BaseUnit=`. Otherwise, a
-/// house with one of the first two `[AI] BuildConst=` types tracked and
-/// neither of the first two `HarvesterUnit=` types tracked gets its first
-/// ownable `HarvesterUnit=`. `[CrateRules] UnitCrateType=` overrides both.
+/// house with one of the first two `[AI] BuildRefinery=` types tracked
+/// (Rules `+0x8E4`, items `+0x8E8`, against House `+0x5500` at
+/// `0x0048208A..0x004820DD`) and neither of the first two `HarvesterUnit=`
+/// types tracked (`0x004820DF..0x00482131`) gets its first ownable
+/// `HarvesterUnit=`. `[CrateRules] UnitCrateType=` overrides both.
 /// With no type yet, draw `RandomRanged(0, UnitTypes.Count - 1)` until a
 /// `CrateGoodie=` type passes: with Bases on, a `BaseUnit=` type is accepted
 /// for a human house or a pre-empted pickup; with Bases off, never.
@@ -811,8 +758,8 @@ pub(super) fn choose_unit_crate_type<'r>(
                 .get(type_id)
                 .map_or(0, |type_id| house.tracking().owned_count(category, type_id))
         };
-        let has_conyard = rules
-            .build_const_types
+        let has_refinery = rules
+            .build_refinery_types
             .iter()
             .take(2)
             .any(|type_id| tracked(EntityCategory::Structure, type_id) > 0);
@@ -821,7 +768,7 @@ pub(super) fn choose_unit_crate_type<'r>(
             .iter()
             .take(2)
             .any(|type_id| tracked(EntityCategory::Unit, type_id) != 0);
-        if has_conyard && !has_harvester {
+        if has_refinery && !has_harvester {
             chosen = first_owner_compatible(
                 rules,
                 &rules.harvester_unit_types,

@@ -8,7 +8,9 @@
 
 use crate::rules::weapon_type::WeaponType;
 use crate::sim::rng::SimRng;
-use crate::util::native_x87::{MaskedX87Chop53 as X, MaskedX87Ordering, NativeF32Bits, NativeF64Bits};
+use crate::util::native_x87::{
+    MaskedX87Chop53 as X, MaskedX87Ordering, NativeF32Bits, NativeF64Bits,
+};
 
 /// The rearm countdown, `TechnoClass+0x2EC` (a CDTimerClass whose duration is
 /// `+0x2F4`). It belongs to the object, not to its target: `Assign_Target @
@@ -137,8 +139,9 @@ pub(crate) struct RofQuery<'a> {
     /// and mid-burst returns never reach it.
     pub ae_rof: f64,
     /// Installed Ares GetROF hooks10047A40/10047A60. None describes the
-    /// unpatched retail kernel for native controls; the frozen runtime policy
-    /// supplies Some even at identity, including the building-ammo shortcut bypass.
+    /// unpatched retail kernel, which is what a game without Ares gets; an
+    /// Ares game supplies Some even at identity, including the building-ammo
+    /// shortcut bypass.
     pub attached_rof: Option<NativeF64Bits>,
     /// Phobos `ROF.RandomDelay` as `0x006FD0B5` resolves it (the weapon's,
     /// else `[CombatDamage]`). None describes the unpatched kernel for native
@@ -267,7 +270,7 @@ pub(crate) fn get_rof(query: &RofQuery<'_>, rng: &mut SimRng) -> i32 {
     rof
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_combat_d_z))]
 mod tests {
     use super::*;
     use crate::rules::ini_parser::IniFile;
@@ -462,38 +465,39 @@ mod tests {
         ] {
             let ini = IniFile::from_str(&format!("[GUN]\nROF={raw_rof}\nBurst=1\n"));
             let weapon = WeaponType::from_ini_section("GUN", ini.section("GUN").unwrap());
-            let mut query = RofQuery {
-                building_ammo: ammo,
-                use_weapon_rof: false,
-                weapon: Some(&weapon),
-                live: LiveParticles::default(),
-                burst_index: 1,
-                unit_burst_delays: None,
-                house_rof: NativeF64Bits::from_bits(house),
-                ae_rof: 1.0,
-                attached_rof: Some(NativeF64Bits::from_bits(factor)),
-                #[cfg(feature = "phobos")]
-                rof_random_delay: None,
-                rof_ability: false,
-                veteran_rof: 1.0,
-                occupants: None,
-                bunkered: false,
-                occupy_rof_multiplier: 1.0,
-                bunker_rof_multiplier: 1.0,
-            };
-            let mut rng = SimRng::new(31);
-            assert_eq!(get_rof(&query, &mut rng), ares);
-            let mut expected_rng = SimRng::new(31);
-            expected_rng.next_range_u32_inclusive(0, 2);
-            assert_eq!(rng.logical_state(), expected_rng.logical_state());
-            query.attached_rof = None;
-            let mut rng = SimRng::new(31);
-            assert_eq!(get_rof(&query, &mut rng), stock);
-            let mut expected_rng = SimRng::new(31);
-            if ammo.is_none() {
-                expected_rng.next_range_u32_inclusive(0, 2);
+            // Nothing installs the hook without Ares, so the query carries no
+            // factor and the unpatched kernel answers, building shortcut and all.
+            for (attached, expected) in [
+                (None, stock),
+                (Some(NativeF64Bits::from_bits(factor)), ares),
+            ] {
+                let query = RofQuery {
+                    building_ammo: ammo,
+                    use_weapon_rof: false,
+                    weapon: Some(&weapon),
+                    live: LiveParticles::default(),
+                    burst_index: 1,
+                    unit_burst_delays: None,
+                    house_rof: NativeF64Bits::from_bits(house),
+                    ae_rof: 1.0,
+                    attached_rof: attached,
+                    #[cfg(feature = "phobos")]
+                    rof_random_delay: None,
+                    rof_ability: false,
+                    veteran_rof: 1.0,
+                    occupants: None,
+                    bunkered: false,
+                    occupy_rof_multiplier: 1.0,
+                    bunker_rof_multiplier: 1.0,
+                };
+                let mut rng = SimRng::new(31);
+                assert_eq!(get_rof(&query, &mut rng), expected);
+                let mut expected_rng = SimRng::new(31);
+                if attached.is_some() || ammo.is_none() {
+                    expected_rng.next_range_u32_inclusive(0, 2);
+                }
+                assert_eq!(rng.logical_state(), expected_rng.logical_state());
             }
-            assert_eq!(rng.logical_state(), expected_rng.logical_state());
         }
     }
 

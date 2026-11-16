@@ -36,6 +36,19 @@ use crate::ui::sidebar::{
     build_sidebar_view_with_spec, hit_test_item,
 };
 
+/// The presentation frame of `sim` as `owner` sees it: the sidebar reads its
+/// cameo answers from the frame's local player.
+fn frame_for(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+) -> crate::app::presentation::frame::PresentationFrame {
+    let mut sim = sim.clone();
+    sim.session_mut_for_test()
+        .set_current_house_for_test(Some(owner));
+    crate::app::presentation::frame::PresentationFrame::of_test(&sim, rules)
+}
+
 #[path = "ready_building_placement_tests/pending_production_tests.rs"]
 mod pending_production_tests;
 #[path = "ready_building_placement_tests/produced_build_limit_tests.rs"]
@@ -131,7 +144,8 @@ fn roundtrip_fixture_save(fixture: &mut Fixture, label: &str) {
             overlay_registry: fixture.overlays.clone(),
             terrain_template: Some(terrain),
             ..crate::sim::runtime::SimResources::empty()
-        },
+        }
+        .into(),
     };
     let prepared = crate::app::persistence::PreparedLoad::from_repository(
         crate::app::persistence::LoadPreparationView::from_runtime(
@@ -164,7 +178,7 @@ fn paid_ready_fixture() -> Option<Fixture> {
     let options = production::all_build_options_for_owner(&sim, &rules, "Americans");
     let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[]);
     let additions = production::initial_construction_options(&sim, &rules);
-    projection.reconcile_cameos(owner, &candidates, 12, &additions);
+    projection.reconcile_cameos(owner, &candidates, 12, &additions, false);
     let starting_credits = production::credits_for_owner(&sim, "Americans");
     let total_cost: i32 = ["GAPOWR", "GAPILL"]
         .iter()
@@ -200,7 +214,7 @@ fn paid_ready_fixture() -> Option<Fixture> {
             )
             .expect("ordinary paid production frame");
         for fact in output.lifecycle_outputs {
-            projection.apply_lifecycle_output(&fact, Some(owner));
+            projection.apply_lifecycle_output(&fact, Some(owner), crate::rules::ARES_BUILD);
         }
         if production::ready_buildings_for_owner(&sim, &rules, "Americans").len() == 2 {
             break;
@@ -253,9 +267,13 @@ fn refresh_fixture_sidebar(
         .needs_cameo_seed(fixture.owner)
         .then(|| production::initial_construction_options(&fixture.sim, &fixture.rules))
         .unwrap_or_default();
-    fixture
-        .projection
-        .reconcile_cameos(fixture.owner, &candidates, visible_rows, &seed_additions);
+    fixture.projection.reconcile_cameos(
+        fixture.owner,
+        &candidates,
+        visible_rows,
+        &seed_additions,
+        false,
+    );
     fixture
         .projection
         .reconcile_factory_links(&fixture.sim, fixture.owner);
@@ -300,6 +318,7 @@ fn refresh_fixture_sidebar(
     fixture.projection.apply_cameo_draw_state(
         &mut view,
         &fixture.sim,
+        &frame_for(&fixture.sim, &fixture.rules, fixture.owner),
         &fixture.rules,
         fixture.owner,
         armed_building,
@@ -721,7 +740,11 @@ fn loaded_ready_tabs_wait_for_the_saved_factory_changed_edge() {
             None,
         );
         assert_eq!(
-            fixture.projection.ready_building_tabs(&fixture.sim, owner),
+            fixture.projection.ready_building_tabs(
+                &fixture.sim,
+                &frame_for(&fixture.sim, RuleSet::empty_for_test(), owner),
+                owner
+            ),
             [true, true],
         );
         let published = advance_commands(&mut fixture, &[]);
@@ -936,6 +959,10 @@ fn pending_produce_right_click_suspends_on_arrival_without_duplicate_orders() {
     }
 }
 
+// The Infantry request mark falls through to the Vehicle one only without
+// Ares (FactoryClass flag fixes 1005CBD0/1005CB30/1005CBF0, hooks
+// 0x5005CC/0x50067C/0x5007BE).
+#[cfg(not(feature = "ares"))]
 #[test]
 fn pending_alternating_clicks_retain_native_hold_request_and_resume_on_arrival() {
     let native: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
@@ -1093,9 +1120,10 @@ fn consume_lifecycle_output(
     output: &LifecycleOutput,
     local_house: Option<InternedId>,
 ) -> bool {
-    if let Some(cursor_clear) = fixture
-        .projection
-        .apply_lifecycle_output(output, local_house)
+    if let Some(cursor_clear) =
+        fixture
+            .projection
+            .apply_lifecycle_output(output, local_house, crate::rules::ARES_BUILD)
     {
         fixture
             .input
@@ -2410,6 +2438,63 @@ fn queued_only_cameo_right_retains_pending_and_preview_before_abandon() {
 /// cell invalid when that flag is zero, before its own IsClearToBuild call.
 /// This regression covers that production decision and queued refusal/input
 /// cleanup, not native terrain production, cursor projection or PLACE raster.
+/// `UpdateFoundationCenter @ 0x004A91B0` writes the whole-foundation
+/// visibility (`+0x1181`, `0x004A94DA`) only when the foundation moves
+/// (`0x004A9356..0x004A936E`): a Cell revealed under a still foundation, or a
+/// call that leaves the centre (the tactical gadget's, off the map), keeps it
+/// hidden until the foundation moves.
+#[test]
+fn a_still_foundation_keeps_its_visibility_until_it_moves() {
+    let Some(mut fixture) = paid_ready_fixture() else {
+        return;
+    };
+    fn preview_at(
+        fixture: &Fixture,
+    ) -> impl FnOnce((u16, u16)) -> Option<production::BuildingPlacementPreview> + '_ {
+        move |(rx, ry)| {
+            production::placement_preview_for_owner_with_overlays(
+                &fixture.sim,
+                &fixture.rules,
+                "Americans",
+                "GAPOWR",
+                rx,
+                ry,
+                Some(&fixture.overlays),
+            )
+        }
+    }
+    let owner = fixture.owner;
+    let (near, far) = ((8, 4), (25, 25));
+    let mut latch = super::FoundationLatch::default();
+    let fog = |fixture: &mut Fixture, bits| {
+        fixture
+            .sim
+            .fog_mut_for_test()
+            .set_ground_bits_for_test(owner, near.0, near.1, bits);
+    };
+    fog(&mut fixture, 0);
+    let hidden = latch.place(Some(near), preview_at(&fixture)).unwrap();
+    assert!(!hidden.foundation_visible);
+    fog(&mut fixture, 0x18);
+    for still in [Some(near), None] {
+        let kept = latch.place(still, preview_at(&fixture)).unwrap();
+        assert_eq!((kept.rx, kept.ry), near);
+        assert!(!kept.foundation_visible, "{still:?}");
+    }
+    assert!(
+        latch
+            .place(Some(far), preview_at(&fixture))
+            .unwrap()
+            .foundation_visible
+    );
+    assert!(
+        latch
+            .place(Some(near), preview_at(&fixture))
+            .unwrap()
+            .foundation_visible
+    );
+}
+
 #[test]
 fn mixed_slope_preview_uses_proximity_and_preserves_paid_product_lifecycle() {
     let Some(mut fixture) = paid_ready_fixture() else {
@@ -2866,6 +2951,7 @@ fn unlinked_abandon_clears_current_before_product_expiry() {
             construction_order: pill_order,
         },
         Some(owner),
+        crate::rules::ARES_BUILD,
     );
     production::object_find_factory(&fixture.sim, &fixture.rules, power_product, false, false)
         .expect("the real completed product finds its healthy builder");
@@ -2907,9 +2993,10 @@ fn unlinked_abandon_clears_current_before_product_expiry() {
         .unwrap();
     let mut clears = 0;
     for (index, output) in frame.lifecycle_outputs.iter().enumerate() {
-        if let Some(cursor_clear) = fixture
-            .projection
-            .apply_lifecycle_output(output, Some(owner))
+        if let Some(cursor_clear) =
+            fixture
+                .projection
+                .apply_lifecycle_output(output, Some(owner), crate::rules::ARES_BUILD)
         {
             clears += 1;
             fixture

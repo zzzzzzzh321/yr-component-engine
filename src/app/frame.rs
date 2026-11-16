@@ -5,6 +5,7 @@
 
 use super::input::precedence::{ModalPage, ScreenPage};
 use super::loading::transitions;
+use super::match_runtime::redraw_gate::ProbeVerdict;
 use super::{
     ActiveEventLoop, App, AppState, GameScreen, Instant, Result, frontend::startup_splash, render,
     sim_tick,
@@ -35,7 +36,7 @@ pub(super) struct RuntimeServiceResult {
     /// Offset selected for this service's draw: normal Input result, the
     /// paused render-before-Input snapshot, or the last presented freeze value.
     pub(super) screen_shake_offset: Option<[i32; 2]>,
-    completed_frames: u32,
+    pub(super) completed_frames: u32,
     last_frame_completed: bool,
 }
 
@@ -44,8 +45,13 @@ pub(super) enum FrameRenderOutcome {
     Presented,
     Unavailable,
     Deferred,
-    /// A probe found the presented picture still standing and drew nothing.
+    /// A probe drew nothing: the presented picture still stands, or the draw
+    /// limits hold the next one.
     Unchanged,
+    /// The match was serviced, but the hand-off thread is still taking the
+    /// window's next picture: a draw would wait for the screen. Its wake
+    /// brings the draw (`GpuContext::screen_busy`).
+    ScreenBusy,
 }
 
 /// What one pass of `render_frame` may do once the match is serviced.
@@ -63,8 +69,14 @@ pub(super) enum FramePass {
 /// including the command bar beneath the tactical viewport.
 fn shake_central_rect(state: &AppState, target: &wgpu::Texture) -> [u32; 4] {
     let source_height = state.render_height();
+    // The strip spans what the column leaves: left of it, right of a column
+    // on the left, or the whole frame under a floating one.
     let sidebar_frame = state.sidebar_frame();
-    let central_source_width = sidebar_frame.column().0;
+    let (_, _, tactical_width, _) = sidebar_frame.tactical_rect();
+    let (central_source_x, central_source_width) = (
+        sidebar_frame.tactical_rect().0,
+        tactical_width.min(state.render_width()),
+    );
 
     if let Some(geometry) = state
         .renderer
@@ -73,20 +85,21 @@ fn shake_central_rect(state: &AppState, target: &wgpu::Texture) -> [u32; 4] {
         .map(|pass| pass.geometry())
     {
         let (frame_width, frame_height) = geometry.frame_size();
-        let central_width = central_source_width
-            .saturating_mul(geometry.percent)
-            .saturating_div(100);
+        let scaled = |source: u32| source.saturating_mul(geometry.percent).saturating_div(100);
+        let central_x = scaled(central_source_x).min(frame_width);
+        let central_width = scaled(central_source_width);
         [
-            geometry.origin.0,
+            geometry.origin.0 + central_x,
             geometry.origin.1,
-            central_width.min(frame_width),
+            central_width.min(frame_width - central_x),
             frame_height.min(target.height().saturating_sub(geometry.origin.1)),
         ]
     } else {
+        let central_x = central_source_x.min(target.width());
         [
+            central_x,
             0,
-            0,
-            central_source_width.min(target.width()),
+            central_source_width.min(target.width() - central_x),
             source_height.min(target.height()),
         ]
     }
@@ -110,6 +123,37 @@ fn apply_screen_shake(
 }
 
 impl App {
+    /// Move the simulation's pending radar-terrain marks into the minimap's
+    /// backlog before a draw. While a tick runs on the simulation thread the
+    /// marks stay with it: that tick's tail hands them over
+    /// ([`sim_tick::drain_radar_terrain_marks`]) with the frame they belong
+    /// to, and taking them here would wait for the tick.
+    fn drain_radar_terrain_marks(state: &mut AppState) {
+        if !state.match_state.sim_runtime.is_lent() {
+            sim_tick::drain_radar_terrain_marks(&mut state.match_state);
+        }
+    }
+
+    /// docs/sim-thread.md: once a pass finds back the tick that held the
+    /// window events, finish that tick and replay them in order, so they act
+    /// on its world before the pass services the next frame.
+    pub(super) fn release_held_events(&mut self, event_loop: &ActiveEventLoop) {
+        if self.held_window_events.is_empty() {
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if !state.match_state.sim_runtime.pass_may_run(false) {
+            return;
+        }
+        sim_tick::finish_threaded_frame(state);
+        state.platform.window_events_held = false;
+        for (window, event) in std::mem::take(&mut self.held_window_events) {
+            winit::application::ApplicationHandler::window_event(self, event_loop, window, event);
+        }
+    }
+
     /// Service the match runtime for one pass: the outcome voice wait, the
     /// scenario exit cascade, the quit cascade, the audio pump and, when
     /// admitted, each simulation advance due by now (only the first without
@@ -117,14 +161,37 @@ impl App {
     /// hidden-window service loop in `about_to_wait`, so the world keeps the
     /// same cadence whether or not a frame is drawn. Returns quit state and
     /// the pre-Logic Main_Tick admission for its later consumers.
+    /// `wait_for_tick` makes a desktop pass wait for a tick still on the
+    /// simulation thread instead of passing beside it, for captures whose
+    /// pictures must each follow a finished tick.
     pub(super) fn service_match_runtime(
         state: &mut AppState,
         event_loop: &ActiveEventLoop,
         simulation_allowed: bool,
         catch_up_allowed: bool,
+        wait_for_tick: bool,
     ) -> RuntimeServiceResult {
         if state.persistence.pending_load.is_some() {
             return RuntimeServiceResult::default();
+        }
+        // No pass waits for a tick still on the simulation thread
+        // (docs/sim-thread.md). This one admits no frame and takes nothing
+        // from the world: the camera and the presentation services run as in
+        // a pass the pacer does not admit, and it draws the frame published
+        // for that tick. No Input, so the screen shake stands as last
+        // presented. The tick's end wakes the pass that finishes it.
+        if !state.match_state.sim_runtime.pass_may_run(wait_for_tick) {
+            sim_tick::service_beside_tick(state);
+            return RuntimeServiceResult {
+                screen_shake_offset: (state.frontend.screen == GameScreen::InGame).then(|| {
+                    state
+                        .match_state
+                        .match_presentation
+                        .screen_shake
+                        .service_offset_snapshot(None, false)
+                }),
+                ..RuntimeServiceResult::default()
+            };
         }
         let started = Instant::now();
         let mut result = RuntimeServiceResult::default();
@@ -141,12 +208,15 @@ impl App {
         state.audio.mute_for_restore(restoring, sound, voice);
         let mut attempts = 0;
         loop {
-            if result.last_frame_completed {
-                // Observe each catch-up frame, so interpolation keeps
-                // consecutive endpoints instead of snapping at the jump.
-                crate::app::presentation::interpolation::prepare(state, false);
+            if catch_up_allowed {
+                // The pass decides from this whether its frame is the
+                // service's last (`LocalFramePacer::another_pass_follows`).
+                state
+                    .platform
+                    .frame_pacer
+                    .begin_service_pass(started, attempts);
             }
-            let before = state.match_state.sim_runtime.as_ref().map(|runtime| {
+            let before = state.match_state.sim_runtime.runtime().map(|runtime| {
                 (
                     runtime.simulation.session().tick(),
                     runtime.simulation.session().binary_frame(),
@@ -156,7 +226,7 @@ impl App {
             result.main_tick_admitted |= pass.main_tick_admitted;
             result.screen_shake_offset = pass.screen_shake_offset;
             result.quit_requested |= pass.quit_requested;
-            let after = state.match_state.sim_runtime.as_ref().map(|runtime| {
+            let after = state.match_state.sim_runtime.runtime().map(|runtime| {
                 (
                     runtime.simulation.session().tick(),
                     runtime.simulation.session().binary_frame(),
@@ -180,10 +250,13 @@ impl App {
                     attempts,
                     started.elapsed(),
                 )
+                // A tick is running beside this thread: draw. Another pass
+                // would only find it running; its end wakes the next one.
+                || state.match_state.sim_runtime.is_lent()
             {
                 break;
             }
-            let Some(runtime) = state.match_state.sim_runtime.as_ref() else {
+            let Some(runtime) = state.match_state.sim_runtime.runtime() else {
                 break;
             };
             let session = runtime.simulation.session();
@@ -248,6 +321,7 @@ impl App {
                 }
             }
         }
+        state.platform.frame_pacer.end_service();
         crate::app::match_runtime::network_quality::observe_pass(state);
         result
     }
@@ -260,6 +334,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         simulation_allowed: bool,
     ) -> RuntimeServiceResult {
+        // A tick the simulation thread ran since the last pass ends here,
+        // before anything in this pass reads or routes its result.
+        sim_tick::finish_threaded_frame(state);
         let mut main_tick_admitted = false;
         // GScreen Input reads the current native frame parity but does not
         // advance it. Hidden background service still owns Input while the
@@ -267,7 +344,7 @@ impl App {
         let network_wait_pending = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .is_some_and(|rt| rt.simulation.pending_network_wait());
         let in_game = state.frontend.screen == GameScreen::InGame;
         // Wait_For_Players still enters GScreen Input at 0x006485B7 and
@@ -280,7 +357,7 @@ impl App {
             state
                 .match_state
                 .sim_runtime
-                .as_ref()
+                .runtime()
                 .map(|rt| rt.simulation.session().binary_frame())
         });
         let screen_shake_offset = if in_game {
@@ -348,9 +425,12 @@ impl App {
                     );
                     Self::drive_scenario_exit(state, scenario_now_ms);
                 }
+                // A stopped frame leaves no exit or outcome to drive: Stop
+                // always returns to the shell, or the box would reopen.
                 if matches!(state.frontend.screen, GameScreen::InGame)
-                    && state.match_state.scenario_exit.is_none()
-                    && state.match_state.scenario_outcome.is_none()
+                    && (frame_stopped
+                        || (state.match_state.scenario_exit.is_none()
+                            && state.match_state.scenario_outcome.is_none()))
                 {
                     // ProcessNetwork6475F0 clears GameActive at64826F;
                     // Main_Game55D347 returns directly to shell cleanup.
@@ -495,7 +575,7 @@ impl App {
         let network_frame_pending = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .runtime()
             .is_some_and(|rt| rt.simulation.pending_network_wait());
         // Main_Game48CE8A..48CEA8 runs the router 55CFD0 after every
         // Main_Tick and leaves the loop once it routes, so no frame follows a
@@ -551,6 +631,8 @@ impl App {
         }
     }
 
+    /// The next canonical frame and the committed frontier while that frame
+    /// is due now, so the draw may wait for it (`defer_online_render`).
     /// The render continuation is allowed only outside every modal, focus
     /// freeze, exact-step and terminal path. The sequencer remains frame
     /// authority. A visible window without focus still catches up: it takes
@@ -577,7 +659,7 @@ impl App {
             state.match_state.live_network.as_ref().filter(|live| {
                 live.uses_sequenced_lockstep() && !live.has_terminal_network_error()
             })?;
-        let sim = &state.match_state.sim_runtime.as_ref()?.simulation;
+        let sim = &state.match_state.sim_runtime.runtime()?.simulation;
         if sim.session().scenario_paused()
             || sim.pending_network_wait()
             || sim.pending_network_interruption().is_some()
@@ -593,7 +675,7 @@ impl App {
                     frame,
                 )
                 .is_some();
-            if !state.platform.frame_pacer.online_catch_up_ready(
+            if !state.platform.frame_pacer.online_frame_due(
                 Instant::now(),
                 frame,
                 live.committed_frontier(),
@@ -614,21 +696,60 @@ impl App {
             && (Self::house_outcome_wait_pending(state) || !state.focus_freeze_active())
     }
 
+    /// The active-game shell `page` into `destination`.
+    fn render_in_game_shell(
+        state: &mut AppState,
+        encoder: &mut wgpu::CommandEncoder,
+        destination: &wgpu::Texture,
+        page: ScreenPage,
+    ) -> Result<()> {
+        use crate::app::frontend::skirmish_shell_render as shell;
+        use crate::ui::pause_menu::InGameMenuState;
+        match page {
+            ScreenPage::InGameShell(InGameMenuState::Menu) => {
+                let buttons = crate::app::input::pause_menu::button_states(state);
+                shell::render_pause_menu_shell(state, encoder, destination, buttons)
+            }
+            ScreenPage::InGameShell(InGameMenuState::AbortConfirm) => {
+                shell::render_abort_shell(state, encoder, destination)
+            }
+            ScreenPage::InGameShell(InGameMenuState::Sound) => {
+                shell::render_sound_shell(state, encoder, destination)
+            }
+            ScreenPage::InGameShell(InGameMenuState::Diplomacy) => {
+                shell::render_diplomacy_shell(state, encoder, destination)
+            }
+            ScreenPage::InGameShell(InGameMenuState::MissionBriefing) => {
+                shell::render_restate_shell(state, encoder, destination)
+            }
+            ScreenPage::InGameShell(InGameMenuState::SavedGame(_)) => {
+                shell::render_saved_game_shell(state, encoder, destination)
+            }
+            // No other state draws the active-game shell.
+            _ => Ok(()),
+        }
+    }
+
     /// The one owner of the window's own cursor after the startup splash, set
     /// after each frame's draw. gamemd's WWMouse constructor (`0x007B8730`)
     /// hides it with `ShowCursor(FALSE)` (`0x007B88BA`) and the game draws
-    /// mouse.shp itself, so it shows only where VERA draws no cursor but the
-    /// player points: over a status screen; over the battlefield where
-    /// `use_software_cursor` turns mouse.shp off (the debug pause, whose
-    /// developer overlay takes the pointer, or a missing mouse.sha) while
+    /// mouse.shp itself; VERA has the window system draw that shape
+    /// (`input::hardware_cursor`). The system arrow shows only where VERA
+    /// draws no cursor but the player points: over a status screen; over the
+    /// battlefield where `use_software_cursor` turns mouse.shp off (the debug
+    /// pause, whose developer overlay takes the pointer, or a missing mouse.sha) while
     /// WWMouse's depth is visible; wherever the pointer left the client area,
     /// because `DefWindowProc` answers a non-client `WM_SETCURSOR` with the
     /// system arrow and mouse.shp has no title-bar art, or the window is not
     /// active (see `PlatformState::owns_pointer`); and elsewhere only
     /// without mouse.sha, which the shell pages draw whenever it loaded.
-    fn show_os_cursor_only_without_game_cursor(state: &mut AppState, battlefield_drawn: bool) {
+    fn show_os_cursor_only_without_game_cursor(
+        state: &mut AppState,
+        event_loop: &ActiveEventLoop,
+        battlefield_drawn: bool,
+    ) {
         let status_screen_drawn = std::mem::take(&mut state.frontend.status_screen_drawn);
-        let visible = !state.platform.owns_pointer()
+        let arrow = !state.platform.owns_pointer()
             || if state.platform.cursor_confined {
                 // Confined: the game owns the pointer through its
                 // software cursor, so keep the OS cursor hidden everywhere the game
@@ -654,17 +775,7 @@ impl App {
                             .is_none()
                     }
             };
-        // Asking winit is not free on Windows: `set_cursor_visible` runs
-        // `refresh_os_cursor`, which clears any OS cursor clip winit does not own
-        // itself, so repeating the same answer every frame would tear
-        // `cursor_confined` down once per frame and let the pointer slip out of
-        // the window between two re-asserts. Hand over only a transition, then put
-        // the clip straight back.
-        if state.platform.os_cursor_visible == Some(visible) {
-            return;
-        }
-        crate::app::input::cursor::set_os_cursor_visible(state, visible);
-        crate::app::input::cursor::reassert_cursor_confinement(state);
+        crate::app::input::hardware_cursor::show(state, event_loop, arrow);
     }
 
     /// Dispatch rendering based on current GameScreen state.
@@ -675,6 +786,27 @@ impl App {
         mut hidden_run: Option<&mut crate::app::hidden_run::HiddenRun>,
         pass: FramePass,
     ) -> Result<FrameRenderOutcome> {
+        // Publish the player's colour-vision matrix before any early-return
+        // present and before synchronous loading repaints: all of them encode
+        // through the shared filter on GpuContext, not just the frame's tail.
+        state
+            .renderer
+            .gpu
+            .set_color_vision_matrix(state.color_vision_matrix());
+        // The glyph atlas empties or grows only between frames, while no
+        // instance built from it is waiting to draw.
+        state
+            .renderer
+            .bit_font
+            .begin_frame(&state.renderer.gpu.device, &state.renderer.batch_renderer);
+        state.platform.hardware_cursor.set_frames_read_back(
+            shell_capture.is_some()
+                || hidden_run.is_some()
+                || state
+                    .match_state
+                    .match_diagnostics
+                    .playback_capture_requested(),
+        );
         // A retired loading job still brings back the actual process Rules
         // and MIX registry. Leave its last picture up until those are home.
         if matches!(
@@ -685,6 +817,7 @@ impl App {
             return Ok(FrameRenderOutcome::Deferred);
         }
         if let Some(presented) = crate::app::persistence::commands::pump_saved_game_load(state) {
+            crate::app::input::hardware_cursor::hide_game_cursor(state);
             return Ok(if presented {
                 FrameRenderOutcome::Presented
             } else {
@@ -715,7 +848,10 @@ impl App {
             .match_state
             .match_diagnostics
             .begin_presentation_observation();
-        crate::app::presentation::interpolation::prepare(state, hidden_run.is_some());
+        crate::app::diagnostics::performance_overlay::observe_simulation(
+            state,
+            hidden_run.is_some(),
+        );
         let tooltip_ms = crate::app::input::tooltips::update(state);
         // `Init_Game` plays the startup logo (`0x0052C5E2`) before it presents
         // the splash (`0x0052C5F3`): the splash waits while a movie owns the
@@ -739,14 +875,15 @@ impl App {
                 &state.renderer.batch_renderer,
                 &state.renderer.shell_surface_presenter,
                 &state.renderer.depth_view,
-                &state.renderer.fps_overlay,
+                &state.renderer.performance_overlay,
+                &state.renderer.bit_font,
                 Some(splash),
             )?;
             if presented {
                 state
                     .platform
                     .frame_pacer
-                    .record_presented(Instant::now(), false);
+                    .record_presented(Instant::now(), None);
                 state
                     .frontend
                     .startup_splash
@@ -780,9 +917,6 @@ impl App {
         let shell_capture_owns_simulation = shell_capture
             .as_deref()
             .is_some_and(|capture| capture.owns_simulation_steps(state));
-        let ordinary_online = hidden_run.is_none()
-            && !shell_capture_owns_simulation
-            && Self::next_online_render_frame(state).is_some();
         // A capture that checks every committed frame needs one per render.
         let catch_up_allowed = !shell_capture
             .as_deref()
@@ -792,6 +926,7 @@ impl App {
             event_loop,
             hidden_run.is_none() && !shell_capture_owns_simulation,
             catch_up_allowed,
+            shell_capture.is_some() || hidden_run.is_some(),
         );
         if runtime_pass.quit_requested {
             return Ok(FrameRenderOutcome::Unavailable);
@@ -845,20 +980,31 @@ impl App {
         // still follows exactly one match service. The picture is judged by
         // the clock before the draw (`redraw_gate::PictureClock`).
         let picture_clock = crate::app::match_runtime::redraw_gate::PictureClock::now();
-        let unchanged = pass == FramePass::Probe
-            && state.platform.redraw_gate.still_presented(
+        let verdict = (pass == FramePass::Probe).then(|| {
+            state.platform.redraw_gate.probe_verdict(
                 crate::app::match_runtime::redraw_gate::still_frame(
                     state,
                     false,
                     runtime_pass.screen_shake_offset,
                     picture_clock,
                 ),
-            );
-        // The gate's audit draws the pass anyway and checks its pixels.
-        if unchanged && !state.platform.redraw_gate.auditing() {
-            return Ok(FrameRenderOutcome::Unchanged);
+                picture_clock.at,
+            )
+        });
+        let unchanged = verdict == Some(ProbeVerdict::Stands);
+        match verdict {
+            // The gate's audit draws the pass anyway and checks its pixels.
+            Some(ProbeVerdict::Stands) if state.platform.redraw_gate.auditing() => {}
+            Some(ProbeVerdict::Stands | ProbeVerdict::PointerWaits) => {
+                state.match_state.network_quality.picture_stood();
+                return Ok(FrameRenderOutcome::Unchanged);
+            }
+            Some(ProbeVerdict::DrawWaits) => return Ok(FrameRenderOutcome::Unchanged),
+            Some(ProbeVerdict::Draw) | None => {}
         }
-        let next_canonical = ordinary_online
+        // Judged after the service: a frame that arrived or came due while
+        // it ran may still go before this draw.
+        let next_canonical = (hidden_run.is_none() && !shell_capture_owns_simulation)
             .then(|| Self::next_online_render_frame(state))
             .flatten();
         if state.platform.frame_pacer.defer_online_render(
@@ -869,7 +1015,14 @@ impl App {
         ) {
             return Ok(FrameRenderOutcome::Deferred);
         }
-        state.diag.frame_timer.sample(Instant::now());
+        // The game never waits for the screen: with VSync on, the wait for a
+        // free picture is the hand-off thread's, and the ticks that come due
+        // meanwhile run in the passes its wake and the simulation's bring.
+        if state.renderer.gpu.screen_busy() {
+            return Ok(FrameRenderOutcome::ScreenBusy);
+        }
+        let draw_started = Instant::now();
+        state.diag.frame_timer.sample(draw_started);
 
         // Native queues/maintains [INTRO] before arming the 0xE2 first-paint
         // owner. An arm stays silent until the matching surface is acquired.
@@ -921,6 +1074,14 @@ impl App {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Frame"),
                 });
+        state.renderer.gpu.timer.begin_frame(&mut encoder);
+        state.renderer.window_ui.begin_frame();
+        if state.match_state.input.retail_screenshot_requested {
+            state
+                .renderer
+                .retail_screenshot_frame_cache
+                .retain_presented(&state.renderer.gpu.device, &mut encoder);
+        }
         let mut pending_main_menu_entry_token = None;
         let mut pending_main_menu_title_receipt = None;
         use crate::app::diagnostics::shell_capture::PresentedShell;
@@ -955,14 +1116,22 @@ impl App {
             }
             _ if page == Some(ModalPage::NetworkFailure) => {
                 crate::app::frontend::skirmish_shell_render::render_network_failure(
-                    state, &mut encoder, &output.texture,
+                    state,
+                    &mut encoder,
+                    &output.texture,
                 )?;
             }
             _ if page == Some(ModalPage::NetworkWait)
-                && crate::app::frontend::skirmish_shell_render::connection_shell_drawable(state) =>
+                && crate::app::frontend::skirmish_shell_render::connection_shell_drawable(
+                    state,
+                ) =>
             {
                 // 0xEA is pushed over whatever the game shows, in-game A3 included.
-                crate::app::frontend::skirmish_shell_render::render_connection_shell(state, &mut encoder, &output.texture)?;
+                crate::app::frontend::skirmish_shell_render::render_connection_shell(
+                    state,
+                    &mut encoder,
+                    &output.texture,
+                )?;
             }
             _ if page == Some(ModalPage::Keyboard) => {
                 // The launcher's A3 is a family page, so its entry wave has to be
@@ -977,12 +1146,14 @@ impl App {
                         &mut encoder,
                         &output.texture,
                     )?,
-                    crate::app::frontend::shell_transition::ShellFirstPaintRenderResult::Rendered {
-                        ..
-                    }
+                    crate::app::frontend::shell_transition::ShellFirstPaintRenderResult::Rendered { .. }
                 );
                 if !slid {
-                    crate::app::frontend::skirmish_shell_render::render_keyboard_shell(state, &mut encoder, &output.texture)?;
+                    crate::app::frontend::skirmish_shell_render::render_keyboard_shell(
+                        state,
+                        &mut encoder,
+                        &output.texture,
+                    )?;
                 }
             }
             _ if screen_page == ScreenPage::FullscreenMovie => {
@@ -1039,6 +1210,17 @@ impl App {
                                 &output.texture,
                             )? {
                                 presented_shell = PresentedShell::MovieList;
+                            } else {
+                                Self::render_shell_error(state, &mut encoder, &view)?;
+                            }
+                        }
+                        ScreenPage::Mods => {
+                            if crate::app::frontend::mods_render::render_mods_page(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )? {
+                                presented_shell = PresentedShell::Mods;
                             } else {
                                 Self::render_shell_error(state, &mut encoder, &view)?;
                             }
@@ -1141,6 +1323,13 @@ impl App {
                         }
                     }
                 }
+                if page == Some(ModalPage::ShellMessageBox) {
+                    crate::app::frontend::main_menu_shell_render::render_shell_message_box_over_page(
+                        state,
+                        &mut encoder,
+                        &output.texture,
+                    );
+                }
             }
             GameScreen::Loading => {
                 match crate::app::loading::pump::render_loading_screen(
@@ -1154,8 +1343,11 @@ impl App {
                             .unwrap_or("auto")
                             .to_string();
                         crate::app::frontend::status_screen::render(
-                            state, &mut encoder, &view,
-                            "Loading...", &format!("Map: {map_name_display}"),
+                            state,
+                            &mut encoder,
+                            &view,
+                            &crate::i18n::tr("VERA:Loading"),
+                            &crate::i18n::tr_fill("VERA:LoadingMap", &[("map", &map_name_display)]),
                             crate::app::frontend::status_screen::Buttons::NONE,
                         );
                     }
@@ -1167,43 +1359,29 @@ impl App {
             _ if matches!(screen_page, ScreenPage::InGameShell(_)) => {
                 // 621FCE -> 72F540 clears and paints a complete active-game shell.
                 // No battlefield commands share this encoder/camera upload.
-                use crate::ui::pause_menu::InGameMenuState;
-                match screen_page {
-                    ScreenPage::InGameShell(InGameMenuState::Menu) => {
-                        let buttons = crate::app::input::pause_menu::button_states(state);
-                        crate::app::frontend::skirmish_shell_render::render_pause_menu_shell(
-                            state, &mut encoder, &output.texture, buttons,
-                        )?;
-                    }
-                    ScreenPage::InGameShell(InGameMenuState::AbortConfirm) => {
-                        crate::app::frontend::skirmish_shell_render::render_abort_shell(state, &mut encoder, &output.texture)?;
-                    }
-                    ScreenPage::InGameShell(InGameMenuState::Sound) => {
-                        crate::app::frontend::skirmish_shell_render::render_sound_shell(state, &mut encoder, &output.texture)?;
-                    }
-                    ScreenPage::InGameShell(InGameMenuState::Diplomacy) => {
-                        crate::app::frontend::skirmish_shell_render::render_diplomacy_shell(state, &mut encoder, &output.texture)?;
-                    }
-                    ScreenPage::InGameShell(InGameMenuState::MissionBriefing) => {
-                        crate::app::frontend::skirmish_shell_render::render_restate_shell(state, &mut encoder, &output.texture)?;
-                    }
-                    ScreenPage::InGameShell(InGameMenuState::SavedGame(_)) => {
-                        crate::app::frontend::skirmish_shell_render::render_saved_game_shell(state, &mut encoder, &output.texture)?;
-                    }
-                    _ => {
-                        crate::app::frontend::skirmish_shell_render::render_in_game_options_shell(
-                            state, &mut encoder, &output.texture,
-                        )?;
-                    }
-                }
+                // Its text is laid out at the Sidebar size and drawn in the
+                // window (`window_ui::shell_raster`).
+                let raster = crate::app::presentation::window_ui::shell_raster(state, true)
+                    .unwrap_or(crate::render::bit_font::TextRaster::NATIVE);
+                let frame_raster = state.renderer.bit_font.set_raster(raster);
+                let painted =
+                    Self::render_in_game_shell(state, &mut encoder, &output.texture, screen_page);
+                state.renderer.bit_font.set_raster(frame_raster);
+                painted?;
             }
             _ if screen_page == ScreenPage::InGameCard => {
                 let abort = state.match_state.match_presentation.in_game_menu
                     == crate::ui::pause_menu::InGameMenuState::AbortConfirm;
                 crate::app::frontend::status_screen::render(
-                    state, &mut encoder, &view,
-                    if abort { "Leave this mission?" } else { "Menu resources unavailable" },
-                    "Required retail dialog artwork could not be loaded. Check your game installation. Full details are in logs/ra2.log.",
+                    state,
+                    &mut encoder,
+                    &view,
+                    &crate::i18n::tr(if abort {
+                        "VERA:LeaveMissionQuestion"
+                    } else {
+                        "VERA:InGameMenuUnavailable"
+                    }),
+                    &crate::i18n::tr("VERA:InGameMenuArtworkMissing"),
                     if abort {
                         crate::app::frontend::status_screen::Buttons::ABORT_CONFIRM
                     } else {
@@ -1215,12 +1393,21 @@ impl App {
                 //53B460 copies the already-composed surface, before this
                 //frame's world replaces it. The effect owns the retained copy.
                 let chrono_tactical = crate::app::input::camera::tactical_viewport_px(state);
-                state.match_state.match_presentation.chrono_screen.before_frame(
-                    &state.renderer.gpu,
-                    &mut encoder,
-                    state.renderer.game_frame_texture(),
-                    [chrono_tactical.0, chrono_tactical.1, chrono_tactical.2, chrono_tactical.3],
-                );
+                state
+                    .match_state
+                    .match_presentation
+                    .chrono_screen
+                    .before_frame(
+                        &state.renderer.gpu,
+                        &mut encoder,
+                        state.renderer.game_frame_texture(),
+                        [
+                            chrono_tactical.0,
+                            chrono_tactical.1,
+                            chrono_tactical.2,
+                            chrono_tactical.3,
+                        ],
+                    );
                 let times = render::GameRenderTimes {
                     radar_ms: state.radar_presentation_ms(),
                     tooltip_ms,
@@ -1242,6 +1429,10 @@ impl App {
                 } else {
                     crate::app::presentation::tactical_composite::CompositeCadence::PerMainTick
                 };
+                // Drawing reads the simulation and never writes it: the
+                // minimap keeps its own radar-terrain backlog, so the frame
+                // moves the simulation's newly marked cells there first.
+                Self::drain_radar_terrain_marks(state);
                 let game_output = if state.renderer.upscale_pass.is_some() {
                     // Render game to intermediate texture, then upscale to swapchain.
                     let up = state.renderer.upscale_pass.as_ref().unwrap();
@@ -1252,15 +1443,29 @@ impl App {
                     let render_output = result?;
                     state.renderer.copy_game_frame_to(
                         &mut encoder,
-                        state.renderer.upscale_pass.as_ref().unwrap().color_texture(),
+                        state
+                            .renderer
+                            .upscale_pass
+                            .as_ref()
+                            .unwrap()
+                            .color_texture(),
                     );
                     state
-                        .renderer.upscale_pass
+                        .renderer
+                        .upscale_pass
                         .as_ref()
                         .unwrap()
                         .draw(&mut encoder, &view);
                     crate::app::presentation::sidebar_surface::draw_window_copy(
-                        state, &mut encoder, &view,
+                        state,
+                        &mut encoder,
+                        &view,
+                    );
+                    crate::app::presentation::window_ui::draw_battlefield(
+                        state,
+                        &mut encoder,
+                        &view,
+                        render_output.software_cursor,
                     );
                     render_output
                 } else {
@@ -1268,12 +1473,14 @@ impl App {
                     state
                         .renderer
                         .copy_game_frame_to(&mut encoder, &output.texture);
+                    render::draw_software_cursor(
+                        state,
+                        &mut encoder,
+                        &view,
+                        render_output.software_cursor,
+                    );
                     render_output
                 };
-                #[cfg(feature = "telemetry-dashboard")]
-                if let Some(phases) = game_output.phases {
-                    state.diag.render_timing.record(phases);
-                }
                 game_render_output = Some(game_output);
             }
             GameScreen::MissionResult { title, detail } => {
@@ -1326,20 +1533,25 @@ impl App {
                     presented_shell = PresentedShell::Score;
                 } else {
                     crate::app::frontend::status_screen::render(
-                        state, &mut encoder, &view, &title, &detail,
+                        state,
+                        &mut encoder,
+                        &view,
+                        &title,
+                        &detail,
                         crate::app::frontend::status_screen::Buttons::BACK_TO_MENU,
                     );
                 }
             }
         }
-        state.renderer.fps_overlay.encode(
+        state.renderer.performance_overlay.encode(
             &state.renderer.gpu,
             &state.renderer.batch_renderer,
             &mut encoder,
             &output.texture,
+            &state.renderer.bit_font,
+            crate::app::diagnostics::performance_overlay::match_panel(state),
         );
         if state.frontend.screen == GameScreen::InGame {
-            let csf = state.process_assets.csf.as_ref();
             let status = state
                 .match_state
                 .match_diagnostics
@@ -1349,7 +1561,7 @@ impl App {
                     let frame = state
                         .match_state
                         .sim_runtime
-                        .as_ref()?
+                        .runtime()?
                         .simulation
                         .session()
                         .binary_frame();
@@ -1361,21 +1573,15 @@ impl App {
                             // The relay drops a lapsed pass, which only the
                             // lobby can renew: then waiting cannot help.
                             let lapsed = live.relay_expires().is_some_and(|expires| {
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
+                                crate::util::time::SystemTime::now()
+                                    .duration_since(crate::util::time::UNIX_EPOCH)
                                     .is_ok_and(|now| now.as_secs() >= expires)
                             });
-                            Some(
-                                crate::i18n::text(
-                                    csf,
-                                    if lapsed {
-                                        "VERA:ReconnectPassLapsed"
-                                    } else {
-                                        "VERA:Reconnecting"
-                                    },
-                                )
-                                .into_owned(),
-                            )
+                            Some(crate::i18n::tr(if lapsed {
+                                "VERA:ReconnectPassLapsed"
+                            } else {
+                                "VERA:Reconnecting"
+                            }))
                         }
                         crate::net::live_commands::NetworkRecoveryStatus::CatchingUp { frames } => {
                             let key = if live.restoring_match() {
@@ -1383,20 +1589,17 @@ impl App {
                             } else {
                                 "VERA:CatchingUp"
                             };
-                            Some(crate::i18n::fill(
-                                &crate::i18n::text(csf, key),
-                                &[("frames", &frames)],
-                            ))
+                            Some(crate::i18n::tr_count(key, frames, &[]))
                         }
                     }
                 })
                 .or_else(|| {
                     crate::app::input::pause_menu::multiplayer_control(state)?
                         .status
-                        .map(|key| crate::i18n::text(csf, key).into_owned())
+                        .map(crate::i18n::tr)
                 });
             if let Some(status) = status {
-                state.renderer.fps_overlay.encode_status(
+                state.renderer.performance_overlay.encode_status(
                     &state.renderer.gpu,
                     &state.renderer.batch_renderer,
                     &mut encoder,
@@ -1414,7 +1617,11 @@ impl App {
             // central primary-client rectangle.
             apply_screen_shake(state, &mut encoder, &output.texture, offset_px);
         }
-        Self::show_os_cursor_only_without_game_cursor(state, game_render_output.is_some());
+        Self::show_os_cursor_only_without_game_cursor(
+            state,
+            event_loop,
+            game_render_output.is_some(),
+        );
 
         let entry_sequence_identity = match shell_capture.as_deref_mut() {
             Some(session) if session.is_entry_sequence() => {
@@ -1485,20 +1692,43 @@ impl App {
         let retail_screenshot_current_frame =
             std::mem::take(&mut state.match_state.input.retail_screenshot_requested);
         let screenshot_central_rect = shake_central_rect(state, &output.texture);
-        let pending_retail_screenshot = state
+        // Text drawn in the window (`window_ui`) is not in the frame the
+        // screenshot retains: this frame's goes over its copy.
+        let window_text = state.renderer.window_ui.drew_text();
+        let previous_composition = state
             .renderer
             .retail_screenshot_frame_cache
-            .capture_previous_if_requested(
+            .previous_composition(
                 retail_screenshot_current_frame,
+                window_text,
                 &state.renderer.gpu.device,
                 &mut encoder,
                 state.renderer.gpu.config.format,
                 state.renderer.gpu.config.width,
                 state.renderer.gpu.config.height,
                 state.renderer.upscale_pass.as_ref(),
-                &mut state.renderer.screen_presentation,
-                screenshot_central_rect,
             )?;
+        if let Some(copy) = previous_composition
+            .as_ref()
+            .and_then(|previous| previous.copy())
+            .filter(|_| window_text)
+        {
+            state
+                .renderer
+                .window_ui
+                .draw_screenshot_text(state, &mut encoder, copy);
+        }
+        let pending_retail_screenshot = previous_composition
+            .map(|previous| {
+                previous.read_back(
+                    &state.renderer.gpu.device,
+                    &mut encoder,
+                    state.renderer.gpu.config.format,
+                    &mut state.renderer.screen_presentation,
+                    screenshot_central_rect,
+                )
+            })
+            .transpose()?;
         let capture_timeout = if capture_current_frame {
             Some(if replay_capture_current_frame {
                 crate::render::screenshot::READBACK_TIMEOUT
@@ -1516,18 +1746,42 @@ impl App {
         } else {
             None
         };
-        let submission = state
+        let measured_phases = game_render_output
+            .as_ref()
+            .and_then(|output| output.phases)
+            .map(|phases| (phases, Instant::now()));
+        state.renderer.gpu.timer.end_frame(&mut encoder);
+        // VERA's colour-vision filter is the last draw of every presented
+        // frame, so the world, sidebar, menus, overlays and software cursor
+        // are all covered. Every screenshot and capture readback above is
+        // encoded earlier in this command buffer and stays uncorrected.
+        // Synchronous loading repaints call the same GpuContext helper.
+        state
             .renderer
             .gpu
-            .queue
-            .submit(std::iter::once(encoder.finish()));
-        output.present(&state.renderer.gpu.queue);
+            .encode_color_vision(&mut encoder, &output.texture);
+        let submission = state.renderer.gpu.hand_off_frame(encoder, output);
         let presented_at = Instant::now();
+        let handoff_waited = state.renderer.gpu.take_handoff_wait();
+        if let Some((mut phases, handoff_started)) = measured_phases {
+            // What handing frames to the driver cost this thread: every
+            // bounded submission this frame (render_game's and any after it),
+            // the send to the hand-off thread, and any wait for the last one.
+            phases.handoff = state.renderer.terrain_draw_renderer.frame_submit_time()
+                + presented_at.duration_since(handoff_started)
+                + handoff_waited;
+            #[cfg(feature = "telemetry-dashboard")]
+            state.diag.render_timing.record(phases);
+            state
+                .renderer
+                .performance_overlay
+                .record_render_phases(phases);
+        }
         let battlefield = state.frontend.screen == GameScreen::InGame;
         state
             .platform
             .frame_pacer
-            .record_presented(presented_at, battlefield);
+            .record_presented(presented_at, battlefield.then_some(draw_started));
         if battlefield {
             state
                 .match_state
@@ -1540,7 +1794,8 @@ impl App {
             .commit_presentation_observation()
         {
             // Diagnostic callback is an upper bound on this submitted frame's
-            // GPU completion. It never waits or enters simulation state.
+            // GPU completion; reaching the queue waits for the frame's hand-off,
+            // so it covers this frame. It never waits or enters simulation state.
             state.renderer.gpu.queue.on_submitted_work_done(move || {
                 *completed.lock().unwrap_or_else(|error| error.into_inner()) =
                     Some(crate::app::match_diagnostics::ObservationTime::now());
@@ -1567,42 +1822,49 @@ impl App {
             } else {
                 [0, 0]
             });
-        let still = crate::app::match_runtime::redraw_gate::still_frame(
-            state,
-            shell_capture.is_some() || hidden_run.is_some(),
-            runtime_pass.screen_shake_offset,
-            picture_clock,
-        );
-        state.platform.redraw_gate.record_presented(still);
-        if let Some(readback) = pending_gate_audit {
-            let pixels = readback.finish(
-                &state.renderer.gpu.device,
-                submission.clone(),
-                crate::render::screenshot::READBACK_TIMEOUT,
-            )?;
-            state
-                .platform
-                .redraw_gate
-                .audit_presented(pixels, unchanged);
-        }
         // A family renderer that drew a timer-driven 0x71C frame this pass
         // advances it now that the frame reached the screen.
         state.frontend.shell_monitor.commit_presented();
         state.frontend.shell_page_title.commit_presented();
-        state.frontend.shell_status_line.commit_presented();
+        let mut status_step = state.frontend.shell_status_line.commit_presented();
         if let Some(page) = state.frontend.score_page.as_mut() {
             page.commit_presented();
         }
         if let Some(page) = state.frontend.campaign_score_page.as_mut() {
             page.commit_presented();
         }
+        if let Some(ui) = state.frontend.multiplayer_setup.as_mut() {
+            status_step |= ui.statics.commit_presented();
+        }
         let skirmish = &mut state.frontend.skirmish_shell_state;
-        skirmish.statics.commit_presented();
+        status_step |= skirmish.statics.commit_presented();
         if let Some(modal) = skirmish.choose_map_modal.as_mut() {
-            modal.statics.commit_presented();
+            status_step |= modal.statics.commit_presented();
         }
         if let Some(setup) = skirmish.random_map_setup_modal.as_mut() {
-            setup.statics.commit_presented();
+            status_step |= setup.statics.commit_presented();
+        }
+        let still = crate::app::match_runtime::redraw_gate::still_frame(
+            state,
+            shell_capture.is_some() || hidden_run.is_some(),
+            runtime_pass.screen_shake_offset,
+            picture_clock,
+        );
+        let limits = crate::app::match_runtime::redraw_gate::draw_limits(state, status_step);
+        state
+            .platform
+            .redraw_gate
+            .record_presented(still, draw_started, limits);
+        if let Some(readback) = pending_gate_audit {
+            let pixels = readback.finish(
+                &state.renderer.gpu.device,
+                submission.index(),
+                crate::render::screenshot::READBACK_TIMEOUT,
+            )?;
+            state
+                .platform
+                .redraw_gate
+                .audit_presented(pixels, unchanged);
         }
         if let Some(token) = pending_main_menu_entry_token.take() {
             crate::app::frontend::shell_transition::record_main_menu_entry_presented(state, token)?;
@@ -1612,7 +1874,7 @@ impl App {
             shell_capture
                 .as_deref_mut()
                 .expect("entry-sequence session exists for retained readback")
-                .record_entry_sequence_submission(identity, readback, submission.clone())?;
+                .record_entry_sequence_submission(identity, readback, submission.index())?;
         }
         if let Some(receipt) = pending_main_menu_title_receipt.take() {
             anyhow::ensure!(
@@ -1638,7 +1900,7 @@ impl App {
         if let Some(pending_capture) = pending_capture {
             let pixels = pending_capture.finish(
                 &state.renderer.gpu.device,
-                submission.clone(),
+                submission.index(),
                 capture_timeout.expect("capture timeout exists with pending readback"),
             )?;
             let surface_format = state.renderer.gpu.config.format;
@@ -1646,7 +1908,7 @@ impl App {
                 let runtime = state
                     .match_state
                     .sim_runtime
-                    .as_ref()
+                    .runtime()
                     .expect("rendered replay runtime");
                 state
                     .match_state
@@ -1676,7 +1938,7 @@ impl App {
         if let Some(pending_screenshot) = pending_retail_screenshot {
             match pending_screenshot.finish(
                 &state.renderer.gpu.device,
-                submission,
+                submission.index(),
                 crate::render::screenshot::READBACK_TIMEOUT,
             ) {
                 Ok(pixels) => match crate::render::screenshot::write_retail_screenshot(
@@ -1705,7 +1967,7 @@ impl App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
 

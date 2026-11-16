@@ -74,6 +74,7 @@ impl Simulation {
             .get(target)
             .ok_or("effect target no longer exists")?;
         let entries = actor
+            .ares
             .attach_effects
             .entries
             .iter()
@@ -107,8 +108,8 @@ impl Simulation {
                 Some(1 | 2)
             ),
             entries,
-            control: control_view(actor.attach_effects.self_effect),
-            animations_hidden: actor.attach_effects.animations_hidden,
+            control: control_view(actor.ares.attach_effects.self_effect),
+            animations_hidden: actor.ares.attach_effects.animations_hidden,
             event,
             configuration: None,
         })
@@ -194,6 +195,7 @@ impl Simulation {
                         .entities
                         .get_mut(target)
                         .unwrap()
+                        .ares
                         .attach_effects
                         .self_effect = control_value(*control);
                 }
@@ -202,6 +204,7 @@ impl Simulation {
                         .entities
                         .get_mut(target)
                         .unwrap()
+                        .ares
                         .attach_effects
                         .animations_hidden = *hidden;
                 }
@@ -210,6 +213,7 @@ impl Simulation {
                         .entities
                         .get_mut(target)
                         .unwrap()
+                        .ares
                         .attach_effects
                         .entries
                         .get_mut(*index)
@@ -240,6 +244,7 @@ impl Simulation {
                         .entities
                         .get_mut(target)
                         .unwrap()
+                        .ares
                         .attach_effects
                         .entries
                         .push(AttachedEffect {
@@ -255,6 +260,7 @@ impl Simulation {
                         .entities
                         .get_mut(target)
                         .unwrap()
+                        .ares
                         .attach_effects
                         .entries;
                     if *index >= entries.len() {
@@ -285,8 +291,8 @@ impl Simulation {
             }
         }
         if let Some(actor) = self.substrate.entities.get(target)
-            && (control_view(actor.attach_effects.self_effect) != plan.control
-                || actor.attach_effects.animations_hidden != plan.animations_hidden)
+            && (control_view(actor.ares.attach_effects.self_effect) != plan.control
+                || actor.ares.attach_effects.animations_hidden != plan.animations_hidden)
         {
             return Err("effect registers changed during a callback".into());
         }
@@ -307,7 +313,7 @@ impl Simulation {
         if !rules.external_effects_enabled() || rules.effect_descriptor(&resource).is_none() {
             return;
         }
-        let targets = self.ares_effect_ground_targets(impact, warhead.cell_spread_f64, rules);
+        let targets = self.ares_cell_spread_items(impact, warhead.cell_spread_f64, rules);
         for target in targets {
             let Some(victim) = self.substrate.entities.get(target) else {
                 continue;
@@ -349,9 +355,9 @@ impl Simulation {
         let Some(actor) = self.substrate.entities.get(target) else {
             return;
         };
-        if actor.attach_effects.entries.is_empty()
+        if actor.ares.attach_effects.entries.is_empty()
             && (!matches!(
-                actor.attach_effects.self_effect,
+                actor.ares.attach_effects.self_effect,
                 SelfEffectState::Pending(_)
             ) || EffectOrigin::for_type(actor)
                 .resource(&self.interner)

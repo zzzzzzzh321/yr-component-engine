@@ -73,9 +73,9 @@ fn retail_berserk_infantry_ctrl_ground_shows_no_move() {
     );
 }
 
-#[cfg(feature = "ares")]
 #[test]
 fn ares_vehicle_capture_cursor_shares_manual_action_and_preserves_shift_selection() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let patch = crate::rules::ini_parser::IniFile::from_str("[E1]\nVehicleThief=yes\n");
     let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch(
         "XMP03T4.MAP",
@@ -154,7 +154,7 @@ fn ares_no_manual_fire_native_modifier_cursors_use_the_shared_action() {
             let case = &row["input"];
             // The same authored key is ignored by the default build. Its
             // expected result is the actual DLL control with the flag off.
-            let expected = if crate::rules::ARES_ENABLED {
+            let expected = if crate::rules::ARES_BUILD {
                 row
             } else {
                 rows.iter()
