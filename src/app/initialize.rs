@@ -343,7 +343,6 @@ impl App {
         replay_retail_directory: Option<&Path>,
         // A `-SPAWN` test run's opt-in invisible window (tools/spawn/README.md).
         hidden_spawn_window: bool,
-        startup_campaign: Option<String>,
     ) -> Result<InitializationStep> {
         // One parsed retail profile snapshot yields two ordered products: the
         // independent frontend size selected after the early Video read, and the later
@@ -583,7 +582,6 @@ impl App {
                         capture_dimensions,
                         external_launch,
                         quickplay_allowed,
-                        startup_campaign.filter(|_| !capture && !hidden_spawn_window),
                         startup_assets,
                     )
                 },
@@ -612,7 +610,6 @@ impl App {
         capture_dimensions: Option<(u32, u32)>,
         external_launch: bool,
         quickplay_allowed: bool,
-        startup_campaign: Option<String>,
         startup_assets: Option<Result<crate::assets::asset_manager::AssetManager>>,
     ) -> Result<InitializationStep> {
         let batch_renderer: BatchRenderer = BatchRenderer::new(&gpu);
@@ -675,28 +672,6 @@ impl App {
         });
         if let Some(fnt) = startup_fnt.as_ref() {
             bit_font = BitFont::from_fnt(&gpu.device, &gpu.queue, &batch_renderer, fnt);
-        }
-        if let (Some(scenario), Some(assets), Some(csf)) = (
-            startup_campaign.as_deref(),
-            startup_asset_manager.as_ref(),
-            startup_csf.as_ref(),
-        ) {
-            match crate::app::loading::pump::present_startup_campaign(
-                scenario,
-                assets,
-                csf,
-                &window,
-                &gpu,
-                &shell_surface_presenter,
-                &depth_view,
-                &batch_renderer,
-                &bit_font,
-                &fps_overlay,
-            ) {
-                Ok(true) => log::info!("Early campaign loading frame presented: {scenario}"),
-                Ok(false) => {}
-                Err(error) => log::debug!("Early campaign loading frame unavailable: {error:#}"),
-            }
         }
         let outcome_banner_art = startup_asset_manager.as_ref().and_then(|assets| {
             crate::app::presentation::outcome_banner::OutcomeBannerArt::build(
