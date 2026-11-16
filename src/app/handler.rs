@@ -558,6 +558,12 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        let startup_campaign = match self.pending_spawn.as_ref().map(|pending| pending.game()) {
+            Some(crate::app::frontend::cncnet_spawn::SpawnGame::Campaign(campaign)) => {
+                Some(campaign.scenario.to_ascii_uppercase())
+            }
+            _ => None,
+        };
         let result = Self::initialize(
             event_loop,
             capture_dimensions,
@@ -567,6 +573,7 @@ impl ApplicationHandler for App {
                 .as_ref()
                 .map(|request| request.retail_dir.as_path()),
             self.pending_spawn.is_some() && Self::spawn_hidden_window_requested(),
+            startup_campaign,
         );
         let result = if capture_dimensions.is_some() {
             result.and_then(super::initialize::InitializationStep::finish_synchronously)

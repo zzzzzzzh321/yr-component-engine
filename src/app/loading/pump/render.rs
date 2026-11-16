@@ -863,12 +863,12 @@ pub(super) fn present_native_loading(
     text_rgb: [f32; 3],
     render_size: [u32; 2],
     scale: ShellScale,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let Some(output) = gpu
         .acquire_frame()
         .map_err(|e| anyhow::anyhow!("loading repaint surface texture: {e}"))?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let mut encoder = gpu
         .device
@@ -902,7 +902,7 @@ pub(super) fn present_native_loading(
     fps_overlay.encode(gpu, batch, &mut encoder, &output.texture);
     gpu.queue.submit(std::iter::once(encoder.finish()));
     output.present(&gpu.queue);
-    Ok(())
+    Ok(true)
 }
 
 /// One upload/draw/present encoding body serves the frame loop and native

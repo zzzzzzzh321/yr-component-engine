@@ -41,7 +41,7 @@ struct NamedArchive {
     archive: MixArchive,
 }
 
-#[cfg_attr(any(test, feature = "test-support"), derive(Clone))]
+#[derive(Clone)]
 struct LooseAsset {
     path: PathBuf,
     source_name: String,
@@ -301,11 +301,18 @@ pub struct AssetManager {
 /// Test fixtures open the retail install once per test process and hand each
 /// test its own copy (`rules::retail_ini_fixture`). A copy shares the archive
 /// bytes and starts with the same registrations, lookups, caches and loose
-/// snapshots as the original. Production code holds one manager and never
-/// copies it.
+/// snapshots as the original.
 #[cfg(any(test, feature = "test-support"))]
 impl Clone for AssetManager {
     fn clone(&self) -> Self {
+        let mut fixture = self.fork_lookup();
+        fixture.audio_pairs.clone_from(&self.audio_pairs);
+        fixture
+    }
+}
+
+impl AssetManager {
+    fn fork_lookup(&self) -> Self {
         Self {
             archives: self.archives.clone(),
             archive_catalog: self.archive_catalog.clone(),
@@ -317,7 +324,7 @@ impl Clone for AssetManager {
                     .clone(),
             ),
             loose_files: self.loose_files.clone(),
-            audio_pairs: self.audio_pairs.clone(),
+            audio_pairs: Vec::new(),
             startup_resources: self.startup_resources.clone(),
             ini_roots: self.ini_roots.clone(),
             active_theater: self.active_theater.clone(),
@@ -1008,6 +1015,15 @@ impl AssetManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Some(cache.entry(cache_key).or_insert(candidate).clone())
+    }
+
+    /// Disposable startup presentation view. The neutral archives precede
+    /// LOADMD/LOAD just as on the scenario path. The process keeps its original
+    /// mounted archives and sticky MIX lookup cache until their normal boundary.
+    pub fn campaign_loading_preview_assets(&self) -> Result<Option<Self>, AssetError> {
+        let mut preview = self.fork_lookup();
+        preview.register_neutral_archives()?;
+        Ok(preview.register_loading_archives()?.then_some(preview))
     }
 
     /// Register the loading-screen archive pair at the scenario-load boundary.
@@ -2542,6 +2558,43 @@ mod tests {
             .unwrap();
         assert_eq!(manager.get_ref("tile.bin"), Some(&b"snow"[..]));
         assert_eq!(manager.active_theater.as_deref(), Some("SNOW"));
+    }
+
+    #[test]
+    fn campaign_preview_mounts_art_in_order_without_changing_the_process_lookup() {
+        let directory = TestDirectory::new("campaign-preview-archives");
+        let mut manager = empty_manager(directory.path());
+        for (archive, payload) in [
+            ("neutral.mix", b"neutral".as_slice()),
+            ("load.mix", b"load".as_slice()),
+            ("ntrlmd.mix", b"ntrlmd".as_slice()),
+            ("loadmd.mix", b"loadmd".as_slice()),
+        ] {
+            manager.archive_catalog.push(NamedArchive {
+                name: format!("master.mix -> {archive}"),
+                archive: make_new_format_mix("mission.shp", payload),
+            });
+        }
+        let preview = manager.campaign_loading_preview_assets().unwrap().unwrap();
+        assert_eq!(
+            preview.registered_archive_names(),
+            [
+                "master.mix -> ntrlmd.mix",
+                "master.mix -> neutral.mix",
+                "master.mix -> loadmd.mix",
+                "master.mix -> load.mix",
+            ]
+        );
+        assert_eq!(
+            preview
+                .load_file_from_mix("mission.shp")
+                .unwrap()
+                .bytes
+                .as_ref(),
+            b"ntrlmd"
+        );
+        assert!(manager.registered_archive_names().is_empty());
+        assert!(manager.load_file_from_mix("mission.shp").is_none());
     }
 
     #[test]
